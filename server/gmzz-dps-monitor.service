@@ -1,0 +1,33 @@
+[Unit]
+Description=GMZZ DPS client session monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gmzz-dps-monitor
+Group=gmzz-dps-monitor
+EnvironmentFile=/etc/gmzz-dps-monitor.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/gmzz-dps-monitor/dps_monitor_server.py
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/gmzz-dps-monitor
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

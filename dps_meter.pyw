@@ -1,0 +1,7259 @@
+#!/usr/bin/env python3
+"""当前 C7 游戏版本的悬浮伤害统计窗口。"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import queue
+import re
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+import tkinter as tk
+from tkinter import messagebox
+
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
+
+from combat_history import CombatHistoryStore, HISTORY_SCHEMA_VERSION
+from damage_hook import DamageHook
+from device_identity import resolve_client_id
+from licensing import (
+    DEFAULT_SERVER_URL,
+    LicensingConnectionError,
+    LicensingService,
+    ServerLicensingGateway,
+    UpdateInfo,
+)
+from monster_metadata import load_monster_metadata, resolve_localization_names
+from network_capture import NetworkMessageHook
+from network_state import (
+    ENCOUNTER_AUXILIARY_TEMPLATES,
+    ENCOUNTER_NON_BOSS_TEMPLATE_IDS,
+    MAX_PARTY_MEMBERS,
+    NetworkPacketParser,
+)
+from remembered_card import remember_card, remembered_card
+
+if sys.platform == "win32":
+    from windows_tray import WindowsTrayIcon
+else:
+    WindowsTrayIcon = None
+
+
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+IS_FROZEN = bool(
+    getattr(sys, "frozen", False)
+    or "__compiled__" in globals()
+    or (
+        bool(sys.argv)
+        and Path(str(sys.argv[0])).suffix.casefold() == ".exe"
+    )
+)
+
+
+def resolve_program_path(
+    frozen: bool,
+    argv0: object,
+    executable: object,
+    source_path: object,
+    compiled: object = None,
+) -> Path:
+    """Return the outer onefile executable rather than its temporary payload."""
+    if not frozen:
+        return Path(str(source_path)).resolve()
+    original_argv0 = getattr(compiled, "original_argv0", "")
+    for candidate in (original_argv0, argv0):
+        text = str(candidate or "").strip()
+        if text:
+            return Path(text).expanduser().resolve()
+    return Path(str(executable)).expanduser().resolve()
+
+
+APP_EXECUTABLE_PATH = resolve_program_path(
+    IS_FROZEN,
+    sys.argv[0] if sys.argv else "",
+    sys.executable,
+    __file__,
+    globals().get("__compiled__"),
+)
+APP_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else BUNDLE_DIR
+SHARED_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", APP_DIR)) / "GMZZDpsMeter"
+DATA_DIR = (
+    SHARED_DATA_DIR
+    if IS_FROZEN
+    else APP_DIR
+)
+CONFIG_PATH = DATA_DIR / "dps_config.json"
+SHARED_CONFIG_PATH = SHARED_DATA_DIR / "dps_config.json"
+DEVICE_ID_PATH = SHARED_DATA_DIR / "device_id"
+SKILL_NAMES_PATH = BUNDLE_DIR / "skill_names.json"
+SKILL_METADATA_PATH = BUNDLE_DIR / "skill_metadata.json"
+MONSTER_METADATA_PATH = BUNDLE_DIR / "monster_metadata.json"
+BOSS_NAME_ALLOWLIST_PATH = BUNDLE_DIR / "boss_allowlist.txt"
+ASSET_DIR = BUNDLE_DIR / "assets"
+ICON_SOURCES_PATH = ASSET_DIR / "icon_sources.json"
+APP_LOGO_PATH = ASSET_DIR / "app_logo.png"
+APP_ICON_PATH = ASSET_DIR / "app_icon.ico"
+LOG_DIR = DATA_DIR / "logs"
+HISTORY_DIR = DATA_DIR / "combat_history"
+TEAM_PROFILE_CACHE_PATH = DATA_DIR / "team_profiles.json"
+SELF_IDENTITY_CACHE_PATH = DATA_DIR / "network_self_identity.json"
+MONSTER_NAME_CACHE_PATH = DATA_DIR / "monster_name_cache.json"
+UPDATE_DIR = APP_DIR
+
+APP_NAME = "叨叨诡秘助手 DPS METER"
+APP_VERSION = "0.0.5"
+CLIENT_BUILD = "0.0.5+20260828.1"
+APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
+BG = "#090c10"
+SURFACE = "#11161d"
+PANEL = "#151b23"
+PANEL_2 = "#1b232d"
+BORDER = "#28323e"
+TEXT = "#f4f6f8"
+MUTED = "#8d99a8"
+SUBTLE = "#556170"
+ACCENT = "#6fe3bd"
+WARN = "#f0bc72"
+ERROR = "#ef6b73"
+WINDOW_EXSTYLE_TRANSPARENT = 0x00000020
+WINDOW_EXSTYLE_LAYERED = 0x00080000
+
+PROFESSION_COLORS = {
+    1_200_001: "#d7bc55",
+    1_200_002: "#82cfa0",
+    1_200_003: "#b8a96f",
+    1_200_004: "#6687c5",
+    1_200_005: "#73a7df",
+    1_200_006: "#d79353",
+    1_200_007: "#8a72bd",
+}
+
+TEAM_TARGET_ACTIVE_SECONDS = 10.0
+MONSTER_DISPLAY_ACTIVE_SECONDS = 30.0
+LICENSE_HEARTBEAT_FAILURE_GRACE_SECONDS = 50.0
+UNVERIFIED_MEMBER_EVENT_WINDOW_SECONDS = 90.0
+STAGE_SUMMARY_SELF_DAMAGE_TOLERANCE = 1_000_000
+MULTIPHASE_BOSS_TEMPLATE_IDS = frozenset(
+    int(parent_template_id)
+    for auxiliary in ENCOUNTER_AUXILIARY_TEMPLATES.values()
+    for parent_template_id in auxiliary.get("parent_template_ids", ())
+    if int(parent_template_id)
+)
+FEEDBACK_CATEGORIES = (
+    ("DPS 统计", "dps"),
+    ("BOSS 识别", "boss"),
+    ("队伍成员", "team"),
+    ("界面显示", "ui"),
+    ("登录或连接", "connection"),
+    ("其他问题", "other"),
+)
+
+
+def window_exstyle_for_lock(
+    style: int, locked: bool, original_style: int | None = None
+) -> int:
+    style = int(style)
+    if locked:
+        return style | WINDOW_EXSTYLE_TRANSPARENT | WINDOW_EXSTYLE_LAYERED
+    if original_style is None:
+        return style & ~WINDOW_EXSTYLE_TRANSPARENT
+    managed_bits = WINDOW_EXSTYLE_TRANSPARENT | WINDOW_EXSTYLE_LAYERED
+    return (style & ~managed_bits) | (int(original_style) & managed_bits)
+
+
+CHINESE_NUMBERS = (
+    "一",
+    "二",
+    "三",
+    "四",
+    "五",
+    "六",
+    "七",
+    "八",
+    "九",
+    "十",
+    "十一",
+    "十二",
+    "十三",
+    "十四",
+    "十五",
+    "十六",
+    "十七",
+    "十八",
+    "十九",
+    "二十",
+)
+
+
+def format_number(value: float | int) -> str:
+    value = int(round(value))
+    if value < 1_000_000:
+        return f"{value:,}"
+    if value < 100_000_000:
+        return f"{value / 10_000:.1f}万"
+    return f"{value / 100_000_000:.2f}亿"
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def chinese_number(index: int) -> str:
+    if 1 <= index <= len(CHINESE_NUMBERS):
+        return CHINESE_NUMBERS[index - 1]
+    return str(index)
+
+
+def chinese_error_message(value) -> str:
+    text = str(value).strip()
+    lower = text.casefold()
+    if "process not found" in lower:
+        return "游戏未运行"
+    if "version/signature mismatch" in lower or "target rva is outside" in lower:
+        return "游戏连接正在重新尝试。"
+    if "openprocess" in lower:
+        return "无法连接游戏进程，请确认游戏已启动。"
+    if "ring buffer" in lower:
+        return "战斗数据缓冲区异常，正在尝试重新连接。"
+    first_line = text.splitlines()[0] if text else "未知错误"
+    return f"连接异常：{first_line}"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def load_skill_catalog() -> dict:
+    """Load the client-derived, exact skill ID to Chinese name catalog."""
+    try:
+        value = json.loads(SKILL_NAMES_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def load_skill_metadata() -> dict:
+    try:
+        value = json.loads(SKILL_METADATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"professions": {}, "skills": {}}
+    if not isinstance(value, dict):
+        return {"professions": {}, "skills": {}}
+    return value
+
+
+def load_icon_sources() -> dict:
+    try:
+        value = json.loads(ICON_SOURCES_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def load_json_object(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_json_object(path: Path, value: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    except OSError:
+        pass
+
+
+def normalize_boss_name(value: object) -> str:
+    return "".join(char.casefold() for char in str(value or "") if char.isalnum())
+
+
+def load_boss_name_allowlist(path: Path = BOSS_NAME_ALLOWLIST_PATH) -> tuple[str, ...]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    return tuple(
+        dict.fromkeys(
+            normalized
+            for line in lines
+            if line.strip() and not line.lstrip().startswith("#")
+            if (normalized := normalize_boss_name(line))
+        )
+    )
+
+
+def boss_name_is_allowed(name: object, allowlist: tuple[str, ...]) -> bool:
+    normalized = normalize_boss_name(name)
+    return bool(normalized and any(item in normalized for item in allowlist))
+
+
+BOSS_PHASE_NAME_GROUPS = (
+    frozenset(
+        {
+            normalize_boss_name("先祖铠甲"),
+            normalize_boss_name("伯德温·威瑟尔"),
+        }
+    ),
+)
+
+
+def boss_names_share_phase(left: object, right: object) -> bool:
+    left_name = normalize_boss_name(left)
+    right_name = normalize_boss_name(right)
+    return bool(
+        left_name
+        and right_name
+        and any(
+            any(alias in left_name for alias in group)
+            and any(alias in right_name for alias in group)
+            for group in BOSS_PHASE_NAME_GROUPS
+        )
+    )
+
+
+def boss_phase_continues(left: object, right: object) -> bool:
+    left_name = normalize_boss_name(left)
+    right_name = normalize_boss_name(right)
+    ancestor = normalize_boss_name("先祖铠甲")
+    baldwin = normalize_boss_name("伯德温·威瑟尔")
+    return bool(
+        left_name
+        and right_name
+        and ancestor in left_name
+        and baldwin in right_name
+    )
+
+
+def load_monster_catalog() -> dict[str, dict]:
+    catalog = load_monster_metadata(MONSTER_METADATA_PATH)
+    cached_names = load_json_object(MONSTER_NAME_CACHE_PATH)
+    for template_id, name in cached_names.items():
+        if isinstance(name, str) and name.strip():
+            catalog.setdefault(str(template_id), {})["name"] = name.strip()
+    allowlist = load_boss_name_allowlist()
+    if allowlist:
+        filtered: dict[str, dict] = {}
+        for template_id, metadata in catalog.items():
+            try:
+                parsed_template_id = int(template_id)
+            except (TypeError, ValueError, OverflowError):
+                parsed_template_id = 0
+            if parsed_template_id in ENCOUNTER_NON_BOSS_TEMPLATE_IDS:
+                continue
+            if not boss_name_is_allowed(metadata.get("name", ""), allowlist):
+                continue
+            boss_metadata = dict(metadata)
+            boss_metadata["boss_type"] = 3
+            filtered[template_id] = boss_metadata
+        for template_id, auxiliary in ENCOUNTER_AUXILIARY_TEMPLATES.items():
+            metadata = dict(catalog.get(str(template_id), {}))
+            metadata.update(
+                {
+                    "name": auxiliary["name"],
+                    "encounter_auxiliary": True,
+                    "encounter_parent_template_ids": list(
+                        auxiliary["parent_template_ids"]
+                    ),
+                }
+            )
+            filtered[str(template_id)] = metadata
+        return filtered
+    return catalog
+
+
+def save_config(config: dict) -> None:
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+@dataclass
+class SkillStats:
+    skill_id: int
+    damage: int = 0
+    hits: int = 0
+    max_hit: int = 0
+    first_time: float = 0.0
+    last_time: float = 0.0
+
+    def add(self, damage: int, event_time: float) -> None:
+        self.damage += damage
+        self.hits += 1
+        self.max_hit = max(self.max_hit, damage)
+        if not self.first_time:
+            self.first_time = event_time
+        self.last_time = event_time
+
+
+@dataclass
+class ActorStats:
+    actor_id: int
+    damage: int = 0
+    hits: int = 0
+    max_hit: int = 0
+    first_time: float = 0.0
+    last_time: float = 0.0
+    skills: dict[int, SkillStats] = field(default_factory=dict)
+    target_damage: dict[int, int] = field(default_factory=dict)
+
+    def add(
+        self, damage: int, event_time: float, skill_id: int, target_id: int = 0
+    ) -> None:
+        self.damage += damage
+        self.hits += 1
+        self.max_hit = max(self.max_hit, damage)
+        if not self.first_time:
+            self.first_time = event_time
+        self.last_time = event_time
+        skill = self.skills.setdefault(skill_id, SkillStats(skill_id))
+        skill.add(damage, event_time)
+        if target_id:
+            self.target_damage[target_id] = (
+                self.target_damage.get(target_id, 0) + damage
+            )
+
+
+@dataclass
+class MonsterStats:
+    entity_id: int
+    name: str = ""
+    entity_type: str = ""
+    template_id: int | None = None
+    level: int | None = None
+    boss_type: int | None = None
+    boss_rank: int = 0
+    encounter_auxiliary: bool = False
+    encounter_parent_template_ids: tuple[int, ...] = ()
+    current_hp: float | None = None
+    max_hp: float | None = None
+    observed_max_hp: float | None = None
+    last_update_100ns: int = 0
+    death_time_100ns: int = 0
+    death_confirmed: bool = False
+
+
+@dataclass
+class TeamDamageState:
+    actor_id: int
+    last_absolute: int = 0
+    has_snapshot: bool = False
+    accepted_damage: int = 0
+    first_time: float = 0.0
+    last_time: float = 0.0
+
+
+class CombatModel:
+    def __init__(
+        self,
+        *,
+        skill_names: dict[str, str] | None = None,
+        runtime_skill_names: dict[str, str] | None = None,
+        skill_professions: dict[str, list[int]] | None = None,
+        entity_names: dict[str, str] | None = None,
+        local_player_name: str = "",
+        run_id: str | None = None,
+        boss_only: bool = True,
+    ):
+        self.skill_names: dict[int, str] = {}
+        for skill_id, name in (skill_names or {}).items():
+            try:
+                parsed_id = int(skill_id)
+            except (TypeError, ValueError):
+                continue
+            cleaned_name = str(name).strip()
+            if parsed_id and cleaned_name:
+                self.skill_names[parsed_id] = cleaned_name[:64]
+        self.runtime_skill_names: dict[int, str] = {}
+        for skill_id, name in (runtime_skill_names or {}).items():
+            try:
+                parsed_id = int(skill_id)
+            except (TypeError, ValueError):
+                continue
+            cleaned_name = str(name).strip()
+            if parsed_id and cleaned_name and parsed_id not in self.skill_names:
+                self.runtime_skill_names[parsed_id] = cleaned_name[:64]
+        self.skill_professions: dict[int, tuple[int, ...]] = {}
+        for skill_id, class_ids in (skill_professions or {}).items():
+            try:
+                parsed_id = int(skill_id)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(class_ids, (list, tuple)):
+                continue
+            parsed_classes: list[int] = []
+            for class_id in class_ids:
+                try:
+                    value = int(class_id)
+                except (TypeError, ValueError):
+                    continue
+                if 1_200_001 <= value <= 1_200_007:
+                    parsed_classes.append(value)
+            if parsed_id and parsed_classes:
+                self.skill_professions[parsed_id] = tuple(sorted(set(parsed_classes)))
+        self.entity_names: dict[int, str] = {}
+        self.entity_professions: dict[int, int] = {}
+        for entity_id, name in (entity_names or {}).items():
+            try:
+                parsed_id = int(entity_id)
+            except (TypeError, ValueError):
+                continue
+            cleaned_name = str(name).strip()
+            if parsed_id and cleaned_name:
+                self.entity_names[parsed_id] = cleaned_name[:64]
+        self.local_player_name = str(local_player_name).strip()[:64]
+        self.boss_only = bool(boss_only)
+        self.self_id: int | None = None
+        self.party_ids: set[int] = set()
+        self.provisional_party_ids: set[int] = set()
+        self.party_member_count = 0
+        self.party_known = False
+        self.friendly_ids: set[int] = set()
+        self.enemy_ids: set[int] = set()
+        self.monsters: dict[int, MonsterStats] = {}
+        self.active_target_id: int | None = None
+        self.events: list[dict] = []
+        self.pending_member_events: list[dict] = []
+        self.stats: dict[int, ActorStats] = {}
+        self.team_damage_states: dict[int, TeamDamageState] = {}
+        self.stage_summaries: dict[str, dict] = {}
+        self.seen_stage_summary_ids: set[str] = set()
+        self.rejected_stage_summary_ids: set[str] = set()
+        self.stage_summary_guard_until = 0.0
+        self.member_death_states: dict[int, bool] = {}
+        self.member_life_times: dict[int, int] = {}
+        self.team_reset_pending = False
+        self.friend_order: list[int] = []
+        self.target_activity_100ns: dict[int, int] = {}
+        self.latest_network_time_100ns = 0
+        self.scene_id: int | None = None
+        self.combat_target_id: int | None = None
+        self.encounter_target_ids: set[int] = set()
+        self.encounter_add_target_ids: set[int] = set()
+        self.encounter_target_order: list[int] = []
+        self.linked_boss_target_ids: set[int] = set()
+        self.encounter_member_ids: set[int] = set()
+        self.encounter_team_size = 0
+        self.completed_combats: list[dict] = []
+        self.run_id = str(run_id or uuid.uuid4().hex[:12])
+        self.last_archive_signature: tuple | None = None
+        self.first_damage_time = 0.0
+        self.last_damage_time = 0.0
+        self.combat_end_time = 0.0
+        self.combat_end_reason = ""
+        self.idle_gap = 10.0
+        self.encounter_gap = 60.0
+        self.session_number = 0
+        self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
+
+    def set_boss_only(self, value: bool) -> bool:
+        value = bool(value)
+        if value == self.boss_only:
+            return False
+        self.reset(
+            keep_identity=True,
+            keep_monsters=True,
+            archive_reason="target_filter_changed",
+        )
+        self.boss_only = value
+        self._resolve_combat_sides()
+        self._recompute()
+        return True
+
+    def reset(
+        self,
+        *,
+        keep_identity: bool = True,
+        keep_monsters: bool = False,
+        archive_reason: str = "reset",
+    ) -> None:
+        self.archive_current(archive_reason)
+        if not keep_identity:
+            self.self_id = None
+            self.party_ids.clear()
+            self.provisional_party_ids.clear()
+            self.party_member_count = 0
+            self.party_known = False
+            self.friendly_ids.clear()
+            self.friend_order.clear()
+            self.team_damage_states.clear()
+            self.member_death_states.clear()
+            self.member_life_times.clear()
+        elif self.self_id is not None:
+            self.party_member_count = max(1, self.party_member_count)
+            self.friendly_ids = (
+                {self.self_id} | self.party_ids | self.provisional_party_ids
+            )
+            self.friend_order = [self.self_id] + sorted(
+                (self.party_ids | self.provisional_party_ids) - {self.self_id}
+            )
+        self.enemy_ids.clear()
+        if not keep_monsters:
+            self.monsters.clear()
+            self.target_activity_100ns.clear()
+            self.latest_network_time_100ns = 0
+        self.active_target_id = None
+        self.combat_target_id = None
+        self.encounter_target_ids.clear()
+        self.encounter_add_target_ids.clear()
+        self.encounter_target_order.clear()
+        self.linked_boss_target_ids.clear()
+        self.encounter_member_ids.clear()
+        self.encounter_team_size = 0
+        self.team_reset_pending = False
+        self.events.clear()
+        self.pending_member_events.clear()
+        self.stats.clear()
+        self.stage_summaries.clear()
+        self.seen_stage_summary_ids.clear()
+        self.rejected_stage_summary_ids.clear()
+        self.stage_summary_guard_until = 0.0
+        for state in self.team_damage_states.values():
+            state.accepted_damage = 0
+            state.first_time = 0.0
+            state.last_time = 0.0
+        self.first_damage_time = 0.0
+        self.last_damage_time = 0.0
+        self.combat_end_time = 0.0
+        self.combat_end_reason = ""
+        self.session_number += 1
+        self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
+        self.last_archive_signature = None
+
+    def _event_seconds(self, event: dict) -> float:
+        return (event["filetime_100ns"] - 116_444_736_000_000_000) / 10_000_000
+
+    def _current_member_ids(self) -> set[int]:
+        members = set(self.party_ids) | self.provisional_party_ids
+        if self.self_id is not None:
+            members.add(self.self_id)
+        return members
+
+    def _party_roster_is_resolved(self) -> bool:
+        if not self.party_known:
+            return False
+        resolved_members = {
+            actor_id for actor_id in self._current_member_ids() if actor_id > 0
+        }
+        expected = max(1, self.party_member_count)
+        return len(resolved_members) >= expected
+
+    def _admit_provisional_party_actor(self, event: dict) -> bool:
+        if (
+            not self.party_known
+            or self.party_member_count <= 1
+            or event.get("player_attacker") is False
+        ):
+            return False
+        try:
+            attacker = int(event.get("attacker_id", 0) or 0)
+            target = int(event.get("target_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if attacker <= 0 or attacker in self._current_member_ids():
+            return attacker in self.provisional_party_ids
+        if not (
+            self._is_priority_target(target)
+            or target in self._encounter_damage_target_ids()
+        ):
+            return False
+        resolved_members = {
+            actor_id for actor_id in self._current_member_ids() if actor_id > 0
+        }
+        if len(resolved_members) >= self.party_member_count:
+            return False
+        self.provisional_party_ids.add(attacker)
+        self.friendly_ids.add(attacker)
+        if attacker not in self.friend_order:
+            self.friend_order.append(attacker)
+        self._replay_pending_member_events()
+        return True
+
+    def _register_encounter_target(self, entity_id: int, *, add: bool = False) -> None:
+        if not entity_id:
+            return
+        self.encounter_target_ids.add(entity_id)
+        if entity_id not in self.encounter_target_order:
+            self.encounter_target_order.append(entity_id)
+        if add:
+            self.encounter_add_target_ids.add(entity_id)
+
+    def _multiphase_encounter(self) -> bool:
+        monster = self.monsters.get(int(self.combat_target_id or 0))
+        return bool(
+            monster is not None
+            and int(monster.template_id or 0) in MULTIPHASE_BOSS_TEMPLATE_IDS
+        )
+
+    def _encounter_idle_timeout(self) -> float:
+        if self._multiphase_encounter() or self.encounter_add_target_ids:
+            return self.encounter_gap
+        return self.idle_gap
+
+    def _buffer_pending_member_event(self, event: dict) -> None:
+        event_time = self._event_seconds(event)
+        cutoff = event_time - UNVERIFIED_MEMBER_EVENT_WINDOW_SECONDS
+        self.pending_member_events = [
+            pending
+            for pending in self.pending_member_events
+            if self._event_seconds(pending) >= cutoff
+        ]
+        self.pending_member_events.append(dict(event))
+        if len(self.pending_member_events) > 8192:
+            self.pending_member_events = self.pending_member_events[-4096:]
+
+    def _replay_pending_member_events(self) -> bool:
+        if not self.pending_member_events:
+            return False
+        members = self._current_member_ids()
+        newest_time = max(
+            self._event_seconds(event) for event in self.pending_member_events
+        )
+        cutoff = newest_time - UNVERIFIED_MEMBER_EVENT_WINDOW_SECONDS
+        roster_resolved = self._party_roster_is_resolved()
+        accepted: list[dict] = []
+        remaining: list[dict] = []
+        for event in self.pending_member_events:
+            attacker = int(event.get("attacker_id", 0) or 0)
+            if attacker in members:
+                accepted.append(event)
+            elif not roster_resolved and self._event_seconds(event) >= cutoff:
+                remaining.append(event)
+        self.pending_member_events = remaining
+        for event in accepted:
+            self.ingest(event)
+        return bool(accepted)
+
+    def current_stats(self) -> list[ActorStats]:
+        return [stats for stats in self.stats.values() if stats.damage > 0]
+
+    def _encounter_started(self) -> bool:
+        return bool(
+            self.first_damage_time
+            or self.last_damage_time
+            or self.encounter_target_ids
+            or any(
+                state.accepted_damage > 0
+                for state in self.team_damage_states.values()
+            )
+        )
+
+    def _update_encounter_roster(self, *extra_actor_ids: int) -> None:
+        # A participant exists only after an observed hit on the current Boss.
+        # Party packets remain useful for names, but never create zero-DPS rows.
+        members = {actor_id for actor_id in extra_actor_ids if actor_id}
+        if not members and not self._encounter_started():
+            return
+        self.encounter_member_ids.update(members)
+        roster_size = self.party_member_count if self.party_known else 0
+        self.encounter_team_size = min(
+            MAX_PARTY_MEMBERS,
+            max(
+                self.encounter_team_size,
+                len(self.encounter_member_ids),
+                roster_size,
+            ),
+        )
+        for actor_id in members:
+            if actor_id not in self.friend_order:
+                self.friend_order.append(actor_id)
+
+    def _mark_target_defeated(self, monster: MonsterStats) -> bool:
+        # One defeated unit does not end an all-monsters encounter while
+        # the party may still be fighting the rest of the same pack.
+        if not self.boss_only:
+            return False
+        if (
+            not self.first_damage_time
+            or monster.entity_id != self.combat_target_id
+            or not self._is_priority_target(monster.entity_id)
+            or monster.current_hp is None
+            or monster.current_hp > 0
+            or not monster.death_time_100ns
+            or not monster.death_confirmed
+            or self.combat_end_time
+        ):
+            return False
+        if self._multiphase_encounter():
+            return False
+        if any(
+            0 <= monster.death_time_100ns - self.target_activity_100ns.get(target, 0)
+            <= int(self.encounter_gap * 10_000_000)
+            for target in self.encounter_add_target_ids
+            if self.target_activity_100ns.get(target, 0)
+        ):
+            return False
+        end_time = self._event_seconds(
+            {"filetime_100ns": monster.death_time_100ns}
+        )
+        if end_time < self.first_damage_time:
+            return False
+        self.combat_end_time = end_time
+        self.combat_end_reason = "target_defeated"
+        return True
+
+    def _mark_party_wipe_if_complete(self, event_time: float) -> bool:
+        if (
+            not self.first_damage_time
+            or self.combat_end_time
+            or event_time < self.first_damage_time
+        ):
+            return False
+        members = self._current_member_ids()
+        if not members:
+            return False
+        if self.party_known and self.party_member_count > len(members):
+            # Some roster entries have not been resolved yet. Never declare a
+            # wipe from only the visible subset of the party.
+            return False
+        if not all(
+            actor_id in self.member_death_states
+            and self.member_death_states[actor_id]
+            for actor_id in members
+        ):
+            return False
+        self.combat_end_time = max(self.last_damage_time, event_time)
+        self.combat_end_reason = "party_wipe"
+        return True
+
+    @staticmethod
+    def _monster_max_hp(monster: MonsterStats) -> float:
+        return max(monster.max_hp or 0.0, monster.observed_max_hp or 0.0)
+
+    def _monster_rank(self, monster: MonsterStats) -> int:
+        if monster.boss_rank >= 3 or monster.boss_type == 3:
+            return 3
+        entity_type = monster.entity_type.casefold()
+        if "boss" in entity_type or "首领" in entity_type:
+            return 3
+        return 0
+
+    def _monster_activity(self, monster: MonsterStats) -> int:
+        return max(
+            monster.last_update_100ns,
+            self.target_activity_100ns.get(monster.entity_id, 0),
+        )
+
+    def _monster_priority(self, monster: MonsterStats) -> tuple:
+        current_hp = monster.current_hp
+        alive = 1 if current_hp is None or current_hp > 0 else 0
+        return (
+            self._monster_rank(monster),
+            int(monster.level or 0),
+            alive,
+            self._monster_max_hp(monster),
+            self._monster_activity(monster),
+        )
+
+    def _select_priority_monster(
+        self, *, active_at_100ns: int | None = None
+    ) -> MonsterStats | None:
+        candidates: list[MonsterStats] = []
+        reference_time = active_at_100ns or self.latest_network_time_100ns
+        active_seconds = (
+            TEAM_TARGET_ACTIVE_SECONDS
+            if active_at_100ns is not None
+            else MONSTER_DISPLAY_ACTIVE_SECONDS
+        )
+        active_window = int(active_seconds * 10_000_000)
+        for entity_id, monster in self.monsters.items():
+            if entity_id in self.friendly_ids:
+                continue
+            if monster.entity_type.casefold() in {"player", "role"}:
+                continue
+            if self.boss_only and self._monster_rank(monster) <= 0:
+                continue
+            if reference_time:
+                activity = self._monster_activity(monster)
+                elapsed = reference_time - activity
+                if not activity or elapsed < 0 or elapsed > active_window:
+                    continue
+            candidates.append(monster)
+        return max(candidates, key=self._monster_priority) if candidates else None
+
+    def _is_priority_target(self, entity_id: int) -> bool:
+        monster = self.monsters.get(entity_id)
+        if monster is None or entity_id in self.friendly_ids:
+            return False
+        if monster.entity_type.casefold() in {"player", "role"}:
+            return False
+        return not self.boss_only or self._monster_rank(monster) > 0
+
+    def _encounter_damage_target_ids(self) -> set[int]:
+        if self.boss_only:
+            if self.combat_target_id is None:
+                return set()
+            target_ids = {
+                self.combat_target_id,
+                *self.linked_boss_target_ids,
+                *self.encounter_add_target_ids,
+            }
+            parent = self.monsters.get(self.combat_target_id)
+            parent_template_id = int(parent.template_id or 0) if parent else 0
+            if parent_template_id:
+                target_ids.update(
+                    entity_id
+                    for entity_id, monster in self.monsters.items()
+                    if monster.encounter_auxiliary
+                    and parent_template_id
+                    in monster.encounter_parent_template_ids
+                )
+            return target_ids
+        target_ids = set(self.encounter_target_ids)
+        if self.combat_target_id is not None:
+            target_ids.add(self.combat_target_id)
+        return {
+            entity_id
+            for entity_id in target_ids
+            if self._is_priority_target(entity_id)
+        }
+
+    def _link_boss_scene_target(
+        self, target: int, event_time: float, timestamp: int
+    ) -> bool:
+        if (
+            not self.boss_only
+            or not self.first_damage_time
+            or self.combat_target_id is None
+            or target == self.combat_target_id
+            or target in self._current_member_ids()
+            or target in self.friendly_ids
+            or self._is_priority_target(target)
+        ):
+            return False
+        primary = self.monsters.get(self.combat_target_id)
+        if primary is None or self._monster_rank(primary) <= 0:
+            return False
+        monster = self.monsters.get(target)
+        if monster is not None and monster.entity_type.casefold() in {
+            "player",
+            "role",
+        }:
+            return False
+        if (
+            self.last_damage_time
+            and event_time - self.last_damage_time > self.encounter_gap
+        ):
+            return False
+        if monster is None:
+            self.monsters[target] = MonsterStats(target, entity_type="Monster")
+        self._register_encounter_target(target, add=True)
+        if timestamp:
+            self.target_activity_100ns[target] = max(
+                self.target_activity_100ns.get(target, 0), timestamp
+            )
+        if (
+            self.combat_end_time
+            and self.combat_end_reason == "target_defeated"
+            and 0 <= event_time - self.combat_end_time <= self.encounter_gap
+        ):
+            self.combat_end_time = 0.0
+            self.combat_end_reason = ""
+        return True
+
+    @staticmethod
+    def _iso_timestamp(value: float) -> str:
+        return dt.datetime.fromtimestamp(value).astimezone().isoformat(
+            timespec="seconds"
+        )
+
+    def _archive_signature(self) -> tuple | None:
+        total = sum(actor.damage for actor in self.stats.values())
+        if total <= 0 or not self.first_damage_time or not self.last_damage_time:
+            return None
+        actors = tuple(
+            sorted(
+                (
+                    actor_id,
+                    actor.damage,
+                    actor.hits,
+                    actor.max_hit,
+                    self.display_name(actor_id),
+                    tuple(
+                        sorted(
+                            (
+                                skill.skill_id,
+                                skill.damage,
+                                skill.hits,
+                                skill.max_hit,
+                                self.display_skill_name(actor_id, skill.skill_id),
+                            )
+                            for skill in actor.skills.values()
+                        )
+                    ),
+                    tuple(sorted(actor.target_damage.items())),
+                )
+                for actor_id, actor in self.stats.items()
+            )
+        )
+        targets = tuple(
+            sorted(
+                (
+                    entity_id,
+                    monster.name,
+                    monster.level,
+                    monster.boss_rank,
+                    monster.current_hp,
+                    monster.max_hp,
+                    monster.observed_max_hp,
+                )
+                for entity_id in self.encounter_target_ids
+                if (monster := self.monsters.get(entity_id)) is not None
+            )
+        )
+        return (
+            self.encounter_id,
+            round(self.first_damage_time, 3),
+            round(self.last_damage_time, 3),
+            round(self.combat_end_time, 3),
+            self.encounter_team_size,
+            tuple(sorted(self.encounter_member_ids)),
+            actors,
+            targets,
+        )
+
+    def build_combat_record(self, reason: str = "completed") -> dict | None:
+        signature = self._archive_signature()
+        if signature is None:
+            return None
+        ended_at = self.combat_end_time or self.last_damage_time
+        duration = max(1.0, ended_at - self.first_damage_time)
+        rows = sorted(
+            (actor for actor in self.stats.values() if actor.damage > 0),
+            key=lambda actor: actor.damage,
+            reverse=True,
+        )
+        total_damage = sum(actor.damage for actor in rows)
+        ordered_ids = list(self.friend_order)
+        ordered_ids.extend(
+            actor.actor_id for actor in rows if actor.actor_id not in ordered_ids
+        )
+        participants: list[dict] = []
+        for actor in rows:
+            actor_id = actor.actor_id
+            try:
+                fallback_index = ordered_ids.index(actor_id) + 1
+            except ValueError:
+                fallback_index = len(participants) + 1
+            name = self.display_name(actor_id) or f"玩家{fallback_index}"
+            skills = []
+            for skill in sorted(
+                actor.skills.values(), key=lambda item: item.damage, reverse=True
+            ):
+                skills.append(
+                    {
+                        "skill_id": skill.skill_id,
+                        "name": self.display_skill_name(actor_id, skill.skill_id),
+                        "damage": skill.damage,
+                        "share": skill.damage / actor.damage if actor.damage else 0.0,
+                        "hits": skill.hits,
+                        "max_hit": skill.max_hit,
+                    }
+                )
+            if not skills and actor.damage > 0:
+                skills.append(
+                    {
+                        "skill_id": 0,
+                        "name": "团队伤害汇总",
+                        "damage": actor.damage,
+                        "share": 1.0,
+                        "hits": None,
+                        "max_hit": None,
+                        "aggregate": True,
+                    }
+                )
+            participants.append(
+                {
+                    "actor_id": actor_id,
+                    "name": name,
+                    "is_self": actor_id == self.self_id,
+                    "profession_id": self.actor_profession_id(actor_id),
+                    "damage": actor.damage,
+                    "dps": actor.damage / duration,
+                    "share": actor.damage / total_damage if total_damage else 0.0,
+                    "hits": actor.hits,
+                    "max_hit": actor.max_hit,
+                    "skills": skills,
+                    "targets": self.actor_target_rows(actor_id),
+                }
+            )
+
+        target_ids = self._encounter_damage_target_ids()
+        target_models = [
+            self.monsters[entity_id]
+            for entity_id in target_ids
+            if entity_id in self.monsters
+        ]
+        target_models.sort(
+            key=lambda monster: (
+                monster.entity_id == self.combat_target_id,
+                self._monster_priority(monster),
+            ),
+            reverse=True,
+        )
+        targets: list[dict] = []
+        for monster in target_models:
+            hp_ceiling = self._monster_max_hp(monster)
+            targets.append(
+                {
+                    "entity_id": monster.entity_id,
+                    "name": self.display_target_name(monster.entity_id),
+                    "level": monster.level,
+                    "entity_type": monster.entity_type,
+                    "template_id": monster.template_id,
+                    "boss_type": monster.boss_type,
+                    "boss_rank": self._monster_rank(monster),
+                    "current_hp": monster.current_hp,
+                    "max_hp": hp_ceiling or None,
+                }
+            )
+        primary_target = targets[0] if targets else None
+        now = time.time()
+        return {
+            "schema_version": HISTORY_SCHEMA_VERSION,
+            "encounter_id": self.encounter_id,
+            "source": "network_rpc",
+            "archive_reason": str(reason),
+            "started_at_epoch": self.first_damage_time,
+            "ended_at_epoch": ended_at,
+            "started_at": self._iso_timestamp(self.first_damage_time),
+            "ended_at": self._iso_timestamp(ended_at),
+            "saved_at_epoch": now,
+            "saved_at": self._iso_timestamp(now),
+            "duration_seconds": duration,
+            "total_damage": total_damage,
+            "team_dps": total_damage / duration,
+            "team_size": min(
+                MAX_PARTY_MEMBERS,
+                max(len(participants), self.encounter_team_size),
+            ),
+            "target_filter": "boss" if self.boss_only else "all_monsters",
+            "monster": primary_target,
+            "targets": targets,
+            "participants": participants,
+        }
+
+    def archive_current(self, reason: str = "completed") -> bool:
+        signature = self._archive_signature()
+        if signature is None or signature == self.last_archive_signature:
+            return False
+        record = self.build_combat_record(reason)
+        if record is None:
+            return False
+        self.completed_combats.append(record)
+        self.last_archive_signature = signature
+        return True
+
+    def finalize_if_idle(self, now: float | None = None) -> bool:
+        if not self.last_damage_time:
+            return False
+        if self.combat_end_time:
+            return self.archive_current(
+                self.combat_end_reason or "completed"
+            )
+        now = time.time() if now is None else now
+        if now - self.last_damage_time < self._encounter_idle_timeout():
+            return False
+        monster = self.current_monster()
+        reason = (
+            "target_defeated"
+            if monster is not None
+            and monster.current_hp is not None
+            and monster.current_hp <= 0
+            and monster.death_time_100ns
+            else "idle"
+        )
+        return self.archive_current(reason)
+
+    def pop_completed_combats(self) -> list[dict]:
+        records = self.completed_combats
+        self.completed_combats = []
+        return records
+
+    def ingest(self, event: dict) -> None:
+        damage = int(event.get("damage", 0))
+        if damage <= 0 or event.get("player_attacker") is False:
+            return
+        attacker = int(event["attacker_id"])
+        if (
+            self.party_known
+            and attacker
+            not in self._current_member_ids()
+        ):
+            if self._admit_provisional_party_actor(event):
+                pass
+            elif not self._party_roster_is_resolved():
+                self._buffer_pending_member_event(event)
+                return
+            else:
+                return
+        previous_session_number = self.session_number
+        encounter_was_empty = not self.first_damage_time
+        event_time = self._event_seconds(event)
+        timestamp = int(event.get("filetime_100ns", 0) or 0)
+        self.latest_network_time_100ns = max(self.latest_network_time_100ns, timestamp)
+        target = int(event["target_id"])
+        if attacker in self._current_member_ids():
+            self.member_death_states[attacker] = False
+            self.member_life_times[attacker] = max(
+                self.member_life_times.get(attacker, 0), timestamp
+            )
+        if (
+            not self.boss_only
+            and target not in self.monsters
+            and target not in self.friendly_ids
+            and attacker in self.friendly_ids
+        ):
+            # Ordinary monster profile/HP packets may arrive after the first
+            # hit.  In all-monsters mode, a confirmed friendly hit is enough
+            # to create a provisional target; later profile packets refine it.
+            self.monsters[target] = MonsterStats(
+                target, entity_type="Monster"
+            )
+        priority_target = self._is_priority_target(target)
+        if not priority_target and self.combat_target_id is None:
+            auxiliary = self.monsters.get(target)
+            if auxiliary is not None and auxiliary.encounter_auxiliary:
+                parents = set(auxiliary.encounter_parent_template_ids)
+                candidates = [
+                    monster
+                    for monster in self.monsters.values()
+                    if int(monster.template_id or 0) in parents
+                    and self._monster_rank(monster) > 0
+                ]
+                if candidates:
+                    self.combat_target_id = max(
+                        candidates, key=self._monster_priority
+                    ).entity_id
+                    self._register_encounter_target(self.combat_target_id)
+        if not priority_target and self.combat_target_id is not None:
+            self._link_boss_scene_target(target, event_time, timestamp)
+        linked_target = target in self._encounter_damage_target_ids()
+        if priority_target:
+            if (
+                self.last_damage_time
+                and event_time - self.last_damage_time
+                > (self.encounter_gap if self.boss_only else self.idle_gap)
+            ):
+                self.reset(
+                    keep_identity=True,
+                    keep_monsters=True,
+                    archive_reason="new_encounter",
+                )
+            current_target = self.monsters.get(int(self.combat_target_id or 0))
+            current_defeated = bool(
+                current_target is not None
+                and current_target.current_hp is not None
+                and current_target.current_hp <= 0
+                and current_target.death_confirmed
+            )
+            if self.combat_end_time:
+                if (
+                    target == self.combat_target_id
+                    and current_target is not None
+                    and current_target.death_confirmed
+                ):
+                    # Ignore damage already in flight when the explicit death
+                    # packet arrived; it cannot reopen the completed encounter.
+                    return
+                self.reset(
+                    keep_identity=True,
+                    keep_monsters=True,
+                    archive_reason=self.combat_end_reason or "new_encounter",
+                )
+            elif self.combat_target_id is not None and target != self.combat_target_id:
+                previous = self.monsters.get(self.combat_target_id)
+                incoming = self.monsters.get(target)
+                same_phase_group = bool(
+                    self.boss_only
+                    and previous is not None
+                    and incoming is not None
+                    and boss_names_share_phase(previous.name, incoming.name)
+                )
+                phase_continuation = bool(
+                    same_phase_group
+                    and boss_phase_continues(previous.name, incoming.name)
+                )
+                idle_switch = bool(
+                    self.last_damage_time
+                    and event_time - self.last_damage_time
+                    > self.idle_gap
+                )
+                if phase_continuation:
+                    self.linked_boss_target_ids.update(
+                        {self.combat_target_id, target}
+                    )
+                    self.combat_target_id = target
+                    self._register_encounter_target(target)
+                elif same_phase_group:
+                    # The only linked direction is Ancestor Armor -> Baldwin.
+                    # Baldwin -> a new Ancestor Armor entity is a repull after
+                    # a wipe, even if the old Boss never emitted a death packet.
+                    self.reset(
+                        keep_identity=True,
+                        keep_monsters=True,
+                        archive_reason="new_encounter",
+                    )
+                elif idle_switch:
+                    self.reset(
+                        keep_identity=True,
+                        keep_monsters=True,
+                        archive_reason="new_encounter",
+                    )
+                elif self.boss_only and current_defeated:
+                    self.reset(
+                        keep_identity=True,
+                        keep_monsters=True,
+                        archive_reason="new_encounter",
+                    )
+                elif self.boss_only:
+                    # A secondary/lower Boss must not contaminate the locked
+                    # encounter while the primary target is still active.
+                    return
+            if self.combat_target_id is None:
+                self.combat_target_id = target
+            elif not self.boss_only and target != self.combat_target_id:
+                current_target = self.monsters.get(self.combat_target_id)
+                incoming_target = self.monsters.get(target)
+                current_priority = (
+                    (
+                        self._monster_rank(current_target),
+                        int(current_target.level or 0),
+                    )
+                    if current_target is not None
+                    else (-1, -1)
+                )
+                incoming_priority = (
+                    (
+                        self._monster_rank(incoming_target),
+                        int(incoming_target.level or 0),
+                    )
+                    if incoming_target is not None
+                    else (-1, -1)
+                )
+                if current_defeated or incoming_priority > current_priority:
+                    self.combat_target_id = target
+            current_target = self.monsters.get(target)
+            if (
+                current_target is not None
+                and current_target.current_hp is not None
+                and current_target.current_hp <= 0
+            ):
+                current_target.current_hp = None
+                current_target.death_time_100ns = 0
+            self._register_encounter_target(target)
+            self._update_encounter_roster(attacker)
+        elif linked_target:
+            if self.combat_end_time:
+                return
+            self._register_encounter_target(
+                target, add=target in self.encounter_add_target_ids
+            )
+            self._update_encounter_roster(attacker)
+        if (priority_target or linked_target) and timestamp:
+            self.target_activity_100ns[target] = timestamp
+        self.events.append(event)
+        # Retain ample history for a long boss fight without unbounded growth.
+        if len(self.events) > 200_000:
+            self.events = self.events[-150_000:]
+        self._resolve_combat_sides()
+        self._recompute()
+        if self.first_damage_time and (
+            self.session_number != previous_session_number
+            or (encounter_was_empty and self.session_number > 0)
+        ):
+            # A completed stage summary can arrive beside the first hit on the
+            # next Boss. Keep a short plausibility gate so those old totals do
+            # not flash as the new pull's DPS.
+            self.stage_summary_guard_until = max(
+                self.stage_summary_guard_until,
+                event_time + 3.0,
+            )
+
+    def _resolve_combat_sides(self) -> None:
+        current_friendly = set(self.party_ids) | self.provisional_party_ids
+        if self.self_id is not None:
+            current_friendly.add(self.self_id)
+
+        if self.combat_target_id is None:
+            target_candidates = {
+                int(event["target_id"])
+                for event in self.events
+                if int(event.get("damage", 0)) > 0
+                and self._is_priority_target(int(event["target_id"]))
+            }
+            if target_candidates:
+                self.combat_target_id = max(
+                    target_candidates,
+                    key=lambda entity_id: self._monster_priority(
+                        self.monsters[entity_id]
+                    ),
+                )
+
+        damage_target_ids = self._encounter_damage_target_ids()
+        observed_attackers = {
+            int(event["attacker_id"])
+            for event in self.events
+            if int(event.get("damage", 0)) > 0
+            and int(event["target_id"]) in damage_target_ids
+        }
+        friendly = current_friendly | observed_attackers
+        enemies = damage_target_ids
+        for actor_id in [*current_friendly, *observed_attackers]:
+            if actor_id not in self.friend_order:
+                self.friend_order.append(actor_id)
+        self.friendly_ids = friendly
+        self.enemy_ids = enemies
+        self.active_target_id = self.combat_target_id
+
+    def _recompute(self) -> None:
+        stats: dict[int, ActorStats] = {}
+        first = 0.0
+        last = 0.0
+        damage_target_ids = self._encounter_damage_target_ids()
+
+        summary_cutoff = 0
+        for summary in self.stage_summaries.values():
+            try:
+                summary_time_100ns = int(summary.get("filetime_100ns", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                summary_time_100ns = 0
+            if summary_time_100ns <= 0:
+                continue
+            summary_cutoff = max(summary_cutoff, summary_time_100ns)
+            summary_time = self._event_seconds(
+                {"filetime_100ns": summary_time_100ns}
+            )
+            for row in summary.get("actors", []):
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    actor_id = int(row.get("actor_id", 0) or 0)
+                    damage = max(0, int(row.get("damage", 0) or 0))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if not actor_id or damage <= 0:
+                    continue
+                actor = stats.setdefault(actor_id, ActorStats(actor_id))
+                actor.damage += damage
+                actor.first_time = (
+                    min(actor.first_time, summary_time)
+                    if actor.first_time
+                    else summary_time
+                )
+                actor.last_time = max(actor.last_time, summary_time)
+                summarized_skill_damage = 0
+                for raw_skill in row.get("skills", []):
+                    if not isinstance(raw_skill, dict):
+                        continue
+                    try:
+                        skill_id = int(raw_skill.get("skill_id", 0) or 0)
+                        skill_damage = max(
+                            0, int(raw_skill.get("damage", 0) or 0)
+                        )
+                        hits = max(0, int(raw_skill.get("hits", 0) or 0))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if not skill_id or skill_damage <= 0:
+                        continue
+                    skill = actor.skills.setdefault(skill_id, SkillStats(skill_id))
+                    skill.damage += skill_damage
+                    skill.hits += hits
+                    skill.first_time = (
+                        min(skill.first_time, summary_time)
+                        if skill.first_time
+                        else summary_time
+                    )
+                    skill.last_time = max(skill.last_time, summary_time)
+                    actor.hits += hits
+                    summarized_skill_damage += skill_damage
+                residual = max(0, damage - summarized_skill_damage)
+                if residual:
+                    aggregate = actor.skills.setdefault(0, SkillStats(0))
+                    aggregate.damage += residual
+                    aggregate.first_time = (
+                        min(aggregate.first_time, summary_time)
+                        if aggregate.first_time
+                        else summary_time
+                    )
+                    aggregate.last_time = max(aggregate.last_time, summary_time)
+            if not first or summary_time < first:
+                first = summary_time
+            last = max(last, summary_time)
+
+        for event in self.events:
+            attacker = int(event["attacker_id"])
+            target = int(event["target_id"])
+            damage = int(event["damage"])
+            if (
+                damage <= 0
+                or target not in damage_target_ids
+            ):
+                continue
+            event_time = self._event_seconds(event)
+            if not first or event_time < first:
+                first = event_time
+            last = max(last, event_time)
+            timestamp = int(event.get("filetime_100ns", 0) or 0)
+            if summary_cutoff and timestamp <= summary_cutoff:
+                actor = stats.get(attacker)
+                if actor is not None:
+                    actor.first_time = (
+                        min(actor.first_time, event_time)
+                        if actor.first_time
+                        else event_time
+                    )
+                continue
+            skill_id = int(event.get("skill_id", 0)) or self.normalize_damage_skill_id(
+                event.get("arg4_u64", 0)
+            )
+            actor = stats.setdefault(attacker, ActorStats(attacker))
+            actor.add(damage, event_time, skill_id, target)
+        for actor_id, state in self.team_damage_states.items():
+            if state.accepted_damage <= 0:
+                continue
+            actor = stats.setdefault(actor_id, ActorStats(actor_id))
+            actor.damage = max(actor.damage, state.accepted_damage)
+            if state.first_time and (
+                not actor.first_time or state.first_time < actor.first_time
+            ):
+                actor.first_time = state.first_time
+            actor.last_time = max(actor.last_time, state.last_time)
+            if state.first_time and (not first or state.first_time < first):
+                first = state.first_time
+            last = max(last, state.last_time)
+            captured_damage = sum(skill.damage for skill in actor.skills.values())
+            aggregate_damage = max(0, actor.damage - captured_damage)
+            if aggregate_damage:
+                aggregate = actor.skills.get(0)
+                if aggregate is None:
+                    actor.skills[0] = SkillStats(
+                        skill_id=0,
+                        damage=aggregate_damage,
+                        hits=0,
+                        max_hit=0,
+                        first_time=state.first_time,
+                        last_time=state.last_time,
+                    )
+                else:
+                    aggregate.damage += aggregate_damage
+                    aggregate.last_time = max(
+                        aggregate.last_time, state.last_time
+                    )
+        self.stats = stats
+        self.first_damage_time = first
+        self.last_damage_time = last
+
+    def ingest_stage_summary(self, update: dict) -> bool:
+        summary_id = str(update.get("summary_id", "")).strip()
+        try:
+            timestamp = int(update.get("filetime_100ns", 0) or 0)
+            member_count = max(0, int(update.get("member_count", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not summary_id or timestamp <= 0:
+            return False
+        if (
+            summary_id in self.seen_stage_summary_ids
+            or summary_id in self.rejected_stage_summary_ids
+        ):
+            return False
+        if not self._encounter_damage_target_ids():
+            return False
+
+        summary_total = 0
+        for raw_actor in update.get("actors", []):
+            if not isinstance(raw_actor, dict):
+                continue
+            try:
+                summary_total += max(0, int(raw_actor.get("damage", 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        summary_time = self._event_seconds({"filetime_100ns": timestamp})
+        observed_total = sum(actor.damage for actor in self.stats.values())
+        if (
+            summary_time <= self.stage_summary_guard_until
+            and summary_total
+            > max(observed_total * 2, observed_total + 250_000)
+        ):
+            self.rejected_stage_summary_ids.add(summary_id)
+            return False
+
+        # Stage rows are cumulative for the whole instance and can arrive at a
+        # phase boundary. They remain useful because the parser emits their
+        # actor/name mappings first, but treating their totals as this pull's
+        # damage is what produced 100M+ dummy records and end-of-fight jumps.
+        self.seen_stage_summary_ids.add(summary_id)
+        self.latest_network_time_100ns = max(self.latest_network_time_100ns, timestamp)
+        self.party_member_count = min(
+            MAX_PARTY_MEMBERS,
+            max(self.party_member_count, member_count),
+        )
+        return True
+
+    def ingest_identity(self, update: dict) -> bool:
+        try:
+            entity_id = int(update.get("entity_id", 0))
+        except (TypeError, ValueError):
+            return False
+        if not entity_id:
+            return False
+        previous_self_id = self.self_id
+        changed = previous_self_id != entity_id
+        self.self_id = entity_id
+        if previous_self_id and previous_self_id != entity_id:
+            previous_time = self.member_life_times.pop(previous_self_id, 0)
+            previous_state = self.member_death_states.pop(
+                previous_self_id, None
+            )
+            if previous_time >= self.member_life_times.get(entity_id, 0):
+                if previous_state is not None:
+                    self.member_death_states[entity_id] = previous_state
+                    self.member_life_times[entity_id] = previous_time
+        self.party_ids.discard(entity_id)
+        self.provisional_party_ids.discard(entity_id)
+        self.party_member_count = max(1, self.party_member_count)
+        if entity_id in self.friend_order:
+            self.friend_order.remove(entity_id)
+        self.friend_order.insert(0, entity_id)
+        automatic_name = self.entity_names.get(entity_id, "").strip()
+        if automatic_name:
+            self.local_player_name = automatic_name
+        self._resolve_combat_sides()
+        self._recompute()
+        replayed = self._replay_pending_member_events()
+        return changed or replayed
+
+    def ingest_party(self, update: dict) -> bool:
+        parsed: set[int] = set()
+        values = update.get("entity_ids", [])
+        if isinstance(values, (list, tuple, set)):
+            for value in values:
+                try:
+                    entity_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if entity_id:
+                    parsed.add(entity_id)
+        if self.self_id is not None:
+            parsed.discard(self.self_id)
+        inferred_count = len(parsed) + (1 if self.self_id is not None else 0)
+        try:
+            member_count = max(0, int(update.get("member_count", inferred_count)))
+        except (TypeError, ValueError, OverflowError):
+            member_count = inferred_count
+        member_count = min(
+            MAX_PARTY_MEMBERS, max(member_count, inferred_count)
+        )
+        previous_provisional_ids = set(self.provisional_party_ids)
+        official_positive_ids = {entity_id for entity_id in parsed if entity_id > 0}
+        self.provisional_party_ids.difference_update(official_positive_ids)
+        resolved_count = len(official_positive_ids) + (
+            1 if self.self_id is not None else 0
+        )
+        provisional_slots = max(0, member_count - resolved_count)
+        if len(self.provisional_party_ids) > provisional_slots:
+            ordered_provisional = [
+                actor_id
+                for actor_id in self.friend_order
+                if actor_id in self.provisional_party_ids
+            ]
+            ordered_provisional.extend(
+                sorted(self.provisional_party_ids - set(ordered_provisional))
+            )
+            self.provisional_party_ids = set(
+                ordered_provisional[:provisional_slots]
+            )
+        changed = (
+            not self.party_known
+            or parsed != self.party_ids
+            or member_count != self.party_member_count
+            or self.provisional_party_ids != previous_provisional_ids
+        )
+        self.party_known = True
+        self.party_ids = parsed
+        self.party_member_count = member_count
+        current_members = self._current_member_ids()
+        self.member_death_states = {
+            actor_id: dead
+            for actor_id, dead in self.member_death_states.items()
+            if actor_id in current_members
+        }
+        self.member_life_times = {
+            actor_id: timestamp
+            for actor_id, timestamp in self.member_life_times.items()
+            if actor_id in current_members
+        }
+        if self._encounter_started():
+            self.encounter_team_size = min(
+                MAX_PARTY_MEMBERS,
+                max(self.encounter_team_size, member_count),
+            )
+        reordered = [
+            actor_id
+            for actor_id in self.friend_order
+            if actor_id in current_members and actor_id != self.self_id
+        ]
+        for actor_id in sorted(parsed):
+            if actor_id not in reordered:
+                reordered.append(actor_id)
+        for actor_id in self.provisional_party_ids:
+            if actor_id not in reordered:
+                reordered.append(actor_id)
+        self.friend_order = (
+            [self.self_id, *reordered]
+            if self.self_id is not None
+            else reordered
+        )
+        self._resolve_combat_sides()
+        self._recompute()
+        replayed = self._replay_pending_member_events()
+        return changed or replayed
+
+    def ingest_scene(self, update: dict) -> bool:
+        try:
+            scene_id = int(update.get("scene_id", 0))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if scene_id <= 0:
+            return False
+        previous_scene_id = self.scene_id
+        force_reset = bool(update.get("force_reset"))
+        visible_entity_ids: set[int] = set()
+        raw_entity_ids = update.get("entity_ids", ())
+        if isinstance(raw_entity_ids, (list, tuple, set)):
+            for raw_entity_id in raw_entity_ids:
+                try:
+                    entity_id = int(raw_entity_id or 0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if entity_id:
+                    visible_entity_ids.add(entity_id)
+        refreshed_targets = self._encounter_damage_target_ids() | set(
+            self.encounter_target_ids
+        )
+        preserves_active_encounter = bool(
+            previous_scene_id == scene_id
+            and force_reset
+            and self._encounter_started()
+            and refreshed_targets.intersection(visible_entity_ids)
+        )
+        changed = previous_scene_id is not None and (
+            scene_id != previous_scene_id
+            or (force_reset and not preserves_active_encounter)
+        )
+        if changed:
+            self.provisional_party_ids.clear()
+            self.reset(
+                keep_identity=True,
+                keep_monsters=False,
+                archive_reason=(
+                    "scene_refresh"
+                    if scene_id == previous_scene_id
+                    else "scene_change"
+                ),
+            )
+            self.member_death_states.clear()
+            self.member_life_times.clear()
+        self.scene_id = scene_id
+        return changed
+
+    def merge_actor(self, update: dict) -> bool:
+        try:
+            old_actor = int(update.get("from_actor_id", 0))
+            new_actor = int(update.get("to_actor_id", 0))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not old_actor or not new_actor or old_actor == new_actor:
+            return False
+
+        changed = False
+        if old_actor in self.provisional_party_ids:
+            self.provisional_party_ids.discard(old_actor)
+            if new_actor != self.self_id:
+                self.provisional_party_ids.add(new_actor)
+            changed = True
+        elif new_actor in self.provisional_party_ids:
+            self.provisional_party_ids.discard(new_actor)
+            changed = True
+        if old_actor in self.party_ids:
+            self.party_ids.discard(old_actor)
+            if new_actor != self.self_id:
+                self.party_ids.add(new_actor)
+            changed = True
+        duplicate_encounter_member = (
+            old_actor in self.encounter_member_ids
+            and new_actor in self.encounter_member_ids
+        )
+        if old_actor in self.encounter_member_ids:
+            self.encounter_member_ids.discard(old_actor)
+            self.encounter_member_ids.add(new_actor)
+            if duplicate_encounter_member and self.encounter_team_size > 0:
+                self.encounter_team_size = max(
+                    len(self.encounter_member_ids),
+                    self.encounter_team_size - 1,
+                )
+                self.encounter_team_size = min(
+                    MAX_PARTY_MEMBERS, self.encounter_team_size
+                )
+            changed = True
+
+        reordered: list[int] = []
+        for actor_id in self.friend_order:
+            candidate = new_actor if actor_id == old_actor else actor_id
+            if candidate not in reordered:
+                reordered.append(candidate)
+        self.friend_order = reordered
+
+        old_name = self.entity_names.pop(old_actor, "")
+        if old_name and not self.entity_names.get(new_actor):
+            self.entity_names[new_actor] = old_name
+            changed = True
+        old_profession = self.entity_professions.pop(old_actor, None)
+        if old_profession and not self.entity_professions.get(new_actor):
+            self.entity_professions[new_actor] = old_profession
+            changed = True
+
+        old_life_time = self.member_life_times.pop(old_actor, 0)
+        old_dead = self.member_death_states.pop(old_actor, None)
+        if old_life_time >= self.member_life_times.get(new_actor, 0):
+            if old_dead is not None:
+                self.member_death_states[new_actor] = old_dead
+                self.member_life_times[new_actor] = old_life_time
+                changed = True
+
+        old_state = self.team_damage_states.pop(old_actor, None)
+        if old_state is not None:
+            new_state = self.team_damage_states.get(new_actor)
+            if new_state is None:
+                old_state.actor_id = new_actor
+                self.team_damage_states[new_actor] = old_state
+            else:
+                new_state.last_absolute = max(
+                    new_state.last_absolute, old_state.last_absolute
+                )
+                new_state.has_snapshot |= old_state.has_snapshot
+                new_state.accepted_damage = max(
+                    new_state.accepted_damage, old_state.accepted_damage
+                )
+                times = [
+                    value
+                    for value in (new_state.first_time, old_state.first_time)
+                    if value
+                ]
+                new_state.first_time = min(times) if times else 0.0
+                new_state.last_time = max(new_state.last_time, old_state.last_time)
+            changed = True
+
+        for event in self.events:
+            if int(event.get("attacker_id", 0)) == old_actor:
+                event["attacker_id"] = new_actor
+                changed = True
+            if int(event.get("target_id", 0)) == old_actor:
+                event["target_id"] = new_actor
+                changed = True
+        for event in self.pending_member_events:
+            if int(event.get("attacker_id", 0)) == old_actor:
+                event["attacker_id"] = new_actor
+                changed = True
+            if int(event.get("target_id", 0)) == old_actor:
+                event["target_id"] = new_actor
+                changed = True
+        self.monsters.pop(old_actor, None)
+        if self.self_id == new_actor and self.entity_names.get(new_actor):
+            self.local_player_name = self.entity_names[new_actor]
+        self._resolve_combat_sides()
+        self._recompute()
+        replayed = self._replay_pending_member_events()
+        return changed or replayed
+
+    def ingest_life(self, update: dict) -> bool:
+        try:
+            actor_id = int(update.get("actor_id", 0) or 0)
+            timestamp = int(update.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (
+            not actor_id
+            or not timestamp
+            or "dead" not in update
+            or actor_id not in self._current_member_ids()
+            or timestamp < self.member_life_times.get(actor_id, 0)
+        ):
+            return False
+        dead = bool(update.get("dead"))
+        changed = self.member_death_states.get(actor_id) != dead
+        self.member_death_states[actor_id] = dead
+        self.member_life_times[actor_id] = timestamp
+        event_time = self._event_seconds(update)
+        wiped = self._mark_party_wipe_if_complete(event_time)
+        return changed or wiped
+
+    def ingest_profile(self, update: dict) -> bool:
+        try:
+            entity_id = int(update.get("entity_id", 0))
+        except (TypeError, ValueError):
+            return False
+        if not entity_id:
+            return False
+        changed = False
+        if update.get("name"):
+            changed |= self.ingest_name(update)
+        monster = self.monsters.setdefault(entity_id, MonsterStats(entity_id))
+        entity_type = str(update.get("entity_type", "")).strip()[:64]
+        if entity_type and monster.entity_type != entity_type:
+            monster.entity_type = entity_type
+            changed = True
+        try:
+            level = int(update["level"])
+        except (KeyError, TypeError, ValueError):
+            level = None
+        if level is not None and 1 <= level <= 999 and monster.level != level:
+            monster.level = level
+            changed = True
+        try:
+            profession_id = int(update["profession_id"])
+        except (KeyError, TypeError, ValueError):
+            profession_id = 0
+        if profession_id and self.entity_professions.get(entity_id) != profession_id:
+            self.entity_professions[entity_id] = profession_id
+            changed = True
+        try:
+            template_id = int(update["template_id"])
+        except (KeyError, TypeError, ValueError):
+            template_id = 0
+        if template_id and monster.template_id != template_id:
+            monster.template_id = template_id
+            changed = True
+        try:
+            boss_type = int(update["boss_type"])
+        except (KeyError, TypeError, ValueError):
+            boss_type = None
+        if boss_type is not None and monster.boss_type != boss_type:
+            monster.boss_type = boss_type
+            changed = True
+        try:
+            boss_rank = max(0, int(update["boss_rank"]))
+        except (KeyError, TypeError, ValueError):
+            boss_rank = 0
+        if boss_rank and monster.boss_rank != boss_rank:
+            monster.boss_rank = boss_rank
+            changed = True
+        if "encounter_auxiliary" in update:
+            encounter_auxiliary = bool(update.get("encounter_auxiliary"))
+            if monster.encounter_auxiliary != encounter_auxiliary:
+                monster.encounter_auxiliary = encounter_auxiliary
+                changed = True
+        if "encounter_parent_template_ids" in update:
+            raw_parent_ids = update.get("encounter_parent_template_ids", ())
+            if not isinstance(raw_parent_ids, (list, tuple, set)):
+                raw_parent_ids = (raw_parent_ids,)
+            parent_ids: list[int] = []
+            for raw_parent_id in raw_parent_ids:
+                try:
+                    parent_id = int(raw_parent_id or 0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if parent_id:
+                    parent_ids.append(parent_id)
+            normalized_parent_ids = tuple(sorted(set(parent_ids)))
+            if monster.encounter_parent_template_ids != normalized_parent_ids:
+                monster.encounter_parent_template_ids = normalized_parent_ids
+                changed = True
+        name = self.entity_names.get(entity_id, "")
+        if name and monster.name != name:
+            monster.name = name
+            changed = True
+        if changed:
+            self._resolve_combat_sides()
+            if self.combat_target_id == entity_id and any(
+                int(event.get("target_id", 0)) == entity_id
+                and int(event.get("damage", 0)) > 0
+                for event in self.events
+            ):
+                self.encounter_target_ids.add(entity_id)
+            self._recompute()
+        self._mark_target_defeated(monster)
+        return changed
+
+    def ingest_monster(self, update: dict) -> bool:
+        try:
+            entity_id = int(update.get("entity_id", 0))
+        except (TypeError, ValueError):
+            return False
+        if not entity_id:
+            return False
+        profile_changed = self.ingest_profile(update)
+        monster = self.monsters.setdefault(entity_id, MonsterStats(entity_id))
+        previous_current_hp = monster.current_hp
+        changed = False
+        for field_name in ("current_hp", "max_hp"):
+            if field_name not in update:
+                continue
+            try:
+                value = max(0.0, float(update[field_name]))
+            except (TypeError, ValueError):
+                continue
+            if (
+                field_name == "max_hp"
+                and entity_id == self.combat_target_id
+                and self.first_damage_time
+                and monster.max_hp is not None
+                and monster.max_hp > 0
+            ):
+                value = max(value, monster.max_hp)
+            if getattr(monster, field_name) != value:
+                setattr(monster, field_name, value)
+                changed = True
+            if field_name == "current_hp" and value > 0:
+                monster.death_time_100ns = 0
+                monster.death_confirmed = False
+                observed = monster.observed_max_hp or 0.0
+                if value > observed:
+                    monster.observed_max_hp = value
+                    changed = True
+        timestamp = int(update.get("filetime_100ns", 0) or 0)
+        if timestamp:
+            monster.last_update_100ns = max(monster.last_update_100ns, timestamp)
+            self.target_activity_100ns[entity_id] = max(
+                self.target_activity_100ns.get(entity_id, 0), timestamp
+            )
+            self.latest_network_time_100ns = max(
+                self.latest_network_time_100ns, timestamp
+            )
+            if "current_hp" in update and monster.current_hp is not None:
+                if monster.current_hp <= 0:
+                    monster.death_time_100ns = max(
+                        monster.death_time_100ns, timestamp
+                    )
+                    if update.get("death_confirmed"):
+                        monster.death_confirmed = True
+                elif (
+                    entity_id == self.combat_target_id
+                    and self.first_damage_time
+                    and not self.combat_end_time
+                    and previous_current_hp is not None
+                    and monster.current_hp > previous_current_hp
+                ):
+                    hp_ceiling = self._monster_max_hp(monster)
+                    event_time = self._event_seconds(
+                        {"filetime_100ns": timestamp}
+                    )
+                    missing_hp_before_reset = max(
+                        0.0, hp_ceiling - previous_current_hp
+                    )
+                    recovered_hp = monster.current_hp - previous_current_hp
+                    meaningful_reset = max(1.0, hp_ceiling * 0.005)
+                    if (
+                        hp_ceiling > 0
+                        and missing_hp_before_reset >= meaningful_reset
+                        and recovered_hp >= meaningful_reset
+                        and monster.current_hp >= hp_ceiling * 0.995
+                        and event_time - self.last_damage_time
+                        >= self._encounter_idle_timeout()
+                    ):
+                        # A quiet snap back to full HP is a wipe/reset. Freeze
+                        # this pull at its last real hit even when the wipe
+                        # happened early in the fight. The next hit begins a
+                        # fresh encounter even if the game reuses the entity ID.
+                        self.combat_end_time = self.last_damage_time
+                        self.combat_end_reason = "target_reset"
+        name = self.entity_names.get(entity_id, "")
+        if name:
+            monster.name = name
+        if self._is_priority_target(entity_id) and any(
+            int(event.get("target_id", 0)) == entity_id
+            and int(event.get("attacker_id", 0)) in self.friendly_ids
+            for event in self.events
+        ):
+            self.encounter_target_ids.add(entity_id)
+        self._recompute()
+        self._mark_target_defeated(monster)
+        return changed or profile_changed
+
+    def ingest_team_stat(self, update: dict) -> bool:
+        try:
+            actor_id = int(update.get("actor_id", 0))
+            absolute_damage = max(0, int(update.get("absolute_damage", 0)))
+            timestamp = int(update.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not actor_id or not timestamp:
+            return False
+        self.latest_network_time_100ns = max(self.latest_network_time_100ns, timestamp)
+        state = self.team_damage_states.setdefault(
+            actor_id, TeamDamageState(actor_id)
+        )
+        snapshot_reset = state.has_snapshot and absolute_damage < state.last_absolute
+        if not state.has_snapshot or snapshot_reset:
+            delta = absolute_damage
+        else:
+            delta = absolute_damage - state.last_absolute
+        state.last_absolute = absolute_damage
+        state.has_snapshot = True
+        if snapshot_reset:
+            self.team_reset_pending = True
+        if delta <= 0:
+            if any(
+                item.accepted_damage > 0
+                for item in self.team_damage_states.values()
+            ):
+                self._recompute()
+            return False
+
+        event_time = self._event_seconds(update)
+        if (
+            self.last_damage_time
+            and event_time - self.last_damage_time
+            > (self.encounter_gap if self.boss_only else self.idle_gap)
+        ):
+            self.reset(
+                keep_identity=True,
+                keep_monsters=True,
+                archive_reason="new_encounter",
+            )
+        if self.combat_end_time:
+            # A team total has no target identity. Snapshots arriving after the
+            # kill must not reopen the encounter or attach to a nearby add.
+            return False
+        if self.combat_target_id is None:
+            target = self._select_priority_monster(active_at_100ns=timestamp)
+            if target is not None:
+                self.combat_target_id = target.entity_id
+                self._register_encounter_target(target.entity_id)
+                self._resolve_combat_sides()
+
+        damage_target_ids = self._encounter_damage_target_ids()
+        observed_attackers = {
+            int(event.get("attacker_id", 0))
+            for event in self.events
+            if int(event.get("damage", 0)) > 0
+            and int(event.get("target_id", 0)) in damage_target_ids
+        }
+        current_members = self._current_member_ids()
+        if not damage_target_ids or (
+            actor_id not in observed_attackers and actor_id not in current_members
+        ):
+            return False
+        self.team_reset_pending = False
+        state.accepted_damage += delta
+        if not state.first_time:
+            state.first_time = event_time
+        state.last_time = event_time
+        self._update_encounter_roster(actor_id)
+        if actor_id not in self.friend_order:
+            self.friend_order.append(actor_id)
+        self._recompute()
+        return True
+
+    def current_monster(self) -> MonsterStats | None:
+        if self.combat_target_id is not None:
+            monster = self.monsters.get(self.combat_target_id)
+            if monster is not None and self._is_priority_target(monster.entity_id):
+                return monster
+        return self._select_priority_monster()
+
+    def display_name(self, actor_id: int) -> str:
+        automatic_name = self.entity_names.get(actor_id, "").strip()
+        if automatic_name:
+            return automatic_name
+        if actor_id == self.self_id:
+            return self.local_player_name
+        return ""
+
+    def display_target_name(self, entity_id: int) -> str:
+        if not entity_id:
+            return "未分配目标"
+        monster = self.monsters.get(entity_id)
+        name = (
+            (monster.name if monster is not None else "")
+            or self.entity_names.get(entity_id, "")
+        ).strip()
+        if name and name.casefold() not in {"boss", "首领", "未命名boss"}:
+            return name
+        if entity_id == self.combat_target_id:
+            return name or "Boss"
+        add_order = [
+            target_id
+            for target_id in self.encounter_target_order
+            if target_id in self.encounter_add_target_ids
+        ]
+        try:
+            index = add_order.index(entity_id) + 1
+        except ValueError:
+            index = len(add_order) + 1
+        return f"小怪 {index}"
+
+    def actor_target_rows(self, actor_id: int) -> list[dict]:
+        actor = self.stats.get(actor_id)
+        if actor is None or actor.damage <= 0:
+            return []
+        rows = [
+            {
+                "entity_id": target_id,
+                "name": self.display_target_name(target_id),
+                "kind": (
+                    "Boss" if target_id == self.combat_target_id else "小怪"
+                ),
+                "damage": damage,
+                "share": damage / actor.damage,
+            }
+            for target_id, damage in actor.target_damage.items()
+            if damage > 0
+        ]
+        tracked_damage = sum(int(row["damage"]) for row in rows)
+        unassigned_damage = max(0, actor.damage - tracked_damage)
+        if unassigned_damage:
+            rows.append(
+                {
+                    "entity_id": 0,
+                    "name": "未分配目标",
+                    "kind": "汇总",
+                    "damage": unassigned_damage,
+                    "share": unassigned_damage / actor.damage,
+                }
+            )
+        rows.sort(
+            key=lambda row: (
+                int(row["entity_id"]) == int(self.combat_target_id or 0),
+                int(row["damage"]),
+            ),
+            reverse=True,
+        )
+        return rows
+
+    def display_skill_name(self, actor_id: int, skill_id: int) -> str:
+        automatic_name = self.skill_names.get(skill_id, "").strip()
+        if automatic_name:
+            return automatic_name
+        runtime_name = self.runtime_skill_names.get(skill_id, "").strip()
+        if runtime_name:
+            return runtime_name
+        actor = self.stats.get(actor_id)
+        if actor is None:
+            return "其他伤害" if not skill_id else "未知技能"
+        if not skill_id:
+            aggregate = actor.skills.get(0)
+            if aggregate is not None and aggregate.hits == 0:
+                return "团队伤害汇总"
+        return "其他伤害" if not skill_id else "未知技能"
+
+    def actor_profession_id(self, actor_id: int) -> int | None:
+        explicit = self.entity_professions.get(actor_id)
+        if explicit:
+            return explicit
+        actor = self.stats.get(actor_id)
+        if actor is None:
+            return None
+        scores: dict[int, int] = {}
+        for skill in actor.skills.values():
+            class_ids = self.skill_professions.get(skill.skill_id, ())
+            if not class_ids and 86_010_000 <= skill.skill_id < 86_080_000:
+                index = (skill.skill_id - 86_000_000) // 10_000
+                if 1 <= index <= 7:
+                    class_ids = (1_200_000 + index,)
+            for class_id in class_ids:
+                scores[class_id] = scores.get(class_id, 0) + max(1, skill.damage)
+        return max(scores, key=scores.get) if scores else None
+
+    @staticmethod
+    def normalize_damage_skill_id(value) -> int:
+        try:
+            skill_id = int(value)
+        except (TypeError, ValueError):
+            return 0
+        # Damage sources append a decimal effect index to their eight-digit
+        # root skill ID (for example 860210200 -> 86021020).
+        if 100_000_000 <= skill_id <= 9_999_999_999 and skill_id % 10 == 0:
+            return skill_id // 10
+        return skill_id
+
+    def ingest_skill_name(self, update: dict) -> bool:
+        try:
+            skill_id = int(update.get("skill_id", 0))
+        except (TypeError, ValueError):
+            return False
+        name = str(update.get("name", "")).strip().replace("\x00", "")
+        if not skill_id or not name or len(name) > 64:
+            return False
+        if any(ord(char) < 0x20 for char in name):
+            return False
+        # The client catalog is authoritative.  Runtime discovery only fills a
+        # missing exact ID: nearby IDs can be different skills (for example
+        # 89004600 is 挥砍 while 89004604 is 飞弹).
+        if skill_id in self.skill_names:
+            return False
+        if self.runtime_skill_names.get(skill_id) == name:
+            return False
+        self.runtime_skill_names[skill_id] = name
+        return True
+
+    def ingest_name(self, update: dict) -> bool:
+        try:
+            entity_id = int(update.get("entity_id", 0))
+        except (TypeError, ValueError):
+            return False
+        name = str(update.get("name", "")).strip().replace("\x00", "")
+        if not entity_id or not name or len(name) > 64:
+            return False
+        if any(ord(char) < 0x20 for char in name):
+            return False
+        if self.entity_names.get(entity_id) == name:
+            return False
+        self.entity_names[entity_id] = name
+        if entity_id == self.self_id:
+            self.local_player_name = name
+        return True
+
+    def duration(self, now: float | None = None) -> float:
+        if not self.first_damage_time:
+            return 0.0
+        now = now if now is not None else time.time()
+        if self.combat_end_time:
+            end = self.combat_end_time
+        elif now - self.last_damage_time < self._encounter_idle_timeout():
+            end = now
+        else:
+            end = self.last_damage_time
+        return max(1.0, end - self.first_damage_time)
+
+    def active(self, now: float | None = None) -> bool:
+        if not self.last_damage_time:
+            return False
+        if self.combat_end_time:
+            return False
+        now = now if now is not None else time.time()
+        return now - self.last_damage_time < self._encounter_idle_timeout()
+
+
+def blend_color(left: str, right: str, amount: float) -> str:
+    amount = min(1.0, max(0.0, amount))
+    lhs = tuple(int(left[index : index + 2], 16) for index in (1, 3, 5))
+    rhs = tuple(int(right[index : index + 2], 16) for index in (1, 3, 5))
+    mixed = tuple(round(a + (b - a) * amount) for a, b in zip(lhs, rhs))
+    return "#" + "".join(f"{value:02x}" for value in mixed)
+
+
+class IconFactory:
+    """Load extracted PNGs when present, otherwise draw deterministic badges."""
+
+    PROFESSION_GLYPHS = {
+        1_200_001: "日",
+        1_200_002: "心",
+        1_200_003: "愚",
+        1_200_004: "审",
+        1_200_005: "门",
+        1_200_006: "暮",
+        1_200_007: "隐",
+    }
+
+    def __init__(self, root: tk.Misc):
+        self.root = root
+        self.cache: dict[tuple[str, int, int, str], ImageTk.PhotoImage] = {}
+
+    @staticmethod
+    def _font(size: int, *, bold: bool = False):
+        windows = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        candidates = (
+            windows / ("msyhbd.ttc" if bold else "msyh.ttc"),
+            windows / ("segoeuib.ttf" if bold else "segoeui.ttf"),
+        )
+        for path in candidates:
+            try:
+                return ImageFont.truetype(str(path), size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _rounded(image: Image.Image, radius: int) -> Image.Image:
+        mask = Image.new("L", image.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, image.width - 1, image.height - 1), radius=radius, fill=255
+        )
+        # Keep the original game's transparent pixels.  Replacing the alpha
+        # channel would turn transparent texture padding into a black tile.
+        image.putalpha(ImageChops.multiply(image.getchannel("A"), mask))
+        return image
+
+    def _from_file(self, path: Path, size: int) -> Image.Image | None:
+        if not path.is_file():
+            return None
+        try:
+            image = Image.open(path).convert("RGBA")
+            image.thumbnail((size, size), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            canvas.alpha_composite(
+                image, ((size - image.width) // 2, (size - image.height) // 2)
+            )
+            return self._rounded(canvas, max(4, size // 5))
+        except (OSError, ValueError):
+            return None
+
+    def _draw_badge(self, text: str, color: str, size: int, seed: int) -> Image.Image:
+        image = Image.new("RGBA", (size, size), color)
+        draw = ImageDraw.Draw(image, "RGBA")
+        for y in range(size):
+            alpha = int(38 + 70 * y / max(1, size - 1))
+            draw.line((0, y, size, y), fill=(3, 8, 14, alpha))
+        offset = seed % max(5, size // 3)
+        draw.polygon(
+            ((-size // 3 + offset, size), (size // 2 + offset, 0), (size, 0), (size // 5, size)),
+            fill=(255, 255, 255, 20),
+        )
+        draw.rounded_rectangle(
+            (1, 1, size - 2, size - 2),
+            radius=max(4, size // 5),
+            outline=(255, 255, 255, 75),
+            width=max(1, size // 24),
+        )
+        text = (text or "?")[:1]
+        font = self._font(max(12, int(size * 0.48)), bold=True)
+        box = draw.textbbox((0, 0), text, font=font)
+        x = (size - (box[2] - box[0])) / 2 - box[0]
+        y = (size - (box[3] - box[1])) / 2 - box[1] - 1
+        draw.text((x + 1, y + 2), text, font=font, fill=(0, 0, 0, 110))
+        draw.text((x, y), text, font=font, fill=(248, 250, 252, 245))
+        return self._rounded(image, max(4, size // 5))
+
+    def app_logo(self, size: int = 18) -> ImageTk.PhotoImage:
+        key = ("app", 0, size, ACCENT)
+        if key not in self.cache:
+            image = self._from_file(APP_LOGO_PATH, size) or self._draw_badge(
+                "D", ACCENT, size, 0
+            )
+            self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
+        return self.cache[key]
+
+    def profession(self, class_id: int | None, size: int = 34) -> ImageTk.PhotoImage:
+        class_id = int(class_id or 0)
+        color = PROFESSION_COLORS.get(class_id, SUBTLE)
+        key = ("profession", class_id, size, color)
+        if key not in self.cache:
+            path = ASSET_DIR / "professions" / f"{class_id}.png"
+            image = self._from_file(path, size) or self._draw_badge(
+                self.PROFESSION_GLYPHS.get(class_id, "?"), color, size, class_id
+            )
+            self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
+        return self.cache[key]
+
+    def skill(
+        self,
+        skill_id: int,
+        name: str,
+        class_id: int | None,
+        size: int = 36,
+    ) -> ImageTk.PhotoImage:
+        color = PROFESSION_COLORS.get(int(class_id or 0), "#526273")
+        key = ("skill", int(skill_id), size, color)
+        if key not in self.cache:
+            path = ASSET_DIR / "skills" / f"{int(skill_id)}.png"
+            image = self._from_file(path, size) or self._draw_badge(
+                (name or "?")[:1], color, size, int(skill_id)
+            )
+            self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
+        return self.cache[key]
+
+
+class LicenseHeartbeatWorker(threading.Thread):
+    def __init__(
+        self,
+        licensing: LicensingService,
+        messages: queue.Queue,
+        stop_event: threading.Event,
+    ):
+        super().__init__(name="DpsLicenseHeartbeat", daemon=True)
+        self.licensing = licensing
+        self.messages = messages
+        self.stop_event = stop_event
+        self.state_lock = threading.Lock()
+        self.using = False
+        self.character_name = ""
+        self.game_pid = 0
+
+    def update_state(
+        self, *, using: bool, character_name: str = "", game_pid: int = 0
+    ) -> None:
+        with self.state_lock:
+            self.using = bool(using)
+            self.character_name = str(character_name).strip()[:48]
+            self.game_pid = max(0, int(game_pid or 0))
+
+    def _state(self) -> tuple[bool, str, int]:
+        with self.state_lock:
+            return self.using, self.character_name, self.game_pid
+
+    def run(self) -> None:
+        last_success = time.monotonic()
+        interval = 30
+        try:
+            while not self.stop_event.is_set():
+                using, character_name, game_pid = self._state()
+                try:
+                    result = self.licensing.heartbeat(
+                        using=using,
+                        character_name=character_name,
+                        game_pid=game_pid,
+                    )
+                except LicensingConnectionError:
+                    if (
+                        time.monotonic() - last_success
+                        >= LICENSE_HEARTBEAT_FAILURE_GRACE_SECONDS
+                    ):
+                        self.messages.put(
+                            (
+                                "license_required",
+                                "授权服务器连接中断，请重新输入卡号。",
+                            )
+                        )
+                        return
+                    self.stop_event.wait(10.0)
+                    continue
+                if not result.authorized:
+                    self.messages.put(
+                        (
+                            "license_required",
+                            result.message or "登录状态已失效，请重新输入卡号。",
+                        )
+                    )
+                    return
+                last_success = time.monotonic()
+                interval = result.heartbeat_interval
+                self.stop_event.wait(interval)
+        finally:
+            self.licensing.sign_out()
+
+
+class BossNameResolver(threading.Thread):
+    def __init__(
+        self,
+        messages: queue.Queue,
+        stop_event: threading.Event,
+        monster_catalog: dict[str, dict],
+    ):
+        super().__init__(name="C7BossNames", daemon=True)
+        self.messages = messages
+        self.stop_event = stop_event
+        self.monster_catalog = monster_catalog
+        self.requests: queue.Queue = queue.Queue()
+        self.requested: set[tuple[int, int, int]] = set()
+        self.cached_names = load_json_object(MONSTER_NAME_CACHE_PATH)
+
+    def request(
+        self,
+        pid: int,
+        entity_id: int,
+        template_id: int,
+        localization_id: int,
+        filetime_100ns: int,
+    ) -> None:
+        if not pid or not entity_id or not template_id or not localization_id:
+            return
+        key = (pid, entity_id, template_id)
+        if key in self.requested:
+            return
+        self.requested.add(key)
+        self.requests.put(
+            (pid, entity_id, template_id, localization_id, filetime_100ns)
+        )
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                first = self.requests.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            batch = [first]
+            deadline = time.monotonic() + 0.25
+            while time.monotonic() < deadline:
+                try:
+                    candidate = self.requests.get_nowait()
+                except queue.Empty:
+                    self.stop_event.wait(0.02)
+                    continue
+                if candidate[0] == first[0]:
+                    batch.append(candidate)
+                else:
+                    self.requests.put(candidate)
+                    break
+            localization_ids = {item[3] for item in batch}
+            try:
+                names = resolve_localization_names(first[0], localization_ids)
+            except Exception as exc:
+                self.messages.put(("diagnostic", f"Boss 名称后台解析失败：{exc}"))
+                continue
+            cache_changed = False
+            for _pid, entity_id, template_id, localization_id, timestamp in batch:
+                name = str(names.get(localization_id, "")).strip()
+                if not name:
+                    continue
+                self.monster_catalog.setdefault(str(template_id), {})["name"] = name
+                if self.cached_names.get(str(template_id)) != name:
+                    self.cached_names[str(template_id)] = name
+                    cache_changed = True
+                self.messages.put(
+                    (
+                        "profile",
+                        {
+                            "filetime_100ns": timestamp,
+                            "entity_id": entity_id,
+                            "template_id": template_id,
+                            "name": name,
+                            "entity_type": "Boss",
+                            "boss_type": 3,
+                            "boss_rank": 3,
+                        },
+                    )
+                )
+            if cache_changed:
+                write_json_object(MONSTER_NAME_CACHE_PATH, self.cached_names)
+
+
+class HookWorker(threading.Thread):
+    def __init__(self, messages: queue.Queue, stop_event: threading.Event):
+        super().__init__(name="C7NetworkPackets", daemon=False)
+        self.messages = messages
+        self.stop_event = stop_event
+        self.diagnostic_lock = threading.Lock()
+        self.diagnostics: dict[str, object] = {
+            "stage": "created",
+            "process_found": False,
+            "network_hook_installed": False,
+            "native_damage_hook_installed": False,
+            "damage_source": "none",
+            "game_pid": 0,
+            "network_records": 0,
+            "native_damage_records": 0,
+            "native_boss_records": 0,
+            "boss_catalog_size": 0,
+            "boss_catalog_promotions": 0,
+            "parsed_damage_events": 0,
+            "monster_updates": 0,
+            "last_network_record_at": 0.0,
+            "last_native_damage_at": 0.0,
+            "last_parsed_damage_at": 0.0,
+            "messages": [],
+        }
+        self.monster_catalog = load_monster_catalog()
+        self.diagnostics["boss_catalog_size"] = sum(
+            int(metadata.get("boss_type", 0) or 0) == 3
+            for metadata in self.monster_catalog.values()
+            if isinstance(metadata, dict)
+        )
+        self._diagnostic_entity_templates: dict[int, dict[str, object]] = {}
+        self._diagnostic_damage_targets: dict[int, dict[str, object]] = {}
+        self.team_profile_cache = load_json_object(TEAM_PROFILE_CACHE_PATH)
+        self.self_identity_cache = load_json_object(SELF_IDENTITY_CACHE_PATH)
+        self.boss_name_resolver = BossNameResolver(
+            messages,
+            stop_event,
+            self.monster_catalog,
+        )
+
+    def _update_diagnostics(self, **values: object) -> None:
+        with self.diagnostic_lock:
+            self.diagnostics.update(values)
+
+    def _add_diagnostic_counts(self, **values: int) -> None:
+        with self.diagnostic_lock:
+            for key, value in values.items():
+                self.diagnostics[key] = int(self.diagnostics.get(key, 0) or 0) + int(
+                    value
+                )
+
+    def diagnostic_snapshot(self) -> dict[str, object]:
+        with self.diagnostic_lock:
+            snapshot = dict(self.diagnostics)
+            snapshot["messages"] = list(self.diagnostics.get("messages", []))
+            snapshot["recent_damage_targets"] = [
+                dict(value)
+                for value in list(self._diagnostic_damage_targets.values())[-16:]
+            ]
+            snapshot["recent_boss_templates"] = [
+                dict(value)
+                for value in self._diagnostic_entity_templates.values()
+                if bool(value.get("catalog_match"))
+                or int(value.get("runtime_boss_type", 0) or 0) == 3
+            ][-24:]
+        return snapshot
+
+    def _record_native_boss_observation(self, record: dict) -> None:
+        try:
+            entity_id = int(record.get("entity_id", 0) or 0)
+            template_id = int(record.get("template_id", 0) or 0)
+            runtime_boss_type = int(record.get("boss_type", -1))
+            filetime_100ns = int(record.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not entity_id:
+            return
+        metadata = self.monster_catalog.get(str(template_id), {})
+        try:
+            catalog_match = bool(
+                isinstance(metadata, dict)
+                and int(metadata.get("boss_type", 0) or 0) == 3
+            )
+        except (TypeError, ValueError, OverflowError):
+            catalog_match = False
+        name = ""
+        if isinstance(metadata, dict):
+            name = str(metadata.get("name", "")).strip()[:64]
+        if not name:
+            name = str(record.get("name", "")).strip()[:64]
+        observation: dict[str, object] = {
+            "entity_id": str(entity_id),
+            "template_id": template_id,
+            "runtime_boss_type": runtime_boss_type,
+            "catalog_match": catalog_match,
+            "name": name,
+            "filetime_100ns": filetime_100ns,
+        }
+        with self.diagnostic_lock:
+            self._diagnostic_entity_templates.pop(entity_id, None)
+            self._diagnostic_entity_templates[entity_id] = observation
+            while len(self._diagnostic_entity_templates) > 4096:
+                oldest = next(iter(self._diagnostic_entity_templates))
+                self._diagnostic_entity_templates.pop(oldest, None)
+            target = self._diagnostic_damage_targets.get(entity_id)
+            if target is not None:
+                target.update(
+                    {
+                        "template_id": template_id,
+                        "runtime_boss_type": runtime_boss_type,
+                        "catalog_match": catalog_match,
+                        "name": name,
+                    }
+                )
+
+    def _record_native_damage_observation(self, record: dict) -> None:
+        try:
+            target_id = int(record.get("target_id", 0) or 0)
+            damage = max(0, int(record.get("damage", 0) or 0))
+            filetime_100ns = int(record.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not target_id or damage <= 0:
+            return
+        with self.diagnostic_lock:
+            existing = self._diagnostic_damage_targets.pop(target_id, None) or {
+                "target_id": str(target_id),
+                "records": 0,
+                "damage": 0,
+                "template_id": 0,
+                "runtime_boss_type": -1,
+                "catalog_match": False,
+                "name": "",
+            }
+            existing["records"] = int(existing.get("records", 0) or 0) + 1
+            existing["damage"] = int(existing.get("damage", 0) or 0) + damage
+            existing["filetime_100ns"] = filetime_100ns
+            template = self._diagnostic_entity_templates.get(target_id)
+            if template is not None:
+                existing.update(
+                    {
+                        "template_id": int(template.get("template_id", 0) or 0),
+                        "runtime_boss_type": int(
+                            template.get("runtime_boss_type", -1)
+                        ),
+                        "catalog_match": bool(template.get("catalog_match")),
+                        "name": str(template.get("name", ""))[:64],
+                    }
+                )
+            self._diagnostic_damage_targets[target_id] = existing
+            while len(self._diagnostic_damage_targets) > 32:
+                oldest = next(iter(self._diagnostic_damage_targets))
+                self._diagnostic_damage_targets.pop(oldest, None)
+
+    def _remember_diagnostic_message(self, message: object) -> None:
+        text = str(message or "").strip()
+        if not text:
+            return
+        with self.diagnostic_lock:
+            messages = list(self.diagnostics.get("messages", []))
+            messages.append({"time": time.time(), "message": text[:500]})
+            self.diagnostics["messages"] = messages[-12:]
+
+    def emit(self, kind: str, payload=None) -> None:
+        if kind == "event":
+            self._add_diagnostic_counts(parsed_damage_events=1)
+            self._update_diagnostics(last_parsed_damage_at=time.time())
+        elif (
+            kind == "profile"
+            and isinstance(payload, dict)
+            and payload.get("boss_source") == "monster_template_catalog"
+        ):
+            self._add_diagnostic_counts(boss_catalog_promotions=1)
+        elif kind == "monster":
+            self._add_diagnostic_counts(monster_updates=1)
+        elif kind in {"diagnostic", "error", "fatal"}:
+            self._remember_diagnostic_message(payload)
+        self.messages.put((kind, payload))
+
+    def _enrich_boss_record(self, record: dict, pid: int) -> None:
+        try:
+            template_id = int(record.get("template_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            template_id = 0
+        if not template_id:
+            return
+        metadata = self.monster_catalog.get(str(template_id), {})
+        if not isinstance(metadata, dict):
+            return
+        name = str(metadata.get("name", "")).strip()
+        if name and name.casefold() not in {"boss", "首领", "未命名boss"}:
+            record["name"] = name
+        if metadata.get("level") not in (None, ""):
+            record["level"] = metadata["level"]
+        paths = metadata.get("fc_paths", [])
+        if isinstance(paths, list) and paths:
+            record["template_path"] = str(paths[0])[:160]
+        try:
+            localization_id = int(metadata.get("localization_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            localization_id = 0
+        if not record.get("name") and localization_id:
+            self.boss_name_resolver.request(
+                pid,
+                int(record.get("entity_id", 0) or 0),
+                template_id,
+                localization_id,
+                int(record.get("filetime_100ns", 0) or 0),
+            )
+
+    def run(self) -> None:
+        log_handle = None
+        profile_cache_dirty = False
+        last_profile_cache_save = 0.0
+        try:
+            self.boss_name_resolver.start()
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            log_path = LOG_DIR / time.strftime("network_%Y%m%d_%H%M%S.jsonl")
+            log_handle = log_path.open("a", encoding="utf-8", buffering=1)
+            while not self.stop_event.is_set():
+                self._update_diagnostics(
+                    stage="searching_game",
+                    process_found=False,
+                    network_hook_installed=False,
+                    native_damage_hook_installed=False,
+                    damage_source="none",
+                    game_pid=0,
+                )
+                hook = NetworkMessageHook()
+                try:
+                    hook.install()
+                except RuntimeError as exc:
+                    if "process not found" in str(exc):
+                        self._update_diagnostics(stage="game_not_found")
+                        self.emit("waiting", "游戏未运行")
+                        self.stop_event.wait(1.0)
+                        continue
+                    self._update_diagnostics(stage="network_hook_failed")
+                    self.emit("error", str(exc))
+                    self.stop_event.wait(3.0)
+                    continue
+                except Exception as exc:
+                    self._update_diagnostics(stage="network_hook_failed")
+                    self.emit("error", f"连接失败：{exc}")
+                    self.stop_event.wait(2.0)
+                    continue
+
+                self._update_diagnostics(
+                    stage="network_connected",
+                    process_found=True,
+                    network_hook_installed=True,
+                    game_pid=int(hook.pid or 0),
+                )
+                remembered_self_token = ""
+                try:
+                    remembered_game_pid = int(
+                        self.self_identity_cache.get("game_pid", 0) or 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    remembered_game_pid = 0
+                if remembered_game_pid == int(hook.pid or 0):
+                    remembered_self_token = str(
+                        self.self_identity_cache.get("user_token", "")
+                    ).strip()
+                parser = NetworkPacketParser(
+                    self.team_profile_cache,
+                    self.monster_catalog,
+                    remembered_self_token=remembered_self_token,
+                    allow_cached_projection_roster=(
+                        remembered_game_pid == int(hook.pid or 0)
+                    ),
+                    boss_name_allowlist=load_boss_name_allowlist(),
+                )
+                native_damage_hook: DamageHook | None = None
+                try:
+                    try:
+                        native_damage_hook = DamageHook(
+                            pid=hook.pid,
+                            capture_names=True,
+                            capture_boss_types=True,
+                        ).install()
+                    except Exception as exc:
+                        self.emit(
+                            "diagnostic",
+                            f"原生伤害入口不可用，已使用脚本封包：{exc}",
+                        )
+                        try:
+                            native_damage_hook = DamageHook(
+                                pid=hook.pid,
+                                capture_names=False,
+                                capture_boss_types=True,
+                            ).install()
+                        except Exception:
+                            native_damage_hook = None
+                    self._update_diagnostics(
+                        stage="capturing",
+                        native_damage_hook_installed=native_damage_hook is not None,
+                        damage_source=(
+                            "native" if native_damage_hook is not None else "script"
+                        ),
+                    )
+                    self.emit(
+                        "connected",
+                        {
+                            "pid": hook.pid,
+                            "log": str(log_path),
+                        },
+                    )
+                    while not self.stop_event.is_set() and hook.alive:
+                        records = hook.poll(decode_arguments=True)
+                        native_records: list[dict] = []
+                        native_boss_records: list[dict] = []
+                        native_name_records: list[dict] = []
+                        native_skill_name_records: list[dict] = []
+                        if native_damage_hook is not None:
+                            try:
+                                native_records = native_damage_hook.poll()
+                                native_boss_records = native_damage_hook.poll_boss_types()
+                                native_name_records = native_damage_hook.poll_names()
+                                native_skill_name_records = (
+                                    native_damage_hook.poll_skill_names()
+                                )
+                            except Exception as exc:
+                                self.emit(
+                                    "diagnostic",
+                                    f"原生伤害入口已回退：{exc}",
+                                )
+                                try:
+                                    native_damage_hook.close()
+                                finally:
+                                    native_damage_hook = None
+                                    self._update_diagnostics(
+                                        native_damage_hook_installed=False,
+                                        damage_source="script",
+                                    )
+                        if records:
+                            self._add_diagnostic_counts(network_records=len(records))
+                            self._update_diagnostics(last_network_record_at=time.time())
+                        if native_records:
+                            self._add_diagnostic_counts(
+                                native_damage_records=len(native_records)
+                            )
+                            self._update_diagnostics(last_native_damage_at=time.time())
+                        if native_boss_records:
+                            self._add_diagnostic_counts(
+                                native_boss_records=len(native_boss_records)
+                            )
+                        for record in native_boss_records:
+                            self._enrich_boss_record(record, hook.pid)
+                            self._record_native_boss_observation(record)
+                            log_handle.write(
+                                json.dumps(record, ensure_ascii=False) + "\n"
+                            )
+                            for kind, update in parser.process_native_boss_type(record):
+                                self.emit(kind, update)
+                        for record in native_name_records:
+                            log_handle.write(
+                                json.dumps(record, ensure_ascii=False) + "\n"
+                            )
+                            boss_name_update = parser.apply_runtime_boss_name(record)
+                            if boss_name_update:
+                                self.emit(*boss_name_update)
+                            runtime_name = str(record.get("name", "")).strip()
+                            if runtime_name.casefold() not in {
+                                "boss",
+                                "首领",
+                                "未命名boss",
+                            }:
+                                self.emit("name", record)
+                        for record in native_skill_name_records:
+                            log_handle.write(
+                                json.dumps(record, ensure_ascii=False) + "\n"
+                            )
+                            self.emit("skill_name", record)
+                        for record in native_records:
+                            self._record_native_damage_observation(record)
+                            log_handle.write(
+                                json.dumps(record, ensure_ascii=False) + "\n"
+                            )
+                            for kind, update in parser.process_native_damage(record):
+                                self.emit(kind, update)
+                        for record in records:
+                            log_handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                            for kind, update in parser.process(
+                                record, include_damage=native_damage_hook is None
+                            ):
+                                self.emit(kind, update)
+                        cached_profiles = parser.take_team_profile_cache()
+                        if cached_profiles is not None:
+                            self.team_profile_cache = cached_profiles
+                            profile_cache_dirty = True
+                        current_self_identity = parser.current_self_identity()
+                        if current_self_identity is not None:
+                            next_self_identity = {
+                                "game_pid": int(hook.pid or 0),
+                                **current_self_identity,
+                            }
+                            if next_self_identity != self.self_identity_cache:
+                                self.self_identity_cache = next_self_identity
+                                write_json_object(
+                                    SELF_IDENTITY_CACHE_PATH,
+                                    self.self_identity_cache,
+                                )
+                        now = time.monotonic()
+                        if profile_cache_dirty and now - last_profile_cache_save >= 1.0:
+                            write_json_object(
+                                TEAM_PROFILE_CACHE_PATH,
+                                self.team_profile_cache,
+                            )
+                            profile_cache_dirty = False
+                            last_profile_cache_save = now
+                        self.stop_event.wait(
+                            0.002
+                            if (
+                                records
+                                or native_records
+                                or native_boss_records
+                                or native_name_records
+                            )
+                            else 0.006
+                        )
+                    if not self.stop_event.is_set():
+                        self._update_diagnostics(stage="game_exited")
+                        self.emit("waiting", "游戏已退出")
+                except Exception as exc:
+                    self._update_diagnostics(stage="capture_failed")
+                    self.emit("error", f"采集异常：{exc}")
+                finally:
+                    if native_damage_hook is not None:
+                        try:
+                            native_damage_hook.close()
+                        except Exception as exc:
+                            self.emit("error", f"恢复原生伤害函数失败：{exc}")
+                    try:
+                        hook.close()
+                    except Exception as exc:
+                        self.emit("error", f"恢复游戏函数失败：{exc}")
+                    self._update_diagnostics(
+                        network_hook_installed=False,
+                        native_damage_hook_installed=False,
+                        damage_source="none",
+                    )
+                self.stop_event.wait(0.5)
+        except Exception:
+            self._update_diagnostics(stage="fatal")
+            self.emit("fatal", traceback.format_exc())
+        finally:
+            cached_profiles = locals().get("parser")
+            if isinstance(cached_profiles, NetworkPacketParser):
+                pending_cache = cached_profiles.take_team_profile_cache()
+                if pending_cache is not None:
+                    self.team_profile_cache = pending_cache
+                    profile_cache_dirty = True
+            if profile_cache_dirty:
+                write_json_object(TEAM_PROFILE_CACHE_PATH, self.team_profile_cache)
+            if log_handle:
+                log_handle.close()
+            self._update_diagnostics(stage="stopped")
+            self.emit("stopped", None)
+
+
+class MetadataWorker(threading.Thread):
+    def __init__(self, messages: queue.Queue, stop_event: threading.Event):
+        super().__init__(name="C7RuntimeMetadata", daemon=False)
+        self.messages = messages
+        self.stop_event = stop_event
+
+    def emit(self, kind: str, payload=None) -> None:
+        self.messages.put((kind, payload))
+
+    def run(self) -> None:
+        # Kept only for the unused legacy window class. Runtime identity now
+        # comes exclusively from decoded network packets in HookWorker.
+        return
+
+
+class _LegacyDpsWindow:
+    def __init__(self):
+        self.config = load_config()
+        self.config.pop("boss_only", None)
+        skill_names = load_skill_catalog()
+        runtime_skill_names = self.config.get("runtime_skill_names", {})
+        self.model = CombatModel(
+            skill_names=(skill_names if isinstance(skill_names, dict) else {}),
+            runtime_skill_names=(
+                runtime_skill_names if isinstance(runtime_skill_names, dict) else {}
+            ),
+            # Entity IDs and automatic character names belong to the current
+            # game session.  They must be confirmed again from live game data
+            # on every DPS launch, never restored from local preferences.
+            entity_names={},
+            local_player_name="",
+        )
+        self.messages: queue.Queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.worker = HookWorker(self.messages, self.stop_event)
+        self.connected = False
+        self.closing = False
+        self.drag_offset = (0, 0)
+        self.skill_window: tk.Toplevel | None = None
+        self.skill_tree: ttk.Treeview | None = None
+        self.skill_actor_id: int | None = None
+        self.skill_title_label: tk.Label | None = None
+        self.skill_total_label: tk.Label | None = None
+
+        self.root = tk.Tk()
+        self.root.title(APP_TITLE)
+        self.root.configure(bg=BG)
+        self.root.geometry(self.config.get("geometry", "500x355+24+180"))
+        self.root.minsize(440, 280)
+        self.root.attributes("-topmost", bool(self.config.get("topmost", True)))
+        self.root.attributes("-alpha", float(self.config.get("alpha", 0.94)))
+        self.root.overrideredirect(True)
+        self._build_styles()
+        self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.after(50, self._drain_messages)
+        self.root.after(200, self._render)
+        self.worker.start()
+        self.metadata_worker.start()
+
+    def _build_styles(self) -> None:
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure(
+            "Dps.Treeview",
+            background=PANEL,
+            fieldbackground=PANEL,
+            foreground=TEXT,
+            borderwidth=0,
+            relief="flat",
+            rowheight=30,
+            font=("Microsoft YaHei UI", 10),
+        )
+        style.map(
+            "Dps.Treeview",
+            background=[("selected", "#27483f")],
+            foreground=[("selected", "#ffffff")],
+        )
+        style.configure(
+            "Dps.Treeview.Heading",
+            background=PANEL_2,
+            foreground=MUTED,
+            relief="flat",
+            borderwidth=0,
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map("Dps.Treeview.Heading", background=[("active", PANEL_2)])
+
+    def _button(self, parent, text: str, command, width=5, color=MUTED):
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            bg=BG,
+            fg=color,
+            activebackground=PANEL_2,
+            activeforeground=TEXT,
+            borderwidth=0,
+            relief="flat",
+            font=("Microsoft YaHei UI", 9),
+            cursor="hand2",
+        )
+
+    def _build_ui(self) -> None:
+        top = tk.Frame(self.root, bg=BG, height=38)
+        top.pack(fill="x")
+        top.pack_propagate(False)
+        top.bind("<ButtonPress-1>", self._drag_start)
+        top.bind("<B1-Motion>", self._drag_move)
+
+        self.dot = tk.Label(top, text="●", bg=BG, fg=WARN, font=("Segoe UI", 10))
+        self.dot.pack(side="left", padx=(12, 6))
+        title = tk.Label(
+            top,
+            text="诡秘之主  伤害统计",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        title.pack(side="left")
+        title.bind("<ButtonPress-1>", self._drag_start)
+        title.bind("<B1-Motion>", self._drag_move)
+
+        self._button(top, "×", self.close, width=3, color=ERROR).pack(side="right")
+        self._button(top, "—", self.minimize, width=3).pack(side="right")
+        self.pin_button = self._button(top, "置顶", self.toggle_topmost, width=5)
+        self.pin_button.pack(side="right")
+        self._button(top, "清零", self.reset, width=5).pack(side="right")
+
+        summary = tk.Frame(self.root, bg=PANEL_2, height=52)
+        summary.pack(fill="x", padx=8)
+        summary.pack_propagate(False)
+        self.total_label = tk.Label(
+            summary,
+            text="总伤害  0",
+            bg=PANEL_2,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        self.total_label.pack(side="left", padx=12)
+        self.dps_label = tk.Label(
+            summary,
+            text="每秒  0",
+            bg=PANEL_2,
+            fg=ACCENT,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        self.dps_label.pack(side="left", padx=(8, 0))
+        self.time_label = tk.Label(
+            summary,
+            text="00:00",
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Segoe UI", 10),
+        )
+        self.time_label.pack(side="right", padx=12)
+
+        table_frame = tk.Frame(self.root, bg=PANEL)
+        table_frame.pack(fill="both", expand=True, padx=8, pady=(6, 0))
+        columns = ("name", "damage", "dps", "share", "hits", "max_hit")
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            style="Dps.Treeview",
+            selectmode="browse",
+        )
+        headings = {
+            "name": "队伍成员（点击看技能）",
+            "damage": "伤害",
+            "dps": "每秒",
+            "share": "占比",
+            "hits": "次数",
+            "max_hit": "最大",
+        }
+        widths = {"name": 135, "damage": 90, "dps": 76, "share": 54, "hits": 48, "max_hit": 76}
+        for column in columns:
+            self.tree.heading(column, text=headings[column])
+            self.tree.column(
+                column,
+                width=widths[column],
+                minwidth=42,
+                anchor="w" if column == "name" else "e",
+                stretch=column in ("name", "damage"),
+            )
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.tree.bind("<ButtonRelease-1>", self.show_skill_details)
+        self.tree.bind("<Return>", self.show_skill_details)
+
+        bottom = tk.Frame(self.root, bg=BG, height=28)
+        bottom.pack(fill="x")
+        bottom.pack_propagate(False)
+        self.status_label = tk.Label(
+            bottom,
+            text="正在连接…",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.status_label.pack(fill="both", padx=11)
+
+        grip = tk.Label(self.root, text="◢", bg=BG, fg="#42505d", cursor="size_nw_se")
+        grip.place(relx=1.0, rely=1.0, anchor="se")
+        grip.bind("<ButtonPress-1>", self._resize_start)
+        grip.bind("<B1-Motion>", self._resize_move)
+
+    def _drag_start(self, event) -> None:
+        self.drag_offset = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+
+    def _drag_move(self, event) -> None:
+        x = event.x_root - self.drag_offset[0]
+        y = event.y_root - self.drag_offset[1]
+        self.root.geometry(f"+{x}+{y}")
+
+    def _resize_start(self, event) -> None:
+        self.resize_origin = (
+            event.x_root,
+            event.y_root,
+            self.root.winfo_width(),
+            self.root.winfo_height(),
+        )
+
+    def _resize_move(self, event) -> None:
+        x, y, width, height = self.resize_origin
+        self.root.geometry(f"{max(440, width + event.x_root - x)}x{max(280, height + event.y_root - y)}")
+
+    def _drain_messages(self) -> None:
+        if self.closing:
+            return
+        try:
+            while True:
+                kind, payload = self.messages.get_nowait()
+                if kind == "event":
+                    self.model.ingest(payload)
+                elif kind == "name":
+                    if self.model.ingest_name(payload):
+                        self._save_preferences()
+                elif kind == "skill_name":
+                    if self.model.ingest_skill_name(payload):
+                        self._save_preferences()
+                elif kind == "connected":
+                    self.connected = True
+                    self.dot.configure(fg=ACCENT)
+                    self.status_label.configure(
+                        text="运行中",
+                        fg=MUTED,
+                    )
+                elif kind == "waiting":
+                    self.connected = False
+                    self.dot.configure(fg=WARN)
+                    self.status_label.configure(text=str(payload), fg=MUTED)
+                elif kind in ("error", "fatal"):
+                    self.connected = False
+                    self.dot.configure(fg=ERROR)
+                    self.status_label.configure(
+                        text=chinese_error_message(payload), fg=ERROR
+                    )
+                elif kind == "metadata_error":
+                    # Metadata is an optional read-only enhancement.  Native
+                    # damage and name capture continue even if it is unavailable.
+                    pass
+                elif kind == "stopped" and self.closing:
+                    self.root.destroy()
+        except queue.Empty:
+            pass
+        self.root.after(50, self._drain_messages)
+
+    def _render(self) -> None:
+        if self.closing:
+            return
+        now = time.time()
+        duration = self.model.duration(now)
+        rows = sorted(self.model.stats.values(), key=lambda item: item.damage, reverse=True)
+        total = sum(row.damage for row in rows)
+        total_dps = total / duration if duration else 0.0
+        self.total_label.configure(text=f"总伤害  {format_number(total)}")
+        self.dps_label.configure(text=f"每秒  {format_number(total_dps)}")
+        state = "战斗中" if self.model.active(now) else ("已结束" if total else "待机")
+        self.time_label.configure(text=f"{state}  {format_duration(duration)}")
+
+        present = set()
+        for row in rows:
+            item_id = str(row.actor_id)
+            present.add(item_id)
+            actor_dps = row.damage / duration if duration else 0.0
+            share = row.damage / total * 100 if total else 0.0
+            values = (
+                self.model.display_name(row.actor_id),
+                format_number(row.damage),
+                format_number(actor_dps),
+                f"{share:.1f}%",
+                str(row.hits),
+                format_number(row.max_hit),
+            )
+            if self.tree.exists(item_id):
+                self.tree.item(item_id, values=values)
+            else:
+                self.tree.insert("", "end", iid=item_id, values=values)
+        for item_id in self.tree.get_children(""):
+            if item_id not in present:
+                self.tree.delete(item_id)
+        self._render_skill_details()
+        self.root.after(200, self._render)
+
+    def reset(self) -> None:
+        self.model.reset(keep_identity=True, keep_monsters=True)
+        self.status_label.configure(text="统计已清零", fg=MUTED)
+
+    def _save_preferences(self) -> None:
+        recent_skill_names = list(self.model.runtime_skill_names.items())[-2048:]
+        self.config["runtime_skill_names"] = {
+            str(skill_id): name for skill_id, name in recent_skill_names
+        }
+        # Drop the old cache because older builds could assign a variant name
+        # to a neighbouring root ID.  The static client catalog is kept in its
+        # own file and is never copied into preferences.
+        self.config.pop("skill_names", None)
+        self.config.pop("local_player_name", None)
+        self.config.pop("entity_names", None)
+        save_config(self.config)
+
+    def show_skill_details(self, event=None) -> None:
+        if event is not None and getattr(event, "num", None) == 1:
+            item_id = self.tree.identify_row(event.y)
+            if not item_id:
+                return
+            self.tree.selection_set(item_id)
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self.skill_actor_id = int(selected[0])
+        if self.skill_window is None or not self.skill_window.winfo_exists():
+            self._build_skill_window()
+        else:
+            self.skill_window.deiconify()
+            self.skill_window.lift()
+            self.skill_window.focus_force()
+        self._render_skill_details()
+
+    def _build_skill_window(self) -> None:
+        x = max(0, self.root.winfo_rootx() + self.root.winfo_width() + 12)
+        y = max(0, self.root.winfo_rooty())
+        window = tk.Toplevel(self.root)
+        self.skill_window = window
+        window.title("技能伤害分布")
+        window.configure(bg=BG)
+        window.geometry(f"540x360+{x}+{y}")
+        window.minsize(480, 300)
+        window.attributes("-topmost", bool(self.root.attributes("-topmost")))
+        window.attributes("-alpha", 1.0)
+        window.protocol("WM_DELETE_WINDOW", self._close_skill_window)
+
+        header = tk.Frame(window, bg=BG, height=48)
+        header.pack(fill="x", padx=10, pady=(8, 0))
+        header.pack_propagate(False)
+        self.skill_title_label = tk.Label(
+            header,
+            text="技能伤害分布",
+            bg=BG,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        )
+        self.skill_title_label.pack(side="left", fill="both", expand=True)
+
+        self.skill_total_label = tk.Label(
+            window,
+            text="总伤害  0",
+            bg=PANEL_2,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.skill_total_label.pack(fill="x", padx=10, pady=(0, 6), ipady=7)
+
+        frame = tk.Frame(window, bg=PANEL)
+        frame.pack(fill="both", expand=True, padx=10)
+        columns = ("skill", "damage", "share", "hits", "max_hit")
+        tree = ttk.Treeview(
+            frame,
+            columns=columns,
+            show="headings",
+            style="Dps.Treeview",
+            selectmode="browse",
+        )
+        self.skill_tree = tree
+        headings = {
+            "skill": "技能",
+            "damage": "伤害",
+            "share": "占比",
+            "hits": "次数",
+            "max_hit": "最大伤害",
+        }
+        widths = {"skill": 170, "damage": 95, "share": 65, "hits": 55, "max_hit": 90}
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(
+                column,
+                width=widths[column],
+                minwidth=48,
+                anchor="w" if column == "skill" else "e",
+                stretch=column in ("skill", "damage"),
+            )
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+    def _render_skill_details(self) -> None:
+        if (
+            self.skill_window is None
+            or not self.skill_window.winfo_exists()
+            or self.skill_tree is None
+            or self.skill_actor_id is None
+        ):
+            return
+        actor_id = self.skill_actor_id
+        actor = self.model.stats.get(actor_id)
+        actor_name = self.model.display_name(actor_id)
+        if self.skill_title_label is not None:
+            self.skill_title_label.configure(text=f"{actor_name} · 技能伤害分布")
+        skills = (
+            sorted(actor.skills.values(), key=lambda item: item.damage, reverse=True)
+            if actor is not None
+            else []
+        )
+        total = actor.damage if actor is not None else 0
+        if self.skill_total_label is not None:
+            self.skill_total_label.configure(
+                text=f"总伤害  {format_number(total)}    技能数量  {len(skills)}"
+            )
+        present = set()
+        for skill in skills:
+            item_id = str(skill.skill_id)
+            present.add(item_id)
+            share = skill.damage / total * 100 if total else 0.0
+            values = (
+                self.model.display_skill_name(actor_id, skill.skill_id),
+                format_number(skill.damage),
+                f"{share:.1f}%",
+                str(skill.hits),
+                format_number(skill.max_hit),
+            )
+            if self.skill_tree.exists(item_id):
+                self.skill_tree.item(item_id, values=values)
+            else:
+                self.skill_tree.insert("", "end", iid=item_id, values=values)
+        for item_id in self.skill_tree.get_children(""):
+            if item_id not in present:
+                self.skill_tree.delete(item_id)
+
+    def _close_skill_window(self) -> None:
+        if self.skill_window is not None and self.skill_window.winfo_exists():
+            self.skill_window.destroy()
+        self.skill_window = None
+        self.skill_tree = None
+        self.skill_actor_id = None
+        self.skill_title_label = None
+        self.skill_total_label = None
+
+    def toggle_topmost(self) -> None:
+        current = bool(self.root.attributes("-topmost"))
+        self.root.attributes("-topmost", not current)
+        if self.skill_window is not None and self.skill_window.winfo_exists():
+            self.skill_window.attributes("-topmost", not current)
+        self.pin_button.configure(fg=ACCENT if not current else MUTED)
+
+    def minimize(self) -> None:
+        self.root.overrideredirect(False)
+        self.root.iconify()
+        self.root.after(200, self._restore_borderless)
+
+    def _restore_borderless(self) -> None:
+        if self.root.state() == "normal":
+            self.root.overrideredirect(True)
+        else:
+            self.root.after(200, self._restore_borderless)
+
+    def close(self) -> None:
+        if self.closing:
+            return
+        self.closing = True
+        self.status_label.configure(text="正在恢复游戏函数并退出…", fg=WARN)
+        self._save_preferences()
+        self.config["geometry"] = self.root.geometry()
+        self.config["topmost"] = bool(self.root.attributes("-topmost"))
+        self.config["alpha"] = float(self.root.attributes("-alpha"))
+        save_config(self.config)
+        self.stop_event.set()
+        self.root.after(50, self._finish_close)
+
+    def _finish_close(self) -> None:
+        if self.worker.is_alive() or self.metadata_worker.is_alive():
+            self.root.after(50, self._finish_close)
+            return
+        self.root.destroy()
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+
+class DpsWindow:
+    """Borderless LOA-Logs-inspired live meter with custom Windows chrome."""
+
+    def __init__(self):
+        self.config = load_config()
+        self.metadata = load_skill_metadata()
+        self.professions = (
+            self.metadata.get("professions", {})
+            if isinstance(self.metadata.get("professions"), dict)
+            else {}
+        )
+        raw_skill_metadata = self.metadata.get("skills", {})
+        skill_professions: dict[str, list[int]] = {}
+        if isinstance(raw_skill_metadata, dict):
+            for skill_id, value in raw_skill_metadata.items():
+                if not isinstance(value, dict):
+                    continue
+                class_ids = value.get("profession_ids", [])
+                if isinstance(class_ids, list) and class_ids:
+                    skill_professions[str(skill_id)] = class_ids
+
+        # Effect/sub-skill IDs can have a client-derived icon alias even when
+        # SkillDataNew has no row for that exact packet ID.  The extraction
+        # manifest only supplies a profession when every matching source skill
+        # agrees on one class, so ambiguous shared skills remain unidentified.
+        icon_sources = load_icon_sources()
+        for section_name in ("skills", "skill_icon_aliases"):
+            section = icon_sources.get(section_name, {})
+            if not isinstance(section, dict):
+                continue
+            for skill_id, value in section.items():
+                if not isinstance(value, dict):
+                    continue
+                class_ids = value.get("profession_ids", [])
+                if isinstance(class_ids, list) and class_ids:
+                    skill_professions.setdefault(str(skill_id), class_ids)
+
+        skill_names = load_skill_catalog()
+        runtime_skill_names = self.config.get("runtime_skill_names", {})
+        self.history_store = CombatHistoryStore(HISTORY_DIR)
+        self.model = CombatModel(
+            skill_names=skill_names,
+            runtime_skill_names=(
+                runtime_skill_names if isinstance(runtime_skill_names, dict) else {}
+            ),
+            skill_professions=skill_professions,
+            entity_names={},
+            local_player_name="",
+            boss_only=True,
+        )
+
+        self.messages: queue.Queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.worker = HookWorker(self.messages, self.stop_event)
+        self.heartbeat_stop_event = threading.Event()
+        self.heartbeat_worker: LicenseHeartbeatWorker | None = None
+        self.connected = False
+        self.game_pid = 0
+        self.closing = False
+        self.authorization_resetting = False
+        self.close_status_text = ""
+        self.capture_started = False
+        self.hide_names = bool(self.config.get("hide_names", False))
+        self.compact_mode = bool(self.config.get("compact_mode", False))
+        self.window_locked = bool(self.config.get("window_locked", False))
+        self.unlock_window: tk.Toplevel | None = None
+        self.unlock_button: tk.Label | None = None
+        self.window_lock_original_styles: dict[int, int] = {}
+        self.drag_state: dict[int, tuple[int, int]] = {}
+        self.resize_state: dict[int, tuple[int, int, int, int]] = {}
+        self.restore_geometry: dict[int, str] = {}
+        self.skill_window: tk.Toplevel | None = None
+        self.skill_actor_id: int | None = None
+        self.history_window: tk.Toplevel | None = None
+        self.history_records: list[dict] = []
+        self.history_selected_id = ""
+        self.history_selected_actor = 0
+        self.history_list_canvas: tk.Canvas | None = None
+        self.history_participant_panel: tk.Frame | None = None
+        self.history_participant_canvas: tk.Canvas | None = None
+        self.history_skill_canvas: tk.Canvas | None = None
+        self.history_count_label: tk.Label | None = None
+        self.history_target_label: tk.Label | None = None
+        self.history_time_label: tk.Label | None = None
+        self.history_metrics_label: tk.Label | None = None
+        self.history_favorite_button: tk.Label | None = None
+        self.history_max_button: tk.Label | None = None
+        self.feedback_window: tk.Toplevel | None = None
+        self.feedback_category_var: tk.StringVar | None = None
+        self.feedback_content: tk.Text | None = None
+        self.feedback_diagnostics_var: tk.BooleanVar | None = None
+        self.feedback_status_label: tk.Label | None = None
+        self.feedback_submit_button: tk.Label | None = None
+        self.feedback_submitting = False
+        self.notice_window: tk.Toplevel | None = None
+        self.update_window: tk.Toplevel | None = None
+        self.update_status_label: tk.Label | None = None
+        self.update_action_button: tk.Label | None = None
+        self.update_button: tk.Label | None = None
+        self.pending_update: UpdateInfo | None = None
+        self.update_check_started = False
+        self.update_check_in_progress = False
+        self.update_downloading = False
+        self.login_window: tk.Toplevel | None = None
+        self.login_card_entry: tk.Entry | None = None
+        self.login_status_label: tk.Label | None = None
+        self.login_button: tk.Label | None = None
+        self.membership_label: tk.Label | None = None
+        self.expiry_label: tk.Label | None = None
+        self.login_status_message = ""
+        self.opacity_value_label: tk.Label | None = None
+        self.opacity_scale: tk.Scale | None = None
+        self.tray_icon = None
+        self.tray_skill_hidden = False
+        self.tray_history_hidden = False
+        self.tray_feedback_hidden = False
+        client_id = resolve_client_id(
+            self.config,
+            DEVICE_ID_PATH,
+            SHARED_CONFIG_PATH,
+        )
+        server_url = str(
+            os.environ.get(
+                "GMZZ_DPS_SERVER_URL",
+                self.config.get("server_url", DEFAULT_SERVER_URL),
+            )
+        ).strip()
+        self.config["server_url"] = server_url
+        self.licensing = LicensingService(
+            ServerLicensingGateway(server_url, client_id, CLIENT_BUILD)
+        )
+        save_config(self.config)
+
+        try:
+            configured_alpha = float(self.config.get("alpha", 0.96))
+        except (TypeError, ValueError):
+            configured_alpha = 0.96
+        self.window_alpha = min(1.0, max(0.50, configured_alpha))
+
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                    "GMZZ.DPSMeter"
+                )
+            except (AttributeError, OSError):
+                pass
+
+        self.root = tk.Tk()
+        self.root.title(APP_TITLE)
+        self.root.withdraw()
+        self.root.configure(bg=BORDER)
+        self.root.geometry(self._initial_geometry())
+        self.root.minsize(420 if self.compact_mode else 500, 94 if self.compact_mode else 280)
+        self.root.attributes("-topmost", bool(self.config.get("topmost", True)))
+        self.root.attributes("-alpha", self.window_alpha)
+        self.root.overrideredirect(True)
+        self.icons = IconFactory(self.root)
+        self.app_window_icon = self.icons.app_logo(64)
+        try:
+            self.root.iconphoto(True, self.app_window_icon)
+            if sys.platform == "win32" and APP_ICON_PATH.is_file():
+                self.root.iconbitmap(default=str(APP_ICON_PATH))
+        except tk.TclError:
+            pass
+        self._build_ui()
+        self._apply_layout_mode()
+        if WindowsTrayIcon is not None:
+            try:
+                self.tray_icon = WindowsTrayIcon(
+                    APP_NAME,
+                    APP_ICON_PATH,
+                    lambda action: self.messages.put((action, None)),
+                ).start()
+            except Exception:
+                pass
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.after(50, self._drain_messages)
+        self.root.after(160, self._render)
+        self.root.after(20, lambda: self._apply_windows_style(self.root))
+        self.root.after(0, self._show_login)
+
+    def _initial_geometry(self) -> str:
+        if self.compact_mode:
+            saved = str(self.config.get("compact_geometry", ""))
+            return self._visible_geometry(saved, 440, 146)
+        saved = str(self.config.get("geometry", ""))
+        if int(self.config.get("layout_version", 0)) < 8:
+            match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+[+-]\d+)", saved)
+            if match:
+                width, height, suffix = match.groups()
+                upgraded = f"{max(520, int(width))}x{max(315, int(height))}{suffix}"
+            else:
+                upgraded = "520x315+32+120"
+            return self._visible_geometry(upgraded, 520, 315)
+        return self._visible_geometry(saved, 520, 315)
+
+    def _visible_geometry(self, value: str, default_width: int, default_height: int) -> str:
+        match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", str(value))
+        if match:
+            width, height, x, y = (int(part) for part in match.groups())
+        else:
+            width, height, x, y = default_width, default_height, 32, 120
+        width = max(1, min(width, self.root.winfo_screenwidth()))
+        height = max(1, min(height, self.root.winfo_screenheight()))
+        x = max(0, min(x, self.root.winfo_screenwidth() - width))
+        y = max(0, min(y, self.root.winfo_screenheight() - height))
+        return f"{width}x{height}+{x}+{y}"
+
+    def _show_login(self) -> None:
+        if self.closing or (
+            self.login_window is not None and self.login_window.winfo_exists()
+        ):
+            return
+        width, height = 380, 184
+        x = max(0, (self.root.winfo_screenwidth() - width) // 2)
+        y = max(0, (self.root.winfo_screenheight() - height) // 2)
+        window = tk.Toplevel(self.root)
+        self.login_window = window
+        window.title(f"{APP_TITLE} · 登录")
+        window.configure(bg=BORDER)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.resizable(False, False)
+        window.attributes("-topmost", True)
+        window.attributes("-alpha", 1.0)
+        window.overrideredirect(True)
+        window.protocol("WM_DELETE_WINDOW", self.close)
+
+        shell = tk.Frame(window, bg=BORDER)
+        shell.pack(fill="both", expand=True)
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+
+        titlebar = tk.Frame(body, bg=SURFACE, height=28)
+        titlebar.pack(fill="x")
+        titlebar.pack_propagate(False)
+        self._bind_drag(titlebar, window)
+
+        logo_image = self.icons.app_logo(18)
+        logo = tk.Label(titlebar, image=logo_image, bg=SURFACE, bd=0)
+        logo.image = logo_image
+        logo.pack(side="left", padx=(5, 2), pady=5)
+        self._bind_drag(logo, window)
+
+        title = tk.Label(
+            titlebar,
+            text=APP_TITLE,
+            bg=SURFACE,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        title.pack(side="left", padx=(2, 8))
+        self._bind_drag(title, window)
+        close_button = self._label_button(
+            titlebar,
+            "×",
+            self.close,
+            width=28,
+            hover="#7f2d35",
+            fg="#c5ccd3",
+            font=("Segoe UI", 12),
+        )
+        close_button.pack(side="right", fill="y")
+        group_label = tk.Label(
+            titlebar,
+            text="群：1094925831",
+            bg=SURFACE,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8),
+        )
+        group_label.pack(side="right", fill="y", padx=(4, 7))
+        self._bind_drag(group_label, window)
+
+        content = tk.Frame(body, bg=BG)
+        content.pack(fill="both", expand=True, padx=24, pady=(14, 16))
+
+        field = tk.Frame(content, bg=BG)
+        field.pack(fill="x")
+        tk.Label(
+            field,
+            text="卡号",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side="left", padx=(0, 10))
+        self.login_card_entry = tk.Entry(
+            field,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground="#315d52",
+            selectforeground=TEXT,
+            relief="flat",
+            bd=0,
+            font=("Consolas", 11),
+        )
+        self.login_card_entry.pack(side="left", fill="x", expand=True, ipady=7)
+        saved_card_key = remembered_card(self.config)
+        if saved_card_key:
+            self.login_card_entry.insert(0, saved_card_key)
+            self.login_card_entry.selection_range(0, "end")
+
+        self.login_status_label = tk.Label(
+            content,
+            text=self.login_status_message,
+            bg=BG,
+            fg=ERROR if self.login_status_message else MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.login_status_label.pack(fill="x", pady=(6, 8))
+        self.login_button = tk.Label(
+            content,
+            text="登录",
+            bg=ACCENT,
+            fg="#07110e",
+            cursor="hand2",
+            pady=6,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        self.login_button.pack(fill="x")
+        self.login_button.bind(
+            "<Enter>", lambda _event: self.login_button.configure(bg="#86edca")
+        )
+        self.login_button.bind(
+            "<Leave>", lambda _event: self.login_button.configure(bg=ACCENT)
+        )
+        self.login_button.bind(
+            "<Button-1>", lambda _event: self._complete_card_login()
+        )
+
+        window.bind("<Return>", lambda _event: self._complete_card_login())
+        window.after(20, lambda: self._apply_windows_style(window))
+        window.after(50, self.login_card_entry.focus_set)
+        window.grab_set()
+        window.focus_force()
+
+    def _set_login_status(self, message: str, *, error: bool = True) -> None:
+        self.login_status_message = str(message).strip()
+        if self.login_status_label is not None and self.login_status_label.winfo_exists():
+            self.login_status_label.configure(
+                text=self.login_status_message,
+                fg=ERROR if error else MUTED,
+            )
+
+    def _complete_card_login(self) -> None:
+        if self.closing or self.authorization_resetting:
+            return
+        card_key = (
+            self.login_card_entry.get().strip()
+            if self.login_card_entry is not None
+            else ""
+        )
+        if not card_key:
+            self._set_login_status("请输入卡号。")
+            return
+        if self.login_button is not None:
+            self.login_button.configure(text="正在验证", bg=PANEL_2, fg=MUTED)
+        if self.login_window is not None:
+            self.login_window.update_idletasks()
+        try:
+            session = self.licensing.sign_in_card(card_key)
+        except LicensingConnectionError as exc:
+            self._set_login_status(str(exc))
+            if self.login_button is not None:
+                self.login_button.configure(text="登录", bg=ACCENT, fg="#07110e")
+            return
+        if not session.active:
+            self._set_login_status(session.display_name or "服务器已拒绝本次登录。")
+            if self.login_button is not None:
+                self.login_button.configure(text="登录", bg=ACCENT, fg="#07110e")
+            return
+        if remember_card(self.config, card_key):
+            save_config(self.config)
+        self.login_status_message = ""
+        if self.login_window is not None and self.login_window.winfo_exists():
+            try:
+                self.login_window.grab_release()
+            except tk.TclError:
+                pass
+            self.login_window.destroy()
+        self.login_window = None
+        self.login_card_entry = None
+        self.login_status_label = None
+        self.login_button = None
+        self.root.deiconify()
+        self.root.lift()
+        if not self.window_locked:
+            self.root.focus_force()
+        self._sync_expiry_label()
+        self.root.after(20, lambda: self._apply_windows_style(self.root))
+        self.root.after(30, self._apply_window_lock_state)
+        self.heartbeat_stop_event = threading.Event()
+        self.heartbeat_worker = LicenseHeartbeatWorker(
+            self.licensing, self.messages, self.heartbeat_stop_event
+        )
+        self.heartbeat_worker.start()
+        self._start_capture()
+        self._start_update_check()
+
+    def _start_capture(self) -> None:
+        if self.capture_started or self.closing:
+            return
+        self.stop_event = threading.Event()
+        self.worker = HookWorker(self.messages, self.stop_event)
+        self.capture_started = True
+        self.worker.start()
+
+    def _start_update_check(self, *, manual: bool = False) -> None:
+        if self.update_check_in_progress or self.closing:
+            return
+        if self.update_check_started and not manual:
+            return
+        self.update_check_started = True
+        self.update_check_in_progress = True
+        if manual and self.update_button is not None:
+            self.update_button.configure(text="检查中", fg=MUTED)
+
+        def check() -> None:
+            try:
+                update = self.licensing.check_update()
+                payload = {"manual": manual, "update": update, "error": ""}
+            except LicensingConnectionError as exc:
+                payload = {"manual": manual, "update": None, "error": str(exc)}
+            self.messages.put(("update_check_result", payload))
+
+        threading.Thread(target=check, name="update-check", daemon=True).start()
+
+    def _handle_update_check_result(self, payload: object) -> None:
+        self.update_check_in_progress = False
+        if self.update_button is not None and self.update_button.winfo_exists():
+            self.update_button.configure(text="更新", fg=MUTED)
+        if not isinstance(payload, dict):
+            return
+        manual = bool(payload.get("manual"))
+        update = payload.get("update")
+        error = str(payload.get("error", "")).strip()
+        if isinstance(update, UpdateInfo) and update.available:
+            self._show_update_window(update)
+            return
+        if not manual:
+            return
+        if error:
+            self._show_notice("软件更新", error, parent=self.root)
+            return
+        self._show_notice(
+            "软件更新",
+            f"当前已是最新版本 v{APP_VERSION}。\n保存位置：{UPDATE_DIR}",
+            parent=self.root,
+        )
+
+    def _show_update_window(self, update: UpdateInfo) -> None:
+        if self.closing:
+            return
+        self.pending_update = update
+        if self.update_window is not None and self.update_window.winfo_exists():
+            self.update_window.deiconify()
+            self.update_window.lift()
+            return
+        width, height = 440, 300
+        self.root.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - width) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - height) // 2)
+        window = tk.Toplevel(self.root)
+        self.update_window = window
+        window.title(f"{APP_NAME} · 软件更新")
+        window.configure(bg=BORDER)
+        window.geometry(self._visible_geometry(f"{width}x{height}+{x}+{y}", width, height))
+        window.resizable(False, False)
+        window.attributes("-topmost", True)
+        window.attributes("-alpha", 1.0)
+        window.overrideredirect(True)
+        window.protocol("WM_DELETE_WINDOW", self._close_update_window)
+
+        body = tk.Frame(window, bg=BG)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+        titlebar = tk.Frame(body, bg=SURFACE, height=30)
+        titlebar.pack(fill="x")
+        titlebar.pack_propagate(False)
+        self._bind_drag(titlebar, window)
+        logo_image = self.icons.app_logo(18)
+        logo = tk.Label(titlebar, image=logo_image, bg=SURFACE, bd=0)
+        logo.image = logo_image
+        logo.pack(side="left", padx=(7, 5), pady=6)
+        self._bind_drag(logo, window)
+        title = tk.Label(
+            titlebar,
+            text="软件更新",
+            bg=SURFACE,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        title.pack(side="left")
+        self._bind_drag(title, window)
+        if not update.required:
+            close_button = self._label_button(
+                titlebar,
+                "×",
+                self._close_update_window,
+                width=30,
+                hover="#7f2d35",
+                fg="#c5ccd3",
+                font=("Segoe UI", 12),
+            )
+            close_button.pack(side="right", fill="y")
+
+        content = tk.Frame(body, bg=BG)
+        content.pack(fill="both", expand=True, padx=24, pady=(19, 17))
+        tk.Label(
+            content,
+            text=f"发现新版本 v{update.latest_version}",
+            bg=BG,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).pack(fill="x")
+        size_text = f"{update.size / 1024 / 1024:.1f} MB"
+        tk.Label(
+            content,
+            text=f"当前 v{APP_VERSION}  ·  安装包 {size_text}",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="x", pady=(5, 10))
+        tk.Label(
+            content,
+            text=f"保存位置：{UPDATE_DIR}",
+            bg=BG,
+            fg=SUBTLE,
+            anchor="w",
+            justify="left",
+            wraplength=382,
+            font=("Microsoft YaHei UI", 8),
+        ).pack(fill="x", pady=(0, 10))
+        notes = update.notes or "包含最新的 DPS 统计、目标识别与稳定性修复。"
+        tk.Label(
+            content,
+            text=notes,
+            bg=PANEL,
+            fg="#d7dde4",
+            anchor="nw",
+            justify="left",
+            wraplength=382,
+            padx=12,
+            pady=10,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="both", expand=True)
+        footer = tk.Frame(content, bg=BG)
+        footer.pack(fill="x", pady=(12, 0))
+        self.update_status_label = tk.Label(
+            footer,
+            text="",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.update_status_label.pack(side="left", fill="x", expand=True)
+        if not update.required:
+            later = self._action_button(footer, "稍后", self._close_update_window)
+            later.pack(side="right", padx=(8, 0))
+        self.update_action_button = self._action_button(
+            footer, "立即更新", self._download_pending_update
+        )
+        self.update_action_button.configure(bg=ACCENT, fg="#07110e")
+        self.update_action_button.pack(side="right")
+        window.after(20, lambda: self._apply_windows_style(window))
+        window.lift()
+        window.focus_force()
+
+    def _download_pending_update(self) -> None:
+        update = self.pending_update
+        if update is None or self.update_downloading or self.closing:
+            return
+        self.update_downloading = True
+        if self.update_status_label is not None:
+            self.update_status_label.configure(text="正在下载并校验…", fg=MUTED)
+        if self.update_action_button is not None:
+            self.update_action_button.configure(text="下载中", bg=PANEL_2, fg=MUTED)
+
+        def download() -> None:
+            try:
+                destination = UPDATE_DIR / update.filename
+                if IS_FROZEN and destination.resolve() == APP_EXECUTABLE_PATH:
+                    destination = destination.with_name(
+                        f"{destination.stem}.update{destination.suffix}"
+                    )
+                path = self.licensing.download_update(update, destination)
+                self.messages.put(("update_downloaded", path))
+            except (LicensingConnectionError, OSError) as exc:
+                self.messages.put(("update_download_failed", str(exc)))
+
+        threading.Thread(target=download, name="update-download", daemon=True).start()
+
+    def _handle_update_downloaded(self, payload: object) -> None:
+        self.update_downloading = False
+        update_path = Path(str(payload))
+        if not IS_FROZEN or sys.platform != "win32":
+            if self.update_status_label is not None:
+                self.update_status_label.configure(
+                    text=f"安装包已保存：{update_path}", fg=ACCENT
+                )
+            if self.update_action_button is not None:
+                self.update_action_button.configure(text="已下载", bg=PANEL_2, fg=ACCENT)
+            return
+        try:
+            self._launch_update_replacer(update_path)
+        except OSError as exc:
+            self._handle_update_download_failed(str(exc))
+            return
+        if self.update_status_label is not None:
+            self.update_status_label.configure(text="即将重启并完成更新…", fg=ACCENT)
+        self.close_status_text = "正在安装更新…"
+        self.root.after(120, self.close)
+
+    def _handle_update_download_failed(self, payload: object) -> None:
+        self.update_downloading = False
+        message = str(payload).strip() or "更新下载失败，请稍后重试。"
+        if self.update_status_label is not None:
+            self.update_status_label.configure(text=message, fg=ERROR)
+        if self.update_action_button is not None:
+            self.update_action_button.configure(text="重试", bg=ACCENT, fg="#07110e")
+
+    def _launch_update_replacer(self, update_path: Path) -> None:
+        target_path = APP_EXECUTABLE_PATH
+        UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+        script_path = UPDATE_DIR / "apply-update.ps1"
+        script_path.write_text(
+            "param([int]$TargetPid,[string]$Source,[string]$Target)\n"
+            "$ErrorActionPreference = 'Stop'\n"
+            "Wait-Process -Id $TargetPid -ErrorAction SilentlyContinue\n"
+            "$installed = $false\n"
+            "for ($attempt = 0; $attempt -lt 20; $attempt++) {\n"
+            "  try { Copy-Item -LiteralPath $Source -Destination $Target -Force; $installed = $true; break }\n"
+            "  catch { Start-Sleep -Milliseconds 500 }\n"
+            "}\n"
+            "if ($installed) {\n"
+            "  Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)\n"
+            "  Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue\n"
+            "}\n"
+            "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n",
+            encoding="utf-8-sig",
+        )
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+                str(script_path),
+                "-TargetPid",
+                str(os.getpid()),
+                "-Source",
+                str(update_path.resolve()),
+                "-Target",
+                str(target_path),
+            ],
+            close_fds=True,
+            creationflags=creation_flags,
+        )
+
+    def _close_update_window(self, *, force: bool = False) -> None:
+        if self.update_downloading and not force:
+            return
+        if self.update_window is not None and self.update_window.winfo_exists():
+            self.update_window.destroy()
+        self.update_window = None
+        self.update_status_label = None
+        self.update_action_button = None
+
+    def _return_to_login(self, message: str) -> None:
+        if self.closing or self.authorization_resetting:
+            return
+        self.authorization_resetting = True
+        self._set_window_click_through(self.root, False)
+        self._destroy_unlock_window()
+        self.connected = False
+        self.game_pid = 0
+        self._close_notice_window()
+        self._close_skill_window()
+        self._close_history_window()
+        self._close_feedback_window()
+        self._close_update_window(force=True)
+        self.dot.configure(fg=WARN)
+        self.status_label.configure(text="正在安全停止", fg=WARN)
+        self.heartbeat_stop_event.set()
+        self.stop_event.set()
+        self.login_status_message = str(message).strip() or "请重新输入卡号。"
+        self.root.after(50, self._finish_return_to_login)
+
+    def _finish_return_to_login(self) -> None:
+        if self.closing:
+            return
+        if self.worker.is_alive() or (
+            self.heartbeat_worker is not None and self.heartbeat_worker.is_alive()
+        ):
+            self.root.after(50, self._finish_return_to_login)
+            return
+        self._ingest_pending_capture_messages()
+        self.model.reset(keep_identity=False, archive_reason="authorization")
+        self.model.entity_names.clear()
+        self.model.entity_professions.clear()
+        self.model.local_player_name = ""
+        self._flush_combat_history()
+        self.capture_started = False
+        self.heartbeat_worker = None
+        self.update_check_started = False
+        self.pending_update = None
+        self.connected = False
+        self.game_pid = 0
+        self.dot.configure(fg=WARN)
+        self.status_label.configure(text="待机", fg=MUTED)
+        self.root.withdraw()
+        self.authorization_resetting = False
+        self._show_login()
+
+    @staticmethod
+    def _label_button(
+        parent: tk.Misc,
+        text: str,
+        command,
+        *,
+        width: int = 38,
+        bg: str = SURFACE,
+        hover: str = PANEL_2,
+        fg: str = MUTED,
+        font=("Microsoft YaHei UI", 10),
+    ) -> tk.Label:
+        label = tk.Label(
+            parent,
+            text=text,
+            bg=bg,
+            fg=fg,
+            width=1,
+            height=1,
+            anchor="center",
+            cursor="hand2",
+            font=font,
+        )
+        label.configure(padx=max(4, (width - 12) // 2))
+        label.bind("<Enter>", lambda _event: label.configure(bg=hover, fg=TEXT))
+        label.bind("<Leave>", lambda _event: label.configure(bg=bg, fg=fg))
+        label.bind("<Button-1>", lambda _event: command())
+        return label
+
+    def _bind_drag(self, widget: tk.Misc, window: tk.Misc) -> None:
+        widget.bind("<ButtonPress-1>", lambda event: self._drag_start(event, window))
+        widget.bind("<B1-Motion>", lambda event: self._drag_move(event, window))
+        widget.bind("<Double-Button-1>", lambda _event: self._toggle_maximize(window))
+
+    def _set_window_click_through(self, window: tk.Misc, locked: bool) -> None:
+        if sys.platform != "win32" or not window.winfo_exists():
+            return
+        try:
+            import ctypes
+
+            window.update_idletasks()
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetParent(window.winfo_id()) or window.winfo_id()
+            get_style = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+            set_style = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+            current = int(get_style(hwnd, -20))
+            style_key = int(hwnd)
+            if locked:
+                original = self.window_lock_original_styles.setdefault(
+                    style_key, current
+                )
+            else:
+                original = self.window_lock_original_styles.pop(style_key, None)
+            updated = window_exstyle_for_lock(current, locked, original)
+            if updated != current:
+                set_style(hwnd, -20, updated)
+                user32.SetWindowPos(
+                    hwnd,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0x0037,
+                )
+        except (AttributeError, OSError, tk.TclError):
+            pass
+
+    def _destroy_unlock_window(self) -> None:
+        if self.unlock_window is not None and self.unlock_window.winfo_exists():
+            self.unlock_window.destroy()
+        self.unlock_window = None
+        self.unlock_button = None
+
+    def _sync_unlock_window_position(self) -> None:
+        window = self.unlock_window
+        if (
+            not self.window_locked
+            or window is None
+            or not window.winfo_exists()
+            or self.root.state() != "normal"
+        ):
+            return
+        self.root.update_idletasks()
+        if self.compact_mode:
+            width, height = 27, 23
+            x = self.root.winfo_rootx() + self.root.winfo_width() - 54
+            y = self.root.winfo_rooty() + 1
+        elif self.lock_button.winfo_ismapped():
+            width = max(27, self.lock_button.winfo_width())
+            height = max(24, self.lock_button.winfo_height())
+            x = self.lock_button.winfo_rootx()
+            y = self.lock_button.winfo_rooty()
+        else:
+            width, height = 27, 28
+            x = self.root.winfo_rootx() + self.root.winfo_width() - 135
+            y = self.root.winfo_rooty()
+        geometry = f"{width}x{height}{x:+d}{y:+d}"
+        if window.geometry() != geometry:
+            window.geometry(geometry)
+
+    def _show_unlock_window(self) -> None:
+        if self.root.state() != "normal":
+            return
+        if self.unlock_window is None or not self.unlock_window.winfo_exists():
+            window = tk.Toplevel(self.root)
+            self.unlock_window = window
+            window.title("解锁 DPS 窗口")
+            window.configure(bg=BORDER)
+            window.overrideredirect(True)
+            window.attributes("-topmost", True)
+            window.attributes("-alpha", 1.0)
+            label = tk.Label(
+                window,
+                text="🔒",
+                bg=SURFACE,
+                fg=ACCENT,
+                cursor="hand2",
+                font=("Segoe UI Emoji", 9),
+                bd=0,
+            )
+            self.unlock_button = label
+            label.pack(fill="both", expand=True, padx=1, pady=1)
+            label.bind(
+                "<Enter>",
+                lambda _event: label.configure(bg=PANEL_2, fg=TEXT),
+            )
+            label.bind(
+                "<Leave>",
+                lambda _event: label.configure(bg=SURFACE, fg=ACCENT),
+            )
+            label.bind("<Button-1>", lambda _event: self.toggle_window_lock())
+        self._sync_unlock_window_position()
+        self.unlock_window.deiconify()
+        self.unlock_window.lift()
+
+    def _apply_window_lock_state(self) -> None:
+        if self.closing or not self.root.winfo_exists():
+            return
+        self._set_window_click_through(self.root, self.window_locked)
+        if self.window_locked:
+            self._show_unlock_window()
+        else:
+            self._destroy_unlock_window()
+        self._sync_action_buttons()
+        self._draw_main_header()
+
+    def toggle_window_lock(self) -> None:
+        if self.closing:
+            return
+        self.window_locked = not self.window_locked
+        self.config["window_locked"] = self.window_locked
+        self.drag_state.pop(id(self.root), None)
+        self.resize_state.pop(id(self.root), None)
+        self._apply_window_lock_state()
+        save_config(self.config)
+
+    def _build_ui(self) -> None:
+        shell = tk.Frame(self.root, bg=BORDER, bd=0)
+        shell.pack(fill="both", expand=True)
+        self.body = tk.Frame(shell, bg=BG, bd=0)
+        self.body.pack(fill="both", expand=True, padx=1, pady=1)
+
+        self.titlebar = tk.Frame(self.body, bg=SURFACE, height=28)
+        self.titlebar.pack(fill="x")
+        self.titlebar.pack_propagate(False)
+        self._bind_drag(self.titlebar, self.root)
+
+        logo_image = self.icons.app_logo(18)
+        logo = tk.Label(self.titlebar, image=logo_image, bg=SURFACE, bd=0)
+        logo.image = logo_image
+        logo.pack(side="left", padx=(5, 2), pady=5)
+        self._bind_drag(logo, self.root)
+
+        title_group = tk.Frame(self.titlebar, bg=SURFACE)
+        title_group.pack(side="left", fill="y", padx=(2, 5))
+        self._bind_drag(title_group, self.root)
+        title = tk.Label(
+            title_group,
+            text=APP_TITLE,
+            bg=SURFACE,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        title.pack(anchor="w", pady=(5, 0))
+        self._bind_drag(title, self.root)
+
+        self.close_button = self._label_button(
+            self.titlebar, "×", self.close, width=27, hover="#7f2d35", fg="#c5ccd3", font=("Segoe UI", 12)
+        )
+        self.close_button.pack(side="right", fill="y")
+        self.max_button = self._label_button(
+            self.titlebar, "□", lambda: self._toggle_maximize(self.root), width=27, font=("Segoe UI", 9)
+        )
+        self.max_button.pack(side="right", fill="y")
+        self.min_button = self._label_button(
+            self.titlebar, "—", self.minimize, width=27, font=("Segoe UI", 9)
+        )
+        self.min_button.pack(side="right", fill="y")
+        self.compact_button = self._label_button(
+            self.titlebar,
+            "▤",
+            self.toggle_compact_mode,
+            width=27,
+            font=("Segoe UI Symbol", 9),
+        )
+        self.compact_button.pack(side="right", fill="y")
+        self.lock_button = self._label_button(
+            self.titlebar,
+            "🔒" if self.window_locked else "🔓",
+            self.toggle_window_lock,
+            width=27,
+            font=("Segoe UI Emoji", 9),
+        )
+        self.lock_button.pack(side="right", fill="y")
+        self.feedback_button = self._label_button(
+            self.titlebar,
+            "反馈",
+            self.show_feedback,
+            width=43,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        self.feedback_button.pack(side="right", fill="y")
+        self.update_button = self._label_button(
+            self.titlebar,
+            "更新",
+            lambda: self._start_update_check(manual=True),
+            width=43,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        self.update_button.pack(side="right", fill="y")
+
+        self.toolbar = tk.Frame(self.body, bg=BG, height=27)
+        self.toolbar.pack(fill="x", padx=5, pady=(3, 0))
+        self.toolbar.pack_propagate(False)
+
+        toolbar_top = tk.Frame(self.toolbar, bg=BG, height=27)
+        toolbar_top.pack(fill="x")
+        toolbar_top.pack_propagate(False)
+        account_info = tk.Frame(toolbar_top, bg=BG)
+        account_info.pack(side="left", fill="y", pady=2)
+        self.membership_label = tk.Label(
+            account_info,
+            text="普通用户",
+            bg=BG,
+            fg=ACCENT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        self.membership_label.pack(side="left", fill="y", padx=(0, 7))
+        self.expiry_label = tk.Label(
+            account_info,
+            text="有效时间：--",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        self.expiry_label.pack(side="left", fill="y")
+
+        actions = tk.Frame(toolbar_top, bg=BG)
+        actions.pack(side="right", pady=2)
+        # The compact scale still needs enough room for the full ``100%``
+        # value at Windows display scaling above 100%.
+        opacity_controls = tk.Frame(actions, bg=BG, width=160, height=23)
+        opacity_controls.pack(side="left", padx=(0, 6))
+        opacity_controls.pack_propagate(False)
+        tk.Label(
+            opacity_controls,
+            text="透明度",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(side="left", fill="y")
+        opacity_value = tk.IntVar(value=round(self.window_alpha * 100))
+        self.opacity_scale = tk.Scale(
+            opacity_controls,
+            from_=50,
+            to=100,
+            orient="horizontal",
+            variable=opacity_value,
+            showvalue=False,
+            resolution=1,
+            command=self._set_window_alpha,
+            bg=ACCENT,
+            fg=TEXT,
+            activebackground="#b6f3df",
+            troughcolor="#3d5360",
+            highlightthickness=0,
+            bd=0,
+            relief="flat",
+            length=76,
+            width=8,
+            sliderlength=16,
+            sliderrelief="raised",
+        )
+        self.opacity_scale.pack(side="left", padx=(4, 3))
+        self.opacity_value_label = tk.Label(
+            opacity_controls,
+            text=f"{opacity_value.get()}%",
+            bg=BG,
+            fg=ACCENT,
+            width=4,
+            anchor="w",
+            font=("Segoe UI", 8, "bold"),
+        )
+        self.opacity_value_label.pack(side="left", fill="y")
+        self.history_button = self._action_button(actions, "历史记录", self.show_history)
+        self.history_button.pack(side="left", padx=(0, 2))
+        self.share_button = self._action_button(actions, "分享", self._share_current)
+        self.share_button.pack(side="left", padx=(0, 2))
+        self.privacy_button = self._action_button(actions, "隐藏名称", self.toggle_names)
+        self.privacy_button.pack(side="left", padx=(0, 2))
+        self.reset_button = self._action_button(actions, "清空", self.reset)
+        self.reset_button.pack(side="left", padx=(0, 2))
+        self.pin_button = self._action_button(actions, "置顶", self.toggle_topmost)
+        self.pin_button.pack(side="left")
+
+        self._sync_action_buttons()
+        self._sync_expiry_label()
+
+        self.summary = tk.Frame(self.body, bg=BG, height=90)
+        self.summary.pack(fill="x", padx=5, pady=(3, 3))
+        self.summary.pack_propagate(False)
+
+        monster_panel = tk.Frame(
+            self.summary,
+            bg=SURFACE,
+            height=56,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        monster_panel.pack(fill="x")
+        monster_panel.pack_propagate(False)
+
+        monster_info = tk.Frame(monster_panel, bg=SURFACE, height=27)
+        monster_info.pack(fill="x")
+        monster_info.pack_propagate(False)
+        self.monster_name_label = tk.Label(
+            monster_info,
+            text="暂无目标",
+            bg=SURFACE,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.monster_name_label.pack(
+            side="left", fill="both", expand=True, padx=(9, 6)
+        )
+        self.monster_hp_text = tk.Label(
+            monster_info,
+            text="-- / --",
+            bg=SURFACE,
+            fg=TEXT,
+            width=22,
+            anchor="e",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.monster_hp_text.pack(side="right", fill="y", padx=(6, 9))
+        self.monster_hp_canvas = tk.Canvas(
+            monster_panel,
+            height=16,
+            bg=PANEL_2,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.monster_hp_canvas.pack(fill="x", padx=9, pady=(0, 9))
+        self.monster_hp_canvas.bind(
+            "<Configure>", lambda _event: self._draw_monster_hp()
+        )
+
+        metric_frame = tk.Frame(self.summary, bg=BG, height=30)
+        metric_frame.pack(fill="x", pady=(4, 0))
+        metric_frame.pack_propagate(False)
+        self.total_value = self._metric(metric_frame, "团队总伤害", "0", 0)
+        self.dps_value = self._metric(metric_frame, "团队 DPS", "0", 1)
+        self.time_value = self._metric(metric_frame, "战斗状态", "待机  00:00", 2)
+        metric_frame.grid_columnconfigure(0, weight=12, uniform="summary")
+        metric_frame.grid_columnconfigure(1, weight=9, uniform="summary")
+        metric_frame.grid_columnconfigure(2, weight=11, uniform="summary")
+
+        self.table_panel = tk.Frame(
+            self.body,
+            bg=PANEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        self.table_panel.pack(fill="both", expand=True, padx=5, pady=(0, 2))
+        self.header_canvas = tk.Canvas(
+            self.table_panel, height=24, bg=SURFACE, bd=0, highlightthickness=0
+        )
+        self.header_canvas.pack(fill="x")
+        self.header_canvas.bind("<Configure>", lambda _event: self._draw_main_header())
+        self.header_canvas.bind(
+            "<ButtonPress-1>", lambda event: self._drag_start(event, self.root)
+        )
+        self.header_canvas.bind(
+            "<B1-Motion>", lambda event: self._drag_move(event, self.root)
+        )
+        self.rows_canvas = tk.Canvas(
+            self.table_panel,
+            bg=PANEL,
+            bd=0,
+            highlightthickness=0,
+            yscrollincrement=34,
+        )
+        self.rows_canvas.pack(fill="both", expand=True)
+        self.rows_canvas.bind("<MouseWheel>", self._scroll_main)
+        self.rows_canvas.bind("<Configure>", lambda _event: self._draw_main_rows())
+
+        self.footer = tk.Frame(self.body, bg=BG, height=17)
+        self.footer.pack(
+            side="bottom",
+            fill="x",
+            padx=5,
+            pady=(0, 2),
+            before=self.table_panel,
+        )
+        self.footer.pack_propagate(False)
+        self.dot = tk.Label(self.footer, text="●", bg=BG, fg=WARN, font=("Segoe UI", 7))
+        self.dot.pack(side="left")
+        self.status_label = tk.Label(
+            self.footer,
+            text="准备中",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 7),
+        )
+        self.status_label.pack(side="left", fill="both", expand=True, padx=(5, 0))
+        self._sync_action_buttons()
+        self.resize_grip = tk.Label(
+            self.body,
+            text="◢",
+            bg=BG,
+            fg=SUBTLE,
+            cursor="size_nw_se",
+            font=("Segoe UI", 9),
+        )
+        self.resize_grip.place(relx=1.0, rely=1.0, anchor="se")
+        self.resize_grip.bind(
+            "<ButtonPress-1>", lambda event: self._resize_start(event, self.root)
+        )
+        self.resize_grip.bind(
+            "<B1-Motion>",
+            lambda event: self._resize_move(
+                event, self.root, 420, 94 if self.compact_mode else 280
+            ),
+        )
+
+    def _apply_layout_mode(self) -> None:
+        if self.compact_mode:
+            for widget in (self.titlebar, self.toolbar, self.summary, self.footer):
+                widget.pack_forget()
+            self.table_panel.pack_configure(padx=0, pady=0)
+            self.resize_grip.configure(bg=PANEL)
+            self.root.minsize(420, 94)
+        else:
+            self.table_panel.pack_configure(padx=5, pady=(0, 2))
+            if not self.titlebar.winfo_manager():
+                self.titlebar.pack(fill="x", before=self.table_panel)
+            if not self.toolbar.winfo_manager():
+                self.toolbar.pack(
+                    fill="x", padx=5, pady=(3, 0), before=self.table_panel
+                )
+            if not self.summary.winfo_manager():
+                self.summary.pack(
+                    fill="x", padx=5, pady=(3, 3), before=self.table_panel
+                )
+            if not self.footer.winfo_manager():
+                self.footer.pack(
+                    side="bottom",
+                    fill="x",
+                    padx=5,
+                    pady=(0, 2),
+                    before=self.table_panel,
+                )
+            self.resize_grip.configure(bg=BG)
+            self.root.minsize(500, 280)
+        self._draw_main_header()
+        self._draw_main_rows()
+
+    def _remember_root_geometry(self) -> None:
+        geometry = self.restore_geometry.get(id(self.root), self.root.geometry())
+        key = "compact_geometry" if self.compact_mode else "geometry"
+        self.config[key] = geometry
+        self.config["compact_mode"] = self.compact_mode
+        self.config["window_locked"] = self.window_locked
+
+    def toggle_compact_mode(self) -> None:
+        if self.closing or self.window_locked:
+            return
+        root_key = id(self.root)
+        if root_key in self.restore_geometry:
+            self.root.geometry(self.restore_geometry.pop(root_key))
+            self.max_button.configure(text="□")
+            self.root.update_idletasks()
+
+        self._remember_root_geometry()
+        current_width = self.root.winfo_width()
+        current_height = self.root.winfo_height()
+        current_x = self.root.winfo_x()
+        current_y = self.root.winfo_y()
+        table_height = self.table_panel.winfo_height() + 2
+
+        self.compact_mode = not self.compact_mode
+        self.config["compact_mode"] = self.compact_mode
+        self._apply_layout_mode()
+
+        geometry_key = "compact_geometry" if self.compact_mode else "geometry"
+        target_geometry = str(self.config.get(geometry_key, ""))
+        if not re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", target_geometry):
+            target_height = (
+                max(94, min(current_height, table_height))
+                if self.compact_mode
+                else max(280, current_height)
+            )
+            target_geometry = (
+                f"{max(500, current_width)}x{target_height}"
+                f"{current_x:+d}{current_y:+d}"
+            )
+        default_height = 146 if self.compact_mode else 315
+        self.root.geometry(
+            self._visible_geometry(target_geometry, 520, default_height)
+        )
+        self.root.update_idletasks()
+        self._remember_root_geometry()
+        save_config(self.config)
+
+    def _metric(self, parent: tk.Misc, caption: str, value: str, column: int) -> tk.Label:
+        frame = tk.Frame(parent, bg=BG)
+        frame.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 4, 0))
+        parent.grid_columnconfigure(column, weight=1)
+        tk.Label(
+            frame,
+            text=caption,
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 7, "bold"),
+        ).pack(side="left", fill="y", padx=(5, 5))
+        label = tk.Label(
+            frame,
+            text=value,
+            bg=BG,
+            fg=TEXT,
+            anchor="w",
+            font=("Segoe UI", 9, "bold"),
+        )
+        label.pack(side="left", fill="both", expand=True)
+        return label
+
+    @staticmethod
+    def _action_button(parent: tk.Misc, text: str, command) -> tk.Label:
+        label = tk.Label(
+            parent,
+            text=text,
+            bg=PANEL_2,
+            fg=MUTED,
+            padx=4,
+            pady=2,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 7, "bold"),
+        )
+        label.bind("<Enter>", lambda _event: label.configure(bg=blend_color(PANEL_2, ACCENT, 0.13), fg=TEXT))
+        label.bind("<Leave>", lambda _event: label.configure(bg=PANEL_2, fg=MUTED))
+        label.bind("<Button-1>", lambda _event: command())
+        return label
+
+    def show_feedback(self) -> None:
+        if self.feedback_window is None or not self.feedback_window.winfo_exists():
+            self._build_feedback_window()
+        self.tray_feedback_hidden = False
+        self.feedback_window.deiconify()
+        self.feedback_window.lift()
+        self.feedback_window.focus_force()
+        if self.feedback_content is not None:
+            self.feedback_content.focus_set()
+
+    def _build_feedback_window(self) -> None:
+        width, height = 500, 418
+        x = max(0, self.root.winfo_rootx() + 20)
+        y = max(0, self.root.winfo_rooty() + 20)
+        window = tk.Toplevel(self.root)
+        self.feedback_window = window
+        window.title(f"{APP_TITLE} · 问题反馈")
+        window.configure(bg=BORDER)
+        window.geometry(self._visible_geometry(f"{width}x{height}+{x}+{y}", width, height))
+        window.resizable(False, False)
+        window.attributes("-topmost", bool(self.root.attributes("-topmost")))
+        window.attributes("-alpha", 1.0)
+        window.overrideredirect(True)
+        window.protocol("WM_DELETE_WINDOW", self._close_feedback_window)
+        window.bind("<Escape>", lambda _event: self._close_feedback_window())
+
+        shell = tk.Frame(window, bg=BORDER)
+        shell.pack(fill="both", expand=True)
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+
+        titlebar = tk.Frame(body, bg=SURFACE, height=34)
+        titlebar.pack(fill="x")
+        titlebar.pack_propagate(False)
+        self._bind_drag(titlebar, window)
+        logo_image = self.icons.app_logo(18)
+        logo = tk.Label(titlebar, image=logo_image, bg=SURFACE, bd=0)
+        logo.image = logo_image
+        logo.pack(side="left", padx=(8, 3), pady=8)
+        self._bind_drag(logo, window)
+        title = tk.Label(
+            titlebar,
+            text="问题反馈",
+            bg=SURFACE,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        title.pack(side="left")
+        self._bind_drag(title, window)
+        self._label_button(
+            titlebar,
+            "×",
+            self._close_feedback_window,
+            width=34,
+            hover="#7f2d35",
+            fg="#c5ccd3",
+            font=("Segoe UI", 13),
+        ).pack(side="right", fill="y")
+
+        content = tk.Frame(body, bg=BG)
+        content.pack(fill="both", expand=True, padx=22, pady=(16, 18))
+        tk.Label(
+            content,
+            text="请描述出现问题前后的操作和实际表现，信息越具体越容易定位。",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="x", pady=(0, 12))
+
+        category_row = tk.Frame(content, bg=BG)
+        category_row.pack(fill="x", pady=(0, 9))
+        tk.Label(
+            category_row,
+            text="问题类型",
+            bg=BG,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(side="left")
+        self.feedback_category_var = tk.StringVar(
+            master=window, value=FEEDBACK_CATEGORIES[0][0]
+        )
+        category_menu = tk.OptionMenu(
+            category_row,
+            self.feedback_category_var,
+            *(label for label, _value in FEEDBACK_CATEGORIES),
+        )
+        category_menu.configure(
+            bg=PANEL,
+            fg=TEXT,
+            activebackground=PANEL_2,
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            width=14,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9),
+        )
+        category_menu["menu"].configure(
+            bg=PANEL,
+            fg=TEXT,
+            activebackground=PANEL_2,
+            activeforeground=TEXT,
+            font=("Microsoft YaHei UI", 9),
+        )
+        category_menu.pack(side="right")
+
+        tk.Label(
+            content,
+            text="问题描述",
+            bg=BG,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(fill="x", pady=(0, 6))
+        self.feedback_content = tk.Text(
+            content,
+            height=8,
+            wrap="word",
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground="#315d52",
+            selectforeground=TEXT,
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=8,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.feedback_content.pack(fill="both", expand=True)
+
+        self.feedback_diagnostics_var = tk.BooleanVar(master=window, value=True)
+        diagnostics_toggle = tk.Checkbutton(
+            content,
+            text="附带运行摘要",
+            variable=self.feedback_diagnostics_var,
+            bg=BG,
+            fg=MUTED,
+            activebackground=BG,
+            activeforeground=TEXT,
+            selectcolor=PANEL,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+            font=("Microsoft YaHei UI", 8),
+        )
+        diagnostics_toggle.pack(anchor="w", pady=(8, 3))
+
+        footer = tk.Frame(content, bg=BG, height=35)
+        footer.pack(fill="x", pady=(3, 0))
+        footer.pack_propagate(False)
+        self.feedback_status_label = tk.Label(
+            footer,
+            text="",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.feedback_status_label.pack(side="left", fill="both", expand=True)
+        self.feedback_submit_button = self._label_button(
+            footer,
+            "提交反馈",
+            self._submit_feedback,
+            width=88,
+            bg=ACCENT,
+            hover="#86edca",
+            fg="#07110e",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.feedback_submit_button.pack(side="right", fill="y")
+        window.after(20, lambda: self._apply_windows_style(window))
+
+    def _feedback_character_name(self) -> str:
+        if self.model.self_id is None:
+            return ""
+        return self.model.display_name(int(self.model.self_id or 0)).strip()[:48]
+
+    @staticmethod
+    def _recent_error_excerpt() -> dict[str, object]:
+        path = APP_DIR / "dps_error.log"
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                handle.seek(max(0, size - 8192))
+                text = handle.read(8192).decode("utf-8", errors="replace")
+            home = str(Path.home())
+            if home:
+                text = text.replace(home, "%USERPROFILE%")
+            return {
+                "updated_at": path.stat().st_mtime,
+                "tail": text[-6000:],
+            }
+        except OSError:
+            return {}
+
+    def _collect_feedback_diagnostics(self) -> dict[str, object]:
+        now = time.time()
+        participants = []
+        for actor in self.model.current_stats()[:12]:
+            skills = sorted(
+                actor.skills.values(), key=lambda value: value.damage, reverse=True
+            )[:8]
+            participants.append(
+                {
+                    "actor_id": str(actor.actor_id),
+                    "name": self.model.display_name(actor.actor_id),
+                    "profession_id": self.model.actor_profession_id(actor.actor_id),
+                    "damage": int(actor.damage),
+                    "hits": int(actor.hits),
+                    "skills": [
+                        {
+                            "skill_id": int(skill.skill_id),
+                            "name": self.model.display_skill_name(
+                                actor.actor_id, skill.skill_id
+                            ),
+                            "damage": int(skill.damage),
+                            "hits": int(skill.hits),
+                        }
+                        for skill in skills
+                    ],
+                }
+            )
+        monster = self.model.current_monster()
+        monster_summary = None
+        if monster is not None:
+            monster_summary = {
+                "entity_id": str(monster.entity_id),
+                "name": monster.name,
+                "entity_type": monster.entity_type,
+                "template_id": monster.template_id,
+                "level": monster.level,
+                "boss_type": monster.boss_type,
+                "boss_rank": monster.boss_rank,
+                "current_hp": monster.current_hp,
+                "max_hp": monster.max_hp,
+                "observed_max_hp": monster.observed_max_hp,
+            }
+        capture_files = []
+        try:
+            recent_logs = sorted(
+                LOG_DIR.glob("network_*.jsonl"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )[:3]
+            for path in recent_logs:
+                stat = path.stat()
+                capture_files.append(
+                    {
+                        "name": path.name,
+                        "size": stat.st_size,
+                        "updated_at": stat.st_mtime,
+                    }
+                )
+        except OSError:
+            capture_files = []
+        recent_combats = []
+        for record in self.history_store.load_recent(3):
+            monster_record = record.get("monster")
+            history_monster_summary = (
+                dict(monster_record)
+                if isinstance(monster_record, dict)
+                else None
+            )
+            recent_combats.append(
+                {
+                    "encounter_id": str(record.get("encounter_id", "")),
+                    "ended_at_epoch": float(
+                        record.get("ended_at_epoch", 0.0) or 0.0
+                    ),
+                    "archive_reason": str(record.get("archive_reason", "")),
+                    "duration_seconds": float(
+                        record.get("duration_seconds", 0.0) or 0.0
+                    ),
+                    "total_damage": int(record.get("total_damage", 0) or 0),
+                    "team_size": int(record.get("team_size", 0) or 0),
+                    "monster": history_monster_summary,
+                    "participants": [
+                        {
+                            "actor_id": str(item.get("actor_id", "")),
+                            "name": str(item.get("name", "")),
+                            "profession_id": item.get("profession_id"),
+                            "damage": int(item.get("damage", 0) or 0),
+                        }
+                        for item in record.get("participants", [])[:12]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        return {
+            "app_version": CLIENT_BUILD,
+            "display_version": APP_VERSION,
+            "runtime": "packaged" if IS_FROZEN else "source",
+            "platform": sys.platform,
+            "connected": bool(self.connected),
+            "game_pid": int(self.game_pid or 0),
+            "capture_started": bool(self.capture_started),
+            "capture_pipeline": self.worker.diagnostic_snapshot(),
+            "compact_mode": bool(self.compact_mode),
+            "boss_only": bool(self.model.boss_only),
+            "combat": {
+                "active": bool(self.model.active(now)),
+                "duration_seconds": round(self.model.duration(now), 3),
+                "end_reason": self.model.combat_end_reason,
+                "participant_count": len(participants),
+                "party_known": bool(self.model.party_known),
+                "party_member_count": int(self.model.party_member_count),
+                "encounter_target_ids": [
+                    str(entity_id)
+                    for entity_id in sorted(self.model.encounter_target_ids)
+                ],
+                "self_id": (
+                    str(self.model.self_id) if self.model.self_id is not None else ""
+                ),
+                "monster": monster_summary,
+                "participants": participants,
+                "team_damage_states": [
+                    {
+                        "actor_id": str(actor_id),
+                        "last_absolute": int(state.last_absolute),
+                        "accepted_damage": int(state.accepted_damage),
+                        "has_snapshot": bool(state.has_snapshot),
+                    }
+                    for actor_id, state in list(
+                        self.model.team_damage_states.items()
+                    )[:12]
+                ],
+            },
+            "recent_combats": recent_combats,
+            "capture_files": capture_files,
+            "last_error": self._recent_error_excerpt(),
+        }
+
+    def _submit_feedback(self) -> None:
+        if self.feedback_submitting or self.feedback_content is None:
+            return
+        content = self.feedback_content.get("1.0", "end-1c").strip()
+        if not content:
+            if self.feedback_status_label is not None:
+                self.feedback_status_label.configure(
+                    text="请先填写问题描述。", fg=ERROR
+                )
+            return
+        if len(content) > 2000:
+            if self.feedback_status_label is not None:
+                self.feedback_status_label.configure(
+                    text="问题描述最多 2000 个字。", fg=ERROR
+                )
+            return
+        selected_label = (
+            self.feedback_category_var.get()
+            if self.feedback_category_var is not None
+            else FEEDBACK_CATEGORIES[0][0]
+        )
+        category = next(
+            (
+                value
+                for label, value in FEEDBACK_CATEGORIES
+                if label == selected_label
+            ),
+            "other",
+        )
+        diagnostics = (
+            self._collect_feedback_diagnostics()
+            if self.feedback_diagnostics_var is not None
+            and self.feedback_diagnostics_var.get()
+            else {}
+        )
+        character_name = self._feedback_character_name()
+        self.feedback_submitting = True
+        if self.feedback_status_label is not None:
+            self.feedback_status_label.configure(text="正在提交…", fg=MUTED)
+        if self.feedback_submit_button is not None:
+            self.feedback_submit_button.configure(
+                text="正在提交", bg=PANEL_2, fg=MUTED
+            )
+
+        def submit() -> None:
+            try:
+                result = self.licensing.submit_feedback(
+                    category=category,
+                    content=content,
+                    character_name=character_name,
+                    diagnostics=diagnostics,
+                )
+                payload = {
+                    "accepted": result.accepted,
+                    "feedback_id": result.feedback_id,
+                    "message": result.message,
+                }
+            except LicensingConnectionError as exc:
+                payload = {"accepted": False, "message": str(exc)}
+            except Exception:
+                payload = {
+                    "accepted": False,
+                    "message": "反馈提交失败，请稍后重试。",
+                }
+            self.messages.put(("feedback_result", payload))
+
+        threading.Thread(target=submit, name="feedback-submit", daemon=True).start()
+
+    def _handle_feedback_result(self, payload: object) -> None:
+        self.feedback_submitting = False
+        if self.feedback_submit_button is not None:
+            self.feedback_submit_button.configure(
+                text="提交反馈", bg=ACCENT, fg="#07110e"
+            )
+        if not isinstance(payload, dict):
+            payload = {}
+        accepted = bool(payload.get("accepted"))
+        feedback_id = str(payload.get("feedback_id", "")).strip()
+        message = str(payload.get("message", "")).strip()
+        if self.feedback_status_label is not None:
+            if accepted:
+                shown = message or "反馈已提交。"
+                if feedback_id:
+                    shown = f"{shown} 编号：{feedback_id}"
+                self.feedback_status_label.configure(text=shown, fg=ACCENT)
+            else:
+                self.feedback_status_label.configure(
+                    text=message or "反馈提交失败，请稍后重试。", fg=ERROR
+                )
+        if accepted and self.feedback_content is not None:
+            self.feedback_content.delete("1.0", "end")
+
+    def _close_feedback_window(self) -> None:
+        if self.feedback_window is not None and self.feedback_window.winfo_exists():
+            self.feedback_window.destroy()
+        self.feedback_window = None
+        self.feedback_category_var = None
+        self.feedback_content = None
+        self.feedback_diagnostics_var = None
+        self.feedback_status_label = None
+        self.feedback_submit_button = None
+        self.tray_feedback_hidden = False
+
+    def _flush_combat_history(self) -> int:
+        records = self.model.pop_completed_combats()
+        saved = 0
+        failed: list[dict] = []
+        for record in records:
+            try:
+                self.history_store.save(record)
+                saved += 1
+            except (OSError, ValueError, TypeError):
+                failed.append(record)
+        if failed:
+            self.model.completed_combats.extend(failed)
+        if (
+            saved
+            and self.history_window is not None
+            and self.history_window.winfo_exists()
+            and self.history_window.state() == "normal"
+        ):
+            self._refresh_history_records()
+        return saved
+
+    def _selected_history_record(self) -> dict | None:
+        for record in self.history_records:
+            if str(record.get("encounter_id", "")) == self.history_selected_id:
+                return record
+        return None
+
+    @staticmethod
+    def _history_actor_name(participant: dict, index: int, hide_names: bool) -> str:
+        if hide_names:
+            return f"玩家{index + 1}"
+        return str(participant.get("name", "")).strip() or f"玩家{index + 1}"
+
+    @staticmethod
+    def _history_share_text(
+        record: dict, hide_names: bool = False, max_length: int = 110
+    ) -> str:
+        participants = record.get("participants", [])
+        if not isinstance(participants, list) or max_length <= 0:
+            return ""
+        try:
+            duration = max(1.0, float(record.get("duration_seconds", 0.0) or 0.0))
+        except (TypeError, ValueError, OverflowError):
+            duration = 1.0
+        parts: list[str] = []
+        for index, participant in enumerate(participants):
+            if not isinstance(participant, dict):
+                continue
+            name = DpsWindow._history_actor_name(participant, index, hide_names)
+            name = re.sub(r"[\s:：;；]+", "", name).strip()
+            if not name:
+                name = f"玩家{index + 1}"
+            if not hide_names:
+                name = name[:2]
+            try:
+                damage = max(0.0, float(participant.get("damage", 0.0) or 0.0))
+                dps = float(participant.get("dps", damage / duration) or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                dps = 0.0
+            part = f"{name}:{max(0.0, dps) / 10_000:.1f}w"
+            candidate = " ".join([*parts, part])
+            if len(candidate) > max_length:
+                break
+            parts.append(part)
+        return " ".join(parts)
+
+    @staticmethod
+    def _history_timestamp(record: dict) -> str:
+        try:
+            value = float(record.get("ended_at_epoch", 0.0) or 0.0)
+            return dt.datetime.fromtimestamp(value).strftime("%Y-%m-%d  %H:%M")
+        except (OSError, OverflowError, TypeError, ValueError):
+            return "时间未知"
+
+    @staticmethod
+    def _history_is_boss(record: dict) -> bool:
+        monster = record.get("monster")
+        if not isinstance(monster, dict):
+            return False
+        try:
+            boss_rank = int(monster.get("boss_rank", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            boss_rank = 0
+        try:
+            boss_type = int(monster.get("boss_type", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            boss_type = 0
+        entity_type = str(monster.get("entity_type", "")).casefold()
+        return (
+            boss_rank >= 3
+            or boss_type == 3
+            or "boss" in entity_type
+            or "首领" in entity_type
+        )
+
+    def _initial_history_geometry(self, x: int, y: int) -> str:
+        saved = str(self.config.get("history_geometry", ""))
+        match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+[+-]\d+)", saved)
+        if match:
+            width, height, position = match.groups()
+            upgraded = f"{max(760, int(width))}x{max(720, int(height))}{position}"
+            return self._visible_geometry(upgraded, 880, 720)
+        return self._visible_geometry(f"880x720+{x}+{y}", 880, 720)
+
+    def show_history(self) -> None:
+        if self.history_window is None or not self.history_window.winfo_exists():
+            self._build_history_window()
+        self.tray_history_hidden = False
+        self.history_window.deiconify()
+        self.history_window.lift()
+        self.history_window.focus_force()
+        self._refresh_history_records()
+
+    def _build_history_window(self) -> None:
+        x = max(0, self.root.winfo_rootx() + 24)
+        y = max(0, self.root.winfo_rooty() + 24)
+        window = tk.Toplevel(self.root)
+        self.history_window = window
+        window.title(f"{APP_TITLE} · 战斗历史")
+        window.configure(bg=BORDER)
+        window.geometry(self._initial_history_geometry(x, y))
+        window.minsize(760, 600)
+        window.attributes("-topmost", bool(self.root.attributes("-topmost")))
+        window.attributes("-alpha", 1.0)
+        window.overrideredirect(True)
+        window.protocol("WM_DELETE_WINDOW", self._close_history_window)
+        window.bind("<Escape>", lambda _event: self._close_history_window())
+
+        shell = tk.Frame(window, bg=BORDER)
+        shell.pack(fill="both", expand=True)
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+
+        titlebar = tk.Frame(body, bg=SURFACE, height=34)
+        titlebar.pack(fill="x")
+        titlebar.pack_propagate(False)
+        self._bind_drag(titlebar, window)
+        logo_image = self.icons.app_logo(18)
+        logo = tk.Label(titlebar, image=logo_image, bg=SURFACE, bd=0)
+        logo.image = logo_image
+        logo.pack(side="left", padx=(8, 3), pady=8)
+        self._bind_drag(logo, window)
+        title = tk.Label(
+            titlebar,
+            text="战斗历史",
+            bg=SURFACE,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        title.pack(side="left")
+        self._bind_drag(title, window)
+        self._label_button(
+            titlebar,
+            "×",
+            self._close_history_window,
+            width=34,
+            hover="#7f2d35",
+            fg="#c5ccd3",
+            font=("Segoe UI", 13),
+        ).pack(side="right", fill="y")
+        self.history_max_button = self._label_button(
+            titlebar,
+            "□",
+            lambda: self._toggle_maximize(window),
+            width=34,
+            font=("Segoe UI", 10),
+        )
+        self.history_max_button.pack(side="right", fill="y")
+        self._label_button(
+            titlebar,
+            "—",
+            self._minimize_history,
+            width=34,
+            font=("Segoe UI", 9),
+        ).pack(side="right", fill="y")
+
+        toolbar = tk.Frame(body, bg=BG, height=38)
+        toolbar.pack(fill="x", padx=8, pady=(5, 4))
+        toolbar.pack_propagate(False)
+        self.history_count_label = tk.Label(
+            toolbar,
+            text="0 场战斗",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        self.history_count_label.pack(side="left", fill="y")
+        share_button = self._action_button(toolbar, "分享", self._share_history)
+        share_button.pack(side="right", pady=7)
+        delete_button = self._action_button(toolbar, "删除", self._delete_history)
+        delete_button.pack(side="right", padx=(0, 4), pady=7)
+        self.history_favorite_button = self._action_button(
+            toolbar, "收藏", self._toggle_history_favorite
+        )
+        self.history_favorite_button.pack(side="right", padx=(0, 4), pady=7)
+
+        content = tk.Frame(body, bg=BG)
+        content.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+        left = tk.Frame(
+            content,
+            width=274,
+            bg=PANEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        left_header = tk.Label(
+            left,
+            text="战斗记录",
+            bg=SURFACE,
+            fg=MUTED,
+            height=2,
+            anchor="w",
+            padx=10,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        left_header.pack(fill="x")
+        list_area = tk.Frame(left, bg=PANEL)
+        list_area.pack(fill="both", expand=True)
+        self.history_list_canvas = tk.Canvas(
+            list_area,
+            bg=PANEL,
+            bd=0,
+            highlightthickness=0,
+            yscrollincrement=66,
+        )
+        self.history_list_canvas.pack(fill="both", expand=True)
+        self.history_list_canvas.bind(
+            "<MouseWheel>",
+            lambda event: self.history_list_canvas.yview_scroll(
+                -1 if event.delta > 0 else 1, "units"
+            ),
+        )
+        self.history_list_canvas.bind(
+            "<Configure>", lambda _event: self._draw_history_list()
+        )
+
+        right = tk.Frame(content, bg=BG)
+        right.pack(side="left", fill="both", expand=True, padx=(7, 0))
+        summary = tk.Frame(
+            right,
+            bg=SURFACE,
+            height=82,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        summary.pack(fill="x")
+        summary.pack_propagate(False)
+        self.history_target_label = tk.Label(
+            summary,
+            text="请选择战斗记录",
+            bg=SURFACE,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        )
+        self.history_target_label.pack(fill="x", padx=12, pady=(9, 0))
+        self.history_time_label = tk.Label(
+            summary,
+            text="--",
+            bg=SURFACE,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.history_time_label.pack(fill="x", padx=12, pady=(1, 0))
+        self.history_metrics_label = tk.Label(
+            summary,
+            text="总伤害  0     团队 DPS  0     队伍  0 人",
+            bg=SURFACE,
+            fg=ACCENT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.history_metrics_label.pack(fill="x", padx=12, pady=(5, 0))
+
+        tk.Label(
+            right,
+            text="团队伤害",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill="x", pady=(7, 3))
+        self.history_participant_panel = tk.Frame(
+            right,
+            bg=PANEL,
+            height=206,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        self.history_participant_panel.pack(fill="x")
+        self.history_participant_panel.pack_propagate(False)
+        self.history_participant_canvas = tk.Canvas(
+            self.history_participant_panel,
+            bg=PANEL,
+            bd=0,
+            highlightthickness=0,
+            yscrollincrement=34,
+        )
+        self.history_participant_canvas.pack(fill="both", expand=True)
+        self.history_participant_canvas.bind(
+            "<MouseWheel>",
+            lambda event: self.history_participant_canvas.yview_scroll(
+                -1 if event.delta > 0 else 1, "units"
+            ),
+        )
+        self.history_participant_canvas.bind(
+            "<Configure>", lambda _event: self._draw_history_participants()
+        )
+
+        tk.Label(
+            right,
+            text="技能明细",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill="x", pady=(7, 3))
+        skill_panel = tk.Frame(
+            right,
+            bg=PANEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        skill_panel.pack(fill="both", expand=True)
+        self.history_skill_canvas = tk.Canvas(
+            skill_panel,
+            bg=PANEL,
+            bd=0,
+            highlightthickness=0,
+            yscrollincrement=34,
+        )
+        self.history_skill_canvas.pack(fill="both", expand=True)
+        self.history_skill_canvas.bind(
+            "<MouseWheel>",
+            lambda event: self.history_skill_canvas.yview_scroll(
+                -1 if event.delta > 0 else 1, "units"
+            ),
+        )
+        self.history_skill_canvas.bind(
+            "<Configure>", lambda _event: self._draw_history_skills()
+        )
+
+        grip = tk.Label(
+            body,
+            text="◢",
+            bg=BG,
+            fg=SUBTLE,
+            cursor="size_nw_se",
+            font=("Segoe UI", 9),
+        )
+        grip.place(relx=1.0, rely=1.0, anchor="se")
+        grip.bind("<ButtonPress-1>", lambda event: self._resize_start(event, window))
+        grip.bind(
+            "<B1-Motion>", lambda event: self._resize_move(event, window, 760, 600)
+        )
+        window.after(20, lambda: self._apply_windows_style(window))
+
+    def _refresh_history_records(self) -> None:
+        current = self.history_selected_id
+        self.history_records = [
+            record
+            for record in self.history_store.load_recent(500)
+            if not self.model.boss_only or self._history_is_boss(record)
+        ]
+        self.history_records.sort(
+            key=lambda item: (
+                bool(item.get("favorite", False)),
+                float(item.get("ended_at_epoch", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
+        ids = {str(item.get("encounter_id", "")) for item in self.history_records}
+        if current not in ids:
+            current = (
+                str(self.history_records[0].get("encounter_id", ""))
+                if self.history_records
+                else ""
+            )
+            self.history_selected_actor = 0
+        self.history_selected_id = current
+        if self.history_count_label is not None:
+            favorites = sum(bool(item.get("favorite")) for item in self.history_records)
+            suffix = f" · 收藏 {favorites}" if favorites else ""
+            self.history_count_label.configure(
+                text=f"{len(self.history_records)} 场战斗{suffix}"
+            )
+        self._render_history_selection()
+
+    def _draw_history_list(self) -> None:
+        canvas = self.history_list_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        row_height = 66
+        if not self.history_records:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="暂无战斗记录",
+                fill=MUTED,
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        for index, record in enumerate(self.history_records):
+            top = index * row_height
+            bottom = top + row_height
+            encounter_id = str(record.get("encounter_id", ""))
+            selected = encounter_id == self.history_selected_id
+            base = PANEL_2 if selected else (PANEL if index % 2 == 0 else SURFACE)
+            accent = ACCENT if selected else BORDER
+            monster = record.get("monster")
+            monster = monster if isinstance(monster, dict) else {}
+            target_name = str(monster.get("name", "")).strip() or (
+                "Boss战斗" if self._history_is_boss(record) else "怪物战斗"
+            )
+            level = int(monster.get("level", 0) or 0)
+            if level:
+                target_name += f"  Lv.{level}"
+            favorite = "★  " if record.get("favorite") else ""
+            tag = f"history:{index}"
+            canvas.create_rectangle(
+                0, top, width, bottom - 1, fill=base, outline="", tags=(tag,)
+            )
+            canvas.create_rectangle(
+                0, top, 3, bottom - 1, fill=accent, outline="", tags=(tag,)
+            )
+            canvas.create_text(
+                11,
+                top + 13,
+                text=f"{favorite}{target_name}",
+                fill=TEXT,
+                anchor="w",
+                font=("Microsoft YaHei UI", 8, "bold"),
+                tags=(tag,),
+            )
+            canvas.create_text(
+                11,
+                top + 34,
+                text=self._history_timestamp(record),
+                fill=MUTED,
+                anchor="w",
+                font=("Microsoft YaHei UI", 7),
+                tags=(tag,),
+            )
+            canvas.create_text(
+                11,
+                top + 52,
+                text=(
+                    f"{format_duration(float(record.get('duration_seconds', 0) or 0))}"
+                    f"   总伤害 {format_number(record.get('total_damage', 0))}"
+                ),
+                fill=ACCENT if selected else MUTED,
+                anchor="w",
+                font=("Microsoft YaHei UI", 8, "bold"),
+                tags=(tag,),
+            )
+            canvas.create_line(
+                0, bottom - 1, width, bottom - 1, fill=BORDER, tags=(tag,)
+            )
+            canvas.tag_bind(
+                tag,
+                "<Button-1>",
+                lambda _event, selected_id=encounter_id: self._select_history(
+                    selected_id
+                ),
+            )
+            canvas.tag_bind(tag, "<Enter>", lambda _event: canvas.configure(cursor="hand2"))
+            canvas.tag_bind(tag, "<Leave>", lambda _event: canvas.configure(cursor=""))
+        canvas.configure(
+            scrollregion=(0, 0, width, max(height, len(self.history_records) * row_height))
+        )
+
+    def _select_history(self, encounter_id: str) -> None:
+        self.history_selected_id = str(encounter_id)
+        self.history_selected_actor = 0
+        self._render_history_selection()
+
+    def _render_history_selection(self) -> None:
+        record = self._selected_history_record()
+        if record is None:
+            if self.history_target_label is not None:
+                self.history_target_label.configure(text="暂无战斗记录", fg=MUTED)
+                self.history_time_label.configure(text="--")
+                self.history_metrics_label.configure(
+                    text="总伤害  0     团队 DPS  0     队伍  0 人"
+                )
+            if self.history_favorite_button is not None:
+                self.history_favorite_button.configure(text="收藏", fg=MUTED)
+        else:
+            participants = record.get("participants", [])
+            participants = participants if isinstance(participants, list) else []
+            try:
+                team_size = min(
+                    MAX_PARTY_MEMBERS,
+                    max(
+                        len(participants),
+                        int(record.get("team_size", len(participants))),
+                    ),
+                )
+            except (TypeError, ValueError, OverflowError):
+                team_size = len(participants)
+            actor_ids = [int(item.get("actor_id", 0) or 0) for item in participants]
+            if self.history_selected_actor not in actor_ids:
+                self.history_selected_actor = actor_ids[0] if actor_ids else 0
+            monster = record.get("monster")
+            monster = monster if isinstance(monster, dict) else {}
+            target_name = str(monster.get("name", "")).strip() or (
+                "Boss战斗" if self._history_is_boss(record) else "怪物战斗"
+            )
+            level = int(monster.get("level", 0) or 0)
+            if level:
+                target_name += f"  Lv.{level}"
+            self.history_target_label.configure(text=target_name, fg=TEXT)
+            self.history_time_label.configure(
+                text=(
+                    f"{self._history_timestamp(record)}   ·   "
+                    f"{format_duration(float(record.get('duration_seconds', 0) or 0))}"
+                )
+            )
+            self.history_metrics_label.configure(
+                text=(
+                    f"总伤害  {format_number(record.get('total_damage', 0))}     "
+                    f"团队 DPS  {format_number(record.get('team_dps', 0))}     "
+                    f"队伍  {team_size} 人"
+                )
+            )
+            if self.history_favorite_button is not None:
+                favorite = bool(record.get("favorite"))
+                self.history_favorite_button.configure(
+                    text="已收藏" if favorite else "收藏",
+                    fg=ACCENT if favorite else MUTED,
+                )
+        participant_count = len(participants) if record is not None else 0
+        if self.history_participant_panel is not None:
+            visible_rows = min(12, max(6, participant_count))
+            self.history_participant_panel.configure(height=visible_rows * 34 + 2)
+        self._draw_history_list()
+        self._draw_history_participants()
+        self._draw_history_skills()
+
+    def _draw_history_participants(self) -> None:
+        canvas = self.history_participant_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        record = self._selected_history_record()
+        participants = record.get("participants", []) if record else []
+        participants = participants if isinstance(participants, list) else []
+        if not participants:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="暂无团队伤害",
+                fill=MUTED,
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        damage_x, share_x, dps_x = int(width * 0.62), int(width * 0.79), width - 12
+        row_height = 34
+        for index, participant in enumerate(participants):
+            top = index * row_height
+            bottom = top + row_height
+            actor_id = int(participant.get("actor_id", 0) or 0)
+            selected = actor_id == self.history_selected_actor
+            class_id = int(participant.get("profession_id", 0) or 0)
+            _profession, color = self._profession_info(class_id)
+            base = PANEL_2 if selected else (PANEL if index % 2 == 0 else SURFACE)
+            share = float(participant.get("share", 0.0) or 0.0)
+            tag = f"history-actor:{index}"
+            canvas.create_rectangle(
+                0, top, width, bottom - 1, fill=base, outline="", tags=(tag,)
+            )
+            canvas.create_rectangle(
+                0,
+                top,
+                max(3, int(width * max(0.0, min(1.0, share)))),
+                bottom - 1,
+                fill=blend_color(base, color, 0.38),
+                outline="",
+                tags=(tag,),
+            )
+            canvas.create_text(
+                9,
+                top + 17,
+                text=f"{index + 1}. {self._history_actor_name(participant, index, self.hide_names)}",
+                fill=TEXT,
+                anchor="w",
+                font=("Microsoft YaHei UI", 8, "bold"),
+                tags=(tag,),
+            )
+            canvas.create_text(
+                damage_x,
+                top + 17,
+                text=format_number(participant.get("damage", 0)),
+                fill=TEXT,
+                anchor="e",
+                font=("Segoe UI", 8, "bold"),
+                tags=(tag,),
+            )
+            canvas.create_text(
+                share_x,
+                top + 17,
+                text=f"{share * 100:.1f}%",
+                fill=TEXT,
+                anchor="e",
+                font=("Segoe UI", 8),
+                tags=(tag,),
+            )
+            canvas.create_text(
+                dps_x,
+                top + 17,
+                text=format_number(participant.get("dps", 0)),
+                fill=TEXT,
+                anchor="e",
+                font=("Segoe UI", 8, "bold"),
+                tags=(tag,),
+            )
+            canvas.tag_bind(
+                tag,
+                "<Button-1>",
+                lambda _event, selected_actor=actor_id: self._select_history_actor(
+                    selected_actor
+                ),
+            )
+            canvas.tag_bind(tag, "<Enter>", lambda _event: canvas.configure(cursor="hand2"))
+            canvas.tag_bind(tag, "<Leave>", lambda _event: canvas.configure(cursor=""))
+        canvas.configure(
+            scrollregion=(0, 0, width, max(height, len(participants) * row_height))
+        )
+
+    def _select_history_actor(self, actor_id: int) -> None:
+        self.history_selected_actor = int(actor_id)
+        self._draw_history_participants()
+        self._draw_history_skills()
+
+    def _draw_history_skills(self) -> None:
+        canvas = self.history_skill_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        record = self._selected_history_record()
+        participants = record.get("participants", []) if record else []
+        participants = participants if isinstance(participants, list) else []
+        participant = next(
+            (
+                item
+                for item in participants
+                if int(item.get("actor_id", 0) or 0) == self.history_selected_actor
+            ),
+            None,
+        )
+        skills = participant.get("skills", []) if isinstance(participant, dict) else []
+        skills = skills if isinstance(skills, list) else []
+        if not skills and isinstance(participant, dict):
+            try:
+                aggregate_damage = max(0, int(participant.get("damage", 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                aggregate_damage = 0
+            if aggregate_damage:
+                skills = [
+                    {
+                        "name": "团队伤害汇总",
+                        "damage": aggregate_damage,
+                        "share": 1.0,
+                        "hits": None,
+                        "max_hit": None,
+                    }
+                ]
+        if not skills:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="暂无技能明细",
+                fill=MUTED,
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        damage_x, share_x, hits_x, max_x = (
+            int(width * 0.58),
+            int(width * 0.73),
+            int(width * 0.83),
+            width - 12,
+        )
+        row_height = 34
+        for index, skill in enumerate(skills):
+            top = index * row_height
+            bottom = top + row_height
+            base = PANEL if index % 2 == 0 else SURFACE
+            hits_value = skill.get("hits")
+            max_hit_value = skill.get("max_hit")
+            hits_text = "--" if hits_value is None else f"{int(hits_value or 0)} 次"
+            max_hit_text = (
+                "--" if max_hit_value is None else format_number(max_hit_value)
+            )
+            canvas.create_rectangle(0, top, width, bottom - 1, fill=base, outline="")
+            canvas.create_text(
+                9,
+                top + 17,
+                text=str(skill.get("name", "")).strip() or "未命名技能",
+                fill=TEXT,
+                anchor="w",
+                font=("Microsoft YaHei UI", 8, "bold"),
+            )
+            canvas.create_text(
+                damage_x,
+                top + 17,
+                text=format_number(skill.get("damage", 0)),
+                fill=TEXT,
+                anchor="e",
+                font=("Segoe UI", 8, "bold"),
+            )
+            canvas.create_text(
+                share_x,
+                top + 17,
+                text=f"{float(skill.get('share', 0.0) or 0.0) * 100:.1f}%",
+                fill=TEXT,
+                anchor="e",
+                font=("Segoe UI", 8),
+            )
+            canvas.create_text(
+                hits_x,
+                top + 17,
+                text=hits_text,
+                fill=TEXT,
+                anchor="e",
+                font=("Microsoft YaHei UI", 8),
+            )
+            canvas.create_text(
+                max_x,
+                top + 17,
+                text=max_hit_text,
+                fill=TEXT,
+                anchor="e",
+                font=("Segoe UI", 8),
+            )
+        canvas.configure(scrollregion=(0, 0, width, max(height, len(skills) * row_height)))
+
+    def _toggle_history_favorite(self) -> None:
+        record = self._selected_history_record()
+        if record is None:
+            return
+        updated = self.history_store.set_favorite(
+            record.get("encounter_id"), not bool(record.get("favorite"))
+        )
+        if updated is not None:
+            self._refresh_history_records()
+
+    def _delete_history(self) -> None:
+        record = self._selected_history_record()
+        if record is None:
+            return
+        encounter_id = record.get("encounter_id")
+
+        def remove() -> None:
+            self.history_store.delete(encounter_id)
+            self.history_selected_id = ""
+            self.history_selected_actor = 0
+            self._refresh_history_records()
+
+        self._show_notice(
+            "删除战斗记录",
+            "确定删除选中的战斗记录？此操作无法撤销。",
+            parent=self.history_window,
+            confirm_text="删除",
+            cancel_text="取消",
+            on_confirm=remove,
+        )
+
+    def _share_history(self) -> None:
+        record = self._selected_history_record()
+        if record is None:
+            return
+        text = self._history_share_text(record, self.hide_names)
+        self._copy_share_text(text, self.history_window)
+
+    def _share_current(self) -> None:
+        record = self.model.build_combat_record("share")
+        text = self._history_share_text(record or {}, self.hide_names)
+        self._copy_share_text(text, self.root)
+
+    def _copy_share_text(self, text: str, parent: tk.Misc | None) -> None:
+        if not text:
+            self._show_notice("分享 DPS", "当前没有可分享的 DPS。", parent=parent)
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update_idletasks()
+        self._show_notice("分享 DPS", "已复制到剪贴板。", parent=parent)
+
+    @staticmethod
+    def _notice_dimensions(message: object) -> tuple[int, int]:
+        text = str(message or "")
+        visual_lines = 0
+        widest = 0
+        for line in text.splitlines() or [""]:
+            units = sum(2 if ord(char) > 0x7F else 1 for char in line)
+            widest = max(widest, units)
+            visual_lines += max(1, (units + 41) // 42)
+        width = 350 if widest <= 34 else 390
+        height = min(286, 132 + max(0, visual_lines - 1) * 18)
+        return width, height
+
+    def _show_notice(
+        self,
+        title_text: str,
+        message: str,
+        *,
+        parent: tk.Misc | None = None,
+        confirm_text: str = "确定",
+        cancel_text: str = "",
+        on_confirm=None,
+    ) -> None:
+        self._close_notice_window()
+        anchor = parent if parent is not None and parent.winfo_exists() else self.root
+        width, height = self._notice_dimensions(message)
+        anchor.update_idletasks()
+        x = anchor.winfo_rootx() + max(0, (anchor.winfo_width() - width) // 2)
+        y = anchor.winfo_rooty() + max(0, (anchor.winfo_height() - height) // 2)
+        window = tk.Toplevel(self.root)
+        self.notice_window = window
+        window.title(f"{APP_NAME} · {title_text}")
+        window.configure(bg=BORDER)
+        window.geometry(self._visible_geometry(f"{width}x{height}+{x}+{y}", width, height))
+        window.resizable(False, False)
+        window.attributes("-topmost", True)
+        window.attributes("-alpha", 1.0)
+        window.overrideredirect(True)
+        window.protocol("WM_DELETE_WINDOW", self._close_notice_window)
+        window.bind("<Escape>", lambda _event: self._close_notice_window())
+
+        body = tk.Frame(window, bg=BG)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+        titlebar = tk.Frame(body, bg=SURFACE, height=30)
+        titlebar.pack(fill="x")
+        titlebar.pack_propagate(False)
+        self._bind_drag(titlebar, window)
+        tk.Label(
+            titlebar,
+            text=title_text,
+            bg=SURFACE,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(side="left", padx=10)
+        close_button = self._label_button(
+            titlebar,
+            "×",
+            self._close_notice_window,
+            width=30,
+            hover="#7f2d35",
+            fg="#c5ccd3",
+            font=("Segoe UI", 12),
+        )
+        close_button.pack(side="right", fill="y")
+        content = tk.Frame(body, bg=BG)
+        content.pack(fill="both", expand=True, padx=22, pady=(14, 12))
+        tk.Label(
+            content,
+            text=str(message),
+            bg=BG,
+            fg="#d7dde4",
+            justify="left",
+            anchor="w",
+            wraplength=width - 46,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="both", expand=True)
+        buttons = tk.Frame(content, bg=BG)
+        buttons.pack(fill="x")
+
+        def confirm() -> None:
+            self._close_notice_window()
+            if on_confirm is not None:
+                on_confirm()
+
+        if cancel_text:
+            cancel = self._action_button(buttons, cancel_text, self._close_notice_window)
+            cancel.configure(padx=14, pady=5, font=("Microsoft YaHei UI", 9))
+            cancel.pack(side="right", padx=(8, 0))
+        confirm_button = self._action_button(buttons, confirm_text, confirm)
+        confirm_button.configure(
+            bg=ACCENT,
+            fg="#07110e",
+            padx=14,
+            pady=5,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        confirm_button.pack(side="right")
+        window.after(20, lambda: self._apply_windows_style(window))
+        window.grab_set()
+        window.lift()
+        window.focus_force()
+
+    def _close_notice_window(self) -> None:
+        if self.notice_window is not None and self.notice_window.winfo_exists():
+            try:
+                self.notice_window.grab_release()
+            except tk.TclError:
+                pass
+            self.notice_window.destroy()
+        self.notice_window = None
+
+    def _minimize_history(self) -> None:
+        if self.history_window is None or not self.history_window.winfo_exists():
+            return
+        self.config["history_geometry"] = self.history_window.geometry()
+        self.history_window.withdraw()
+        self.tray_history_hidden = True
+        save_config(self.config)
+
+    def _close_history_window(self) -> None:
+        if self.history_window is not None and self.history_window.winfo_exists():
+            self.config["history_geometry"] = self.restore_geometry.get(
+                id(self.history_window), self.history_window.geometry()
+            )
+            self.restore_geometry.pop(id(self.history_window), None)
+            self.history_window.destroy()
+        self.history_window = None
+        self.history_list_canvas = None
+        self.history_participant_panel = None
+        self.history_participant_canvas = None
+        self.history_skill_canvas = None
+        self.history_count_label = None
+        self.history_target_label = None
+        self.history_time_label = None
+        self.history_metrics_label = None
+        self.history_favorite_button = None
+        self.history_max_button = None
+        self.tray_history_hidden = False
+        save_config(self.config)
+
+    def _sync_action_buttons(self) -> None:
+        if hasattr(self, "lock_button") and self.lock_button.winfo_exists():
+            self.lock_button.configure(
+                text="🔒" if self.window_locked else "🔓",
+                fg=ACCENT if self.window_locked else MUTED,
+            )
+        self.privacy_button.configure(
+            text="显示名称" if self.hide_names else "隐藏名称",
+            fg=ACCENT if self.hide_names else MUTED,
+        )
+        self.pin_button.configure(
+            fg=ACCENT if bool(self.root.attributes("-topmost")) else MUTED
+        )
+
+    def _sync_expiry_label(self) -> None:
+        if (
+            self.membership_label is None
+            or not self.membership_label.winfo_exists()
+            or self.expiry_label is None
+            or not self.expiry_label.winfo_exists()
+        ):
+            return
+        session = self.licensing.session
+        tier_labels = {
+            "normal": "普通用户",
+            "weekly": "周卡用户",
+            "monthly": "月卡用户",
+            "partner": "莫雪的小伙伴",
+        }
+        membership = tier_labels.get(session.card_tier, "普通用户")
+        if self.membership_label.cget("text") != membership:
+            self.membership_label.configure(text=membership)
+        expires_at = session.expires_at
+        text = (
+            "有效时间：永久"
+            if expires_at is None
+            else f"有效时间：{expires_at:%m-%d %H:%M}"
+        )
+        if self.expiry_label.cget("text") != text:
+            self.expiry_label.configure(text=text)
+
+    def _draw_monster_hp(self) -> None:
+        canvas = self.monster_hp_canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        canvas.create_rectangle(0, 0, width, height, fill=PANEL_2, outline="")
+        monster = self.model.current_monster()
+        if monster is None:
+            self.monster_name_label.configure(text="暂无目标", fg=MUTED)
+            self.monster_hp_text.configure(text="-- / --", fg=MUTED)
+            return
+        display_name = monster.name.strip()
+        if display_name.casefold() in {"首领", "未命名boss"}:
+            display_name = "Boss"
+        if display_name:
+            level = f"  Lv.{monster.level}" if monster.level else ""
+            self.monster_name_label.configure(
+                text=f"{display_name}{level}", fg=TEXT
+            )
+        else:
+            fallback = "Boss" if self.model._monster_rank(monster) > 0 else "怪物"
+            self.monster_name_label.configure(text=fallback, fg=TEXT)
+        current_hp = monster.current_hp
+        max_hp = monster.max_hp
+        hp_ceiling = (
+            max_hp
+            if max_hp is not None and max_hp > 0
+            else monster.observed_max_hp
+        )
+        pending_hp = current_hp is None
+        if current_hp is None:
+            hp_text = f"-- / {format_number(max_hp)}" if max_hp is not None else "-- / --"
+            ratio = 1.0
+        elif hp_ceiling is not None and hp_ceiling > 0:
+            hp_text = f"{format_number(current_hp)} / {format_number(hp_ceiling)}"
+            ratio = min(1.0, max(0.0, current_hp / hp_ceiling))
+        else:
+            hp_text = f"{format_number(current_hp)} / --"
+            ratio = 0.0
+        self.monster_hp_text.configure(text=hp_text, fg=TEXT)
+        if ratio > 0:
+            canvas.create_rectangle(
+                0,
+                0,
+                max(2, int(width * ratio)),
+                height,
+                fill=SUBTLE if pending_hp else ERROR,
+                outline="",
+            )
+        if current_hp is not None and hp_ceiling is not None and hp_ceiling > 0:
+            percentage = ratio * 100.0
+            percentage_text = (
+                f"{percentage:.0f}%"
+                if percentage in (0.0, 100.0)
+                else f"{percentage:.1f}%"
+            )
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text=percentage_text,
+                fill="#ffffff",
+                font=("Segoe UI", 8, "bold"),
+            )
+
+    def _draw_main_header(self) -> None:
+        canvas = self.header_canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        damage_x, share_x, dps_x = self._main_columns(width)
+        font = ("Microsoft YaHei UI", 8, "bold")
+        canvas.create_text(28, 11, text="角色名称", fill=MUTED, anchor="w", font=font)
+        canvas.create_text(damage_x, 11, text="总伤害", fill=MUTED, anchor="e", font=font)
+        canvas.create_text(share_x, 11, text="伤害占比", fill=MUTED, anchor="e", font=font)
+        canvas.create_text(dps_x, 11, text="DPS", fill=MUTED, anchor="e", font=font)
+        canvas.create_line(0, 23, width, 23, fill=BORDER)
+
+        if self.compact_mode:
+            canvas.create_rectangle(
+                width - 54,
+                1,
+                width - 28,
+                22,
+                fill=SURFACE,
+                outline="",
+                tags=("compact_lock", "compact_lock_bg"),
+            )
+            canvas.create_text(
+                width - 41,
+                11,
+                text="🔒" if self.window_locked else "🔓",
+                fill=ACCENT if self.window_locked else TEXT,
+                font=("Segoe UI Emoji", 8),
+                tags=("compact_lock",),
+            )
+            canvas.tag_bind(
+                "compact_lock", "<Button-1>", self._toggle_lock_from_header
+            )
+            canvas.tag_bind(
+                "compact_lock", "<Enter>", self._compact_lock_enter
+            )
+            canvas.tag_bind(
+                "compact_lock", "<Leave>", self._compact_lock_leave
+            )
+            canvas.create_rectangle(
+                width - 27,
+                1,
+                width - 1,
+                22,
+                fill=SURFACE,
+                outline="",
+                tags=("compact_restore", "compact_restore_bg"),
+            )
+            canvas.create_text(
+                width - 14,
+                11,
+                text="▴",
+                fill=TEXT,
+                font=("Segoe UI Symbol", 9, "bold"),
+                tags=("compact_restore",),
+            )
+            canvas.tag_bind(
+                "compact_restore", "<Button-1>", self._restore_compact_from_header
+            )
+            canvas.tag_bind(
+                "compact_restore", "<Enter>", self._compact_restore_enter
+            )
+            canvas.tag_bind(
+                "compact_restore", "<Leave>", self._compact_restore_leave
+            )
+
+    def _toggle_lock_from_header(self, _event=None) -> str:
+        self.toggle_window_lock()
+        return "break"
+
+    def _compact_lock_enter(self, _event=None) -> None:
+        self.header_canvas.configure(cursor="hand2")
+        self.header_canvas.itemconfigure("compact_lock_bg", fill=PANEL_2)
+
+    def _compact_lock_leave(self, _event=None) -> None:
+        self.header_canvas.configure(cursor="")
+        self.header_canvas.itemconfigure("compact_lock_bg", fill=SURFACE)
+
+    def _restore_compact_from_header(self, _event=None) -> str:
+        if self.compact_mode and not self.window_locked:
+            self.toggle_compact_mode()
+        return "break"
+
+    def _compact_restore_enter(self, _event=None) -> None:
+        self.header_canvas.configure(cursor="hand2")
+        self.header_canvas.itemconfigure("compact_restore_bg", fill=PANEL_2)
+
+    def _compact_restore_leave(self, _event=None) -> None:
+        self.header_canvas.configure(cursor="")
+        self.header_canvas.itemconfigure("compact_restore_bg", fill=SURFACE)
+
+    def _main_columns(self, width: int) -> tuple[int, int, int]:
+        available_width = max(1, width - (54 if self.compact_mode else 0))
+        return (
+            int(available_width * 0.56),
+            int(available_width * 0.77),
+            available_width - 10,
+        )
+
+    def _scroll_main(self, event) -> None:
+        self.rows_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def _shown_actor_name(self, actor_id: int) -> str:
+        if not self.hide_names:
+            display_name = self.model.display_name(actor_id)
+            if display_name:
+                return display_name
+        ordered = list(self.model.friend_order)
+        if actor_id not in ordered:
+            ordered.extend(value for value in self.model.stats if value not in ordered)
+        try:
+            index = ordered.index(actor_id)
+        except ValueError:
+            index = len(ordered)
+        return f"玩家{index + 1}"
+
+    def _profession_info(self, class_id: int | None) -> tuple[str, str]:
+        value = self.professions.get(str(class_id or 0), {})
+        name = value.get("name", "") if isinstance(value, dict) else ""
+        color = PROFESSION_COLORS.get(int(class_id or 0), SUBTLE)
+        return (str(name).strip() or "职业识别中", color)
+
+    def _draw_main_rows(self) -> None:
+        canvas = self.rows_canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        rows = sorted(self.model.current_stats(), key=lambda item: item.damage, reverse=True)
+        total = sum(row.damage for row in rows)
+        duration = self.model.duration()
+        damage_x, share_x, dps_x = self._main_columns(width)
+        row_height = 34
+        if not rows:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="暂无伤害记录",
+                fill=MUTED,
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        for index, row in enumerate(rows):
+            top = index * row_height
+            bottom = top + row_height
+            share = row.damage / total if total else 0.0
+            actor_dps = row.damage / duration if duration else 0.0
+            class_id = self.model.actor_profession_id(row.actor_id)
+            _profession, color = self._profession_info(class_id)
+            base = PANEL if index % 2 == 0 else blend_color(PANEL, SURFACE, 0.28)
+            bar = blend_color(base, color, 0.48)
+            tag = f"actor:{row.actor_id}"
+            canvas.create_rectangle(0, top, width, bottom - 1, fill=base, outline="", tags=(tag,))
+            canvas.create_rectangle(0, top, max(3, int(width * share)), bottom - 1, fill=bar, outline="", tags=(tag,))
+            canvas.create_rectangle(0, top, 3, bottom - 1, fill=color, outline="", tags=(tag,))
+            icon = self.icons.profession(class_id, 18)
+            canvas.create_image(6, top + 8, image=icon, anchor="nw", tags=(tag,))
+            canvas.create_text(30, top + 17, text=self._shown_actor_name(row.actor_id), fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"), tags=(tag,))
+            canvas.create_text(damage_x, top + 17, text=format_number(row.damage), fill=TEXT, anchor="e", font=("Segoe UI", 8, "bold"), tags=(tag,))
+            canvas.create_text(share_x, top + 17, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=("Segoe UI", 8, "bold"), tags=(tag,))
+            canvas.create_text(dps_x, top + 17, text=format_number(actor_dps), fill=TEXT, anchor="e", font=("Segoe UI", 8, "bold"), tags=(tag,))
+            canvas.create_line(0, bottom - 1, width, bottom - 1, fill=blend_color(BORDER, base, 0.45), tags=(tag,))
+            canvas.tag_bind(tag, "<Enter>", lambda _event, current=tag: canvas.configure(cursor="hand2"))
+            canvas.tag_bind(tag, "<Leave>", lambda _event: canvas.configure(cursor=""))
+            canvas.tag_bind(tag, "<Button-1>", lambda _event, actor_id=row.actor_id: self.show_skill_details(actor_id))
+        canvas.configure(scrollregion=(0, 0, width, max(height, len(rows) * row_height)))
+
+    def _drag_start(self, event, window: tk.Misc) -> None:
+        if window is self.root and self.window_locked:
+            return
+        if id(window) in self.restore_geometry:
+            return
+        self.drag_state[id(window)] = (
+            event.x_root - window.winfo_x(),
+            event.y_root - window.winfo_y(),
+        )
+
+    def _drag_move(self, event, window: tk.Misc) -> None:
+        if window is self.root and self.window_locked:
+            return
+        offset = self.drag_state.get(id(window))
+        if not offset or id(window) in self.restore_geometry:
+            return
+        window.geometry(f"+{event.x_root - offset[0]}+{event.y_root - offset[1]}")
+
+    def _resize_start(self, event, window: tk.Misc) -> None:
+        if window is self.root and self.window_locked:
+            return
+        self.resize_state[id(window)] = (
+            event.x_root,
+            event.y_root,
+            window.winfo_width(),
+            window.winfo_height(),
+        )
+
+    def _resize_move(self, event, window: tk.Misc, minimum_width: int, minimum_height: int) -> None:
+        if window is self.root and self.window_locked:
+            return
+        state = self.resize_state.get(id(window))
+        if not state or id(window) in self.restore_geometry:
+            return
+        x, y, width, height = state
+        window.geometry(
+            f"{max(minimum_width, width + event.x_root - x)}x"
+            f"{max(minimum_height, height + event.y_root - y)}"
+        )
+
+    def _work_area(self, window: tk.Misc) -> tuple[int, int, int, int]:
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                class MonitorInfo(ctypes.Structure):
+                    _fields_ = [
+                        ("cbSize", wintypes.DWORD),
+                        ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT),
+                        ("dwFlags", wintypes.DWORD),
+                    ]
+
+                info = MonitorInfo()
+                info.cbSize = ctypes.sizeof(info)
+                monitor = ctypes.windll.user32.MonitorFromWindow(window.winfo_id(), 2)
+                if monitor and ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                    work = info.rcWork
+                    return work.left, work.top, work.right - work.left, work.bottom - work.top
+            except (AttributeError, OSError):
+                pass
+        return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
+
+    def _toggle_maximize(self, window: tk.Misc) -> None:
+        if window is self.root and self.window_locked:
+            return
+        key = id(window)
+        if window is self.root:
+            button = self.max_button
+        elif window is self.history_window:
+            button = self.history_max_button
+        else:
+            button = getattr(self, "skill_max_button", None)
+        if key in self.restore_geometry:
+            window.geometry(self.restore_geometry.pop(key))
+            if button is not None:
+                button.configure(text="□")
+            return
+        self.restore_geometry[key] = window.geometry()
+        x, y, width, height = self._work_area(window)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        if button is not None:
+            button.configure(text="❐")
+
+    def minimize(self) -> None:
+        if self.closing:
+            return
+        self._remember_root_geometry()
+        self.tray_skill_hidden = bool(
+            self.skill_window is not None
+            and self.skill_window.winfo_exists()
+            and self.skill_window.state() == "normal"
+        )
+        self.tray_history_hidden = bool(
+            self.history_window is not None
+            and self.history_window.winfo_exists()
+            and self.history_window.state() == "normal"
+        )
+        self.tray_feedback_hidden = bool(
+            self.feedback_window is not None
+            and self.feedback_window.winfo_exists()
+            and self.feedback_window.state() == "normal"
+        )
+        if self.tray_skill_hidden:
+            self.skill_window.withdraw()
+        if self.tray_history_hidden:
+            self.history_window.withdraw()
+        if self.tray_feedback_hidden:
+            self.feedback_window.withdraw()
+        self._destroy_unlock_window()
+        self.root.withdraw()
+        save_config(self.config)
+
+    def show_from_tray(self) -> None:
+        if self.closing:
+            return
+        if self.login_window is not None and self.login_window.winfo_exists():
+            self.login_window.geometry(
+                self._visible_geometry(self.login_window.geometry(), 380, 250)
+            )
+            self.login_window.deiconify()
+            self.login_window.lift()
+            self.login_window.focus_force()
+            return
+        self.root.geometry(
+            self._visible_geometry(
+                self.root.geometry(),
+                440 if self.compact_mode else 520,
+                146 if self.compact_mode else 315,
+            )
+        )
+        self.root.overrideredirect(True)
+        self.root.deiconify()
+        self.root.lift()
+        if not self.window_locked:
+            self.root.focus_force()
+        self._apply_windows_style(self.root)
+        self.root.after(20, self._apply_window_lock_state)
+        if (
+            self.tray_skill_hidden
+            and self.skill_window is not None
+            and self.skill_window.winfo_exists()
+        ):
+            self.skill_window.geometry(
+                self._visible_geometry(self.skill_window.geometry(), 560, 360)
+            )
+            self.skill_window.deiconify()
+            self.skill_window.lift()
+        if (
+            self.tray_history_hidden
+            and self.history_window is not None
+            and self.history_window.winfo_exists()
+        ):
+            self.history_window.geometry(
+                self._visible_geometry(self.history_window.geometry(), 880, 560)
+            )
+            self.history_window.deiconify()
+            self.history_window.lift()
+        if (
+            self.tray_feedback_hidden
+            and self.feedback_window is not None
+            and self.feedback_window.winfo_exists()
+        ):
+            self.feedback_window.geometry(
+                self._visible_geometry(self.feedback_window.geometry(), 500, 418)
+            )
+            self.feedback_window.deiconify()
+            self.feedback_window.lift()
+        self.tray_skill_hidden = False
+        self.tray_history_hidden = False
+        self.tray_feedback_hidden = False
+
+    def _restore_borderless(self) -> None:
+        if self.closing:
+            return
+        if self.root.state() == "normal":
+            self.root.overrideredirect(True)
+            self._apply_windows_style(self.root)
+            self.root.lift()
+        else:
+            self.root.after(120, self._restore_borderless)
+
+    @staticmethod
+    def _apply_windows_style(window: tk.Misc) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            window.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
+            dark = ctypes.c_int(1)
+            corner = ctypes.c_int(2)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark))
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), ctypes.sizeof(corner))
+        except (AttributeError, OSError):
+            pass
+
+    def _drain_messages(self) -> None:
+        if self.closing:
+            return
+        try:
+            while True:
+                kind, payload = self.messages.get_nowait()
+                if kind == "event":
+                    self._ingest_combat_event(payload)
+                elif kind == "identity":
+                    self.model.ingest_identity(payload)
+                elif kind == "actor_merge":
+                    self.model.merge_actor(payload)
+                elif kind == "party":
+                    self.model.ingest_party(payload)
+                elif kind == "profile":
+                    self.model.ingest_profile(payload)
+                elif kind == "monster":
+                    self.model.ingest_monster(payload)
+                elif kind == "team_stat":
+                    self.model.ingest_team_stat(payload)
+                elif kind == "stage_summary":
+                    self.model.ingest_stage_summary(payload)
+                elif kind == "life":
+                    self.model.ingest_life(payload)
+                elif kind == "scene":
+                    self.model.ingest_scene(payload)
+                elif kind == "tray_restore":
+                    self.show_from_tray()
+                elif kind == "tray_exit":
+                    self.close()
+                elif kind == "feedback_result":
+                    self._handle_feedback_result(payload)
+                elif kind == "update_check_result":
+                    self._handle_update_check_result(payload)
+                elif kind == "update_available" and isinstance(payload, UpdateInfo):
+                    self._show_update_window(payload)
+                elif kind == "update_downloaded":
+                    self._handle_update_downloaded(payload)
+                elif kind == "update_download_failed":
+                    self._handle_update_download_failed(payload)
+                elif kind == "name":
+                    self.model.ingest_name(payload)
+                elif kind == "skill_name":
+                    if self.model.ingest_skill_name(payload):
+                        self._save_preferences()
+                elif kind == "connected":
+                    self.connected = True
+                    self.game_pid = int(payload.get("pid", 0) or 0)
+                    if self.heartbeat_worker is not None:
+                        self.heartbeat_worker.update_state(
+                            using=True,
+                            character_name=self.model.display_name(
+                                int(self.model.self_id or 0)
+                            ),
+                            game_pid=self.game_pid,
+                        )
+                    self.dot.configure(fg=ACCENT)
+                    self.status_label.configure(
+                        text="运行中",
+                        fg=MUTED,
+                    )
+                elif kind == "waiting":
+                    self.connected = False
+                    self.game_pid = 0
+                    if self.heartbeat_worker is not None:
+                        self.heartbeat_worker.update_state(using=False)
+                    self.dot.configure(fg=WARN)
+                    self.status_label.configure(text="待机", fg=MUTED)
+                elif kind in ("error", "fatal"):
+                    self.connected = False
+                    self.game_pid = 0
+                    if self.heartbeat_worker is not None:
+                        self.heartbeat_worker.update_state(using=False)
+                    self.dot.configure(fg=ERROR)
+                    self.status_label.configure(
+                        text=chinese_error_message(payload), fg=ERROR
+                    )
+                elif kind == "license_required":
+                    self._return_to_login(str(payload))
+        except queue.Empty:
+            pass
+        self.root.after(50, self._drain_messages)
+
+    def _ingest_combat_event(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        self.model.ingest(payload)
+
+    def _render(self) -> None:
+        if self.closing:
+            return
+        now = time.time()
+        self.model.finalize_if_idle(now)
+        self._flush_combat_history()
+        duration = self.model.duration(now)
+        total = sum(row.damage for row in self.model.current_stats())
+        total_dps = total / duration if duration else 0.0
+        self.total_value.configure(text=format_number(total))
+        self.dps_value.configure(text=format_number(total_dps))
+        state = "战斗中" if self.model.active(now) else ("已结束" if total else "待机")
+        self.time_value.configure(
+            text=f"{state}  {format_duration(duration)}",
+            fg=ACCENT if state == "战斗中" else TEXT,
+        )
+        if self.heartbeat_worker is not None:
+            self.heartbeat_worker.update_state(
+                using=self.connected,
+                character_name=(
+                    self.model.display_name(int(self.model.self_id or 0))
+                    if self.model.self_id is not None
+                    else ""
+                ),
+                game_pid=self.game_pid,
+            )
+        self._draw_monster_hp()
+        self._draw_main_rows()
+        self._render_skill_details()
+        self._sync_expiry_label()
+        self._sync_unlock_window_position()
+        self.root.after(180, self._render)
+
+    def toggle_names(self) -> None:
+        self.hide_names = not self.hide_names
+        self._sync_action_buttons()
+        self._save_preferences()
+        self._draw_main_rows()
+        self._render_skill_details()
+        self._draw_history_participants()
+
+    def toggle_topmost(self) -> None:
+        value = not bool(self.root.attributes("-topmost"))
+        self.root.attributes("-topmost", value)
+        if self.skill_window is not None and self.skill_window.winfo_exists():
+            self.skill_window.attributes("-topmost", value)
+        if self.history_window is not None and self.history_window.winfo_exists():
+            self.history_window.attributes("-topmost", value)
+        if self.feedback_window is not None and self.feedback_window.winfo_exists():
+            self.feedback_window.attributes("-topmost", value)
+        self._sync_action_buttons()
+        self._save_preferences()
+
+    def _set_window_alpha(self, value) -> None:
+        try:
+            alpha = float(value) / 100.0
+        except (TypeError, ValueError):
+            return
+        self.window_alpha = min(1.0, max(0.50, alpha))
+        self.root.attributes("-alpha", self.window_alpha)
+        if self.opacity_value_label is not None:
+            self.opacity_value_label.configure(text=f"{round(self.window_alpha * 100)}%")
+        self.config["alpha"] = self.window_alpha
+        self._sync_action_buttons()
+        save_config(self.config)
+
+    def reset(self) -> None:
+        self.model.reset(
+            keep_identity=True,
+            keep_monsters=True,
+            archive_reason="manual_reset",
+        )
+        self._flush_combat_history()
+        self._draw_main_rows()
+        self._render_skill_details()
+
+    def show_skill_details(self, actor_id: int) -> None:
+        self.skill_actor_id = int(actor_id)
+        if self.skill_window is None or not self.skill_window.winfo_exists():
+            self._build_skill_window()
+        else:
+            self.skill_window.deiconify()
+            self.skill_window.lift()
+            self.skill_window.focus_force()
+        self._render_skill_details()
+
+    def _initial_skill_geometry(self, x: int, y: int) -> str:
+        saved = str(self.config.get("skill_geometry", ""))
+        match = re.fullmatch(r"\d+x\d+([+-]\d+[+-]\d+)", saved)
+        suffix = match.group(1) if match else f"+{x}+{y}"
+        if int(self.config.get("skill_layout_version", 0)) < 3:
+            return self._visible_geometry(f"580x390{suffix}", 580, 390)
+        return self._visible_geometry(saved if match else f"580x390{suffix}", 580, 390)
+
+    def _build_skill_window(self) -> None:
+        x = max(0, self.root.winfo_rootx() + 36)
+        y = max(0, self.root.winfo_rooty() + 36)
+        window = tk.Toplevel(self.root)
+        self.skill_window = window
+        window.title(f"{APP_TITLE} · 技能详情")
+        window.configure(bg=BORDER)
+        window.geometry(self._initial_skill_geometry(x, y))
+        window.minsize(520, 340)
+        window.attributes("-topmost", bool(self.root.attributes("-topmost")))
+        window.attributes("-alpha", 1.0)
+        window.overrideredirect(True)
+        window.protocol("WM_DELETE_WINDOW", self._close_skill_window)
+        window.bind("<Escape>", lambda _event: self._close_skill_window())
+
+        shell = tk.Frame(window, bg=BORDER)
+        shell.pack(fill="both", expand=True)
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+
+        titlebar = tk.Frame(body, bg=SURFACE, height=34)
+        titlebar.pack(fill="x")
+        titlebar.pack_propagate(False)
+        self._bind_drag(titlebar, window)
+        logo_image = self.icons.app_logo(18)
+        logo = tk.Label(titlebar, image=logo_image, bg=SURFACE, bd=0)
+        logo.image = logo_image
+        logo.pack(side="left", padx=(8, 2), pady=8)
+        self._bind_drag(logo, window)
+        skill_title = tk.Label(
+            titlebar,
+            text="技能伤害详情",
+            bg=SURFACE,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        skill_title.pack(side="left", padx=(2, 8))
+        self._bind_drag(skill_title, window)
+        close_button = self._label_button(
+            titlebar,
+            "×",
+            self._close_skill_window,
+            width=34,
+            hover="#7f2d35",
+            fg="#c5ccd3",
+            font=("Segoe UI", 13),
+        )
+        close_button.pack(side="right", fill="y")
+        self.skill_max_button = self._label_button(
+            titlebar,
+            "□",
+            lambda: self._toggle_maximize(window),
+            width=34,
+            font=("Segoe UI", 10),
+        )
+        self.skill_max_button.pack(side="right", fill="y")
+
+        hero = tk.Frame(body, bg=BG, height=66)
+        hero.pack(fill="x", padx=8, pady=(7, 5))
+        hero.pack_propagate(False)
+        self.skill_profession_icon = tk.Label(hero, bg=BG, bd=0)
+        self.skill_profession_icon.pack(side="left", padx=(2, 7), pady=12)
+        identity = tk.Frame(hero, bg=BG)
+        identity.pack(side="left", fill="both", expand=True)
+        self.skill_title_label = tk.Label(
+            identity,
+            text="技能伤害详情",
+            bg=BG,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        )
+        self.skill_title_label.pack(fill="both", expand=True)
+
+        totals = tk.Frame(hero, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
+        totals.pack(side="right", fill="y", pady=5)
+        self.skill_total_label = tk.Label(
+            totals,
+            text="总伤害  0",
+            bg=SURFACE,
+            fg=TEXT,
+            padx=10,
+            anchor="e",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.skill_total_label.pack(fill="both", expand=True)
+        self.skill_dps_label = tk.Label(
+            totals,
+            text="DPS  0",
+            bg=SURFACE,
+            fg=MUTED,
+            padx=10,
+            anchor="e",
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.skill_dps_label.pack(fill="both", expand=True)
+
+        panel = tk.Frame(body, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
+        panel.pack(fill="both", expand=True, padx=8, pady=(0, 5))
+        self.skill_header_canvas = tk.Canvas(panel, height=30, bg=SURFACE, bd=0, highlightthickness=0)
+        self.skill_header_canvas.pack(fill="x")
+        self.skill_header_canvas.bind("<Configure>", lambda _event: self._draw_skill_header())
+        self.skill_rows_canvas = tk.Canvas(
+            panel,
+            bg=PANEL,
+            bd=0,
+            highlightthickness=0,
+            yscrollincrement=38,
+        )
+        self.skill_rows_canvas.pack(fill="both", expand=True)
+        self.skill_rows_canvas.bind(
+            "<MouseWheel>",
+            lambda event: self.skill_rows_canvas.yview_scroll(
+                -1 if event.delta > 0 else 1, "units"
+            ),
+        )
+        self.skill_rows_canvas.bind("<Configure>", lambda _event: self._draw_skill_rows())
+
+        grip = tk.Label(body, text="◢", bg=BG, fg=SUBTLE, cursor="size_nw_se", font=("Segoe UI", 9))
+        grip.place(relx=1.0, rely=1.0, anchor="se")
+        grip.bind("<ButtonPress-1>", lambda event: self._resize_start(event, window))
+        grip.bind("<B1-Motion>", lambda event: self._resize_move(event, window, 520, 340))
+        window.after(20, lambda: self._apply_windows_style(window))
+
+    @staticmethod
+    def _skill_columns(width: int) -> tuple[int, int, int, int]:
+        return int(width * 0.57), int(width * 0.73), int(width * 0.84), width - 17
+
+    def _draw_skill_header(self) -> None:
+        if self.skill_header_canvas is None:
+            return
+        canvas = self.skill_header_canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        damage_x, share_x, hits_x, max_x = self._skill_columns(width)
+        font = ("Microsoft YaHei UI", 8, "bold")
+        canvas.create_text(36, 15, text="技能", fill=MUTED, anchor="w", font=font)
+        canvas.create_text(damage_x, 15, text="伤害", fill=MUTED, anchor="e", font=font)
+        canvas.create_text(share_x, 15, text="占比", fill=MUTED, anchor="e", font=font)
+        canvas.create_text(hits_x, 15, text="次数", fill=MUTED, anchor="e", font=font)
+        canvas.create_text(max_x, 15, text="最大伤害", fill=MUTED, anchor="e", font=font)
+        canvas.create_line(0, 29, width, 29, fill=BORDER)
+
+    def _draw_skill_rows(self) -> None:
+        if self.skill_rows_canvas is None or self.skill_actor_id is None:
+            return
+        canvas = self.skill_rows_canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        actor = self.model.stats.get(self.skill_actor_id)
+        skills = sorted(actor.skills.values(), key=lambda item: item.damage, reverse=True) if actor else []
+        total = actor.damage if actor else 0
+        skill_rows = [
+            (
+                skill.skill_id,
+                self.model.display_skill_name(self.skill_actor_id, skill.skill_id),
+                skill.damage,
+                skill.hits,
+                skill.max_hit,
+            )
+            for skill in skills
+        ]
+        if not skill_rows and total > 0:
+            skill_rows = [(0, "团队伤害汇总", total, None, None)]
+        class_id = self.model.actor_profession_id(self.skill_actor_id)
+        _profession, color = self._profession_info(class_id)
+        damage_x, share_x, hits_x, max_x = self._skill_columns(width)
+        row_height = 38
+        if not skill_rows:
+            canvas.create_text(width // 2, height // 2, text="暂无技能伤害", fill=MUTED, font=("Microsoft YaHei UI", 10, "bold"))
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        for index, (skill_id, name, damage, hits, max_hit) in enumerate(skill_rows):
+            top = index * row_height
+            bottom = top + row_height
+            share = damage / total if total else 0.0
+            base = PANEL if index % 2 == 0 else blend_color(PANEL, SURFACE, 0.28)
+            bar = blend_color(base, color, 0.43)
+            canvas.create_rectangle(0, top, width, bottom - 1, fill=base, outline="")
+            canvas.create_rectangle(0, top, max(3, int(width * share)), bottom - 1, fill=bar, outline="")
+            canvas.create_rectangle(0, top, 3, bottom - 1, fill=color, outline="")
+            icon = self.icons.skill(skill_id, name, class_id, 22)
+            canvas.create_image(8, top + 8, image=icon, anchor="nw")
+            canvas.create_text(38, top + 19, text=name, fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 9, "bold"))
+            canvas.create_text(damage_x, top + 19, text=format_number(damage), fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
+            canvas.create_text(share_x, top + 19, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
+            canvas.create_text(hits_x, top + 19, text="--" if hits is None else str(hits), fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
+            canvas.create_text(max_x, top + 19, text="--" if max_hit is None else format_number(max_hit), fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
+            canvas.create_line(0, bottom - 1, width, bottom - 1, fill=blend_color(BORDER, base, 0.45))
+        canvas.configure(scrollregion=(0, 0, width, max(height, len(skill_rows) * row_height)))
+
+    def _render_skill_details(self) -> None:
+        if (
+            self.skill_window is None
+            or not self.skill_window.winfo_exists()
+            or self.skill_actor_id is None
+        ):
+            return
+        actor = self.model.stats.get(self.skill_actor_id)
+        class_id = self.model.actor_profession_id(self.skill_actor_id)
+        actor_name = self._shown_actor_name(self.skill_actor_id)
+        icon = self.icons.profession(class_id, 30)
+        self.skill_profession_icon.configure(image=icon)
+        self.skill_profession_icon.image = icon
+        self.skill_title_label.configure(text=actor_name)
+        total = actor.damage if actor else 0
+        duration = self.model.duration()
+        actor_dps = total / duration if duration else 0.0
+        self.skill_total_label.configure(text=f"总伤害  {format_number(total)}")
+        self.skill_dps_label.configure(text=f"DPS  {format_number(actor_dps)}")
+        self._draw_skill_rows()
+
+    def _close_skill_window(self) -> None:
+        if self.skill_window is not None and self.skill_window.winfo_exists():
+            self.config["skill_geometry"] = self.skill_window.geometry()
+            self.config["skill_layout_version"] = 3
+            self.restore_geometry.pop(id(self.skill_window), None)
+            self.skill_window.destroy()
+        self.skill_window = None
+        self.skill_actor_id = None
+
+    def _save_preferences(self) -> None:
+        recent_skill_names = list(self.model.runtime_skill_names.items())[-2048:]
+        self.config["runtime_skill_names"] = {
+            str(skill_id): name for skill_id, name in recent_skill_names
+        }
+        self.config["hide_names"] = self.hide_names
+        self.config["window_locked"] = self.window_locked
+        self.config["layout_version"] = 8
+        self.config["topmost"] = bool(self.root.attributes("-topmost"))
+        self.config["alpha"] = float(self.root.attributes("-alpha"))
+        self._remember_root_geometry()
+        if self.history_window is not None and self.history_window.winfo_exists():
+            self.config["history_geometry"] = self.restore_geometry.get(
+                id(self.history_window), self.history_window.geometry()
+            )
+        for legacy_key in (
+            "aliases",
+            "skill_aliases",
+            "skill_names",
+            "local_player_name",
+            "entity_names",
+        ):
+            self.config.pop(legacy_key, None)
+        save_config(self.config)
+
+    def close(self) -> None:
+        if self.closing:
+            return
+        self.closing = True
+        self._set_window_click_through(self.root, False)
+        self._destroy_unlock_window()
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+            self.tray_icon = None
+        self._close_notice_window()
+        self._close_skill_window()
+        self._close_history_window()
+        self._close_feedback_window()
+        self._close_update_window(force=True)
+        self.status_label.configure(
+            text=self.close_status_text or "正在安全停止并退出…", fg=WARN
+        )
+        self._save_preferences()
+        self.heartbeat_stop_event.set()
+        self.stop_event.set()
+        self.root.after(50, self._finish_close)
+
+    def _ingest_pending_capture_messages(self) -> None:
+        handlers = {
+            "event": self._ingest_combat_event,
+            "identity": self.model.ingest_identity,
+            "actor_merge": self.model.merge_actor,
+            "party": self.model.ingest_party,
+            "profile": self.model.ingest_profile,
+            "monster": self.model.ingest_monster,
+            "team_stat": self.model.ingest_team_stat,
+            "stage_summary": self.model.ingest_stage_summary,
+            "life": self.model.ingest_life,
+            "scene": self.model.ingest_scene,
+            "name": self.model.ingest_name,
+            "skill_name": self.model.ingest_skill_name,
+        }
+        while True:
+            try:
+                kind, payload = self.messages.get_nowait()
+            except queue.Empty:
+                return
+            handler = handlers.get(kind)
+            if handler is not None:
+                handler(payload)
+
+    def _finish_close(self) -> None:
+        if self.worker.is_alive() or (
+            self.heartbeat_worker is not None and self.heartbeat_worker.is_alive()
+        ):
+            self.root.after(50, self._finish_close)
+            return
+        self._ingest_pending_capture_messages()
+        self.model.archive_current("exit")
+        self._flush_combat_history()
+        self._save_preferences()
+        self.root.destroy()
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+def main() -> None:
+    try:
+        DpsWindow().run()
+    except Exception:
+        details = traceback.format_exc()
+        try:
+            (APP_DIR / "dps_error.log").write_text(details, encoding="utf-8")
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("伤害统计启动失败", details)
+            root.destroy()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

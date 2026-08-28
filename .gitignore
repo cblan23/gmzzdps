@@ -1,0 +1,35 @@
+# Runtime and user data
+dps_config.json
+network_self_identity.json
+team_profiles.json
+monster_name_cache.json
+device_id
+logs/
+combat_history/
+*.log
+
+# Captures, diagnostics and local screenshots
+*.etl
+*.pcapng
+damage_inline_live*.jsonl
+debug_*
+skill_names_diagnostics.json
+
+# Build products and local environments
+.venv*/
+dist*/
+release-*/
+%TEMP%/
+__pycache__/
+*.py[cod]
+*.xml
+
+# Large reverse-engineering workspaces are not application source
+tools/
+video-guide/
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

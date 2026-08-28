@@ -1,0 +1,3450 @@
+{
+  "professions": {
+    "1200001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Character_2/NotAtlas/Occupation/UI_Character_Icon_HeadSun.UI_Character_Icon_HeadSun",
+      "name": "太阳途径",
+      "skill_ids": [
+        86010010,
+        86010040,
+        86011010,
+        86011020,
+        86011025,
+        86011030,
+        86011040,
+        86011048,
+        86011050,
+        86011051,
+        86011053,
+        86011054,
+        86011060,
+        86011061,
+        86011070,
+        86011071,
+        86011080,
+        86011081,
+        86012010,
+        86013010,
+        86015010,
+        86015020,
+        86016010,
+        86016020,
+        86016030,
+        86017020
+      ]
+    },
+    "1200002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Character_2/NotAtlas/Occupation/UI_Character_Icon_HeadAudience.UI_Character_Icon_HeadAudience",
+      "name": "空想家途径",
+      "skill_ids": [
+        86020010,
+        86020040,
+        86021010,
+        86021020,
+        86021030,
+        86021050,
+        86021060,
+        86021070,
+        86021080,
+        86021090,
+        86021100,
+        86021102,
+        86021110,
+        86021111,
+        86021113,
+        86022010,
+        86023010,
+        86023020,
+        86024011,
+        86025010,
+        86025020,
+        86025030,
+        86025040,
+        86026010,
+        86026020,
+        86026070
+      ]
+    },
+    "1200003": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Character_2/NotAtlas/Occupation/UI_Character_Icon_HeadFortuneTeller.UI_Character_Icon_HeadFortuneTeller",
+      "name": "愚者途径",
+      "skill_ids": [
+        86030010,
+        86031010,
+        86031020,
+        86031030,
+        86031031,
+        86031050,
+        86031060,
+        86031070,
+        86031080,
+        86032010,
+        86033010,
+        86033020,
+        86033030,
+        86033031,
+        86034010,
+        86035010,
+        86036010,
+        86036020,
+        86036030
+      ]
+    },
+    "1200004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Character_2/NotAtlas/Occupation/UI_Character_Icon_HeadArbitrator.UI_Character_Icon_HeadArbitrator",
+      "name": "审判者途径",
+      "skill_ids": [
+        86040001,
+        86040004,
+        86040005,
+        86040006,
+        86040007,
+        86040008,
+        86040009,
+        86040010,
+        86040013,
+        86040014,
+        86040015
+      ]
+    },
+    "1200005": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Character_2/NotAtlas/Occupation/UI_Character_Icon_HeadApprentice.UI_Character_Icon_HeadApprentice",
+      "name": "门途径",
+      "skill_ids": [
+        86050010,
+        86050050,
+        86051010,
+        86051020,
+        86051030,
+        86051040,
+        86051050,
+        86051060,
+        86051080,
+        86051090,
+        86052010,
+        86053010,
+        86054010,
+        86054020,
+        86054030,
+        86054050,
+        86054052,
+        86054054,
+        86054060,
+        86054070,
+        86055010,
+        86056010,
+        86056020,
+        86056030
+      ]
+    },
+    "1200006": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Character_2/NotAtlas/Occupation/UI_Character_Icon_HeadWarrior.UI_Character_Icon_HeadWarrior",
+      "name": "黄昏巨人途径",
+      "skill_ids": [
+        86060010,
+        86060040,
+        86061010,
+        86061020,
+        86061023,
+        86061025,
+        86061030,
+        86061040,
+        86061050,
+        86061060,
+        86061063,
+        86061070,
+        86061080,
+        86061100,
+        86061110,
+        86062010,
+        86063010,
+        86063020,
+        86065010,
+        86065040,
+        86066010,
+        86066020,
+        86066030
+      ]
+    },
+    "1200007": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Character_2/NotAtlas/Occupation/UI_Character_Icon_HeadMysteryPryer.UI_Character_Icon_HeadMysteryPryer",
+      "name": "隐者途径",
+      "skill_ids": [
+        86070010,
+        86070040,
+        86071010,
+        86071020,
+        86071030,
+        86071040,
+        86071050,
+        86071060,
+        86071070,
+        86071080,
+        86072010,
+        86073010,
+        86073020,
+        86075010,
+        86076010,
+        86076020,
+        86076030
+      ]
+    }
+  },
+  "skills": {
+    "86000001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill09_py_Sprite.UI_Skill_Icon_FoolSkill09_py_Sprite"
+    },
+    "86000002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_04.Spectator_Attack_04"
+    },
+    "86000003": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_04.Spectator_Attack_04"
+    },
+    "86000004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_04.Spectator_Attack_04"
+    },
+    "86000005": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_01.Apprentice_Skill_01"
+    },
+    "86000006": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_04.Apprentice_Skill_04"
+    },
+    "86000007": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill04_zpfd_Sprite.UI_Skill_Icon_FoolSkill04_zpfd_Sprite"
+    },
+    "86000008": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill17_Zpfd02_Sprite.UI_Skill_Icon_FoolSkill17_Zpfd02_Sprite"
+    },
+    "86000009": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill15_Kqd_Sprite.UI_Skill_Icon_FoolSkill15_Kqd_Sprite"
+    },
+    "86000010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill09_py_Sprite.UI_Skill_Icon_FoolSkill09_py_Sprite"
+    },
+    "86001000": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13.Rogue_Common_13"
+    },
+    "86001001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_15.Rogue_Common_15"
+    },
+    "86001002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_16.Rogue_Common_16"
+    },
+    "86001003": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_18.Rogue_Common_18"
+    },
+    "86001004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_19.Rogue_Common_19"
+    },
+    "86001005": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_23.Rogue_Common_23"
+    },
+    "86001006": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_11.Rogue_Common_11"
+    },
+    "86001007": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_09.Rogue_Common_09"
+    },
+    "86001008": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_07.Rogue_Common_07"
+    },
+    "86001009": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_08_01.Bard_Skill_08_01"
+    },
+    "86001010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_10.Rogue_Common_10"
+    },
+    "86001011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_10.Rogue_Common_10"
+    },
+    "86001012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_01.Rogue_Common_01"
+    },
+    "86001013": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_16.Rogue_Common_16"
+    },
+    "86001014": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_16.Rogue_Common_16"
+    },
+    "86001015": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_16.Rogue_Common_16"
+    },
+    "86001016": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_16.Rogue_Common_16"
+    },
+    "86010010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Attack_01.Bard_Attack_01",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86010020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Attack_01.Bard_Attack_01"
+    },
+    "86010030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Attack_01.Bard_Attack_01"
+    },
+    "86010040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Attack_01.Bard_Attack_01",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_01.Bard_Skill_01",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_03.Bard_Skill_03",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011025": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_03.Bard_Skill_03",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_04.Bard_Skill_04",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_05.Bard_Skill_05",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011048": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_05_02.Bard_Skill_05_02",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_08_02.Bard_Skill_08_02",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011051": {
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011053": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_08_01.Bard_Skill_08_01",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011054": {
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_07.Bard_Skill_07",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011061": {
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011063": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_07.Bard_Skill_07"
+    },
+    "86011070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_06_01.Bard_Skill_06_01",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_06_02.Bard_Skill_06_02",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_02_01.Bard_Skill_02_01",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_02_02.Bard_Skill_02_02",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86012010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_09.Bard_Skill_09",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86012011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_09.Bard_Skill_09"
+    },
+    "86013010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_10.Bard_Skill_10",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86013011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_10.Bard_Skill_10"
+    },
+    "86014010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_13.Bard_Skill_13"
+    },
+    "86015010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_11.Bard_Skill_11",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86015020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_12.Bard_Skill_12",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86016010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Bard_RolePlay_Skill_01.Bard_RolePlay_Skill_01",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86016011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Bard_RolePlay_Skill_01.Bard_RolePlay_Skill_01"
+    },
+    "86016020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Bard_RolePlay_Skill_02.Bard_RolePlay_Skill_02",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86016030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Bard_RolePlay_Skill_03.Bard_RolePlay_Skill_03",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86017010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_10.Bard_Skill_10"
+    },
+    "86017020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Bard_01.Rogue_Bard_01",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86017021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Bard_01.Rogue_Bard_01"
+    },
+    "86020010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_04.Spectator_Attack_04",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86020020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_04.Spectator_Attack_04"
+    },
+    "86020030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_04.Spectator_Attack_04"
+    },
+    "86020040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_01.Spectator_Attack_01",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86020050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_01.Spectator_Attack_01"
+    },
+    "86020060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_01.Spectator_Attack_01"
+    },
+    "86021010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_01.Utopian_Skill_01",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_07.Utopian_Skill_07",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_07.Utopian_Skill_07"
+    },
+    "86021022": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_07.Utopian_Skill_07"
+    },
+    "86021030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_05.Utopian_Skill_05",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021031": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_05.Utopian_Skill_05"
+    },
+    "86021032": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_05.Utopian_Skill_05"
+    },
+    "86021033": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_05.Utopian_Skill_05"
+    },
+    "86021050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_08.Utopian_Skill_08",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021051": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_08.Utopian_Skill_08"
+    },
+    "86021060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_09.Utopian_Skill_09",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_03.Utopian_Skill_03",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_03.Utopian_Skill_03"
+    },
+    "86021072": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_03.Utopian_Skill_03"
+    },
+    "86021080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_04.Utopian_Skill_04",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_02.Utopian_Skill_02",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021091": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_02.Utopian_Skill_02"
+    },
+    "86021100": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_06.Utopian_Skill_06",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_06.Utopian_Skill_06"
+    },
+    "86021102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_06.Utopian_Skill_06",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_10.Utopian_Skill_10",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021111": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Skill_10_02.Spectator_Skill_10_02",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86021113": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_10.Utopian_Skill_10",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86022010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_11.Utopian_Skill_11",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86023010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_12.Utopian_Skill_12",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86023011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_12.Utopian_Skill_12"
+    },
+    "86023012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_12.Utopian_Skill_12"
+    },
+    "86023020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13.Utopian_Skill_13",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86023021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13.Utopian_Skill_13"
+    },
+    "86023022": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13.Utopian_Skill_13"
+    },
+    "86024010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_16.Utopian_Skill_16"
+    },
+    "86024011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_16.Utopian_Skill_16",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86025010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_14.Utopian_Skill_14",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86025020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_15.Utopian_Skill_15",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86025030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_17.Utopian_Skill_17",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86025040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_18.Utopian_Skill_18",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86026010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Utopian_RolePlay_Skill_01.Utopian_RolePlay_Skill_01",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86026020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Utopian_RolePlay_Skill_02.Utopian_RolePlay_Skill_02",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86026070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Utopian_RolePlay_Skill_03.Utopian_RolePlay_Skill_03",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "86027010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_10.Utopian_Skill_10"
+    },
+    "86030010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86030020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "86030030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "86030040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "86031010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_01_01.Seer_Skill_01_01",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86031011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_01_02.Seer_Skill_01_02"
+    },
+    "86031012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_01_03.Seer_Skill_01_03"
+    },
+    "86031020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_02.Seer_Skill_02",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86031021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_02.Seer_Skill_02"
+    },
+    "86031030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_05.Seer_Skill_05",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86031031": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_05.Seer_Skill_05",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86031040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_14.Seer_Skill_14"
+    },
+    "86031050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_07.Seer_Skill_07",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86031060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_04.Seer_Skill_04",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86031070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_06_01.Seer_Skill_06_01",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86031071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_06_02.Seer_Skill_06_02"
+    },
+    "86031080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_03.Seer_Skill_03",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86031081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_03.Seer_Skill_03"
+    },
+    "86032010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_09.Seer_Skill_09",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86032013": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_09.Seer_Skill_09"
+    },
+    "86033010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_11.Seer_Skill_11",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86033020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_12.Seer_Skill_12",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86033030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_10.Seer_Skill_10",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86033031": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_10.Seer_Skill_10",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86033032": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_10.Seer_Skill_10"
+    },
+    "86033033": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_10.Seer_Skill_10"
+    },
+    "86033034": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_10.Seer_Skill_10"
+    },
+    "86034010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_08.Seer_Skill_08",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86034020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_14.Seer_Skill_14"
+    },
+    "86035010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_13.Seer_Skill_13",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86036010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_01.Seer_RolePlay_Skill_01",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86036011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_01.Seer_RolePlay_Skill_01"
+    },
+    "86036012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_01.Seer_RolePlay_Skill_01"
+    },
+    "86036013": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_01.Seer_RolePlay_Skill_01"
+    },
+    "86036014": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_01.Seer_RolePlay_Skill_01"
+    },
+    "86036015": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_01.Seer_RolePlay_Skill_01"
+    },
+    "86036020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_02.Seer_RolePlay_Skill_02",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86036021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_02.Seer_RolePlay_Skill_02"
+    },
+    "86036030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Seer_RolePlay_Skill_03.Seer_RolePlay_Skill_03",
+      "profession_ids": [
+        1200003
+      ]
+    },
+    "86037010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_06_01.Seer_Skill_06_01"
+    },
+    "86040001": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040004": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040005": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040006": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040007": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040008": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040009": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040010": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040013": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040014": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86040015": {
+      "profession_ids": [
+        1200004
+      ]
+    },
+    "86050010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86050011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "86050020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "86050021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "86050030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "86050040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "86050050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86050051": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "86051010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_02.Apprentice_Skill_02",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86051020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_04.Apprentice_Skill_04",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86051021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_04.Apprentice_Skill_04"
+    },
+    "86051030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_05.Apprentice_Skill_05",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86051040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_06.Apprentice_Skill_06",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86051041": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_06.Apprentice_Skill_06"
+    },
+    "86051042": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_06.Apprentice_Skill_06"
+    },
+    "86051050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_01.Apprentice_Skill_01",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86051060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_03.Apprentice_Skill_03",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86051080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_07.Apprentice_Skill_07",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86051090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_13.Apprentice_Skill_13",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86052010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_09.Apprentice_Skill_09",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86052011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_09.Apprentice_Skill_09"
+    },
+    "86052020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_12.Apprentice_Skill_12"
+    },
+    "86052902": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "86052906": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_07.Apprentice_Skill_07"
+    },
+    "86052907": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_05.Apprentice_Skill_05"
+    },
+    "86052915": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_01.Apprentice_Skill_01"
+    },
+    "86053010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_10.Apprentice_Skill_10",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_03.Bard_Skill_03",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_03.Bard_Skill_03"
+    },
+    "86054012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_03.Bard_Skill_03"
+    },
+    "86054020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_04.Utopian_Skill_04",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_04.Utopian_Skill_04"
+    },
+    "86054030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_05.Seer_Skill_05",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054031": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_05.Seer_Skill_05"
+    },
+    "86054050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_01.Apprentice_Skill_01",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054051": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_01.Apprentice_Skill_01"
+    },
+    "86054052": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_02.Apprentice_Skill_02",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054053": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_02.Apprentice_Skill_02"
+    },
+    "86054054": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_03.Apprentice_Skill_03",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054055": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_03.Apprentice_Skill_03"
+    },
+    "86054056": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_03.Apprentice_Skill_03"
+    },
+    "86054057": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_03.Apprentice_Skill_03"
+    },
+    "86054058": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_03.Apprentice_Skill_03"
+    },
+    "86054059": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_03.Apprentice_Skill_03"
+    },
+    "86054060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_02.Warrior_Skill_01_02",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054061": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_02.Warrior_Skill_01_02"
+    },
+    "86054070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_05.MysteryPryer_Skill_05",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86054071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_05.MysteryPryer_Skill_05"
+    },
+    "86055010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_11.Apprentice_Skill_11",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86056010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Apprentice_RolePlay_Skill_01.Apprentice_RolePlay_Skill_01",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86056020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Apprentice_RolePlay_Skill_02.Apprentice_RolePlay_Skill_02",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86056021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Apprentice_RolePlay_Skill_02.Apprentice_RolePlay_Skill_02"
+    },
+    "86056030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Apprentice_RolePlay_Skill_03.Apprentice_RolePlay_Skill_03",
+      "profession_ids": [
+        1200005
+      ]
+    },
+    "86056031": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Apprentice_RolePlay_Skill_03.Apprentice_RolePlay_Skill_03"
+    },
+    "86056032": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Apprentice_RolePlay_Skill_03.Apprentice_RolePlay_Skill_03"
+    },
+    "86056033": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Apprentice_RolePlay_Skill_03.Apprentice_RolePlay_Skill_03"
+    },
+    "86057010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_08.Apprentice_Skill_08"
+    },
+    "86060010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_01.Warrior_Attack_01",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86060020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_01.Warrior_Attack_01"
+    },
+    "86060030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_01.Warrior_Attack_01"
+    },
+    "86060040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_04.Warrior_Attack_04",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86060050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_04.Warrior_Attack_04"
+    },
+    "86060060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_04.Warrior_Attack_04"
+    },
+    "86060061": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_04.Warrior_Attack_04"
+    },
+    "86061010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_06.Warrior_Skill_06",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_01.Warrior_Skill_01_01",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061023": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_02.Warrior_Skill_01_02",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061024": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_01.Warrior_Skill_01_01"
+    },
+    "86061025": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_03.Warrior_Skill_01_03",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061026": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_02.Warrior_Skill_01_02"
+    },
+    "86061030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_03.Warrior_Skill_03",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061035": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_03.Warrior_Skill_03"
+    },
+    "86061040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061041": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86061050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_04.Warrior_Skill_04",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061051": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_04.Warrior_Skill_04"
+    },
+    "86061060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_13.Warrior_Skill_13",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061063": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_13_02.Warrior_Skill_13_02",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_12.Warrior_Skill_12",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_12.Warrior_Skill_12"
+    },
+    "86061080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_02.Warrior_Skill_02",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_02.Warrior_Skill_02"
+    },
+    "86061083": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_02.Warrior_Skill_02"
+    },
+    "86061086": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_02.Warrior_Skill_02"
+    },
+    "86061090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_07.Warrior_Skill_07"
+    },
+    "86061092": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_01.Warrior_Attack_01"
+    },
+    "86061100": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_08.Warrior_Skill_08",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_08.Warrior_Skill_08"
+    },
+    "86061110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_07.Warrior_Skill_07",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86061111": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_07.Warrior_Skill_07"
+    },
+    "86062010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_11.Warrior_Skill_11",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86062020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_02.Warrior_Skill_01_02"
+    },
+    "86062030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_01_02.Warrior_Skill_01_02"
+    },
+    "86063010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_10.Warrior_Skill_10",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86063020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_09.Warrior_Skill_09",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86064010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_14.Warrior_Skill_14"
+    },
+    "86064020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_14.Warrior_Skill_14"
+    },
+    "86065010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_15.Warrior_Skill_15",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86065020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_16.Warrior_Skill_16"
+    },
+    "86065030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_16.Warrior_Skill_16"
+    },
+    "86065040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17.Warrior_Skill_17",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86065060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_16.Warrior_Skill_16"
+    },
+    "86066010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Warrior_RolePlay_Skill_01.Warrior_RolePlay_Skill_01",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86066020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Warrior_RolePlay_Skill_02.Warrior_RolePlay_Skill_02",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86066021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Warrior_RolePlay_Skill_02.Warrior_RolePlay_Skill_02"
+    },
+    "86066022": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Warrior_RolePlay_Skill_02.Warrior_RolePlay_Skill_02"
+    },
+    "86066030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/Warrior_RolePlay_Skill_03.Warrior_RolePlay_Skill_03",
+      "profession_ids": [
+        1200006
+      ]
+    },
+    "86070010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Attack_01.MysteryPryer_Attack_01",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86070011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Attack_01.MysteryPryer_Attack_01"
+    },
+    "86070020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Attack_01.MysteryPryer_Attack_01"
+    },
+    "86070021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Attack_01.MysteryPryer_Attack_01"
+    },
+    "86070025": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Attack_01.MysteryPryer_Attack_01"
+    },
+    "86070026": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Attack_01.MysteryPryer_Attack_01"
+    },
+    "86070040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Attack_01.MysteryPryer_Attack_01",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86071010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_01.MysteryPryer_Skill_01",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86071020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_02.MysteryPryer_Skill_02",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86071025": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_02.MysteryPryer_Skill_02"
+    },
+    "86071027": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_02.MysteryPryer_Skill_02"
+    },
+    "86071030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_03.MysteryPryer_Skill_03",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86071031": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_03.MysteryPryer_Skill_03"
+    },
+    "86071040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_05.MysteryPryer_Skill_05",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86071041": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_05.MysteryPryer_Skill_05"
+    },
+    "86071050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_04.MysteryPryer_Skill_04",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86071060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_06.MysteryPryer_Skill_06",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86071061": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_06.MysteryPryer_Skill_06"
+    },
+    "86071070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_07.MysteryPryer_Skill_07",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86071071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_07.MysteryPryer_Skill_07"
+    },
+    "86071080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_08.MysteryPryer_Skill_08",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86072010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_09.MysteryPryer_Skill_09",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86073010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_10.MysteryPryer_Skill_10",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86073020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_10.MysteryPryer_Skill_10",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86074010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_12.MysteryPryer_Skill_12"
+    },
+    "86074020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_01.MysteryPryer_Skill_01"
+    },
+    "86075010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11.MysteryPryer_Skill_11",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86076010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/MysteryPryer_RolePlay_Skill_01.MysteryPryer_RolePlay_Skill_01",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86076020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/MysteryPryer_RolePlay_Skill_02.MysteryPryer_RolePlay_Skill_02",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86076021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/MysteryPryer_RolePlay_Skill_02.MysteryPryer_RolePlay_Skill_02"
+    },
+    "86076022": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/MysteryPryer_RolePlay_Skill_02.MysteryPryer_RolePlay_Skill_02"
+    },
+    "86076030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/MysteryPryer_RolePlay_Skill_03.MysteryPryer_RolePlay_Skill_03",
+      "profession_ids": [
+        1200007
+      ]
+    },
+    "86076031": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/RolePlay/MysteryPryer_RolePlay_Skill_01.MysteryPryer_RolePlay_Skill_01"
+    },
+    "86910010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910042": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Explore/Explore_Skill_Exit.Explore_Skill_Exit"
+    },
+    "86910072": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Stat_04.Rogue_Stat_04"
+    },
+    "86910080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Explore/Explore_Skill_Exit.Explore_Skill_Exit"
+    },
+    "86910082": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_05.Rogue_Common_05"
+    },
+    "86910090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910091": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Explore/Explore_Skill_Exit.Explore_Skill_Exit"
+    },
+    "86910092": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "86910100": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Explore/Explore_Skill_Exit.Explore_Skill_Exit"
+    },
+    "86910102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "86910103": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "86910104": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "86910110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910111": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910120": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910121": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910130": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Dragon_Skill1.Mount_Skill_Dragon_Skill1"
+    },
+    "86910131": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Dragon_Skill1.Mount_Skill_Dragon_Skill1"
+    },
+    "86910140": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Stat_04.Rogue_Stat_04"
+    },
+    "86910150": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910160": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910170": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910171": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910180": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910190": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "86910200": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Dragon_Skill3.Mount_Skill_Dragon_Skill3"
+    },
+    "86910201": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Dragon_Skill3.Mount_Skill_Dragon_Skill3"
+    },
+    "86930010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930021": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_02.Gun_Attack_02"
+    },
+    "86930031": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930035": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Repulse_Gunstock.Morph_Skill_Repulse_Gunstock"
+    },
+    "86930050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Repulse_Kick.Morph_Skill_Repulse_Kick"
+    },
+    "86930060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Repulse_Kick.Morph_Skill_Repulse_Kick"
+    },
+    "86930070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Pistol.Morph_Skill_Gun_Pistol"
+    },
+    "86930071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930072": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930073": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930074": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Pistol.Morph_Skill_Gun_Pistol"
+    },
+    "86930075": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930076": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930077": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930078": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930079": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_FellowTemporary08.Follow_Skill_FellowTemporary08"
+    },
+    "86930080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "86930082": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930083": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930084": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930091": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930092": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_02.Gun_Attack_02"
+    },
+    "86930093": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_02.Gun_Attack_02"
+    },
+    "86930094": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_02.Gun_Attack_02"
+    },
+    "86930100": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Pistol.Morph_Skill_Gun_Pistol"
+    },
+    "86930101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930103": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930104": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Pistol.Morph_Skill_Gun_Pistol"
+    },
+    "86930105": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930106": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930120": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Pistol.Morph_Skill_Gun_Pistol"
+    },
+    "86930121": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930122": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930123": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930124": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "86930129": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Pistol.Morph_Skill_Gun_Pistol"
+    },
+    "86930130": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930131": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_02.Gun_Attack_02"
+    },
+    "86930132": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_02.Gun_Attack_02"
+    },
+    "86930133": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930139": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930140": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_SniperRifle.Morph_Skill_Gun_SniperRifle"
+    },
+    "86930141": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_03.Gun_Attack_03"
+    },
+    "86930143": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930144": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930149": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930150": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "86930151": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_ShotGun.Morph_Skill_Gun_ShotGun"
+    },
+    "87000110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "87000210": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowHugh_Sprite.UI_Skill_Icon_FellowHugh_Sprite"
+    },
+    "87000310": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_Klein_Kqd_Sprite.UI_Skill_Icon_Klein_Kqd_Sprite"
+    },
+    "87000410": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_12.Follow_Skill_12"
+    },
+    "87000411": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_13.Follow_Skill_13"
+    },
+    "87000412": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_13.Follow_Skill_13"
+    },
+    "87000510": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_14.Follow_Skill_14"
+    },
+    "87000511": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_14.Follow_Skill_14"
+    },
+    "87000512": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_15.Follow_Skill_15"
+    },
+    "87000513": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_14.Follow_Skill_14"
+    },
+    "87000610": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowDerric_Sgph_Sprite.UI_Skill_Icon_FellowDerric_Sgph_Sprite"
+    },
+    "87000611": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowDerric_Sgph_Sprite.UI_Skill_Icon_FellowDerric_Sgph_Sprite"
+    },
+    "87000612": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowDerric_Sgph_Sprite.UI_Skill_Icon_FellowDerric_Sgph_Sprite"
+    },
+    "87000710": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowJiadeliya_Kmyy_Sprite.UI_Skill_Icon_FellowJiadeliya_Kmyy_Sprite"
+    },
+    "87000810": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_18.Follow_Skill_18"
+    },
+    "87000811": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_18.Follow_Skill_18"
+    },
+    "87001010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_01.Follow_Skill_01"
+    },
+    "87001011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_01.Follow_Skill_01"
+    },
+    "87001012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_01.Follow_Skill_01"
+    },
+    "87001013": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_01.Follow_Skill_01"
+    },
+    "87001014": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_01.Follow_Skill_01"
+    },
+    "87001110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_02.Follow_Skill_02"
+    },
+    "87001111": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_02.Follow_Skill_02"
+    },
+    "87001112": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_02.Follow_Skill_02"
+    },
+    "87001210": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_03.Follow_Skill_03"
+    },
+    "87001211": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_04.Follow_Skill_04"
+    },
+    "87001212": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_03.Follow_Skill_03"
+    },
+    "87001310": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_05.Follow_Skill_05"
+    },
+    "87001313": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_05.Follow_Skill_05"
+    },
+    "87001410": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_06.Follow_Skill_06"
+    },
+    "87001412": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_06.Follow_Skill_06"
+    },
+    "87001413": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_06.Follow_Skill_06"
+    },
+    "87001414": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_06.Follow_Skill_06"
+    },
+    "87001510": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_10.Follow_Skill_10"
+    },
+    "87001511": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_10.Follow_Skill_10"
+    },
+    "87001610": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_11.Follow_Skill_11"
+    },
+    "87001611": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_11.Follow_Skill_11"
+    },
+    "87001710": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87001711": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87001712": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87001715": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87001716": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87001717": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87001718": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87001719": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87001810": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_09.Follow_Skill_09"
+    },
+    "87001823": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_09.Follow_Skill_09"
+    },
+    "87001910": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_08.Follow_Skill_08"
+    },
+    "87001912": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_08.Follow_Skill_08"
+    },
+    "87001915": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_08.Follow_Skill_08"
+    },
+    "87001916": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_08.Follow_Skill_08"
+    },
+    "87002010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_16.Follow_Skill_16"
+    },
+    "87002011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_16.Follow_Skill_16"
+    },
+    "87002012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_17.Follow_Skill_17"
+    },
+    "87002016": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_17.Follow_Skill_17"
+    },
+    "87002017": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_17.Follow_Skill_17"
+    },
+    "87002110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_21.Follow_Skill_21"
+    },
+    "87002111": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_21.Follow_Skill_21"
+    },
+    "87002112": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_22.Follow_Skill_22"
+    },
+    "87002210": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_19.Follow_Skill_19"
+    },
+    "87002211": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_19.Follow_Skill_19"
+    },
+    "87002212": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_19.Follow_Skill_19"
+    },
+    "87002213": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_20.Follow_Skill_20"
+    },
+    "87002214": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_19.Follow_Skill_19"
+    },
+    "87002215": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_19.Follow_Skill_19"
+    },
+    "87002216": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_20.Follow_Skill_20"
+    },
+    "87002217": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_20.Follow_Skill_20"
+    },
+    "87303001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_02.SecretPartner_Skill_02"
+    },
+    "87303002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_02.SecretPartner_Skill_02"
+    },
+    "87303003": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_02.SecretPartner_Skill_02"
+    },
+    "87303004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_02.SecretPartner_Skill_02"
+    },
+    "87303008": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_02.SecretPartner_Skill_02"
+    },
+    "87303009": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_02.SecretPartner_Skill_02"
+    },
+    "87303010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_06.MysteryPryer_Skill_06"
+    },
+    "87303020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_03.Warrior_Skill_03"
+    },
+    "87303030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_03.SecretPartner_Skill_03"
+    },
+    "87303033": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_03.SecretPartner_Skill_03"
+    },
+    "87303035": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_03.SecretPartner_Skill_03"
+    },
+    "87303037": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_03.SecretPartner_Skill_03"
+    },
+    "87303040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303041": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303042": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303043": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303044": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303045": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303046": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303047": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303048": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_04.SecretPartner_Skill_04"
+    },
+    "87303050": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_01.SecretPartner_Skill_01"
+    },
+    "87303052": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_01.SecretPartner_Skill_01"
+    },
+    "87303053": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_01.SecretPartner_Skill_01"
+    },
+    "87303060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_05.SecretPartner_Skill_05"
+    },
+    "87303061": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_05.SecretPartner_Skill_05"
+    },
+    "87303065": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_05.SecretPartner_Skill_05"
+    },
+    "87303070": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_13_Black.SecretPartner_Skill_13_Black"
+    },
+    "87303071": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_13_Black.SecretPartner_Skill_13_Black"
+    },
+    "87303072": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_13_White.SecretPartner_Skill_13_White"
+    },
+    "87303073": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_13_White.SecretPartner_Skill_13_White"
+    },
+    "87303080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_06.SecretPartner_Skill_06"
+    },
+    "87303081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_06.SecretPartner_Skill_06"
+    },
+    "87303082": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_06.SecretPartner_Skill_06"
+    },
+    "87303083": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_06.SecretPartner_Skill_06"
+    },
+    "87303084": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_06.SecretPartner_Skill_06"
+    },
+    "87303085": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_06.SecretPartner_Skill_06"
+    },
+    "87303090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_07.SecretPartner_Skill_07"
+    },
+    "87303091": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_07.SecretPartner_Skill_07"
+    },
+    "87303092": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_07.SecretPartner_Skill_07"
+    },
+    "87303093": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_07.SecretPartner_Skill_07"
+    },
+    "87303100": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_Fors_Km_Sprite.UI_Skill_Icon_Fors_Km_Sprite"
+    },
+    "87303101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_Fors_Km_Sprite.UI_Skill_Icon_Fors_Km_Sprite"
+    },
+    "87303110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_03.Seer_Skill_03"
+    },
+    "87303120": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Sun_Skill_02.Sun_Skill_02"
+    },
+    "87303130": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_05.Utopian_Skill_05"
+    },
+    "87303140": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_08.SecretPartner_Skill_08"
+    },
+    "87303142": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_08.SecretPartner_Skill_08"
+    },
+    "87303144": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_08.SecretPartner_Skill_08"
+    },
+    "87303150": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_03.Apprentice_Skill_03"
+    },
+    "87303160": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_09.SecretPartner_Skill_09"
+    },
+    "87303170": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_10.SecretPartner_Skill_10"
+    },
+    "87303173": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_10.SecretPartner_Skill_10"
+    },
+    "87303180": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_03.Warrior_Skill_03"
+    },
+    "87303190": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_03.Warrior_Skill_03"
+    },
+    "87303200": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_11.SecretPartner_Skill_11"
+    },
+    "87303210": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_12.SecretPartner_Skill_12"
+    },
+    "87303220": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_03.SecretPartner_Skill_03"
+    },
+    "87303222": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_03.SecretPartner_Skill_03"
+    },
+    "87303300": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_15.SecretPartner_Skill_15"
+    },
+    "87303310": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_16.SecretPartner_Skill_16"
+    },
+    "87303320": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_17.SecretPartner_Skill_17"
+    },
+    "87303330": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_18.SecretPartner_Skill_18"
+    },
+    "87303340": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_19.SecretPartner_Skill_19"
+    },
+    "87303350": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_20.SecretPartner_Skill_20"
+    },
+    "87303360": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_21.SecretPartner_Skill_21"
+    },
+    "87303370": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_22.SecretPartner_Skill_22"
+    },
+    "87303380": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_23.SecretPartner_Skill_23"
+    },
+    "87303390": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_24.SecretPartner_Skill_24"
+    },
+    "87303400": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_25.SecretPartner_Skill_25"
+    },
+    "87303410": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_14.SecretPartner_Skill_14"
+    },
+    "87303420": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_31.SecretPartner_Skill_31"
+    },
+    "87303430": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_32.SecretPartner_Skill_32"
+    },
+    "87303440": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_33.SecretPartner_Skill_33"
+    },
+    "87900000": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowDerric_Sstz01_Sprite.UI_Skill_Icon_FellowDerric_Sstz01_Sprite"
+    },
+    "87900001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowDerric9_01_Sprite.UI_Skill_Icon_FellowDerric9_01_Sprite"
+    },
+    "87900004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/HUD_2/Atlas/HUD_Common/Sprites/UI_HUD_Com_Icon_Quit_Sprite.UI_HUD_Com_Icon_Quit_Sprite"
+    },
+    "87900022": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_SiegeEngine_Shoot.Morph_Skill_SiegeEngine_Shoot"
+    },
+    "87900023": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_SiegeEngine_TripleShoot.Morph_Skill_SiegeEngine_TripleShoot"
+    },
+    "87900101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Playing/Playing_Skill_87900023.Playing_Skill_87900023"
+    },
+    "87900102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill14_Dx_Sprite.UI_Skill_Icon_UtopianSkill14_Dx_Sprite"
+    },
+    "87900104": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowDerric_Sstz01_Sprite.UI_Skill_Icon_FellowDerric_Sstz01_Sprite"
+    },
+    "87900105": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowDerric9_01_Sprite.UI_Skill_Icon_FellowDerric9_01_Sprite"
+    },
+    "87900106": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/PVP/PVP_Skill_1.PVP_Skill_1"
+    },
+    "87900501": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill00_ym02_Sprite.UI_Skill_Icon_UtopianSkill00_ym02_Sprite"
+    },
+    "87900502": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill00_ym02_Sprite.UI_Skill_Icon_UtopianSkill00_ym02_Sprite"
+    },
+    "87900503": {
+      "icon_path": "/Game/Arts/UI_2/Resource/HUD_2/Atlas/HUD_Common/Sprites/UI_HUD_Skill_Icon_Cane_Sprite.UI_HUD_Skill_Icon_Cane_Sprite"
+    },
+    "87900504": {
+      "icon_path": "/Game/Arts/UI_2/Resource/HUD_2/Atlas/HUD_Common/Sprites/UI_HUD_Com_Icon_Quit_Sprite.UI_HUD_Com_Icon_Quit_Sprite"
+    },
+    "87900505": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Task/UI_Skill_Icon_TaskSkill01_Rm.UI_Skill_Icon_TaskSkill01_Rm"
+    },
+    "87900506": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Task/UI_Skill_Icon_TaskSkill02_Tl.UI_Skill_Icon_TaskSkill02_Tl"
+    },
+    "87900507": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_04.Apprentice_Skill_04"
+    },
+    "87900508": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Attack_01.Warrior_Attack_01"
+    },
+    "87901001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Explore/Sprites/UI_Skill_Icon_Explore_Fire_Sprite.UI_Skill_Icon_Explore_Fire_Sprite"
+    },
+    "87901002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Explore/Sprites/UI_Skill_Icon_Explore_Fire_Sprite.UI_Skill_Icon_Explore_Fire_Sprite"
+    },
+    "87907479": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_11.Dungeon_Skill_11"
+    },
+    "87907480": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill14_Dx_Sprite.UI_Skill_Icon_UtopianSkill14_Dx_Sprite"
+    },
+    "87907481": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill14_Dx_Sprite.UI_Skill_Icon_UtopianSkill14_Dx_Sprite"
+    },
+    "87907482": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill14_Dx_Sprite.UI_Skill_Icon_UtopianSkill14_Dx_Sprite"
+    },
+    "87907483": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill14_Dx_Sprite.UI_Skill_Icon_UtopianSkill14_Dx_Sprite"
+    },
+    "87907484": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill14_Dx_Sprite.UI_Skill_Icon_UtopianSkill14_Dx_Sprite"
+    },
+    "87907485": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill14_Dx_Sprite.UI_Skill_Icon_UtopianSkill14_Dx_Sprite"
+    },
+    "87907486": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_03.Seer_Skill_03"
+    },
+    "87907490": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_11.Dungeon_Skill_11"
+    },
+    "87910001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Car_RingBell.Mount_Skill_Car_RingBell"
+    },
+    "87910002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Car_Lights_On.Mount_Skill_Car_Lights_On"
+    },
+    "87910003": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Car_RingBell.Mount_Skill_Car_RingBell"
+    },
+    "87910004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Car_Lights_On.Mount_Skill_Car_Lights_On"
+    },
+    "87910005": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Car_RingBell.Mount_Skill_Car_RingBell"
+    },
+    "87910006": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Bike_RingBell.Mount_Skill_Bike_RingBell"
+    },
+    "87910007": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Bike_Invite.Mount_Skill_Bike_Invite"
+    },
+    "87910008": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Horse_Invite.Mount_Skill_Horse_Invite"
+    },
+    "87910009": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Car_Invite.Mount_Skill_Car_Invite"
+    },
+    "87910010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Dragon_Invite.Mount_Skill_Dragon_Invite"
+    },
+    "87910011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Dragon_Skill2.Mount_Skill_Dragon_Skill2"
+    },
+    "87910012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/SimpleSkill/Mount/Mount_Skill_Car_Music.Mount_Skill_Car_Music"
+    },
+    "87910123": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "87910124": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "87910125": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_Dunn_My_Sprite.UI_Skill_Icon_Dunn_My_Sprite"
+    },
+    "87910222": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "87910223": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_Klein_Kqd_Sprite.UI_Skill_Icon_Klein_Kqd_Sprite"
+    },
+    "87910226": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_07.Follow_Skill_07"
+    },
+    "87910228": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_08.Follow_Skill_08"
+    },
+    "87910229": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_16.Rogue_Common_16"
+    },
+    "87910230": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_16.Rogue_Common_16"
+    },
+    "87910243": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/PVP/PVP_Skill_2.PVP_Skill_2"
+    },
+    "87910333": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "87910334": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Swing.Morph_Skill_Knight_Swing"
+    },
+    "87912020": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Seal/Seal_Skill_4.Seal_Skill_4"
+    },
+    "87912030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Seal/Seal_Skill_3.Seal_Skill_3"
+    },
+    "87912035": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Seal/Seal_Skill_1.Seal_Skill_1"
+    },
+    "87912052": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Element/UI_Skill_Img_Element09.UI_Skill_Img_Element09"
+    },
+    "87912078": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_08.Seer_Skill_08"
+    },
+    "87912079": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_08.Seer_Skill_08"
+    },
+    "87912080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "87912081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "87912082": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_01.Apprentice_Skill_01"
+    },
+    "87912083": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_01.Apprentice_Skill_01"
+    },
+    "87912084": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_04.Utopian_Skill_04"
+    },
+    "87912085": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_04.Utopian_Skill_04"
+    },
+    "87912086": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_05.MysteryPryer_Skill_05"
+    },
+    "87912087": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_05.MysteryPryer_Skill_05"
+    },
+    "87912088": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_04.Bard_Skill_04"
+    },
+    "87912089": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_04.Bard_Skill_04"
+    },
+    "87913081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Element/UI_Skill_Img_Element09.UI_Skill_Img_Element09"
+    },
+    "87913082": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_08.Seer_Skill_08"
+    },
+    "87913083": {
+      "icon_path": "/Game/Arts/UI_2/Resource/HUD_2/Atlas/HUD_Common/Sprites/UI_HUD_Com_Icon_Quit_Sprite.UI_HUD_Com_Icon_Quit_Sprite"
+    },
+    "87913084": {
+      "icon_path": "/Game/Arts/UI_2/Resource/HUD_2/Atlas/HUD_Common/Sprites/UI_HUD_Skill_Icon_Cane_Sprite.UI_HUD_Skill_Icon_Cane_Sprite"
+    },
+    "87913085": {
+      "icon_path": "/Game/Arts/UI_2/Resource/HUD_2/Atlas/HUD_Common/Sprites/UI_HUD_Skill_Icon_Cane_Sprite.UI_HUD_Skill_Icon_Cane_Sprite"
+    },
+    "87913086": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Element/UI_Skill_Img_Element09.UI_Skill_Img_Element09"
+    },
+    "87913087": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Element/UI_Skill_Img_Element06.UI_Skill_Img_Element06"
+    },
+    "87913088": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_1.Dungeon_Skill_1"
+    },
+    "87913090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/HUD_2/Atlas/HUD_Common/Sprites/UI_HUD_Skill_Icon_Cane_Sprite.UI_HUD_Skill_Icon_Cane_Sprite"
+    },
+    "87914001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "88005698": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel02.UI_Skill_Icon_Dungeon_GiantKing_Sasriel02"
+    },
+    "88005699": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "88007185": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Mount/Texture01/UI_Skill_Icon_Mount_Bell.UI_Skill_Icon_Mount_Bell"
+    },
+    "88007284": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_2.Dungeon_Skill_2"
+    },
+    "88007286": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_1.Dungeon_Skill_1"
+    },
+    "88007481": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "88007482": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Swing.Morph_Skill_Knight_Swing"
+    },
+    "88007483": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "88007484": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "88007485": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Halo.Morph_Skill_Knight_Halo"
+    },
+    "88007486": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "88007487": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "88007498": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/SocialClass/Security/Sprites/UI_Skill_Icon_Security_Release_Sprite.UI_Skill_Icon_Security_Release_Sprite"
+    },
+    "88007499": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "88007681": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "88007682": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Swing.Morph_Skill_Knight_Swing"
+    },
+    "88007683": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "88007684": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "88007685": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Halo.Morph_Skill_Knight_Halo"
+    },
+    "88007686": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "88007687": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "88007699": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "88008211": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_1.Dungeon_Skill_1"
+    },
+    "88013527": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/TextControl/UI_Skill_Icon_PickUp.UI_Skill_Icon_PickUp"
+    },
+    "88013528": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/TextControl/UI_Skill_Icon_PickUp.UI_Skill_Icon_PickUp"
+    },
+    "88013529": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/TextControl/UI_Skill_Icon_PickUp.UI_Skill_Icon_PickUp"
+    },
+    "88013530": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/TextControl/UI_Skill_Icon_PickUp.UI_Skill_Icon_PickUp"
+    },
+    "88013608": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "88013609": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "88013634": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "88013635": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "88013636": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "88013647": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/TextControl/UI_Skill_Icon_PickUp.UI_Skill_Icon_PickUp"
+    },
+    "88017006": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "88017007": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "88017008": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "88017014": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_5.Dungeon_Skill_5"
+    },
+    "88017015": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_5.Dungeon_Skill_5"
+    },
+    "88018164": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "88018168": {
+      "icon_path": "-1"
+    },
+    "88018335": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance01.QTE_Battle_Skill_Dance01"
+    },
+    "88018336": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance02.QTE_Battle_Skill_Dance02"
+    },
+    "88018337": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance03.QTE_Battle_Skill_Dance03"
+    },
+    "88018375": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance01.QTE_Battle_Skill_Dance01"
+    },
+    "88018376": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance02.QTE_Battle_Skill_Dance02"
+    },
+    "88018377": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance03.QTE_Battle_Skill_Dance03"
+    },
+    "88018564": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "88018568": {
+      "icon_path": "-1"
+    },
+    "88105153": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/TextControl/UI_Skill_Icon_PickUp.UI_Skill_Icon_PickUp"
+    },
+    "88105303": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard01.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard01"
+    },
+    "88105304": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02"
+    },
+    "88105305": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "88105309": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard01.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard01"
+    },
+    "88105310": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02"
+    },
+    "88105311": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "88105698": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel02.UI_Skill_Icon_Dungeon_GiantKing_Sasriel02"
+    },
+    "88105699": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "88106303": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard01.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard01"
+    },
+    "88106304": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02"
+    },
+    "88106305": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "88106309": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard01.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard01"
+    },
+    "88106310": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02"
+    },
+    "88106311": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "88106698": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel02.UI_Skill_Icon_Dungeon_GiantKing_Sasriel02"
+    },
+    "88106699": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "89000350": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89000351": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89000352": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89000353": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89000354": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89000355": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89000356": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89001309": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Explore/Sprites/UI_Skill_Icon_Explore_Grow_Sprite.UI_Skill_Icon_Explore_Grow_Sprite"
+    },
+    "89001331": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Pollution_Attack.Morph_Skill_Pollution_Attack"
+    },
+    "89001332": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Pollution_Attack.Morph_Skill_Pollution_Attack"
+    },
+    "89001333": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Pollution_Attack.Morph_Skill_Pollution_Attack"
+    },
+    "89001334": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Pollution_Attack.Morph_Skill_Pollution_Attack"
+    },
+    "89001335": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89001360": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001361": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001362": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001363": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_Dunn_My_Sprite.UI_Skill_Icon_Dunn_My_Sprite"
+    },
+    "89001364": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill22_Gmzj_Sprite.UI_Skill_Icon_FoolSkill22_Gmzj_Sprite"
+    },
+    "89001370": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001371": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001372": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001373": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001374": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001375": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001376": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89001377": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89002101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002103": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002104": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002105": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002106": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002107": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002108": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002109": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002111": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002112": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002113": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002114": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002115": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002116": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002117": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002118": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002119": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002120": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002121": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002122": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002123": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002124": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002125": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002126": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002127": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002128": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002129": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002130": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002131": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002132": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002133": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002134": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002135": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002136": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite"
+    },
+    "89002302": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Spectator_Attack_04.Spectator_Attack_04"
+    },
+    "89002303": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_12.SecretPartner_Skill_12"
+    },
+    "89002304": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_01.SecretPartner_Skill_01"
+    },
+    "89002305": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_11.SecretPartner_Skill_11"
+    },
+    "89003467": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_3.Dungeon_Skill_3"
+    },
+    "89003547": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Dance_Green.Morph_Skill_Dance_Green"
+    },
+    "89003548": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Dance_Blue.Morph_Skill_Dance_Blue"
+    },
+    "89003549": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Dance_Red.Morph_Skill_Dance_Red"
+    },
+    "89004400": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004401": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004402": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004403": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004404": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004405": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004411": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004412": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004413": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004414": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004415": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004416": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89004518": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004519": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004520": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004521": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004522": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004523": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004524": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004525": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004526": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004527": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004528": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004529": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004530": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004531": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_MainAttack.Morph_Skill_Knight_MainAttack"
+    },
+    "89004532": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "89004533": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "89004534": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "89004535": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "89004536": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_ChargeSwing.Morph_Skill_Knight_ChargeSwing"
+    },
+    "89004540": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89004543": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89004544": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89004545": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89004546": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89004547": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89004548": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89004549": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89004550": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Halo.Morph_Skill_Knight_Halo"
+    },
+    "89004560": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004561": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004563": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004564": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004565": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004566": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004567": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004569": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004570": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004572": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004573": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge"
+    },
+    "89004631": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Explore/Possess_Skill_Dog_Bark.Possess_Skill_Dog_Bark"
+    },
+    "89004830": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89004833": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89004834": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89004835": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89004845": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89004849": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Pollution_Attack.Morph_Skill_Pollution_Attack"
+    },
+    "89004850": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Pollution_Attack.Morph_Skill_Pollution_Attack"
+    },
+    "89004851": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Pollution_Attack.Morph_Skill_Pollution_Attack"
+    },
+    "89004852": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Pollution_Attack.Morph_Skill_Pollution_Attack"
+    },
+    "89005107": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "89005109": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "89005110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "89005705": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "89005740": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "89005745": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "89005752": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
+    },
+    "89006001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/GiantKing/UI_Skill_Icon_Dungeon_GiantKing_Sasriel01.UI_Skill_Icon_Dungeon_GiantKing_Sasriel01"
+    },
+    "89006300": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "89006301": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "89006302": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "89006303": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "89006401": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "89006873": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Association/Association_Skill_03.Association_Skill_03"
+    },
+    "89006876": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89006881": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89006884": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89007000": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_12.Dungeon_Skill_12"
+    },
+    "89007001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_13.Dungeon_Skill_13"
+    },
+    "89007002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_14.Dungeon_Skill_14"
+    },
+    "89007010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_12.Dungeon_Skill_12"
+    },
+    "89007011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_12.Dungeon_Skill_12"
+    },
+    "89007012": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Dungeon/Dungeon_ACT_Cion01.Dungeon_ACT_Cion01"
+    },
+    "89007150": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_FellowTemporary08.Follow_Skill_FellowTemporary08"
+    },
+    "89007151": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89007152": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89007301": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Give02.QTE_Battle_Skill_Give02"
+    },
+    "89007302": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Give03.QTE_Battle_Skill_Give03"
+    },
+    "89007303": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Give01.QTE_Battle_Skill_Give01"
+    },
+    "89007305": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_4.Dungeon_Skill_4"
+    },
+    "89007310": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_4.Dungeon_Skill_4"
+    },
+    "89007311": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_4.Dungeon_Skill_4"
+    },
+    "89007500": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Interruption.Morph_Skill_Gun_Interruption"
+    },
+    "89007501": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Interruption.Morph_Skill_Gun_Interruption"
+    },
+    "89007806": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_16.SecretPartner_Skill_16"
+    },
+    "89007807": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_24.Rogue_Common_24"
+    },
+    "89007809": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89007810": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89007811": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89007812": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill01_hyty_Sprite.UI_Skill_Icon_FoolSkill01_hyty_Sprite"
+    },
+    "89008100": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_8.Dungeon_Skill_8"
+    },
+    "89008101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/SocialAction/Fashionshow_M_Show_Boxing.Fashionshow_M_Show_Boxing"
+    },
+    "89008102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_5.Dungeon_Skill_5"
+    },
+    "89008104": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_8.Dungeon_Skill_8"
+    },
+    "89008105": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_8.Dungeon_Skill_8"
+    },
+    "89008106": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Jump.Morph_Skill_Knight_Jump"
+    },
+    "89008108": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_4.Dungeon_Skill_4"
+    },
+    "89008109": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_5.Dungeon_Skill_5"
+    },
+    "89008113": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_5.Dungeon_Skill_5"
+    },
+    "89008117": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2000593.2000593"
+    },
+    "89008118": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2000592.2000592"
+    },
+    "89008119": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2000594.2000594"
+    },
+    "89008120": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2000592.2000592"
+    },
+    "89008121": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2000592.2000592"
+    },
+    "89008123": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_5.Dungeon_Skill_5"
+    },
+    "89008125": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_5.Dungeon_Skill_5"
+    },
+    "89008260": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Dungeon/Dungeon_ACT_Cion01.Dungeon_ACT_Cion01"
+    },
+    "89008627": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Texture01/UI_Skill_Icon_Amon_Myjs.UI_Skill_Icon_Amon_Myjs"
+    },
+    "89008628": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard02"
+    },
+    "89008765": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance01.QTE_Battle_Skill_Dance01"
+    },
+    "89008766": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance02.QTE_Battle_Skill_Dance02"
+    },
+    "89008767": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance03.QTE_Battle_Skill_Dance03"
+    },
+    "89008773": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/WorldWidget/PVESkill/UI_WorldWidget_PVE_Skill_Icon_CrazySkill.UI_WorldWidget_PVE_Skill_Icon_CrazySkill"
+    },
+    "89008774": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/WorldWidget/PVESkill/UI_WorldWidget_PVE_Skill_Icon_CrazySkill.UI_WorldWidget_PVE_Skill_Icon_CrazySkill"
+    },
+    "89008775": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/WorldWidget/PVESkill/UI_WorldWidget_PVE_Skill_Icon_CrazySkill.UI_WorldWidget_PVE_Skill_Icon_CrazySkill"
+    },
+    "89008776": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/WorldWidget/PVESkill/UI_WorldWidget_PVE_Skill_Icon_CrazySkill.UI_WorldWidget_PVE_Skill_Icon_CrazySkill"
+    },
+    "89008814": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_1.Dungeon_Skill_1"
+    },
+    "89009007": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89009008": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89009009": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89009430": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_FellowTemporary08.Follow_Skill_FellowTemporary08"
+    },
+    "89009431": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89009432": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89009433": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89009700": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Dance_Blue.Morph_Skill_Dance_Blue"
+    },
+    "89009701": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_03.SecretPartner_Skill_03"
+    },
+    "89009702": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Dance_Red.Morph_Skill_Dance_Red"
+    },
+    "89009703": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Dance_Green.Morph_Skill_Dance_Green"
+    },
+    "89010401": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_01.Follow_Skill_01"
+    },
+    "89010916": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Dungeon/Dungeon_Skill_1.Dungeon_Skill_1"
+    },
+    "89011001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "89011002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "89011003": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Perform/Dance/Texture01/UI_Skill_Icon_DanceSkill01.UI_Skill_Icon_DanceSkill01"
+    },
+    "89103300": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89103301": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89103302": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89103310": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowDerric_Sstz02_Sprite.UI_Skill_Icon_FellowDerric_Sstz02_Sprite"
+    },
+    "89103311": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_10.Apprentice_Skill_10"
+    },
+    "89103312": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_10.Apprentice_Skill_10"
+    },
+    "89103313": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_10.Apprentice_Skill_10"
+    },
+    "89103314": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_10.Apprentice_Skill_10"
+    },
+    "89103319": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_10.Apprentice_Skill_10"
+    },
+    "89103320": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_10.Apprentice_Skill_10"
+    },
+    "89103321": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Skill_10.Apprentice_Skill_10"
+    },
+    "89103325": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill04_zpfd_Sprite.UI_Skill_Icon_FoolSkill04_zpfd_Sprite"
+    },
+    "89103326": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill17_Zpfd02_Sprite.UI_Skill_Icon_FoolSkill17_Zpfd02_Sprite"
+    },
+    "89103327": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill18_Zpfd03_Sprite.UI_Skill_Icon_FoolSkill18_Zpfd03_Sprite"
+    },
+    "89103328": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89103329": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89103331": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89103332": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89103333": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_18.Follow_Skill_18"
+    },
+    "89103334": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill06_xlzs_Sprite.UI_Skill_Icon_UtopianSkill06_xlzs_Sprite"
+    },
+    "89103335": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Follow/Follow_Skill_18.Follow_Skill_18"
+    },
+    "89103336": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Utopian/Sprites/UI_Skill_Icon_UtopianSkill06_xlzs_Sprite.UI_Skill_Icon_UtopianSkill06_xlzs_Sprite"
+    },
+    "89103340": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_Dunn_My_Sprite.UI_Skill_Icon_Dunn_My_Sprite"
+    },
+    "89103341": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill22_Gmzj_Sprite.UI_Skill_Icon_FoolSkill22_Gmzj_Sprite"
+    },
+    "89103350": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89103351": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "89103352": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowJiadeliya_Sprite.UI_Skill_Icon_FellowJiadeliya_Sprite"
+    },
+    "89103353": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowMerlin_Qjjl01_Sprite.UI_Skill_Icon_FellowMerlin_Qjjl01_Sprite"
+    },
+    "89103500": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103501": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103503": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103504": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103506": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103510": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103511": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103512": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103513": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103520": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Pistol.Morph_Skill_Gun_Pistol"
+    },
+    "89103521": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103522": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103523": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103524": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Pistol.Morph_Skill_Gun_Pistol"
+    },
+    "89103525": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103526": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103527": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/ACT/Gun/Gun_Attack_01.Gun_Attack_01"
+    },
+    "89103528": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89103529": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Attack_01.Seer_Attack_01"
+    },
+    "89103530": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill04_zpfd_Sprite.UI_Skill_Icon_FoolSkill04_zpfd_Sprite"
+    },
+    "89103531": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill17_Zpfd02_Sprite.UI_Skill_Icon_FoolSkill17_Zpfd02_Sprite"
+    },
+    "89103532": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill18_Zpfd03_Sprite.UI_Skill_Icon_FoolSkill18_Zpfd03_Sprite"
+    },
+    "89103540": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_03.Seer_Skill_03"
+    },
+    "89103550": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Interruption.Morph_Skill_Gun_Interruption"
+    },
+    "89103551": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Gun_Interruption.Morph_Skill_Gun_Interruption"
+    }
+  }
+}

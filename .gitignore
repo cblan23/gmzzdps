@@ -14,6 +14,9 @@ combat_history/
 damage_inline_live*.jsonl
 debug_*
 skill_names_diagnostics.json
+network_active_boss.json
+replay_*.json
+更新日志-v*.txt
 
 # Build products and local environments
 .venv*/

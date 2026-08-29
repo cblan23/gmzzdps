@@ -11,6 +11,7 @@ import json
 import math
 import struct
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from inline_capture import (
@@ -238,12 +239,16 @@ class RemoteMsgpackReader:
         return self._decode_object(address, 0)
 
     def _decode_object(self, address: int, depth: int):
+        return self._decode_raw_object(self._read(address, self.OBJECT_SIZE), depth)
+
+    def _decode_raw_object(self, raw: bytes, depth: int):
         if depth > self.MAX_DEPTH:
             raise MessageDecodeError("decoded message exceeds nesting limit")
         self.items_read += 1
         if self.items_read > self.MAX_ITEMS:
             raise MessageDecodeError("decoded message exceeds item limit")
-        raw = self._read(address, self.OBJECT_SIZE)
+        if len(raw) != self.OBJECT_SIZE:
+            raise MessageDecodeError("decoded message object is truncated")
         object_type = struct.unpack_from("<I", raw)[0]
         scalar = struct.unpack_from("<Q", raw, 8)[0]
         pointer = struct.unpack_from("<Q", raw, 16)[0]
@@ -277,19 +282,35 @@ class RemoteMsgpackReader:
             size = scalar & 0xFFFFFFFF
             if size > self.MAX_ITEMS - self.items_read:
                 raise MessageDecodeError("decoded array exceeds item limit")
+            children = self._read(pointer, size * self.OBJECT_SIZE) if size else b""
             return [
-                self._decode_object(pointer + index * self.OBJECT_SIZE, depth + 1)
+                self._decode_raw_object(
+                    children[
+                        index * self.OBJECT_SIZE : (index + 1) * self.OBJECT_SIZE
+                    ],
+                    depth + 1,
+                )
                 for index in range(size)
             ]
         if object_type == 8:  # MAP
             size = scalar & 0xFFFFFFFF
             if size * 2 > self.MAX_ITEMS - self.items_read:
                 raise MessageDecodeError("decoded map exceeds item limit")
+            entries = (
+                self._read(pointer, size * self.OBJECT_SIZE * 2) if size else b""
+            )
             pairs = []
             for index in range(size):
-                pair = pointer + index * self.OBJECT_SIZE * 2
-                key = self._decode_object(pair, depth + 1)
-                value = self._decode_object(pair + self.OBJECT_SIZE, depth + 1)
+                pair = index * self.OBJECT_SIZE * 2
+                key = self._decode_raw_object(
+                    entries[pair : pair + self.OBJECT_SIZE], depth + 1
+                )
+                value = self._decode_raw_object(
+                    entries[
+                        pair + self.OBJECT_SIZE : pair + self.OBJECT_SIZE * 2
+                    ],
+                    depth + 1,
+                )
                 pairs.append((key, value))
             if all(isinstance(key, str) for key, _value in pairs):
                 result = {}
@@ -457,6 +478,7 @@ class NetworkMessageHook:
         self,
         *,
         decode_arguments: bool = False,
+        decode_method_filter: Callable[[str], bool] | None = None,
         include_snapshots: bool = False,
     ) -> list[dict]:
         if not self.installed or not self.alive:
@@ -480,11 +502,21 @@ class NetworkMessageHook:
             record = parse_message_record(raw or b"", self.next_sequence)
             if record is None:
                 break
-            if decode_arguments:
+            if decode_arguments and (
+                decode_method_filter is None
+                or decode_method_filter(str(record.get("method", "")))
+            ):
                 try:
                     record["decoded_arguments"] = RemoteMsgpackReader(
                         self.process
                     ).decode(int(record["arguments"]))
+                    decoded_at_100ns = (
+                        time.time_ns() // 100 + 116_444_736_000_000_000
+                    )
+                    record["decode_delay_ms"] = max(
+                        0.0,
+                        (decoded_at_100ns - int(record["filetime_100ns"])) / 10_000,
+                    )
                 except MessageDecodeError as exc:
                     record["decode_error"] = str(exc)
             if include_snapshots:

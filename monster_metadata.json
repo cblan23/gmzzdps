@@ -8586,7 +8586,8 @@
       "fc_paths": [
         "AI.BlackThornCase.Dungeon5100002.LevelMap5200191.Summon_Langbo_1"
       ],
-      "localization_id": 752067564511488
+      "localization_id": 752067564511488,
+      "name": "冰牢"
     },
     "7107122": {
       "boss_type": 0,

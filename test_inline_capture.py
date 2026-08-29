@@ -20,12 +20,52 @@ from network_capture import (
     MESSAGE_RECORD_COUNT,
     MESSAGE_RECORD_SIZE,
     NetworkMessageHook,
+    RemoteMsgpackReader,
     build_absolute_patch,
     build_message_stub,
 )
 
 
 class BossTypeCaptureTests(unittest.TestCase):
+    def test_msgpack_array_children_are_read_in_one_bulk_operation(self):
+        root_address = 0x10000
+        children_address = 0x20000
+        values = [20_875_602, 2_011, 20_868_585]
+        root = bytearray(RemoteMsgpackReader.OBJECT_SIZE)
+        struct.pack_into("<I", root, 0, 7)
+        struct.pack_into("<Q", root, 8, len(values))
+        struct.pack_into("<Q", root, 16, children_address)
+        children = bytearray(RemoteMsgpackReader.OBJECT_SIZE * len(values))
+        for index, value in enumerate(values):
+            offset = index * RemoteMsgpackReader.OBJECT_SIZE
+            struct.pack_into("<I", children, offset, 2)
+            struct.pack_into("<Q", children, offset + 8, value)
+
+        reads = []
+
+        def fake_read(_process, address, size):
+            reads.append((address, size))
+            if address == root_address:
+                return bytes(root)
+            if address == children_address:
+                return bytes(children)
+            return None
+
+        with patch("network_capture.read_region", side_effect=fake_read):
+            decoded = RemoteMsgpackReader(99).decode(root_address)
+
+        self.assertEqual(decoded, values)
+        self.assertEqual(
+            reads,
+            [
+                (root_address, RemoteMsgpackReader.OBJECT_SIZE),
+                (
+                    children_address,
+                    RemoteMsgpackReader.OBJECT_SIZE * len(values),
+                ),
+            ],
+        )
+
     def test_network_hook_adopts_valid_existing_capture(self):
         hook = NetworkMessageHook(pid=1234)
         hook.process = 99

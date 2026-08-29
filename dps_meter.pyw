@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
@@ -36,8 +37,11 @@ from network_capture import NetworkMessageHook
 from network_state import (
     ENCOUNTER_AUXILIARY_TEMPLATES,
     ENCOUNTER_NON_BOSS_TEMPLATE_IDS,
+    EXPLICIT_NON_TYPE3_BOSS_TEMPLATE_IDS,
     MAX_PARTY_MEMBERS,
     NetworkPacketParser,
+    SEPARATE_BOSS_ENCOUNTER_TRANSITIONS,
+    should_decode_network_arguments,
 )
 from remembered_card import remember_card, remembered_card
 
@@ -105,12 +109,13 @@ LOG_DIR = DATA_DIR / "logs"
 HISTORY_DIR = DATA_DIR / "combat_history"
 TEAM_PROFILE_CACHE_PATH = DATA_DIR / "team_profiles.json"
 SELF_IDENTITY_CACHE_PATH = DATA_DIR / "network_self_identity.json"
+ACTIVE_BOSS_CACHE_PATH = DATA_DIR / "network_active_boss.json"
 MONSTER_NAME_CACHE_PATH = DATA_DIR / "monster_name_cache.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手 DPS METER"
-APP_VERSION = "0.0.5"
-CLIENT_BUILD = "0.0.5+20260828.1"
+APP_VERSION = "0.0.8"
+CLIENT_BUILD = "0.0.8+20260829.1"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
 BG = "#090c10"
 SURFACE = "#11161d"
@@ -140,10 +145,15 @@ TEAM_TARGET_ACTIVE_SECONDS = 10.0
 MONSTER_DISPLAY_ACTIVE_SECONDS = 30.0
 LICENSE_HEARTBEAT_FAILURE_GRACE_SECONDS = 50.0
 UNVERIFIED_MEMBER_EVENT_WINDOW_SECONDS = 90.0
-STAGE_SUMMARY_SELF_DAMAGE_TOLERANCE = 1_000_000
+STAGE_SUMMARY_SELF_DAMAGE_TOLERANCE = 150_000
+STAGE_SUMMARY_FINAL_WINDOW_SECONDS = 120.0
+STAGE_SUMMARY_TOTAL_TOLERANCE_RATIO = 0.35
+STAGE_SUMMARY_TOTAL_TOLERANCE_ABSOLUTE = 25_000
+DUMMY_NAME_MARKER = "木桩"
 MULTIPHASE_BOSS_TEMPLATE_IDS = frozenset(
     int(parent_template_id)
     for auxiliary in ENCOUNTER_AUXILIARY_TEMPLATES.values()
+    if auxiliary.get("keeps_encounter_alive")
     for parent_template_id in auxiliary.get("parent_template_ids", ())
     if int(parent_template_id)
 )
@@ -362,6 +372,16 @@ def load_monster_catalog() -> dict[str, dict]:
                 continue
             if not boss_name_is_allowed(metadata.get("name", ""), allowlist):
                 continue
+            try:
+                metadata_boss_type = int(metadata.get("boss_type", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                metadata_boss_type = 0
+            if (
+                metadata_boss_type != 3
+                and parsed_template_id
+                not in EXPLICIT_NON_TYPE3_BOSS_TEMPLATE_IDS
+            ):
+                continue
             boss_metadata = dict(metadata)
             boss_metadata["boss_type"] = 3
             filtered[template_id] = boss_metadata
@@ -419,9 +439,16 @@ class ActorStats:
     last_time: float = 0.0
     skills: dict[int, SkillStats] = field(default_factory=dict)
     target_damage: dict[int, int] = field(default_factory=dict)
+    damage_hits: int | None = None
+    critical_hits: int | None = None
 
     def add(
-        self, damage: int, event_time: float, skill_id: int, target_id: int = 0
+        self,
+        damage: int,
+        event_time: float,
+        skill_id: int,
+        target_id: int = 0,
+        critical: bool | None = None,
     ) -> None:
         self.damage += damage
         self.hits += 1
@@ -435,6 +462,9 @@ class ActorStats:
             self.target_damage[target_id] = (
                 self.target_damage.get(target_id, 0) + damage
             )
+        if critical is not None:
+            self.damage_hits = (self.damage_hits or 0) + 1
+            self.critical_hits = (self.critical_hits or 0) + int(critical)
 
 
 @dataclass
@@ -462,6 +492,7 @@ class TeamDamageState:
     last_absolute: int = 0
     has_snapshot: bool = False
     accepted_damage: int = 0
+    snapshot_time_100ns: int = 0
     first_time: float = 0.0
     last_time: float = 0.0
 
@@ -531,8 +562,10 @@ class CombatModel:
         self.provisional_party_ids: set[int] = set()
         self.party_member_count = 0
         self.party_known = False
+        self.party_roster_authoritative = False
         self.friendly_ids: set[int] = set()
         self.enemy_ids: set[int] = set()
+        self.non_player_actor_ids: set[int] = set()
         self.monsters: dict[int, MonsterStats] = {}
         self.active_target_id: int | None = None
         self.events: list[dict] = []
@@ -540,11 +573,16 @@ class CombatModel:
         self.stats: dict[int, ActorStats] = {}
         self.team_damage_states: dict[int, TeamDamageState] = {}
         self.stage_summaries: dict[str, dict] = {}
+        self.stage_actor_metrics: dict[int, tuple[int, int]] = {}
         self.seen_stage_summary_ids: set[str] = set()
         self.rejected_stage_summary_ids: set[str] = set()
         self.stage_summary_guard_until = 0.0
         self.member_death_states: dict[int, bool] = {}
         self.member_life_times: dict[int, int] = {}
+        self.member_death_counts: dict[int, int] = {}
+        self.entity_combat_states: dict[int, bool] = {}
+        self.entity_combat_state_times: dict[int, int] = {}
+        self.boss_reset_pending_100ns = 0
         self.team_reset_pending = False
         self.friend_order: list[int] = []
         self.target_activity_100ns: dict[int, int] = {}
@@ -557,6 +595,7 @@ class CombatModel:
         self.linked_boss_target_ids: set[int] = set()
         self.encounter_member_ids: set[int] = set()
         self.encounter_team_size = 0
+        self.encounter_authoritative_team_size = 0
         self.completed_combats: list[dict] = []
         self.run_id = str(run_id or uuid.uuid4().hex[:12])
         self.last_archive_signature: tuple | None = None
@@ -588,8 +627,22 @@ class CombatModel:
         *,
         keep_identity: bool = True,
         keep_monsters: bool = False,
+        preserve_active_target: bool = False,
         archive_reason: str = "reset",
     ) -> None:
+        preserved_target_id: int | None = None
+        if preserve_active_target and not self.combat_end_time:
+            candidate = self.monsters.get(int(self.combat_target_id or 0))
+            if (
+                candidate is not None
+                and self._is_priority_target(candidate.entity_id)
+                and not (
+                    candidate.death_confirmed
+                    and candidate.current_hp is not None
+                    and candidate.current_hp <= 0
+                )
+            ):
+                preserved_target_id = candidate.entity_id
         self.archive_current(archive_reason)
         if not keep_identity:
             self.self_id = None
@@ -597,6 +650,7 @@ class CombatModel:
             self.provisional_party_ids.clear()
             self.party_member_count = 0
             self.party_known = False
+            self.party_roster_authoritative = False
             self.friendly_ids.clear()
             self.friend_order.clear()
             self.team_damage_states.clear()
@@ -613,26 +667,34 @@ class CombatModel:
         self.enemy_ids.clear()
         if not keep_monsters:
             self.monsters.clear()
+            self.non_player_actor_ids.clear()
             self.target_activity_100ns.clear()
             self.latest_network_time_100ns = 0
-        self.active_target_id = None
-        self.combat_target_id = None
+        self.active_target_id = preserved_target_id
+        self.combat_target_id = preserved_target_id
         self.encounter_target_ids.clear()
         self.encounter_add_target_ids.clear()
         self.encounter_target_order.clear()
         self.linked_boss_target_ids.clear()
         self.encounter_member_ids.clear()
         self.encounter_team_size = 0
+        self.encounter_authoritative_team_size = 0
+        self.member_death_counts.clear()
+        self.entity_combat_states.clear()
+        self.entity_combat_state_times.clear()
+        self.boss_reset_pending_100ns = 0
         self.team_reset_pending = False
         self.events.clear()
         self.pending_member_events.clear()
         self.stats.clear()
         self.stage_summaries.clear()
+        self.stage_actor_metrics.clear()
         self.seen_stage_summary_ids.clear()
         self.rejected_stage_summary_ids.clear()
         self.stage_summary_guard_until = 0.0
         for state in self.team_damage_states.values():
             state.accepted_damage = 0
+            state.snapshot_time_100ns = 0
             state.first_time = 0.0
             state.last_time = 0.0
         self.first_damage_time = 0.0
@@ -642,6 +704,13 @@ class CombatModel:
         self.session_number += 1
         self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
         self.last_archive_signature = None
+        if preserved_target_id is not None:
+            # A manual clear starts a new local record while the same live Boss
+            # is still being fought. Keeping that target lets the very next
+            # cumulative team update reappear immediately, without waiting for
+            # another local/direct hit to rediscover the encounter.
+            self._register_encounter_target(preserved_target_id)
+            self._resolve_combat_sides()
 
     def _event_seconds(self, event: dict) -> float:
         return (event["filetime_100ns"] - 116_444_736_000_000_000) / 10_000_000
@@ -650,7 +719,88 @@ class CombatModel:
         members = set(self.party_ids) | self.provisional_party_ids
         if self.self_id is not None:
             members.add(self.self_id)
-        return members
+        return members - self.non_player_actor_ids
+
+    def _mark_non_player_actor(self, entity_id: int) -> bool:
+        """Remove a late-confirmed monster from every player-only data source."""
+        if not entity_id:
+            return False
+        was_encounter_member = entity_id in self.encounter_member_ids
+        changed = entity_id not in self.non_player_actor_ids
+        self.non_player_actor_ids.add(entity_id)
+
+        if self.self_id == entity_id:
+            self.self_id = None
+            changed = True
+        for values in (
+            self.party_ids,
+            self.provisional_party_ids,
+            self.friendly_ids,
+            self.encounter_member_ids,
+        ):
+            if entity_id in values:
+                values.discard(entity_id)
+                changed = True
+        filtered_order = [
+            actor_id for actor_id in self.friend_order if actor_id != entity_id
+        ]
+        if filtered_order != self.friend_order:
+            self.friend_order = filtered_order
+            changed = True
+
+        for mapping in (
+            self.entity_professions,
+            self.team_damage_states,
+            self.stage_actor_metrics,
+            self.member_death_states,
+            self.member_life_times,
+            self.member_death_counts,
+        ):
+            if mapping.pop(entity_id, None) is not None:
+                changed = True
+
+        filtered_events = [
+            event
+            for event in self.events
+            if int(event.get("attacker_id", 0) or 0) != entity_id
+        ]
+        if len(filtered_events) != len(self.events):
+            self.events = filtered_events
+            changed = True
+        filtered_pending = [
+            event
+            for event in self.pending_member_events
+            if int(event.get("attacker_id", 0) or 0) != entity_id
+        ]
+        if len(filtered_pending) != len(self.pending_member_events):
+            self.pending_member_events = filtered_pending
+            changed = True
+
+        for summary_id, summary in list(self.stage_summaries.items()):
+            actors = summary.get("actors", [])
+            if not isinstance(actors, list):
+                continue
+            filtered_actors = [
+                row
+                for row in actors
+                if not isinstance(row, dict)
+                or int(row.get("actor_id", 0) or 0) != entity_id
+            ]
+            if len(filtered_actors) != len(actors):
+                cleaned_summary = dict(summary)
+                cleaned_summary["actors"] = filtered_actors
+                self.stage_summaries[summary_id] = cleaned_summary
+                changed = True
+
+        if was_encounter_member and self.encounter_team_size > 0:
+            self.encounter_team_size = min(
+                MAX_PARTY_MEMBERS,
+                max(
+                    len(self.encounter_member_ids),
+                    self.encounter_team_size - 1,
+                ),
+            )
+        return changed
 
     def _party_roster_is_resolved(self) -> bool:
         if not self.party_known:
@@ -665,7 +815,8 @@ class CombatModel:
         if (
             not self.party_known
             or self.party_member_count <= 1
-            or event.get("player_attacker") is False
+            or event.get("player_attacker") is not True
+            or event.get("party_attacker") is False
         ):
             return False
         try:
@@ -680,12 +831,25 @@ class CombatModel:
             or target in self._encounter_damage_target_ids()
         ):
             return False
+        if attacker in self.encounter_member_ids:
+            return True
+
+        # Role/token packets and DamageSync can use different actor IDs for the
+        # same person.  Count verified damage participants, not every positive
+        # roster placeholder, otherwise a seemingly complete 12-player roster
+        # rejects all live teammate damage except the local player.
+        verified_members = set(self.encounter_member_ids)
+        if self.self_id is not None:
+            verified_members.add(self.self_id)
+        if len(verified_members) >= self.party_member_count:
+            return False
+
         resolved_members = {
             actor_id for actor_id in self._current_member_ids() if actor_id > 0
         }
-        if len(resolved_members) >= self.party_member_count:
-            return False
-        self.provisional_party_ids.add(attacker)
+        if len(resolved_members) < self.party_member_count:
+            self.provisional_party_ids.add(attacker)
+        self.encounter_member_ids.add(attacker)
         self.friendly_ids.add(attacker)
         if attacker not in self.friend_order:
             self.friend_order.append(attacker)
@@ -709,9 +873,20 @@ class CombatModel:
         )
 
     def _encounter_idle_timeout(self) -> float:
-        if self._multiphase_encounter() or self.encounter_add_target_ids:
+        if self._multiphase_encounter():
             return self.encounter_gap
         return self.idle_gap
+
+    def _target_hp_depleted(self) -> bool:
+        if self._multiphase_encounter():
+            return False
+        monster = self.monsters.get(int(self.combat_target_id or 0))
+        return bool(
+            monster is not None
+            and self._is_priority_target(monster.entity_id)
+            and monster.current_hp is not None
+            and monster.current_hp <= 0
+        )
 
     def _buffer_pending_member_event(self, event: dict) -> None:
         event_time = self._event_seconds(event)
@@ -728,7 +903,7 @@ class CombatModel:
     def _replay_pending_member_events(self) -> bool:
         if not self.pending_member_events:
             return False
-        members = self._current_member_ids()
+        members = self._current_member_ids() | self.encounter_member_ids
         newest_time = max(
             self._event_seconds(event) for event in self.pending_member_events
         )
@@ -748,13 +923,17 @@ class CombatModel:
         return bool(accepted)
 
     def current_stats(self) -> list[ActorStats]:
-        return [stats for stats in self.stats.values() if stats.damage > 0]
+        return [
+            stats
+            for stats in self.stats.values()
+            if stats.damage > 0
+            and self._actor_counts_for_encounter(stats.actor_id)
+        ]
 
     def _encounter_started(self) -> bool:
         return bool(
             self.first_damage_time
             or self.last_damage_time
-            or self.encounter_target_ids
             or any(
                 state.accepted_damage > 0
                 for state in self.team_damage_states.values()
@@ -764,22 +943,62 @@ class CombatModel:
     def _update_encounter_roster(self, *extra_actor_ids: int) -> None:
         # A participant exists only after an observed hit on the current Boss.
         # Party packets remain useful for names, but never create zero-DPS rows.
-        members = {actor_id for actor_id in extra_actor_ids if actor_id}
+        members = {
+            actor_id
+            for actor_id in extra_actor_ids
+            if actor_id and actor_id not in self.non_player_actor_ids
+        }
+        if self._is_dummy_encounter():
+            members = {
+                actor_id
+                for actor_id in members
+                if self.self_id is not None and actor_id == self.self_id
+            }
         if not members and not self._encounter_started():
             return
         self.encounter_member_ids.update(members)
-        roster_size = self.party_member_count if self.party_known else 0
         self.encounter_team_size = min(
             MAX_PARTY_MEMBERS,
             max(
                 self.encounter_team_size,
                 len(self.encounter_member_ids),
-                roster_size,
             ),
         )
         for actor_id in members:
             if actor_id not in self.friend_order:
                 self.friend_order.append(actor_id)
+
+    def _all_encounter_combatants_out(self) -> bool:
+        participants = {
+            actor_id
+            for actor_id in self.encounter_member_ids
+            if actor_id not in self.non_player_actor_ids
+        }
+        if not participants:
+            return False
+        known_states = {
+            actor_id: self.entity_combat_states[actor_id]
+            for actor_id in participants
+            if actor_id in self.entity_combat_states
+        }
+        if len(known_states) == len(participants):
+            return not any(known_states.values())
+        boss_out = self.entity_combat_states.get(
+            int(self.combat_target_id or 0)
+        ) is False
+        return bool(boss_out and known_states and not any(known_states.values()))
+
+    def _mark_pending_reset_complete(self) -> bool:
+        if (
+            not self.boss_reset_pending_100ns
+            or not self.first_damage_time
+            or self.combat_end_time
+            or not self._all_encounter_combatants_out()
+        ):
+            return False
+        self.combat_end_time = self.last_damage_time
+        self.combat_end_reason = "target_reset"
+        return True
 
     def _mark_target_defeated(self, monster: MonsterStats) -> bool:
         # One defeated unit does not end an all-monsters encounter while
@@ -799,12 +1018,7 @@ class CombatModel:
             return False
         if self._multiphase_encounter():
             return False
-        if any(
-            0 <= monster.death_time_100ns - self.target_activity_100ns.get(target, 0)
-            <= int(self.encounter_gap * 10_000_000)
-            for target in self.encounter_add_target_ids
-            if self.target_activity_100ns.get(target, 0)
-        ):
+        if not self._all_encounter_combatants_out():
             return False
         end_time = self._event_seconds(
             {"filetime_100ns": monster.death_time_100ns}
@@ -843,7 +1057,30 @@ class CombatModel:
     def _monster_max_hp(monster: MonsterStats) -> float:
         return max(monster.max_hp or 0.0, monster.observed_max_hp or 0.0)
 
+    def _is_dummy_target(self, entity_id: int) -> bool:
+        monster = self.monsters.get(int(entity_id or 0))
+        name = (
+            (monster.name if monster is not None else "")
+            or self.entity_names.get(int(entity_id or 0), "")
+        ).strip()
+        return DUMMY_NAME_MARKER in name
+
+    def _is_dummy_encounter(self) -> bool:
+        return bool(
+            self.combat_target_id is not None
+            and self._is_dummy_target(self.combat_target_id)
+        )
+
+    def _actor_counts_for_encounter(self, actor_id: int) -> bool:
+        if not actor_id or actor_id in self.non_player_actor_ids:
+            return False
+        if not self._is_dummy_encounter():
+            return True
+        return self.self_id is not None and actor_id == self.self_id
+
     def _monster_rank(self, monster: MonsterStats) -> int:
+        if self._is_dummy_target(monster.entity_id):
+            return 3
         if monster.boss_rank >= 3 or monster.boss_type == 3:
             return 3
         entity_type = monster.entity_type.casefold()
@@ -991,6 +1228,9 @@ class CombatModel:
                     actor.damage,
                     actor.hits,
                     actor.max_hit,
+                    actor.damage_hits,
+                    actor.critical_hits,
+                    self.member_death_counts.get(actor_id, 0),
                     self.display_name(actor_id),
                     tuple(
                         sorted(
@@ -1096,6 +1336,15 @@ class CombatModel:
                     "share": actor.damage / total_damage if total_damage else 0.0,
                     "hits": actor.hits,
                     "max_hit": actor.max_hit,
+                    "damage_hits": actor.damage_hits,
+                    "critical_hits": actor.critical_hits,
+                    "critical_rate": (
+                        actor.critical_hits / actor.damage_hits
+                        if actor.damage_hits
+                        and actor.critical_hits is not None
+                        else None
+                    ),
+                    "deaths": self.member_death_counts.get(actor_id, 0),
                     "skills": skills,
                     "targets": self.actor_target_rows(actor_id),
                 }
@@ -1146,15 +1395,38 @@ class CombatModel:
             "duration_seconds": duration,
             "total_damage": total_damage,
             "team_dps": total_damage / duration,
-            "team_size": min(
-                MAX_PARTY_MEMBERS,
-                max(len(participants), self.encounter_team_size),
+            "team_size": (
+                len(participants)
+                if self._is_dummy_encounter()
+                else min(
+                    MAX_PARTY_MEMBERS,
+                    max(len(participants), self.encounter_team_size),
+                )
             ),
             "target_filter": "boss" if self.boss_only else "all_monsters",
             "monster": primary_target,
             "targets": targets,
             "participants": participants,
         }
+
+    def _queue_current_record_refresh(self) -> bool:
+        if not self.combat_end_time:
+            return False
+        reason = self.combat_end_reason or "completed"
+        record = self.build_combat_record(reason)
+        signature = self._archive_signature()
+        if record is None or signature is None:
+            return False
+        for index in range(len(self.completed_combats) - 1, -1, -1):
+            if self.completed_combats[index].get("encounter_id") == self.encounter_id:
+                self.completed_combats[index] = record
+                self.last_archive_signature = signature
+                return True
+        # The first copy may already be on disk. Saving the same encounter ID
+        # again atomically replaces it with the late exact stage metrics.
+        self.completed_combats.append(record)
+        self.last_archive_signature = signature
+        return True
 
     def archive_current(self, reason: str = "completed") -> bool:
         signature = self._archive_signature()
@@ -1163,6 +1435,11 @@ class CombatModel:
         record = self.build_combat_record(reason)
         if record is None:
             return False
+        for index in range(len(self.completed_combats) - 1, -1, -1):
+            if self.completed_combats[index].get("encounter_id") == self.encounter_id:
+                self.completed_combats[index] = record
+                self.last_archive_signature = signature
+                return True
         self.completed_combats.append(record)
         self.last_archive_signature = signature
         return True
@@ -1175,6 +1452,16 @@ class CombatModel:
                 self.combat_end_reason or "completed"
             )
         now = time.time() if now is None else now
+        if (
+            self.boss_reset_pending_100ns
+            and now - self.last_damage_time >= self.idle_gap
+        ):
+            # Some clients do not expose every entity's fight-mode transition.
+            # A confirmed full refill followed by a quiet interval is the
+            # fallback for the same all-out-of-combat reset condition.
+            self.combat_end_time = self.last_damage_time
+            self.combat_end_reason = "target_reset"
+            return self.archive_current("target_reset")
         if now - self.last_damage_time < self._encounter_idle_timeout():
             return False
         monster = self.current_monster()
@@ -1195,32 +1482,36 @@ class CombatModel:
 
     def ingest(self, event: dict) -> None:
         damage = int(event.get("damage", 0))
-        if damage <= 0 or event.get("player_attacker") is False:
-            return
         attacker = int(event["attacker_id"])
         if (
-            self.party_known
-            and attacker
-            not in self._current_member_ids()
+            damage <= 0
+            or event.get("player_attacker") is False
+            or attacker in self.non_player_actor_ids
         ):
-            if self._admit_provisional_party_actor(event):
-                pass
-            elif not self._party_roster_is_resolved():
+            return
+        # Participation is established by a confirmed player damaging one of
+        # this encounter's targets. Party snapshots are still used for names
+        # and life state, but a stale join/leave list must never hide a real
+        # contributor or keep a departed zero-damage row on screen.
+        if (
+            attacker not in self._current_member_ids()
+            and event.get("player_attacker") is not True
+        ):
+            if self.party_known and not self._party_roster_is_resolved():
                 self._buffer_pending_member_event(event)
-                return
-            else:
-                return
+            return
         previous_session_number = self.session_number
         encounter_was_empty = not self.first_damage_time
         event_time = self._event_seconds(event)
         timestamp = int(event.get("filetime_100ns", 0) or 0)
         self.latest_network_time_100ns = max(self.latest_network_time_100ns, timestamp)
         target = int(event["target_id"])
-        if attacker in self._current_member_ids():
-            self.member_death_states[attacker] = False
-            self.member_life_times[attacker] = max(
-                self.member_life_times.get(attacker, 0), timestamp
-            )
+        if (
+            self._is_dummy_target(target)
+            and self.self_id is not None
+            and attacker != self.self_id
+        ):
+            return
         if (
             not self.boss_only
             and target not in self.monsters
@@ -1252,6 +1543,12 @@ class CombatModel:
         if not priority_target and self.combat_target_id is not None:
             self._link_boss_scene_target(target, event_time, timestamp)
         linked_target = target in self._encounter_damage_target_ids()
+        if (
+            (priority_target or linked_target)
+            and attacker not in self.encounter_member_ids
+            and len(self.encounter_member_ids) >= MAX_PARTY_MEMBERS
+        ):
+            return
         if priority_target:
             if (
                 self.last_damage_time
@@ -1287,6 +1584,11 @@ class CombatModel:
             elif self.combat_target_id is not None and target != self.combat_target_id:
                 previous = self.monsters.get(self.combat_target_id)
                 incoming = self.monsters.get(target)
+                dummy_switch = bool(
+                    self.boss_only
+                    and self._is_dummy_target(self.combat_target_id)
+                    and self._is_dummy_target(target)
+                )
                 same_phase_group = bool(
                     self.boss_only
                     and previous is not None
@@ -1297,12 +1599,36 @@ class CombatModel:
                     same_phase_group
                     and boss_phase_continues(previous.name, incoming.name)
                 )
+                separate_encounter = bool(
+                    previous is not None
+                    and incoming is not None
+                    and (
+                        int(previous.template_id or 0),
+                        int(incoming.template_id or 0),
+                    )
+                    in SEPARATE_BOSS_ENCOUNTER_TRANSITIONS
+                )
                 idle_switch = bool(
                     self.last_damage_time
                     and event_time - self.last_damage_time
                     > self.idle_gap
                 )
-                if phase_continuation:
+                if dummy_switch:
+                    self.reset(
+                        keep_identity=True,
+                        keep_monsters=True,
+                        archive_reason="new_encounter",
+                    )
+                elif separate_encounter:
+                    # 洛克·金·失控 is a new Boss battle, not a second phase of
+                    # the preceding 洛克·金 record. Archive the completed first
+                    # fight and let this very hit start a clean encounter.
+                    self.reset(
+                        keep_identity=True,
+                        keep_monsters=True,
+                        archive_reason="new_encounter",
+                    )
+                elif phase_continuation:
                     self.linked_boss_target_ids.update(
                         {self.combat_target_id, target}
                     )
@@ -1367,7 +1693,12 @@ class CombatModel:
             self._register_encounter_target(target)
             self._update_encounter_roster(attacker)
         elif linked_target:
-            if self.combat_end_time:
+            if self.combat_end_time or self._target_hp_depleted():
+                # Adds belong to this encounter only while the Boss is alive.
+                # Daily dungeons can leave ordinary monsters on screen after
+                # the Boss reaches zero HP; those late hits must not extend or
+                # change the finished DPS result. Multi-phase encounters still
+                # return False from _target_hp_depleted() by design.
                 return
             self._register_encounter_target(
                 target, add=target in self.encounter_add_target_ids
@@ -1375,6 +1706,13 @@ class CombatModel:
             self._update_encounter_roster(attacker)
         if (priority_target or linked_target) and timestamp:
             self.target_activity_100ns[target] = timestamp
+            if (
+                self.boss_reset_pending_100ns
+                and timestamp > self.boss_reset_pending_100ns
+            ):
+                # Damage continuing before the party leaves fight mode means
+                # this was an ordinary Boss heal, not a completed wipe/reset.
+                self.boss_reset_pending_100ns = 0
         self.events.append(event)
         # Retain ample history for a long boss fight without unbounded growth.
         if len(self.events) > 200_000:
@@ -1419,6 +1757,7 @@ class CombatModel:
             for event in self.events
             if int(event.get("damage", 0)) > 0
             and int(event["target_id"]) in damage_target_ids
+            and self._actor_counts_for_encounter(int(event["attacker_id"]))
         }
         friendly = current_friendly | observed_attackers
         enemies = damage_target_ids
@@ -1429,11 +1768,62 @@ class CombatModel:
         self.enemy_ids = enemies
         self.active_target_id = self.combat_target_id
 
+    @staticmethod
+    def _scale_damage_weights(
+        total: int,
+        observed: dict[int, int],
+        *,
+        allow_zero_key: bool,
+    ) -> dict[int, int]:
+        """Scale reconstructed weights to an authoritative integer total."""
+        total = max(0, int(total))
+        cleaned = {
+            int(item_id): max(0, int(damage))
+            for item_id, damage in observed.items()
+            if (allow_zero_key or int(item_id)) and int(damage) > 0
+        }
+        observed_total = sum(cleaned.values())
+        if total <= 0 or observed_total <= 0:
+            return {}
+        if total == observed_total:
+            return cleaned
+
+        allocations: dict[int, int] = {}
+        remainders: list[tuple[int, int]] = []
+        allocated = 0
+        for item_id, damage in cleaned.items():
+            numerator = total * damage
+            share, remainder = divmod(numerator, observed_total)
+            allocations[item_id] = share
+            allocated += share
+            remainders.append((remainder, item_id))
+        for _remainder, item_id in sorted(remainders, reverse=True)[
+            : total - allocated
+        ]:
+            allocations[item_id] += 1
+        return {item_id: damage for item_id, damage in allocations.items() if damage}
+
+    @classmethod
+    def _scale_target_damage(
+        cls, total: int, observed: dict[int, int]
+    ) -> dict[int, int]:
+        """Scale reconstructed per-target weights to an authoritative total."""
+        return cls._scale_damage_weights(
+            total,
+            observed,
+            allow_zero_key=False,
+        )
+
     def _recompute(self) -> None:
+        previous_first_damage_time = self.first_damage_time
+        previous_last_damage_time = self.last_damage_time
         stats: dict[int, ActorStats] = {}
         first = 0.0
         last = 0.0
         damage_target_ids = self._encounter_damage_target_ids()
+        summary_damage: dict[int, int] = {}
+        observed_target_damage: dict[int, dict[int, int]] = {}
+        team_snapshot_events: dict[int, ActorStats] = {}
 
         summary_cutoff = 0
         for summary in self.stage_summaries.values():
@@ -1447,6 +1837,8 @@ class CombatModel:
             summary_time = self._event_seconds(
                 {"filetime_100ns": summary_time_100ns}
             )
+            encounter_first_time = previous_first_damage_time or summary_time
+            encounter_last_time = previous_last_damage_time or summary_time
             for row in summary.get("actors", []):
                 if not isinstance(row, dict):
                     continue
@@ -1455,16 +1847,40 @@ class CombatModel:
                     damage = max(0, int(row.get("damage", 0) or 0))
                 except (TypeError, ValueError, OverflowError):
                     continue
-                if not actor_id or damage <= 0:
+                if (
+                    not actor_id
+                    or damage <= 0
+                    or not self._actor_counts_for_encounter(actor_id)
+                ):
                     continue
                 actor = stats.setdefault(actor_id, ActorStats(actor_id))
                 actor.damage += damage
+                summary_damage[actor_id] = summary_damage.get(actor_id, 0) + damage
+                for source_key, attribute in (
+                    ("damage_hits", "damage_hits"),
+                    ("critical_hits", "critical_hits"),
+                ):
+                    raw_value = row.get(source_key)
+                    if raw_value is None:
+                        continue
+                    try:
+                        parsed_value = max(0, int(raw_value))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    previous_value = getattr(actor, attribute)
+                    setattr(
+                        actor,
+                        attribute,
+                        parsed_value
+                        if previous_value is None
+                        else previous_value + parsed_value,
+                    )
                 actor.first_time = (
-                    min(actor.first_time, summary_time)
+                    min(actor.first_time, encounter_first_time)
                     if actor.first_time
-                    else summary_time
+                    else encounter_first_time
                 )
-                actor.last_time = max(actor.last_time, summary_time)
+                actor.last_time = max(actor.last_time, encounter_last_time)
                 summarized_skill_damage = 0
                 for raw_skill in row.get("skills", []):
                     if not isinstance(raw_skill, dict):
@@ -1483,11 +1899,11 @@ class CombatModel:
                     skill.damage += skill_damage
                     skill.hits += hits
                     skill.first_time = (
-                        min(skill.first_time, summary_time)
+                        min(skill.first_time, encounter_first_time)
                         if skill.first_time
-                        else summary_time
+                        else encounter_first_time
                     )
-                    skill.last_time = max(skill.last_time, summary_time)
+                    skill.last_time = max(skill.last_time, encounter_last_time)
                     actor.hits += hits
                     summarized_skill_damage += skill_damage
                 residual = max(0, damage - summarized_skill_damage)
@@ -1495,14 +1911,13 @@ class CombatModel:
                     aggregate = actor.skills.setdefault(0, SkillStats(0))
                     aggregate.damage += residual
                     aggregate.first_time = (
-                        min(aggregate.first_time, summary_time)
+                        min(aggregate.first_time, encounter_first_time)
                         if aggregate.first_time
-                        else summary_time
+                        else encounter_first_time
                     )
-                    aggregate.last_time = max(aggregate.last_time, summary_time)
-            if not first or summary_time < first:
-                first = summary_time
-            last = max(last, summary_time)
+                    aggregate.last_time = max(
+                        aggregate.last_time, encounter_last_time
+                    )
 
         for event in self.events:
             attacker = int(event["attacker_id"])
@@ -1511,6 +1926,7 @@ class CombatModel:
             if (
                 damage <= 0
                 or target not in damage_target_ids
+                or not self._actor_counts_for_encounter(attacker)
             ):
                 continue
             event_time = self._event_seconds(event)
@@ -1519,6 +1935,8 @@ class CombatModel:
             last = max(last, event_time)
             timestamp = int(event.get("filetime_100ns", 0) or 0)
             if summary_cutoff and timestamp <= summary_cutoff:
+                actor_targets = observed_target_damage.setdefault(attacker, {})
+                actor_targets[target] = actor_targets.get(target, 0) + damage
                 actor = stats.get(attacker)
                 if actor is not None:
                     actor.first_time = (
@@ -1530,13 +1948,122 @@ class CombatModel:
             skill_id = int(event.get("skill_id", 0)) or self.normalize_damage_skill_id(
                 event.get("arg4_u64", 0)
             )
+            team_state = self.team_damage_states.get(attacker)
+            if (
+                not summary_cutoff
+                and team_state is not None
+                and team_state.accepted_damage > 0
+                and team_state.snapshot_time_100ns > 0
+                and timestamp <= team_state.snapshot_time_100ns
+            ):
+                actor = team_snapshot_events.setdefault(
+                    attacker, ActorStats(attacker)
+                )
+                raw_critical = event.get("critical")
+                actor.add(
+                    damage,
+                    event_time,
+                    skill_id,
+                    target,
+                    (
+                        bool(raw_critical)
+                        if isinstance(raw_critical, bool)
+                        else None
+                    ),
+                )
+                continue
             actor = stats.setdefault(attacker, ActorStats(attacker))
-            actor.add(damage, event_time, skill_id, target)
+            raw_critical = event.get("critical")
+            actor.add(
+                damage,
+                event_time,
+                skill_id,
+                target,
+                (
+                    bool(raw_critical)
+                    if isinstance(raw_critical, bool)
+                    else None
+                ),
+            )
+        for actor_id, authoritative_damage in summary_damage.items():
+            actor = stats.get(actor_id)
+            if actor is None:
+                continue
+            allocations = self._scale_target_damage(
+                authoritative_damage,
+                observed_target_damage.get(actor_id, {}),
+            )
+            for target_id, damage in allocations.items():
+                actor.target_damage[target_id] = (
+                    actor.target_damage.get(target_id, 0) + damage
+                )
         for actor_id, state in self.team_damage_states.items():
-            if state.accepted_damage <= 0:
+            if (
+                state.accepted_damage <= 0
+                or not self._actor_counts_for_encounter(actor_id)
+            ):
                 continue
             actor = stats.setdefault(actor_id, ActorStats(actor_id))
-            actor.damage = max(actor.damage, state.accepted_damage)
+            observed = team_snapshot_events.get(actor_id)
+            actor.damage += state.accepted_damage
+            if observed is not None and observed.damage > 0:
+                scaled_skills = self._scale_damage_weights(
+                    state.accepted_damage,
+                    {
+                        skill_id: skill.damage
+                        for skill_id, skill in observed.skills.items()
+                    },
+                    allow_zero_key=True,
+                )
+                for skill_id, scaled_damage in scaled_skills.items():
+                    source = observed.skills[skill_id]
+                    skill = actor.skills.setdefault(skill_id, SkillStats(skill_id))
+                    skill.damage += scaled_damage
+                    skill.hits += source.hits
+                    skill.max_hit = max(
+                        skill.max_hit,
+                        min(source.max_hit, scaled_damage),
+                    )
+                    skill.first_time = (
+                        min(skill.first_time, source.first_time)
+                        if skill.first_time and source.first_time
+                        else skill.first_time or source.first_time
+                    )
+                    skill.last_time = max(skill.last_time, source.last_time)
+                for target_id, scaled_damage in self._scale_target_damage(
+                    state.accepted_damage,
+                    observed.target_damage,
+                ).items():
+                    actor.target_damage[target_id] = (
+                        actor.target_damage.get(target_id, 0) + scaled_damage
+                    )
+                actor.hits += observed.hits
+                actor.max_hit = max(
+                    actor.max_hit,
+                    min(observed.max_hit, state.accepted_damage),
+                )
+                if observed.damage_hits is not None:
+                    actor.damage_hits = (
+                        (actor.damage_hits or 0) + observed.damage_hits
+                    )
+                    actor.critical_hits = (
+                        (actor.critical_hits or 0)
+                        + int(observed.critical_hits or 0)
+                    )
+                if observed.first_time and (
+                    not actor.first_time or observed.first_time < actor.first_time
+                ):
+                    actor.first_time = observed.first_time
+                actor.last_time = max(actor.last_time, observed.last_time)
+            else:
+                aggregate = actor.skills.setdefault(0, SkillStats(0))
+                aggregate.damage += state.accepted_damage
+                aggregate.first_time = (
+                    min(aggregate.first_time, state.first_time)
+                    if aggregate.first_time and state.first_time
+                    else aggregate.first_time or state.first_time
+                )
+                aggregate.last_time = max(aggregate.last_time, state.last_time)
             if state.first_time and (
                 not actor.first_time or state.first_time < actor.first_time
             ):
@@ -1545,30 +2072,27 @@ class CombatModel:
             if state.first_time and (not first or state.first_time < first):
                 first = state.first_time
             last = max(last, state.last_time)
-            captured_damage = sum(skill.damage for skill in actor.skills.values())
-            aggregate_damage = max(0, actor.damage - captured_damage)
-            if aggregate_damage:
-                aggregate = actor.skills.get(0)
-                if aggregate is None:
-                    actor.skills[0] = SkillStats(
-                        skill_id=0,
-                        damage=aggregate_damage,
-                        hits=0,
-                        max_hit=0,
-                        first_time=state.first_time,
-                        last_time=state.last_time,
-                    )
-                else:
-                    aggregate.damage += aggregate_damage
-                    aggregate.last_time = max(
-                        aggregate.last_time, state.last_time
-                    )
+        for actor_id, (damage_hits, critical_hits) in self.stage_actor_metrics.items():
+            actor = stats.get(actor_id)
+            if actor is None or damage_hits <= 0 or critical_hits > damage_hits:
+                continue
+            actor.damage_hits = damage_hits
+            actor.critical_hits = critical_hits
         self.stats = stats
         self.first_damage_time = first
         self.last_damage_time = last
+        if self._is_dummy_encounter():
+            visible_members = {
+                actor_id
+                for actor_id, actor in stats.items()
+                if actor.damage > 0 and self._actor_counts_for_encounter(actor_id)
+            }
+            self.encounter_member_ids = visible_members
+            self.encounter_team_size = len(visible_members)
 
     def ingest_stage_summary(self, update: dict) -> bool:
         summary_id = str(update.get("summary_id", "")).strip()
+        authoritative = bool(update.get("authoritative"))
         try:
             timestamp = int(update.get("filetime_100ns", 0) or 0)
             member_count = max(0, int(update.get("member_count", 0) or 0))
@@ -1581,37 +2105,185 @@ class CombatModel:
             or summary_id in self.rejected_stage_summary_ids
         ):
             return False
-        if not self._encounter_damage_target_ids():
+        if not self._encounter_damage_target_ids() or not self.first_damage_time:
+            self.rejected_stage_summary_ids.add(summary_id)
             return False
 
         summary_total = 0
+        summary_actor_ids: set[int] = set()
+        summary_damage_by_actor: dict[int, int] = {}
         for raw_actor in update.get("actors", []):
             if not isinstance(raw_actor, dict):
                 continue
             try:
-                summary_total += max(0, int(raw_actor.get("damage", 0) or 0))
+                actor_id = int(raw_actor.get("actor_id", 0) or 0)
+                damage = max(0, int(raw_actor.get("damage", 0) or 0))
             except (TypeError, ValueError, OverflowError):
                 continue
+            if actor_id <= 0 or not self._actor_counts_for_encounter(actor_id):
+                continue
+            summary_damage_by_actor[actor_id] = damage
+            summary_total += damage
+            if damage > 0:
+                summary_actor_ids.add(actor_id)
         summary_time = self._event_seconds({"filetime_100ns": timestamp})
         observed_total = sum(actor.damage for actor in self.stats.values())
-        if (
-            summary_time <= self.stage_summary_guard_until
-            and summary_total
-            > max(observed_total * 2, observed_total + 250_000)
+        encounter_edge = self.combat_end_time or self.last_damage_time
+        summary_delay = (
+            summary_time - encounter_edge if encounter_edge else float("inf")
+        )
+        observed_actor_ids = {
+            actor_id for actor_id, actor in self.stats.items() if actor.damage > 0
+        }
+        actor_overlap = summary_actor_ids.intersection(observed_actor_ids)
+        total_tolerance = max(
+            STAGE_SUMMARY_TOTAL_TOLERANCE_ABSOLUTE,
+            round(
+                max(summary_total, observed_total)
+                * STAGE_SUMMARY_TOTAL_TOLERANCE_RATIO
+            ),
+        )
+        total_plausible = bool(
+            summary_total > 0
+            and observed_total > 0
+            and abs(summary_total - observed_total) <= total_tolerance
+            and min(summary_total, observed_total)
+            >= max(summary_total, observed_total) * 0.5
+        )
+        self_plausible = True
+        if self.self_id is not None and self.self_id in summary_damage_by_actor:
+            observed_self = self.stats.get(self.self_id)
+            observed_self_damage = observed_self.damage if observed_self else 0
+            summary_self_damage = summary_damage_by_actor[self.self_id]
+            self_tolerance = max(
+                STAGE_SUMMARY_SELF_DAMAGE_TOLERANCE,
+                round(max(observed_self_damage, summary_self_damage) * 0.10),
+            )
+            self_plausible = (
+                abs(summary_self_damage - observed_self_damage) <= self_tolerance
+            )
+        end_snapshot = bool(
+            0 <= summary_delay <= STAGE_SUMMARY_FINAL_WINDOW_SECONDS
+            and (
+                authoritative
+                or
+                self.combat_end_time
+                or self._target_hp_depleted()
+                or summary_delay >= self._encounter_idle_timeout()
+            )
+        )
+        exact_snapshot = bool(
+            summary_total > 0
+            and actor_overlap
+            and (authoritative or self_plausible)
+            and end_snapshot
+            and (authoritative or total_plausible)
+        )
+
+        if exact_snapshot:
+            # A matched stage result is exact for this encounter token. It
+            # replaces all provisional HP allocations and live cumulative
+            # snapshots; storing both is what previously doubled add damage.
+            exact_update = dict(update)
+            exact_update["exact_for_encounter"] = True
+            self.stage_summaries.clear()
+            self.stage_summaries[summary_id] = exact_update
+            for state in self.team_damage_states.values():
+                state.accepted_damage = 0
+                state.snapshot_time_100ns = 0
+                state.first_time = 0.0
+                state.last_time = 0.0
+            for raw_actor in update.get("actors", []):
+                if not isinstance(raw_actor, dict):
+                    continue
+                try:
+                    actor_id = int(raw_actor.get("actor_id", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (
+                    self._actor_counts_for_encounter(actor_id)
+                    and "deaths" in raw_actor
+                ):
+                    try:
+                        self.member_death_counts[actor_id] = max(
+                            0, int(raw_actor.get("deaths", 0) or 0)
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+            self.encounter_member_ids.update(summary_actor_ids)
+            self.encounter_team_size = min(
+                MAX_PARTY_MEMBERS, len(self.encounter_member_ids)
+            )
+            if not self.combat_end_time:
+                self.combat_end_time = encounter_edge
+                self.combat_end_reason = (
+                    "settlement" if authoritative else "stage_summary"
+                )
+            self.seen_stage_summary_ids.add(summary_id)
+            self.latest_network_time_100ns = max(
+                self.latest_network_time_100ns, timestamp
+            )
+            self._recompute()
+            if not self._queue_current_record_refresh():
+                self.archive_current(self.combat_end_reason or "stage_summary")
+            return True
+
+        if summary_time <= self.stage_summary_guard_until or (
+            end_snapshot and not total_plausible
         ):
             self.rejected_stage_summary_ids.add(summary_id)
             return False
 
-        # Stage rows are cumulative for the whole instance and can arrive at a
-        # phase boundary. They remain useful because the parser emits their
-        # actor/name mappings first, but treating their totals as this pull's
-        # damage is what produced 100M+ dummy records and end-of-fight jumps.
+        metrics_changed = False
+        if (
+            self.first_damage_time
+            and summary_time >= self.first_damage_time
+            and -0.5 <= summary_delay <= 8.0
+        ):
+            active_actor_ids = set(self.stats)
+            for raw_actor in update.get("actors", []):
+                if not isinstance(raw_actor, dict):
+                    continue
+                try:
+                    actor_id = int(raw_actor.get("actor_id", 0) or 0)
+                    damage = max(0, int(raw_actor.get("damage", 0) or 0))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (
+                    not actor_id
+                    or damage <= 0
+                    or actor_id not in active_actor_ids
+                    or not self._actor_counts_for_encounter(actor_id)
+                ):
+                    continue
+                raw_hits = raw_actor.get("damage_hits")
+                raw_critical = raw_actor.get("critical_hits")
+                if raw_hits is not None and raw_critical is not None:
+                    try:
+                        damage_hits = max(0, int(raw_hits))
+                        critical_hits = max(0, int(raw_critical))
+                    except (TypeError, ValueError, OverflowError):
+                        damage_hits = 0
+                        critical_hits = 0
+                    if damage_hits > 0 and critical_hits <= damage_hits:
+                        metrics = (damage_hits, critical_hits)
+                        if self.stage_actor_metrics.get(actor_id) != metrics:
+                            self.stage_actor_metrics[actor_id] = metrics
+                            metrics_changed = True
+                # UpdateStageCombatStatistics can retain deaths from earlier
+                # pulls of the same dungeon stage. Those cumulative values
+                # must not overwrite this encounter's transition-based death
+                # count. Only the authoritative settlement table is allowed
+                # to replace deaths with the game's final result.
+            if metrics_changed:
+                self._recompute()
+                self._queue_current_record_refresh()
+
+        # A mid-fight or unmatched stage row is useful only for actor bindings
+        # and crit metrics. It must not alter damage until it matches the final
+        # encounter window and the observed packet total.
         self.seen_stage_summary_ids.add(summary_id)
         self.latest_network_time_100ns = max(self.latest_network_time_100ns, timestamp)
-        self.party_member_count = min(
-            MAX_PARTY_MEMBERS,
-            max(self.party_member_count, member_count),
-        )
         return True
 
     def ingest_identity(self, update: dict) -> bool:
@@ -1619,7 +2291,7 @@ class CombatModel:
             entity_id = int(update.get("entity_id", 0))
         except (TypeError, ValueError):
             return False
-        if not entity_id:
+        if not entity_id or entity_id in self.non_player_actor_ids:
             return False
         previous_self_id = self.self_id
         changed = previous_self_id != entity_id
@@ -1633,6 +2305,11 @@ class CombatModel:
                 if previous_state is not None:
                     self.member_death_states[entity_id] = previous_state
                     self.member_life_times[entity_id] = previous_time
+            previous_deaths = self.member_death_counts.pop(previous_self_id, 0)
+            if previous_deaths:
+                self.member_death_counts[entity_id] = (
+                    self.member_death_counts.get(entity_id, 0) + previous_deaths
+                )
         self.party_ids.discard(entity_id)
         self.provisional_party_ids.discard(entity_id)
         self.party_member_count = max(1, self.party_member_count)
@@ -1648,6 +2325,14 @@ class CombatModel:
         return changed or replayed
 
     def ingest_party(self, update: dict) -> bool:
+        left_team = bool(update.get("left_team"))
+        if left_team and self._encounter_started():
+            self.reset(
+                keep_identity=True,
+                keep_monsters=False,
+                archive_reason="party_exit",
+            )
+
         parsed: set[int] = set()
         values = update.get("entity_ids", [])
         if isinstance(values, (list, tuple, set)):
@@ -1658,6 +2343,7 @@ class CombatModel:
                     continue
                 if entity_id:
                     parsed.add(entity_id)
+        parsed.difference_update(self.non_player_actor_ids)
         if self.self_id is not None:
             parsed.discard(self.self_id)
         inferred_count = len(parsed) + (1 if self.self_id is not None else 0)
@@ -1693,9 +2379,16 @@ class CombatModel:
             or member_count != self.party_member_count
             or self.provisional_party_ids != previous_provisional_ids
         )
+        authoritative = bool(update.get("authoritative"))
         self.party_known = True
+        if authoritative:
+            self.party_roster_authoritative = True
         self.party_ids = parsed
         self.party_member_count = member_count
+        if left_team:
+            self.provisional_party_ids.clear()
+            self.party_member_count = 1 if self.self_id is not None else 0
+            self.team_damage_states.clear()
         current_members = self._current_member_ids()
         self.member_death_states = {
             actor_id: dead
@@ -1707,10 +2400,26 @@ class CombatModel:
             for actor_id, timestamp in self.member_life_times.items()
             if actor_id in current_members
         }
-        if self._encounter_started():
+        update_is_during_encounter = True
+        try:
+            update_timestamp = int(update.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            update_timestamp = 0
+        if update_timestamp and self.last_damage_time:
+            update_time = self._event_seconds({"filetime_100ns": update_timestamp})
+            elapsed = update_time - self.last_damage_time
+            update_is_during_encounter = (
+                -1.0 <= elapsed <= self._encounter_idle_timeout()
+            )
+        if (
+            self._encounter_started()
+            and not self.combat_end_time
+            and update_is_during_encounter
+        ):
+            # Party membership is volatile and is not the participant count.
+            # Only actors with accepted encounter damage appear in the record.
             self.encounter_team_size = min(
-                MAX_PARTY_MEMBERS,
-                max(self.encounter_team_size, member_count),
+                MAX_PARTY_MEMBERS, len(self.encounter_member_ids)
             )
         reordered = [
             actor_id
@@ -1731,7 +2440,7 @@ class CombatModel:
         self._resolve_combat_sides()
         self._recompute()
         replayed = self._replay_pending_member_events()
-        return changed or replayed
+        return left_team or changed or replayed
 
     def ingest_scene(self, update: dict) -> bool:
         try:
@@ -1761,9 +2470,18 @@ class CombatModel:
             and self._encounter_started()
             and refreshed_targets.intersection(visible_entity_ids)
         )
-        changed = previous_scene_id is not None and (
-            scene_id != previous_scene_id
-            or (force_reset and not preserves_active_encounter)
+        first_refresh_ends_encounter = bool(
+            previous_scene_id is None
+            and self._encounter_started()
+            and refreshed_targets
+            and not refreshed_targets.intersection(visible_entity_ids)
+        )
+        changed = first_refresh_ends_encounter or (
+            previous_scene_id is not None
+            and (
+                scene_id != previous_scene_id
+                or (force_reset and not preserves_active_encounter)
+            )
         )
         if changed:
             self.provisional_party_ids.clear()
@@ -1845,6 +2563,21 @@ class CombatModel:
                 self.member_life_times[new_actor] = old_life_time
                 changed = True
 
+        old_deaths = self.member_death_counts.pop(old_actor, 0)
+        if old_deaths:
+            self.member_death_counts[new_actor] = (
+                self.member_death_counts.get(new_actor, 0) + old_deaths
+            )
+            changed = True
+
+        old_combat_time = self.entity_combat_state_times.pop(old_actor, 0)
+        old_in_combat = self.entity_combat_states.pop(old_actor, None)
+        if old_combat_time >= self.entity_combat_state_times.get(new_actor, 0):
+            if old_in_combat is not None:
+                self.entity_combat_states[new_actor] = old_in_combat
+                self.entity_combat_state_times[new_actor] = old_combat_time
+                changed = True
+
         old_state = self.team_damage_states.pop(old_actor, None)
         if old_state is not None:
             new_state = self.team_damage_states.get(new_actor)
@@ -1859,6 +2592,10 @@ class CombatModel:
                 new_state.accepted_damage = max(
                     new_state.accepted_damage, old_state.accepted_damage
                 )
+                new_state.snapshot_time_100ns = max(
+                    new_state.snapshot_time_100ns,
+                    old_state.snapshot_time_100ns,
+                )
                 times = [
                     value
                     for value in (new_state.first_time, old_state.first_time)
@@ -1866,6 +2603,13 @@ class CombatModel:
                 ]
                 new_state.first_time = min(times) if times else 0.0
                 new_state.last_time = max(new_state.last_time, old_state.last_time)
+            changed = True
+
+        old_metrics = self.stage_actor_metrics.pop(old_actor, None)
+        if old_metrics is not None:
+            current_metrics = self.stage_actor_metrics.get(new_actor)
+            if current_metrics is None or old_metrics[0] > current_metrics[0]:
+                self.stage_actor_metrics[new_actor] = old_metrics
             changed = True
 
         for event in self.events:
@@ -1905,12 +2649,53 @@ class CombatModel:
         ):
             return False
         dead = bool(update.get("dead"))
-        changed = self.member_death_states.get(actor_id) != dead
+        if dead and update.get("death_confirmed") is not True:
+            return False
+        previous_dead = self.member_death_states.get(actor_id)
+        changed = previous_dead != dead
         self.member_death_states[actor_id] = dead
         self.member_life_times[actor_id] = timestamp
         event_time = self._event_seconds(update)
+        if (
+            dead
+            and previous_dead is not True
+            and self.first_damage_time
+            and event_time >= self.first_damage_time
+        ):
+            self.member_death_counts[actor_id] = (
+                self.member_death_counts.get(actor_id, 0) + 1
+            )
         wiped = self._mark_party_wipe_if_complete(event_time)
         return changed or wiped
+
+    def ingest_combat_state(self, update: dict) -> bool:
+        try:
+            entity_id = int(update.get("entity_id", 0) or 0)
+            timestamp = int(update.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (
+            not entity_id
+            or not timestamp
+            or "in_combat" not in update
+            or timestamp < self.entity_combat_state_times.get(entity_id, 0)
+        ):
+            return False
+        in_combat = bool(update.get("in_combat"))
+        previous = self.entity_combat_states.get(entity_id)
+        self.entity_combat_states[entity_id] = in_combat
+        self.entity_combat_state_times[entity_id] = timestamp
+        self.latest_network_time_100ns = max(
+            self.latest_network_time_100ns, timestamp
+        )
+        changed = previous is None or previous != in_combat
+        if in_combat or not self.first_damage_time or self.combat_end_time:
+            return changed
+
+        reset_completed = self._mark_pending_reset_complete()
+        monster = self.monsters.get(int(self.combat_target_id or 0))
+        defeated = bool(monster and self._mark_target_defeated(monster))
+        return changed or reset_completed or defeated
 
     def ingest_profile(self, update: dict) -> bool:
         try:
@@ -1983,10 +2768,64 @@ class CombatModel:
             if monster.encounter_parent_template_ids != normalized_parent_ids:
                 monster.encounter_parent_template_ids = normalized_parent_ids
                 changed = True
+        auxiliary_metadata = ENCOUNTER_AUXILIARY_TEMPLATES.get(
+            int(monster.template_id or 0)
+        )
+        if auxiliary_metadata is not None:
+            canonical_parent_ids = tuple(
+                sorted(
+                    {
+                        int(parent_id)
+                        for parent_id in auxiliary_metadata.get(
+                            "parent_template_ids", ()
+                        )
+                        if int(parent_id)
+                    }
+                )
+            )
+            canonical_name = str(auxiliary_metadata.get("name", "")).strip()
+            if not monster.encounter_auxiliary:
+                monster.encounter_auxiliary = True
+                changed = True
+            if monster.encounter_parent_template_ids != canonical_parent_ids:
+                monster.encounter_parent_template_ids = canonical_parent_ids
+                changed = True
+            if monster.entity_type != "Monster":
+                monster.entity_type = "Monster"
+                changed = True
+            if canonical_name:
+                if self.entity_names.get(entity_id) != canonical_name:
+                    self.entity_names[entity_id] = canonical_name
+                    changed = True
+                if monster.name != canonical_name:
+                    monster.name = canonical_name
+                    changed = True
         name = self.entity_names.get(entity_id, "")
         if name and monster.name != name:
             monster.name = name
             changed = True
+        confirmed_non_player = bool(
+            monster.encounter_auxiliary
+            or monster.boss_rank > 0
+            or (
+                monster.boss_type == 3
+                and monster.entity_type.casefold() not in {"player", "role"}
+            )
+        )
+        try:
+            timestamp = int(update.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            timestamp = 0
+        if timestamp and confirmed_non_player:
+            monster.last_update_100ns = max(monster.last_update_100ns, timestamp)
+            self.target_activity_100ns[entity_id] = max(
+                self.target_activity_100ns.get(entity_id, 0), timestamp
+            )
+            self.latest_network_time_100ns = max(
+                self.latest_network_time_100ns, timestamp
+            )
+        if confirmed_non_player:
+            changed |= self._mark_non_player_actor(entity_id)
         if changed:
             self._resolve_combat_sides()
             if self.combat_target_id == entity_id and any(
@@ -2044,6 +2883,31 @@ class CombatModel:
             self.latest_network_time_100ns = max(
                 self.latest_network_time_100ns, timestamp
             )
+            try:
+                reset_candidate_hp = float(update["reset_candidate_hp"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                reset_candidate_hp = -1.0
+            if (
+                reset_candidate_hp >= 0
+                and entity_id == self.combat_target_id
+                and self.first_damage_time
+                and not self.combat_end_time
+                and previous_current_hp is not None
+            ):
+                hp_ceiling = self._monster_max_hp(monster)
+                event_time = self._event_seconds(
+                    {"filetime_100ns": timestamp}
+                )
+                missing_hp = max(0.0, hp_ceiling - previous_current_hp)
+                if (
+                    hp_ceiling > 0
+                    and reset_candidate_hp >= hp_ceiling * 0.995
+                    and missing_hp >= hp_ceiling * 0.2
+                ):
+                    self.boss_reset_pending_100ns = max(
+                        self.boss_reset_pending_100ns, timestamp
+                    )
+                    self._mark_pending_reset_complete()
             if "current_hp" in update and monster.current_hp is not None:
                 if monster.current_hp <= 0:
                     monster.death_time_100ns = max(
@@ -2067,20 +2931,26 @@ class CombatModel:
                     )
                     recovered_hp = monster.current_hp - previous_current_hp
                     meaningful_reset = max(1.0, hp_ceiling * 0.005)
+                    hard_reset = missing_hp_before_reset >= hp_ceiling * 0.2
                     if (
                         hp_ceiling > 0
                         and missing_hp_before_reset >= meaningful_reset
                         and recovered_hp >= meaningful_reset
                         and monster.current_hp >= hp_ceiling * 0.995
-                        and event_time - self.last_damage_time
-                        >= self._encounter_idle_timeout()
+                        and (
+                            hard_reset
+                            or event_time - self.last_damage_time
+                            >= self.idle_gap
+                        )
                     ):
-                        # A quiet snap back to full HP is a wipe/reset. Freeze
-                        # this pull at its last real hit even when the wipe
-                        # happened early in the fight. The next hit begins a
-                        # fresh encounter even if the game reuses the entity ID.
-                        self.combat_end_time = self.last_damage_time
-                        self.combat_end_reason = "target_reset"
+                        # Full HP is only the first half of a reset signal. Keep
+                        # the live encounter intact until fight-mode confirms
+                        # that its combatants have left combat; ordinary Boss
+                        # healing must not interrupt real-time DPS.
+                        self.boss_reset_pending_100ns = max(
+                            self.boss_reset_pending_100ns, timestamp
+                        )
+                        self._mark_pending_reset_complete()
         name = self.entity_names.get(entity_id, "")
         if name:
             monster.name = name
@@ -2101,7 +2971,11 @@ class CombatModel:
             timestamp = int(update.get("filetime_100ns", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             return False
-        if not actor_id or not timestamp:
+        if (
+            not actor_id
+            or not timestamp
+            or actor_id in self.non_player_actor_ids
+        ):
             return False
         self.latest_network_time_100ns = max(self.latest_network_time_100ns, timestamp)
         state = self.team_damage_states.setdefault(
@@ -2114,6 +2988,7 @@ class CombatModel:
             delta = absolute_damage - state.last_absolute
         state.last_absolute = absolute_damage
         state.has_snapshot = True
+        state.snapshot_time_100ns = max(state.snapshot_time_100ns, timestamp)
         if snapshot_reset:
             self.team_reset_pending = True
         if delta <= 0:
@@ -2122,6 +2997,13 @@ class CombatModel:
                 for item in self.team_damage_states.values()
             ):
                 self._recompute()
+            return False
+
+        if self._is_dummy_encounter():
+            # Dummy encounters are deliberately local-only. Native per-hit
+            # damage is complete here, while the cumulative team value can
+            # arrive late and temporarily omit a hit that was already seen.
+            self._recompute()
             return False
 
         event_time = self._event_seconds(update)
@@ -2147,15 +3029,11 @@ class CombatModel:
                 self._resolve_combat_sides()
 
         damage_target_ids = self._encounter_damage_target_ids()
-        observed_attackers = {
-            int(event.get("attacker_id", 0))
-            for event in self.events
-            if int(event.get("damage", 0)) > 0
-            and int(event.get("target_id", 0)) in damage_target_ids
-        }
-        current_members = self._current_member_ids()
-        if not damage_target_ids or (
-            actor_id not in observed_attackers and actor_id not in current_members
+        if not self.first_damage_time or not damage_target_ids:
+            return False
+        if (
+            actor_id not in self.encounter_member_ids
+            and len(self.encounter_member_ids) >= MAX_PARTY_MEMBERS
         ):
             return False
         self.team_reset_pending = False
@@ -2207,23 +3085,55 @@ class CombatModel:
             index = len(add_order) + 1
         return f"小怪 {index}"
 
+    def _target_kind(self, entity_id: int) -> str:
+        if (
+            entity_id == self.combat_target_id
+            or entity_id in self.linked_boss_target_ids
+        ):
+            return "Boss"
+        monster = self.monsters.get(entity_id)
+        if (
+            monster is not None
+            and self._monster_rank(monster) > 0
+            and entity_id not in self.encounter_add_target_ids
+        ):
+            return "Boss"
+        return "小怪"
+
     def actor_target_rows(self, actor_id: int) -> list[dict]:
         actor = self.stats.get(actor_id)
         if actor is None or actor.damage <= 0:
             return []
-        rows = [
-            {
-                "entity_id": target_id,
-                "name": self.display_target_name(target_id),
-                "kind": (
-                    "Boss" if target_id == self.combat_target_id else "小怪"
-                ),
-                "damage": damage,
-                "share": damage / actor.damage,
-            }
+        target_damage = {
+            int(target_id): int(damage)
             for target_id, damage in actor.target_damage.items()
-            if damage > 0
-        ]
+            if int(target_id) and int(damage) > 0
+        }
+        if sum(target_damage.values()) > actor.damage:
+            target_damage = self._scale_target_damage(actor.damage, target_damage)
+
+        grouped: dict[tuple[str, str], dict] = {}
+        for target_id, damage in target_damage.items():
+            name = self.display_target_name(target_id)
+            kind = self._target_kind(target_id)
+            key = (kind, name)
+            row = grouped.setdefault(
+                key,
+                {
+                    "entity_id": target_id,
+                    "entity_ids": [],
+                    "name": name,
+                    "kind": kind,
+                    "damage": 0,
+                },
+            )
+            row["entity_ids"].append(target_id)
+            row["damage"] += damage
+            if target_id == self.combat_target_id:
+                row["entity_id"] = target_id
+        rows = list(grouped.values())
+        for row in rows:
+            row["share"] = int(row["damage"]) / actor.damage
         tracked_damage = sum(int(row["damage"]) for row in rows)
         unassigned_damage = max(0, actor.damage - tracked_damage)
         if unassigned_damage:
@@ -2238,7 +3148,7 @@ class CombatModel:
             )
         rows.sort(
             key=lambda row: (
-                int(row["entity_id"]) == int(self.combat_target_id or 0),
+                row["kind"] == "Boss",
                 int(row["damage"]),
             ),
             reverse=True,
@@ -2334,16 +3244,24 @@ class CombatModel:
         now = now if now is not None else time.time()
         if self.combat_end_time:
             end = self.combat_end_time
+        elif self._target_hp_depleted():
+            # Freeze the visible result as soon as the Boss bar reaches zero.
+            # A short idle confirmation still allows a transient phase zero to
+            # resume the same pull without creating a duplicate history row.
+            end = self.last_damage_time
         elif now - self.last_damage_time < self._encounter_idle_timeout():
             end = now
         else:
             end = self.last_damage_time
         return max(1.0, end - self.first_damage_time)
 
+    def combat_in_progress(self, now: float | None = None) -> bool:
+        return self.active(now)
+
     def active(self, now: float | None = None) -> bool:
         if not self.last_damage_time:
             return False
-        if self.combat_end_time:
+        if self.combat_end_time or self._target_hp_depleted():
             return False
         now = now if now is not None else time.time()
         return now - self.last_damage_time < self._encounter_idle_timeout()
@@ -2667,10 +3585,55 @@ class HookWorker(threading.Thread):
         self._diagnostic_damage_targets: dict[int, dict[str, object]] = {}
         self.team_profile_cache = load_json_object(TEAM_PROFILE_CACHE_PATH)
         self.self_identity_cache = load_json_object(SELF_IDENTITY_CACHE_PATH)
+        self.active_boss_cache = load_json_object(ACTIVE_BOSS_CACHE_PATH)
         self.boss_name_resolver = BossNameResolver(
             messages,
             stop_event,
             self.monster_catalog,
+        )
+
+    def _set_active_boss_cache(self, value: dict) -> None:
+        if value == self.active_boss_cache:
+            return
+        self.active_boss_cache = dict(value)
+        write_json_object(ACTIVE_BOSS_CACHE_PATH, self.active_boss_cache)
+
+    def _restore_same_process_boss(
+        self, parser: NetworkPacketParser, game_pid: int
+    ) -> bool:
+        try:
+            cached_pid = int(self.active_boss_cache.get("game_pid", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            cached_pid = 0
+        if cached_pid != int(game_pid or 0):
+            if self.active_boss_cache:
+                self._set_active_boss_cache({})
+            return False
+        updates = parser.restore_active_boss_state(self.active_boss_cache)
+        if not updates:
+            self._set_active_boss_cache({})
+            return False
+        for kind, update in updates:
+            self.emit(kind, update)
+        return True
+
+    def _sync_active_boss_cache(
+        self, parser: NetworkPacketParser, game_pid: int
+    ) -> None:
+        state = parser.current_active_boss_state()
+        if state is None:
+            try:
+                cached_pid = int(self.active_boss_cache.get("game_pid", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                cached_pid = 0
+            if cached_pid == int(game_pid or 0):
+                self._set_active_boss_cache({})
+            return
+        self._set_active_boss_cache(
+            {
+                "game_pid": int(game_pid or 0),
+                **state,
+            }
         )
 
     def _update_diagnostics(self, **values: object) -> None:
@@ -2941,8 +3904,13 @@ class HookWorker(threading.Thread):
                             "log": str(log_path),
                         },
                     )
+                    restored_boss = self._restore_same_process_boss(parser, hook.pid)
+                    self._update_diagnostics(boss_state_restored=restored_boss)
                     while not self.stop_event.is_set() and hook.alive:
-                        records = hook.poll(decode_arguments=True)
+                        records = hook.poll(
+                            decode_arguments=True,
+                            decode_method_filter=should_decode_network_arguments,
+                        )
                         native_records: list[dict] = []
                         native_boss_records: list[dict] = []
                         native_name_records: list[dict] = []
@@ -3036,6 +4004,7 @@ class HookWorker(threading.Thread):
                                     SELF_IDENTITY_CACHE_PATH,
                                     self.self_identity_cache,
                                 )
+                        self._sync_active_boss_cache(parser, hook.pid)
                         now = time.monotonic()
                         if profile_cache_dirty and now - last_profile_cache_save >= 1.0:
                             write_json_object(
@@ -3674,6 +4643,9 @@ class DpsWindow:
         self.restore_geometry: dict[int, str] = {}
         self.skill_window: tk.Toplevel | None = None
         self.skill_actor_id: int | None = None
+        self.skill_detail_mode = "skills"
+        self.skill_mode_buttons: dict[str, tk.Label] = {}
+        self.skill_combat_metrics_label: tk.Label | None = None
         self.history_window: tk.Toplevel | None = None
         self.history_records: list[dict] = []
         self.history_selected_id = ""
@@ -3686,6 +4658,7 @@ class DpsWindow:
         self.history_target_label: tk.Label | None = None
         self.history_time_label: tk.Label | None = None
         self.history_metrics_label: tk.Label | None = None
+        self.history_detail_label: tk.Label | None = None
         self.history_favorite_button: tk.Label | None = None
         self.history_max_button: tk.Label | None = None
         self.feedback_window: tk.Toplevel | None = None
@@ -3755,7 +4728,10 @@ class DpsWindow:
         self.root.withdraw()
         self.root.configure(bg=BORDER)
         self.root.geometry(self._initial_geometry())
-        self.root.minsize(420 if self.compact_mode else 500, 94 if self.compact_mode else 280)
+        self.root.minsize(
+            420 if self.compact_mode else 540,
+            94 if self.compact_mode else 280,
+        )
         self.root.attributes("-topmost", bool(self.config.get("topmost", True)))
         self.root.attributes("-alpha", self.window_alpha)
         self.root.overrideredirect(True)
@@ -3789,15 +4765,15 @@ class DpsWindow:
             saved = str(self.config.get("compact_geometry", ""))
             return self._visible_geometry(saved, 440, 146)
         saved = str(self.config.get("geometry", ""))
-        if int(self.config.get("layout_version", 0)) < 8:
+        if int(self.config.get("layout_version", 0)) < 12:
             match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+[+-]\d+)", saved)
             if match:
-                width, height, suffix = match.groups()
-                upgraded = f"{max(520, int(width))}x{max(315, int(height))}{suffix}"
+                _width, height, suffix = match.groups()
+                upgraded = f"540x{max(315, int(height))}{suffix}"
             else:
-                upgraded = "520x315+32+120"
-            return self._visible_geometry(upgraded, 520, 315)
-        return self._visible_geometry(saved, 520, 315)
+                upgraded = "540x315+32+120"
+            return self._visible_geometry(upgraded, 540, 315)
+        return self._visible_geometry(saved, 540, 315)
 
     def _visible_geometry(self, value: str, default_width: int, default_height: int) -> str:
         match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", str(value))
@@ -4590,7 +5566,7 @@ class DpsWindow:
         actions.pack(side="right", pady=2)
         # The compact scale still needs enough room for the full ``100%``
         # value at Windows display scaling above 100%.
-        opacity_controls = tk.Frame(actions, bg=BG, width=160, height=23)
+        opacity_controls = tk.Frame(actions, bg=BG, width=150, height=23)
         opacity_controls.pack(side="left", padx=(0, 6))
         opacity_controls.pack_propagate(False)
         tk.Label(
@@ -4618,7 +5594,7 @@ class DpsWindow:
             highlightthickness=0,
             bd=0,
             relief="flat",
-            length=76,
+            length=66,
             width=8,
             sliderlength=16,
             sliderrelief="raised",
@@ -4634,7 +5610,7 @@ class DpsWindow:
             font=("Segoe UI", 8, "bold"),
         )
         self.opacity_value_label.pack(side="left", fill="y")
-        self.history_button = self._action_button(actions, "历史记录", self.show_history)
+        self.history_button = self._action_button(actions, "记录", self.show_history)
         self.history_button.pack(side="left", padx=(0, 2))
         self.share_button = self._action_button(actions, "分享", self._share_current)
         self.share_button.pack(side="left", padx=(0, 2))
@@ -4773,7 +5749,10 @@ class DpsWindow:
         self.resize_grip.bind(
             "<B1-Motion>",
             lambda event: self._resize_move(
-                event, self.root, 420, 94 if self.compact_mode else 280
+                event,
+                self.root,
+                420 if self.compact_mode else 540,
+                94 if self.compact_mode else 280,
             ),
         )
 
@@ -4805,7 +5784,7 @@ class DpsWindow:
                     before=self.table_panel,
                 )
             self.resize_grip.configure(bg=BG)
-            self.root.minsize(500, 280)
+            self.root.minsize(540, 280)
         self._draw_main_header()
         self._draw_main_rows()
 
@@ -4845,12 +5824,16 @@ class DpsWindow:
                 else max(280, current_height)
             )
             target_geometry = (
-                f"{max(500, current_width)}x{target_height}"
+                f"{max(420 if self.compact_mode else 540, current_width)}x{target_height}"
                 f"{current_x:+d}{current_y:+d}"
             )
         default_height = 146 if self.compact_mode else 315
         self.root.geometry(
-            self._visible_geometry(target_geometry, 520, default_height)
+            self._visible_geometry(
+                target_geometry,
+                440 if self.compact_mode else 540,
+                default_height,
+            )
         )
         self.root.update_idletasks()
         self._remember_root_geometry()
@@ -4891,9 +5874,30 @@ class DpsWindow:
             cursor="hand2",
             font=("Microsoft YaHei UI", 7, "bold"),
         )
-        label.bind("<Enter>", lambda _event: label.configure(bg=blend_color(PANEL_2, ACCENT, 0.13), fg=TEXT))
-        label.bind("<Leave>", lambda _event: label.configure(bg=PANEL_2, fg=MUTED))
-        label.bind("<Button-1>", lambda _event: command())
+        label._disabled = False
+        label.bind(
+            "<Enter>",
+            lambda _event: (
+                None
+                if getattr(label, "_disabled", False)
+                else label.configure(
+                    bg=blend_color(PANEL_2, ACCENT, 0.13), fg=TEXT
+                )
+            ),
+        )
+        label.bind(
+            "<Leave>",
+            lambda _event: label.configure(
+                bg=PANEL_2,
+                fg=("#4e5862" if getattr(label, "_disabled", False) else MUTED),
+            ),
+        )
+        label.bind(
+            "<Button-1>",
+            lambda _event: (
+                None if getattr(label, "_disabled", False) else command()
+            ),
+        )
         return label
 
     def show_feedback(self) -> None:
@@ -5110,6 +6114,17 @@ class DpsWindow:
                     "profession_id": self.model.actor_profession_id(actor.actor_id),
                     "damage": int(actor.damage),
                     "hits": int(actor.hits),
+                    "damage_hits": actor.damage_hits,
+                    "critical_hits": actor.critical_hits,
+                    "critical_rate": (
+                        actor.critical_hits / actor.damage_hits
+                        if actor.damage_hits
+                        and actor.critical_hits is not None
+                        else None
+                    ),
+                    "deaths": int(
+                        self.model.member_death_counts.get(actor.actor_id, 0)
+                    ),
                     "skills": [
                         {
                             "skill_id": int(skill.skill_id),
@@ -5183,6 +6198,8 @@ class DpsWindow:
                             "name": str(item.get("name", "")),
                             "profession_id": item.get("profession_id"),
                             "damage": int(item.get("damage", 0) or 0),
+                            "critical_rate": item.get("critical_rate"),
+                            "deaths": int(item.get("deaths", 0) or 0),
                         }
                         for item in record.get("participants", [])[:12]
                         if isinstance(item, dict)
@@ -5649,14 +6666,26 @@ class DpsWindow:
             "<Configure>", lambda _event: self._draw_history_participants()
         )
 
+        detail_header = tk.Frame(right, bg=BG, height=24)
+        detail_header.pack(fill="x", pady=(7, 3))
+        detail_header.pack_propagate(False)
         tk.Label(
-            right,
-            text="技能明细",
+            detail_header,
+            text="个人详情",
             bg=BG,
             fg=MUTED,
             anchor="w",
             font=("Microsoft YaHei UI", 8, "bold"),
-        ).pack(fill="x", pady=(7, 3))
+        ).pack(side="left", fill="y")
+        self.history_detail_label = tk.Label(
+            detail_header,
+            text="暴击率  --     死亡  0 次",
+            bg=BG,
+            fg=MUTED,
+            anchor="e",
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.history_detail_label.pack(side="right", fill="y")
         skill_panel = tk.Frame(
             right,
             bg=PANEL,
@@ -5831,6 +6860,10 @@ class DpsWindow:
                 )
             if self.history_favorite_button is not None:
                 self.history_favorite_button.configure(text="收藏", fg=MUTED)
+            if self.history_detail_label is not None:
+                self.history_detail_label.configure(
+                    text="暴击率  --     死亡  0 次"
+                )
         else:
             participants = record.get("participants", [])
             participants = participants if isinstance(participants, list) else []
@@ -5874,6 +6907,39 @@ class DpsWindow:
                 self.history_favorite_button.configure(
                     text="已收藏" if favorite else "收藏",
                     fg=ACCENT if favorite else MUTED,
+                )
+            selected_participant = next(
+                (
+                    item
+                    for item in participants
+                    if int(item.get("actor_id", 0) or 0)
+                    == self.history_selected_actor
+                ),
+                None,
+            )
+            if self.history_detail_label is not None:
+                critical_rate = (
+                    selected_participant.get("critical_rate")
+                    if isinstance(selected_participant, dict)
+                    else None
+                )
+                try:
+                    critical_text = (
+                        f"{float(critical_rate) * 100:.1f}%"
+                        if critical_rate is not None
+                        else "--"
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    critical_text = "--"
+                try:
+                    deaths = max(
+                        0,
+                        int(selected_participant.get("deaths", 0) or 0),
+                    )
+                except (AttributeError, TypeError, ValueError, OverflowError):
+                    deaths = 0
+                self.history_detail_label.configure(
+                    text=f"暴击率  {critical_text}     死亡  {deaths} 次"
                 )
         participant_count = len(participants) if record is not None else 0
         if self.history_participant_panel is not None:
@@ -5978,8 +7044,7 @@ class DpsWindow:
 
     def _select_history_actor(self, actor_id: int) -> None:
         self.history_selected_actor = int(actor_id)
-        self._draw_history_participants()
-        self._draw_history_skills()
+        self._render_history_selection()
 
     def _draw_history_skills(self) -> None:
         canvas = self.history_skill_canvas
@@ -5999,6 +7064,18 @@ class DpsWindow:
             ),
             None,
         )
+        if not isinstance(participant, dict):
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="暂无个人详情",
+                fill=MUTED,
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        targets = participant.get("targets", [])
+        targets = targets if isinstance(targets, list) else []
         skills = participant.get("skills", []) if isinstance(participant, dict) else []
         skills = skills if isinstance(skills, list) else []
         if not skills and isinstance(participant, dict):
@@ -6016,16 +7093,6 @@ class DpsWindow:
                         "max_hit": None,
                     }
                 ]
-        if not skills:
-            canvas.create_text(
-                width // 2,
-                height // 2,
-                text="暂无技能明细",
-                fill=MUTED,
-                font=("Microsoft YaHei UI", 9, "bold"),
-            )
-            canvas.configure(scrollregion=(0, 0, width, height))
-            return
         damage_x, share_x, hits_x, max_x = (
             int(width * 0.58),
             int(width * 0.73),
@@ -6033,8 +7100,48 @@ class DpsWindow:
             width - 12,
         )
         row_height = 34
+        header_height = 28
+        top = 0
+
+        canvas.create_rectangle(0, top, width, top + header_height, fill=SURFACE, outline="")
+        canvas.create_text(9, top + 14, text="伤害目标", fill=ACCENT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(int(width * 0.55), top + 14, text="类型", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(int(width * 0.77), top + 14, text="伤害", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(width - 12, top + 14, text="占个人总伤", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        top += header_height
+        if targets:
+            for index, target in enumerate(targets):
+                bottom = top + row_height
+                base = PANEL if index % 2 == 0 else SURFACE
+                kind = str(target.get("kind", "小怪"))
+                color = WARN if kind == "Boss" else ACCENT
+                name = str(target.get("name", "")).strip() or "未命名目标"
+                entity_count = len(target.get("entity_ids", []))
+                if entity_count > 1:
+                    name = f"{name} ×{entity_count}"
+                canvas.create_rectangle(0, top, width, bottom - 1, fill=base, outline="")
+                canvas.create_text(9, top + 17, text=name, fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
+                canvas.create_text(int(width * 0.55), top + 17, text=kind, fill=color, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+                canvas.create_text(int(width * 0.77), top + 17, text=format_number(target.get("damage", 0)), fill=TEXT, anchor="e", font=("Segoe UI", 8, "bold"))
+                canvas.create_text(width - 12, top + 17, text=f"{float(target.get('share', 0.0) or 0.0) * 100:.1f}%", fill=TEXT, anchor="e", font=("Segoe UI", 8))
+                top = bottom
+        else:
+            canvas.create_rectangle(0, top, width, top + row_height - 1, fill=PANEL, outline="")
+            canvas.create_text(9, top + 17, text="暂无目标明细", fill=MUTED, anchor="w", font=("Microsoft YaHei UI", 8))
+            top += row_height
+
+        canvas.create_rectangle(0, top, width, top + header_height, fill=SURFACE, outline="")
+        canvas.create_text(9, top + 14, text="技能明细", fill=ACCENT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(damage_x, top + 14, text="伤害", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(share_x, top + 14, text="占比", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(hits_x, top + 14, text="次数", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(max_x, top + 14, text="最大伤害", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        top += header_height
+        if not skills:
+            canvas.create_rectangle(0, top, width, top + row_height - 1, fill=PANEL, outline="")
+            canvas.create_text(9, top + 17, text="暂无技能明细", fill=MUTED, anchor="w", font=("Microsoft YaHei UI", 8))
+            top += row_height
         for index, skill in enumerate(skills):
-            top = index * row_height
             bottom = top + row_height
             base = PANEL if index % 2 == 0 else SURFACE
             hits_value = skill.get("hits")
@@ -6084,7 +7191,8 @@ class DpsWindow:
                 anchor="e",
                 font=("Segoe UI", 8),
             )
-        canvas.configure(scrollregion=(0, 0, width, max(height, len(skills) * row_height)))
+            top = bottom
+        canvas.configure(scrollregion=(0, 0, width, max(height, top)))
 
     def _toggle_history_favorite(self) -> None:
         record = self._selected_history_record()
@@ -6273,6 +7381,7 @@ class DpsWindow:
         self.history_target_label = None
         self.history_time_label = None
         self.history_metrics_label = None
+        self.history_detail_label = None
         self.history_favorite_button = None
         self.history_max_button = None
         self.tray_history_hidden = False
@@ -6290,6 +7399,13 @@ class DpsWindow:
         )
         self.pin_button.configure(
             fg=ACCENT if bool(self.root.attributes("-topmost")) else MUTED
+        )
+        reset_disabled = self.model.combat_in_progress()
+        self.reset_button._disabled = reset_disabled
+        self.reset_button.configure(
+            fg="#4e5862" if reset_disabled else MUTED,
+            bg=PANEL_2,
+            cursor="arrow" if reset_disabled else "hand2",
         )
 
     def _sync_expiry_label(self) -> None:
@@ -6387,12 +7503,14 @@ class DpsWindow:
         canvas = self.header_canvas
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
-        damage_x, share_x, dps_x = self._main_columns(width)
+        damage_x, share_x, dps_x, critical_x, deaths_x = self._main_columns(width)
         font = ("Microsoft YaHei UI", 8, "bold")
         canvas.create_text(28, 11, text="角色名称", fill=MUTED, anchor="w", font=font)
         canvas.create_text(damage_x, 11, text="总伤害", fill=MUTED, anchor="e", font=font)
-        canvas.create_text(share_x, 11, text="伤害占比", fill=MUTED, anchor="e", font=font)
+        canvas.create_text(share_x, 11, text="占比", fill=MUTED, anchor="e", font=font)
         canvas.create_text(dps_x, 11, text="DPS", fill=MUTED, anchor="e", font=font)
+        canvas.create_text(critical_x, 11, text="暴击率", fill=MUTED, anchor="e", font=font)
+        canvas.create_text(deaths_x, 11, text="死亡", fill=MUTED, anchor="e", font=font)
         canvas.create_line(0, 23, width, 23, fill=BORDER)
 
         if self.compact_mode:
@@ -6474,12 +7592,17 @@ class DpsWindow:
         self.header_canvas.configure(cursor="")
         self.header_canvas.itemconfigure("compact_restore_bg", fill=SURFACE)
 
-    def _main_columns(self, width: int) -> tuple[int, int, int]:
+    def _main_columns(self, width: int) -> tuple[int, int, int, int, int]:
         available_width = max(1, width - (54 if self.compact_mode else 0))
+        right_edge = available_width - 10
+        damage_x = min(int(available_width * 0.32), 180)
+        remaining = max(1, right_edge - damage_x)
         return (
-            int(available_width * 0.56),
-            int(available_width * 0.77),
-            available_width - 10,
+            damage_x,
+            damage_x + int(remaining * 0.25),
+            damage_x + int(remaining * 0.50),
+            damage_x + int(remaining * 0.78),
+            right_edge,
         )
 
     def _scroll_main(self, event) -> None:
@@ -6499,6 +7622,28 @@ class DpsWindow:
             index = len(ordered)
         return f"玩家{index + 1}"
 
+    def _fit_main_actor_name(self, value: object, maximum_width: int) -> str:
+        text = str(value or "").strip()
+        if not text or maximum_width <= 0:
+            return text
+        font = tkfont.Font(root=self.root, font=("Microsoft YaHei UI", 8, "bold"))
+        if font.measure(text) <= maximum_width:
+            return text
+        suffix = "..."
+        while text and font.measure(text + suffix) > maximum_width:
+            text = text[:-1]
+        return text + suffix if text else suffix
+
+    @staticmethod
+    def _actor_critical_text(actor: ActorStats | None) -> str:
+        if (
+            actor is None
+            or not actor.damage_hits
+            or actor.critical_hits is None
+        ):
+            return "--"
+        return f"{actor.critical_hits / actor.damage_hits * 100:.1f}%"
+
     def _profession_info(self, class_id: int | None) -> tuple[str, str]:
         value = self.professions.get(str(class_id or 0), {})
         name = value.get("name", "") if isinstance(value, dict) else ""
@@ -6513,7 +7658,8 @@ class DpsWindow:
         rows = sorted(self.model.current_stats(), key=lambda item: item.damage, reverse=True)
         total = sum(row.damage for row in rows)
         duration = self.model.duration()
-        damage_x, share_x, dps_x = self._main_columns(width)
+        damage_x, share_x, dps_x, critical_x, deaths_x = self._main_columns(width)
+        data_font = ("Segoe UI", 8, "bold")
         row_height = 34
         if not rows:
             canvas.create_text(
@@ -6540,10 +7686,18 @@ class DpsWindow:
             canvas.create_rectangle(0, top, 3, bottom - 1, fill=color, outline="", tags=(tag,))
             icon = self.icons.profession(class_id, 18)
             canvas.create_image(6, top + 8, image=icon, anchor="nw", tags=(tag,))
-            canvas.create_text(30, top + 17, text=self._shown_actor_name(row.actor_id), fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"), tags=(tag,))
-            canvas.create_text(damage_x, top + 17, text=format_number(row.damage), fill=TEXT, anchor="e", font=("Segoe UI", 8, "bold"), tags=(tag,))
-            canvas.create_text(share_x, top + 17, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=("Segoe UI", 8, "bold"), tags=(tag,))
-            canvas.create_text(dps_x, top + 17, text=format_number(actor_dps), fill=TEXT, anchor="e", font=("Segoe UI", 8, "bold"), tags=(tag,))
+            critical_text = self._actor_critical_text(row)
+            deaths = self.model.member_death_counts.get(row.actor_id, 0)
+            actor_name = self._fit_main_actor_name(
+                self._shown_actor_name(row.actor_id),
+                min(95, max(20, damage_x - 48)),
+            )
+            canvas.create_text(30, top + 17, text=actor_name, fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"), tags=(tag,))
+            canvas.create_text(damage_x, top + 17, text=format_number(row.damage), fill=TEXT, anchor="e", font=data_font, tags=(tag,))
+            canvas.create_text(share_x, top + 17, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=data_font, tags=(tag,))
+            canvas.create_text(dps_x, top + 17, text=format_number(actor_dps), fill=TEXT, anchor="e", font=data_font, tags=(tag,))
+            canvas.create_text(critical_x, top + 17, text=critical_text, fill=TEXT, anchor="e", font=data_font, tags=(tag,))
+            canvas.create_text(deaths_x, top + 17, text=str(deaths), fill=ERROR if deaths else TEXT, anchor="e", font=data_font, tags=(tag,))
             canvas.create_line(0, bottom - 1, width, bottom - 1, fill=blend_color(BORDER, base, 0.45), tags=(tag,))
             canvas.tag_bind(tag, "<Enter>", lambda _event, current=tag: canvas.configure(cursor="hand2"))
             canvas.tag_bind(tag, "<Leave>", lambda _event: canvas.configure(cursor=""))
@@ -6678,7 +7832,7 @@ class DpsWindow:
         self.root.geometry(
             self._visible_geometry(
                 self.root.geometry(),
-                440 if self.compact_mode else 520,
+                440 if self.compact_mode else 540,
                 146 if self.compact_mode else 315,
             )
         )
@@ -6771,6 +7925,8 @@ class DpsWindow:
                     self.model.ingest_team_stat(payload)
                 elif kind == "stage_summary":
                     self.model.ingest_stage_summary(payload)
+                elif kind == "combat_state":
+                    self.model.ingest_combat_state(payload)
                 elif kind == "life":
                     self.model.ingest_life(payload)
                 elif kind == "scene":
@@ -6866,6 +8022,7 @@ class DpsWindow:
         self._draw_monster_hp()
         self._draw_main_rows()
         self._render_skill_details()
+        self._sync_action_buttons()
         self._sync_expiry_label()
         self._sync_unlock_window_position()
         self.root.after(180, self._render)
@@ -6904,9 +8061,12 @@ class DpsWindow:
         save_config(self.config)
 
     def reset(self) -> None:
+        if self.model.combat_in_progress():
+            return
         self.model.reset(
             keep_identity=True,
             keep_monsters=True,
+            preserve_active_target=True,
             archive_reason="manual_reset",
         )
         self._flush_combat_history()
@@ -6936,7 +8096,7 @@ class DpsWindow:
         y = max(0, self.root.winfo_rooty() + 36)
         window = tk.Toplevel(self.root)
         self.skill_window = window
-        window.title(f"{APP_TITLE} · 技能详情")
+        window.title(f"{APP_TITLE} · 个人详情")
         window.configure(bg=BORDER)
         window.geometry(self._initial_skill_geometry(x, y))
         window.minsize(520, 340)
@@ -6962,7 +8122,7 @@ class DpsWindow:
         self._bind_drag(logo, window)
         skill_title = tk.Label(
             titlebar,
-            text="技能伤害详情",
+            text="个人伤害详情",
             bg=SURFACE,
             fg=TEXT,
             font=("Microsoft YaHei UI", 9, "bold"),
@@ -7003,7 +8163,16 @@ class DpsWindow:
             anchor="w",
             font=("Microsoft YaHei UI", 12, "bold"),
         )
-        self.skill_title_label.pack(fill="both", expand=True)
+        self.skill_title_label.pack(fill="x", pady=(8, 0))
+        self.skill_combat_metrics_label = tk.Label(
+            identity,
+            text="暴击率  --     死亡  0 次",
+            bg=BG,
+            fg=MUTED,
+            anchor="w",
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.skill_combat_metrics_label.pack(fill="x", pady=(2, 7))
 
         totals = tk.Frame(hero, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
         totals.pack(side="right", fill="y", pady=5)
@@ -7027,6 +8196,33 @@ class DpsWindow:
             font=("Microsoft YaHei UI", 8),
         )
         self.skill_dps_label.pack(fill="both", expand=True)
+
+        tabs = tk.Frame(body, bg=BG, height=31)
+        tabs.pack(fill="x", padx=8, pady=(0, 4))
+        tabs.pack_propagate(False)
+        self.skill_mode_buttons = {}
+        for mode, text in (("skills", "技能明细"), ("targets", "伤害目标")):
+            tab = tk.Label(
+                tabs,
+                text=text,
+                bg=BG,
+                fg=MUTED,
+                padx=13,
+                pady=5,
+                cursor="hand2",
+                font=("Microsoft YaHei UI", 8, "bold"),
+            )
+            tab.pack(side="left", fill="y")
+            tab.bind(
+                "<Button-1>",
+                lambda _event, selected_mode=mode: self._set_skill_detail_mode(
+                    selected_mode
+                ),
+            )
+            tab.bind("<Enter>", lambda _event, widget=tab: widget.configure(fg=TEXT))
+            tab.bind("<Leave>", lambda _event: self._sync_skill_detail_tabs())
+            self.skill_mode_buttons[mode] = tab
+        self._sync_skill_detail_tabs()
 
         panel = tk.Frame(body, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
         panel.pack(fill="both", expand=True, padx=8, pady=(0, 5))
@@ -7055,6 +8251,22 @@ class DpsWindow:
         grip.bind("<B1-Motion>", lambda event: self._resize_move(event, window, 520, 340))
         window.after(20, lambda: self._apply_windows_style(window))
 
+    def _set_skill_detail_mode(self, mode: str) -> None:
+        if mode not in {"skills", "targets"}:
+            return
+        self.skill_detail_mode = mode
+        self._sync_skill_detail_tabs()
+        self._draw_skill_header()
+        self._draw_skill_rows()
+
+    def _sync_skill_detail_tabs(self) -> None:
+        for mode, button in self.skill_mode_buttons.items():
+            selected = mode == self.skill_detail_mode
+            button.configure(
+                bg=PANEL_2 if selected else BG,
+                fg=ACCENT if selected else MUTED,
+            )
+
     @staticmethod
     def _skill_columns(width: int) -> tuple[int, int, int, int]:
         return int(width * 0.57), int(width * 0.73), int(width * 0.84), width - 17
@@ -7065,17 +8277,27 @@ class DpsWindow:
         canvas = self.skill_header_canvas
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
-        damage_x, share_x, hits_x, max_x = self._skill_columns(width)
         font = ("Microsoft YaHei UI", 8, "bold")
-        canvas.create_text(36, 15, text="技能", fill=MUTED, anchor="w", font=font)
-        canvas.create_text(damage_x, 15, text="伤害", fill=MUTED, anchor="e", font=font)
-        canvas.create_text(share_x, 15, text="占比", fill=MUTED, anchor="e", font=font)
-        canvas.create_text(hits_x, 15, text="次数", fill=MUTED, anchor="e", font=font)
-        canvas.create_text(max_x, 15, text="最大伤害", fill=MUTED, anchor="e", font=font)
+        if self.skill_detail_mode == "targets":
+            kind_x, damage_x, share_x = int(width * 0.58), int(width * 0.79), width - 17
+            canvas.create_text(12, 15, text="目标", fill=MUTED, anchor="w", font=font)
+            canvas.create_text(kind_x, 15, text="类型", fill=MUTED, anchor="e", font=font)
+            canvas.create_text(damage_x, 15, text="伤害", fill=MUTED, anchor="e", font=font)
+            canvas.create_text(share_x, 15, text="占比", fill=MUTED, anchor="e", font=font)
+        else:
+            damage_x, share_x, hits_x, max_x = self._skill_columns(width)
+            canvas.create_text(36, 15, text="技能", fill=MUTED, anchor="w", font=font)
+            canvas.create_text(damage_x, 15, text="伤害", fill=MUTED, anchor="e", font=font)
+            canvas.create_text(share_x, 15, text="占比", fill=MUTED, anchor="e", font=font)
+            canvas.create_text(hits_x, 15, text="次数", fill=MUTED, anchor="e", font=font)
+            canvas.create_text(max_x, 15, text="最大伤害", fill=MUTED, anchor="e", font=font)
         canvas.create_line(0, 29, width, 29, fill=BORDER)
 
     def _draw_skill_rows(self) -> None:
         if self.skill_rows_canvas is None or self.skill_actor_id is None:
+            return
+        if self.skill_detail_mode == "targets":
+            self._draw_skill_target_rows()
             return
         canvas = self.skill_rows_canvas
         canvas.delete("all")
@@ -7123,6 +8345,54 @@ class DpsWindow:
             canvas.create_line(0, bottom - 1, width, bottom - 1, fill=blend_color(BORDER, base, 0.45))
         canvas.configure(scrollregion=(0, 0, width, max(height, len(skill_rows) * row_height)))
 
+    def _draw_skill_target_rows(self) -> None:
+        if self.skill_rows_canvas is None or self.skill_actor_id is None:
+            return
+        canvas = self.skill_rows_canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        rows = self.model.actor_target_rows(self.skill_actor_id)
+        if not rows:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="暂无目标伤害",
+                fill=MUTED,
+                font=("Microsoft YaHei UI", 10, "bold"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        kind_x, damage_x, share_x = int(width * 0.58), int(width * 0.79), width - 17
+        row_height = 38
+        for index, row in enumerate(rows):
+            top = index * row_height
+            bottom = top + row_height
+            share = max(0.0, min(1.0, float(row.get("share", 0.0) or 0.0)))
+            kind = str(row.get("kind", "小怪"))
+            color = WARN if kind == "Boss" else ACCENT
+            base = PANEL if index % 2 == 0 else blend_color(PANEL, SURFACE, 0.28)
+            name = str(row.get("name", "")).strip() or "未命名目标"
+            entity_count = len(row.get("entity_ids", []))
+            if entity_count > 1:
+                name = f"{name} ×{entity_count}"
+            canvas.create_rectangle(0, top, width, bottom - 1, fill=base, outline="")
+            canvas.create_rectangle(
+                0,
+                top,
+                max(3, int(width * share)),
+                bottom - 1,
+                fill=blend_color(base, color, 0.38),
+                outline="",
+            )
+            canvas.create_rectangle(0, top, 3, bottom - 1, fill=color, outline="")
+            canvas.create_text(12, top + 19, text=name, fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 9, "bold"))
+            canvas.create_text(kind_x, top + 19, text=kind, fill=color, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+            canvas.create_text(damage_x, top + 19, text=format_number(row.get("damage", 0)), fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
+            canvas.create_text(share_x, top + 19, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
+            canvas.create_line(0, bottom - 1, width, bottom - 1, fill=blend_color(BORDER, base, 0.45))
+        canvas.configure(scrollregion=(0, 0, width, max(height, len(rows) * row_height)))
+
     def _render_skill_details(self) -> None:
         if (
             self.skill_window is None
@@ -7142,6 +8412,13 @@ class DpsWindow:
         actor_dps = total / duration if duration else 0.0
         self.skill_total_label.configure(text=f"总伤害  {format_number(total)}")
         self.skill_dps_label.configure(text=f"DPS  {format_number(actor_dps)}")
+        critical_text = self._actor_critical_text(actor)
+        deaths = self.model.member_death_counts.get(self.skill_actor_id, 0)
+        if self.skill_combat_metrics_label is not None:
+            self.skill_combat_metrics_label.configure(
+                text=f"暴击率  {critical_text}     死亡  {deaths} 次"
+            )
+        self._draw_skill_header()
         self._draw_skill_rows()
 
     def _close_skill_window(self) -> None:
@@ -7152,6 +8429,8 @@ class DpsWindow:
             self.skill_window.destroy()
         self.skill_window = None
         self.skill_actor_id = None
+        self.skill_mode_buttons = {}
+        self.skill_combat_metrics_label = None
 
     def _save_preferences(self) -> None:
         recent_skill_names = list(self.model.runtime_skill_names.items())[-2048:]
@@ -7160,7 +8439,7 @@ class DpsWindow:
         }
         self.config["hide_names"] = self.hide_names
         self.config["window_locked"] = self.window_locked
-        self.config["layout_version"] = 8
+        self.config["layout_version"] = 12
         self.config["topmost"] = bool(self.root.attributes("-topmost"))
         self.config["alpha"] = float(self.root.attributes("-alpha"))
         self._remember_root_geometry()
@@ -7210,6 +8489,7 @@ class DpsWindow:
             "monster": self.model.ingest_monster,
             "team_stat": self.model.ingest_team_stat,
             "stage_summary": self.model.ingest_stage_summary,
+            "combat_state": self.model.ingest_combat_state,
             "life": self.model.ingest_life,
             "scene": self.model.ingest_scene,
             "name": self.model.ingest_name,

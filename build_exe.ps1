@@ -13,7 +13,7 @@ $Description = "$ProductName$([char]0x56E2)$([char]0x961F)$([char]0x4F24)$([char
 $OutputName = if ($OutputFilename) {
     $OutputFilename
 } else {
-    "$ProductName-DPS-METER-v0.0.5.exe"
+    "$ProductName-DPS-METER-v0.0.8.exe"
 }
 $OutputDirectoryPath = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
     [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -54,8 +54,8 @@ try {
         --include-data-files=monster_metadata.json=monster_metadata.json `
         --include-data-files=boss_allowlist.txt=boss_allowlist.txt `
         --include-data-files=cacert.pem=cacert.pem `
-        --file-version=0.0.5.0 `
-        --product-version=0.0.5.0 `
+        --file-version=0.0.8.0 `
+        --product-version=0.0.8.0 `
         --product-name="$ProductName DPS METER" `
         --file-description=$Description `
         --copyright=$ProductName `

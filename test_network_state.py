@@ -61,6 +61,67 @@ class NetworkPacketParserTests(unittest.TestCase):
         record["decode_delay_ms"] = 249.0
         self.assertEqual(NetworkPacketParser._args(record), [123.0])
 
+    def test_heal_sync_emits_exact_total_effective_and_overheal(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.party_ids.add(PLAYER_ID + 1)
+
+        updates = parser.process(
+            packet(
+                "OnMsgHealSyncV2",
+                [PLAYER_ID, PLAYER_ID + 1, 860_210_300, 1_250, 900],
+                sequence=2,
+            )
+        )
+
+        healing = next(value for kind, value in updates if kind == "heal")
+        self.assertEqual(healing["healer_id"], PLAYER_ID)
+        self.assertEqual(healing["target_id"], PLAYER_ID + 1)
+        self.assertEqual(healing["skill_id"], 86_021_030)
+        self.assertEqual(healing["total_healing"], 1_250)
+        self.assertEqual(healing["effective_healing"], 900)
+        self.assertEqual(healing["overhealing"], 350)
+        self.assertEqual(healing["healing_source"], "network_exact")
+        self.assertEqual(healing["sequence"], 2)
+
+    def test_bound_team_hp_emits_guarded_realtime_health_only(self):
+        parser = NetworkPacketParser()
+        teammate_id = PLAYER_ID + 1
+        pointer = MONSTER_POINTER + 1
+        parser.self_id = PLAYER_ID
+        parser.party_ids.add(teammate_id)
+        parser.actor_tokens[teammate_id] = TEAMMATE_TOKEN
+        parser.token_actors[TEAMMATE_TOKEN] = teammate_id
+        parser.token_max_hp[TEAMMATE_TOKEN] = 11_866.0
+        parser.pointer_entities[pointer] = teammate_id
+
+        valid = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [9_500.0],
+                pointer=pointer,
+                sequence=3,
+            )
+        )
+        health = next(
+            value for kind, value in valid if kind == "actor_health"
+        )
+        self.assertEqual(health["entity_id"], teammate_id)
+        self.assertEqual(health["current_hp"], 9_500.0)
+        self.assertEqual(health["max_hp"], 11_866.0)
+        self.assertEqual(health["health_source"], "bound_realtime_hp")
+
+        stale = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [5_403_352.0],
+                pointer=pointer,
+                sequence=4,
+            )
+        )
+        self.assertFalse(any(kind == "actor_health" for kind, _ in stale))
+
     def test_dungeon_and_stage_ids_are_retained_from_explicit_protocol_fields(self):
         parser = NetworkPacketParser()
         parser.process(
@@ -3836,6 +3897,8 @@ class NetworkPacketParserTests(unittest.TestCase):
                     [27, 179],
                     [33, {86_073_010: 4}],
                     [34, {86_073_010: 191_791}],
+                    [17, 27_651],
+                    [35, {86_021_030: 12_916, 86_021_100: 14_735}],
                 ]
             },
             "settlement-token-2": {
@@ -3895,10 +3958,20 @@ class NetworkPacketParserTests(unittest.TestCase):
             summary["actors"][0]["skills"],
             [{"skill_id": 86_073_010, "damage": 191_791, "hits": 4}],
         )
+        self.assertEqual(summary["actors"][0]["effective_healing"], 27_651)
+        self.assertEqual(
+            summary["actors"][0]["healing_skills"],
+            [
+                {"skill_id": 86_021_030, "effective_healing": 12_916},
+                {"skill_id": 86_021_100, "effective_healing": 14_735},
+            ],
+        )
         self.assertEqual(
             summary["actors"][1]["skills"],
             [{"skill_id": 86_053_010, "damage": 211_718, "hits": 4}],
         )
+        self.assertEqual(summary["actors"][1]["effective_healing"], 0)
+        self.assertEqual(summary["actors"][1]["healing_skills"], [])
         names = {
             value["entity_id"]: value["name"]
             for kind, value in updates

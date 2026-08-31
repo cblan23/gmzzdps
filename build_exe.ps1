@@ -14,7 +14,7 @@ $Description = "$DisplayName $([char]0x56E2)$([char]0x961F)$([char]0x4F24)$([cha
 $OutputName = if ($OutputFilename) {
     $OutputFilename
 } else {
-    "$ProductName-Dps-Logs-v0.0.14.exe"
+    "$ProductName-Dps-Logs-v0.0.15.exe"
 }
 $OutputDirectoryPath = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
     [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -55,8 +55,8 @@ try {
         --include-data-files=monster_metadata.json=monster_metadata.json `
         --include-data-files=boss_allowlist.txt=boss_allowlist.txt `
         --include-data-files=cacert.pem=cacert.pem `
-        --file-version=0.0.14.0 `
-        --product-version=0.0.14.0 `
+        --file-version=0.0.15.0 `
+        --product-version=0.0.15.0 `
         --product-name="$DisplayName" `
         --file-description=$Description `
         --copyright=$ProductName `

@@ -16,6 +16,7 @@ debug_*
 skill_names_diagnostics.json
 network_active_boss.json
 replay_*.json
+research-v0.0.15/joker-protocol-evidence.json
 更新日志-v*.txt
 
 # Build products and local environments

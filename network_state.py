@@ -641,6 +641,11 @@ class NetworkPacketParser:
             update.update(pending)
             update["entity_id"] = entity_id
             updates.append(("monster", update))
+            player_health = self._player_health_update(
+                entity_id, pending, record, pointer=pointer
+            )
+            if player_health is not None:
+                updates.append(("actor_health", player_health))
             try:
                 max_hp = float(pending.get("max_hp", 0) or 0)
             except (TypeError, ValueError, OverflowError):
@@ -688,7 +693,13 @@ class NetworkPacketParser:
             update = self._base_update(record)
             update.update(values)
             update["entity_id"] = entity_id
-            return [("monster", update)]
+            updates = [("monster", update)]
+            player_health = self._player_health_update(
+                entity_id, values, record, pointer=pointer
+            )
+            if player_health is not None:
+                updates.append(("actor_health", player_health))
+            return updates
         pending = self.pointer_state.setdefault(pointer, {})
         pending.update(values)
         # Pointer lifetimes are short across scene changes; a bounded cache also
@@ -697,6 +708,70 @@ class NetworkPacketParser:
             oldest = next(iter(self.pointer_state))
             self.pointer_state.pop(oldest, None)
         return []
+
+    def _player_health_update(
+        self,
+        entity_id: int,
+        values: dict,
+        record: dict,
+        *,
+        pointer: int,
+    ) -> dict | None:
+        """Return a guarded real-time party HP sample.
+
+        ScriptEntity pointers are reused between scene objects.  A pointer that
+        used to belong to a player has been observed carrying a Boss HP value,
+        so a player binding alone is not sufficient evidence.  Team max HP is
+        preferred and every current/max value must remain inside that bound.
+        """
+        explicit_members = set(self.party_ids) | set(self.actor_tokens)
+        if self.self_id is not None:
+            explicit_members.add(self.self_id)
+        if entity_id not in explicit_members:
+            return None
+
+        token = self.actor_tokens.get(entity_id, "")
+        team_max_hp = float(self.token_max_hp.get(token, 0.0) or 0.0)
+        try:
+            incoming_max_hp = float(values.get("max_hp", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            incoming_max_hp = 0.0
+        observed_max_hp = float(self.entity_max_hp.get(entity_id, 0.0) or 0.0)
+        expected_max_hp = team_max_hp
+        if expected_max_hp <= 0:
+            for candidate in (incoming_max_hp, observed_max_hp):
+                if 0 < candidate < BOSS_POINTER_HIGH_HP_FLOOR:
+                    expected_max_hp = candidate
+                    break
+        if expected_max_hp <= 0:
+            return None
+        if (
+            incoming_max_hp > 0
+            and not 0.98 <= incoming_max_hp / expected_max_hp <= 1.02
+        ):
+            return None
+
+        update = self._base_update(record)
+        update.update(
+            {
+                "entity_id": entity_id,
+                "max_hp": expected_max_hp,
+                "script_entity": int(pointer or 0),
+                "health_source": "bound_realtime_hp",
+            }
+        )
+        if "current_hp" in values:
+            try:
+                current_hp = float(values["current_hp"])
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if (
+                not self._valid_hp_value(current_hp)
+                or current_hp > expected_max_hp * 1.02
+            ):
+                return None
+            update["current_hp"] = current_hp
+        return update
 
     def _name_matches_boss_allowlist(self, value: object) -> bool:
         normalized = normalize_boss_name(value)
@@ -3505,16 +3580,19 @@ class NetworkPacketParser:
                 damage = 0
             skill_damage = direct_numeric_map(fields.get(34))
             skill_hits = direct_numeric_map(fields.get(33))
+            skill_healing = direct_numeric_map(fields.get(35))
             try:
                 damage_hits = max(0, int(fields.get(27, 0) or 0))
                 critical_hits = max(0, int(fields.get(25, 0) or 0))
                 deaths = max(0, int(fields.get(18, 0) or 0))
                 profession_id = max(0, int(fields.get(4, 0) or 0))
+                effective_healing = max(0, int(fields.get(17, 0) or 0))
             except (TypeError, ValueError, OverflowError):
                 damage_hits = 0
                 critical_hits = 0
                 deaths = 0
                 profession_id = 0
+                effective_healing = 0
             try:
                 combat_seconds_total = max(0, int(fields.get(19, 0) or 0))
             except (TypeError, ValueError, OverflowError):
@@ -3552,6 +3630,20 @@ class NetworkPacketParser:
                             "hits": hits,
                         }
                     )
+            healing_skills: list[dict[str, int]] = []
+            for raw_skill_id, raw_healing in skill_healing.items():
+                skill_id = normalize_network_skill_id(raw_skill_id)
+                try:
+                    parsed_healing = max(0, int(raw_healing or 0))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if skill_id and parsed_healing > 0:
+                    healing_skills.append(
+                        {
+                            "skill_id": skill_id,
+                            "effective_healing": parsed_healing,
+                        }
+                    )
             summary_row: dict[str, object] = {
                 "actor_id": actor_id,
                 "user_token": token,
@@ -3563,6 +3655,8 @@ class NetworkPacketParser:
                 "combat_seconds_total": combat_seconds_total,
                 "combat_seconds_delta": combat_seconds_delta,
                 "skills": skills,
+                "effective_healing": effective_healing,
+                "healing_skills": healing_skills,
             }
             if authoritative or 18 in fields:
                 # Settlement rows omit field 18 when its value is zero.
@@ -4353,6 +4447,39 @@ class NetworkPacketParser:
                 updates.extend(
                     self._record_combat_source(record, actor_id, args[2])
                 )
+                if len(args) >= 5:
+                    target_id = parse_combat_entity_id(args[1])
+                    skill_id = normalize_network_skill_id(args[2])
+                    try:
+                        attempted_healing = int(args[3])
+                        effective_healing = int(args[4])
+                    except (TypeError, ValueError, OverflowError):
+                        attempted_healing = -1
+                        effective_healing = -1
+                    if (
+                        target_id
+                        and is_player_skill(skill_id)
+                        and attempted_healing >= 0
+                        and 0 <= effective_healing <= attempted_healing
+                    ):
+                        updates.append(
+                            (
+                                "heal",
+                                {
+                                    **self._base_update(record),
+                                    "sequence": int(record.get("sequence", 0) or 0),
+                                    "healer_id": actor_id,
+                                    "target_id": target_id,
+                                    "skill_id": skill_id,
+                                    "total_healing": attempted_healing,
+                                    "effective_healing": effective_healing,
+                                    "overhealing": (
+                                        attempted_healing - effective_healing
+                                    ),
+                                    "healing_source": "network_exact",
+                                },
+                            )
+                        )
         elif method == "OnMsgCastSkillNew" and args:
             actor_id = self.pointer_entities.get(pointer)
             if actor_id:

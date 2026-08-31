@@ -36,6 +36,8 @@ resolve_program_path = MODULE["resolve_program_path"]
 window_exstyle_for_lock = MODULE["window_exstyle_for_lock"]
 membership_label_for_card_tier = MODULE["membership_label_for_card_tier"]
 format_duration = MODULE["format_duration"]
+format_response_time = MODULE["format_response_time"]
+healing_coverage_label = MODULE["healing_coverage_label"]
 dps_duration_seconds = MODULE["dps_duration_seconds"]
 relative_damage_bar_ratio = MODULE["relative_damage_bar_ratio"]
 compact_width_for_visible_metrics = MODULE["compact_width_for_visible_metrics"]
@@ -77,6 +79,37 @@ def team_stat(
     if server_time:
         update["server_time"] = server_time
     return update
+
+
+def healing(
+    timestamp: int,
+    healer: int,
+    target: int,
+    *,
+    total: int,
+    effective: int,
+    skill_id: int = 86_021_030,
+) -> dict:
+    return {
+        "filetime_100ns": timestamp,
+        "healer_id": healer,
+        "target_id": target,
+        "skill_id": skill_id,
+        "total_healing": total,
+        "effective_healing": effective,
+        "overhealing": total - effective,
+        "healing_source": "network_exact",
+    }
+
+
+def actor_health(timestamp: int, actor: int, current: int, maximum: int) -> dict:
+    return {
+        "filetime_100ns": timestamp,
+        "entity_id": actor,
+        "current_hp": current,
+        "max_hp": maximum,
+        "health_source": "bound_realtime_hp",
+    }
 
 
 class CombatModelTests(unittest.TestCase):
@@ -146,7 +179,7 @@ class CombatModelTests(unittest.TestCase):
             {actor_id: row.damage for actor_id, row in model.stats.items()},
         )
 
-    def test_final_combat_clock_recalculates_history_dps_only(self):
+    def test_final_combat_clock_recalculates_history_dps_and_hps_only(self):
         record = {
             "encounter_id": "clock-history-000001",
             "duration_seconds": 21.9,
@@ -160,6 +193,17 @@ class CombatModelTests(unittest.TestCase):
                     "damage": 1_200_000,
                     "dps": 1_200_000 / 21,
                 },
+            ],
+            "team_effective_healing": 105_000,
+            "team_total_healing": 125_000,
+            "team_hps": 105_000 / 21,
+            "healers": [
+                {
+                    "actor_id": SELF_ID,
+                    "effective_healing": 105_000,
+                    "total_healing": 125_000,
+                    "hps": 105_000 / 21,
+                }
             ],
             "_shared_clock_request": {"state": "ended"},
         }
@@ -180,6 +224,10 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(updated["dps_duration_seconds"], 20.0)
         self.assertEqual(updated["team_dps"], 100_000.0)
         self.assertEqual(updated["participants"][0]["dps"], 40_000.0)
+        self.assertEqual(updated["team_effective_healing"], 105_000)
+        self.assertEqual(updated["team_total_healing"], 125_000)
+        self.assertEqual(updated["team_hps"], 5_250.0)
+        self.assertEqual(updated["healers"][0]["hps"], 5_250.0)
         self.assertNotIn("_shared_clock_request", updated)
         self.assertEqual(updated["duration_source"], "server_shared_clock")
 
@@ -1866,8 +1914,8 @@ class CombatModelTests(unittest.TestCase):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(APP_VERSION, "0.0.14")
-        self.assertEqual(CLIENT_BUILD, "0.0.14+20260831.4")
+        self.assertEqual(APP_VERSION, "0.0.15")
+        self.assertEqual(CLIENT_BUILD, "0.0.15+20260901.1")
         self.assertIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
@@ -1893,8 +1941,8 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn("clear_if_expired", source)
         self.assertIn('"critical": "暴击率"', source)
         self.assertIn('("显示死亡次数", tk.BooleanVar', source)
-        self.assertIn('columns["critical"]', source)
-        self.assertIn('("DPS", True), ("HPS", False)', source)
+        self.assertIn('"critical": critical_text', source)
+        self.assertIn('("hps", "HPS", True)', source)
         self.assertNotIn('"HDPS"', source)
         self.assertIn(
             "self.titlebar = tk.Frame(self.body, bg=BG, height=44)",
@@ -1955,10 +2003,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertIn("width=22", checkbox_source)
         self.assertIn("height=22", checkbox_source)
         self.assertNotIn("tk.Checkbutton(", checkbox_source)
-        self.assertNotIn(
-            'lambda _event, actor_id=row.actor_id: self.show_skill_details',
-            source,
-        )
+        self.assertIn("selected_kind=detail_kind", source)
 
     def test_window_alpha_clamps_and_accepts_percent_or_fraction(self):
         class Root:
@@ -2306,6 +2351,103 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(second_rect[0][3] - second_rect[0][1], 32)
         self.assertEqual(window.rows_canvas.options["yscrollincrement"], 1)
 
+    def test_hps_main_rows_show_effective_hps_overheal_and_response(self):
+        class Canvas:
+            def __init__(self):
+                self.texts = []
+
+            @staticmethod
+            def winfo_width():
+                return 620
+
+            @staticmethod
+            def winfo_height():
+                return 180
+
+            @staticmethod
+            def delete(*_args, **_kwargs):
+                return None
+
+            @staticmethod
+            def create_rectangle(*_args, **_kwargs):
+                return None
+
+            @staticmethod
+            def create_image(*_args, **_kwargs):
+                return None
+
+            def create_text(self, *args, **kwargs):
+                self.texts.append((args, kwargs))
+
+            @staticmethod
+            def configure(**_kwargs):
+                return None
+
+            @staticmethod
+            def yview_moveto(*_args):
+                return None
+
+        window = object.__new__(DpsWindow)
+        window.main_meter_mode = "hps"
+        window.compact_mode = False
+        window.ui_font_size = 14
+        window.main_scroll_offset = 0
+        window.main_scroll_content_height = 0
+        window.latest_healing_summary = {
+            "team_effective_healing": 900,
+            "healers": [
+                {
+                    "actor_id": SELF_ID,
+                    "profession_id": 1_200_002,
+                    "effective_healing": 900,
+                    "hps": 90,
+                    "overheal_rate": 0.25,
+                    "response": {"average_ms": 500},
+                },
+                {
+                    "actor_id": TEAMMATE_ID,
+                    "profession_id": 1_200_002,
+                    "effective_healing": 0,
+                    "observed_total_healing": 500,
+                    "total_healing": 500,
+                    "hps": 0,
+                    "overheal_rate": 1.0,
+                    "response": {"average_ms": None},
+                },
+            ],
+        }
+        window.model = type(
+            "Model",
+            (),
+            {
+                "duration": lambda _self: 10.0,
+                "actor_profession_id": lambda _self, _actor: 1_200_002,
+            },
+        )()
+        window.icons = type(
+            "Icons", (), {"profession": lambda _self, _class_id, _size: object()}
+        )()
+        window._profession_info = lambda _class_id: ("", "#6fe3bd")
+        window._shown_actor_name = lambda _actor_id: "治疗者"
+        window._fit_main_actor_name = lambda value, _maximum: value
+        window._ui_font = lambda _role: None
+        canvas = Canvas()
+        window.rows_canvas = canvas
+
+        window._draw_main_rows_on_canvas(canvas, update_scroll_state=True)
+
+        rendered = [options["text"] for _args, options in canvas.texts]
+        self.assertIn("治疗者", rendered)
+        self.assertIn("900", rendered)
+        self.assertIn("90", rendered)
+        self.assertIn("25.0%", rendered)
+        self.assertIn("100.0%", rendered)
+        self.assertIn("500ms", rendered)
+        self.assertEqual(format_response_time(1250), "1.25s")
+        self.assertIn("明细为已观测部分", healing_coverage_label(
+            "server_effective_with_partial_callbacks"
+        ))
+
     def test_history_participant_name_has_profession_icon(self):
         class Canvas:
             def __init__(self):
@@ -2389,6 +2531,47 @@ class CombatModelTests(unittest.TestCase):
         ]
         self.assertIn("12,345", rendered_text)
         self.assertNotIn("123,456", rendered_text)
+
+    def test_empty_history_hps_mode_resets_captions_and_detail(self):
+        class Label:
+            def __init__(self):
+                self.values = {}
+
+            def configure(self, **values):
+                self.values.update(values)
+
+        window = object.__new__(DpsWindow)
+        window.history_meter_mode = "hps"
+        window.history_selected_actor = SELF_ID
+        window.history_target_label = Label()
+        window.history_time_label = Label()
+        window.history_total_value = Label()
+        window.history_total_value._caption_label = Label()
+        window.history_dps_value = Label()
+        window.history_dps_value._caption_label = Label()
+        window.history_team_value = Label()
+        window.history_favorite_button = Label()
+        window.history_detail_label = Label()
+        window.history_detail_mode = "skills"
+        window._selected_history_record = lambda: None
+        window._set_history_detail_mode = lambda _mode: None
+        window._draw_history_list = lambda: None
+        window._draw_history_participant_header = lambda: None
+        window._draw_history_participants = lambda: None
+        window._draw_history_skills = lambda: None
+
+        window._render_history_selection()
+
+        self.assertEqual(window.history_selected_actor, 0)
+        self.assertEqual(window.history_target_label.values["text"], "暂无战斗记录")
+        self.assertEqual(
+            window.history_total_value._caption_label.values["text"],
+            "总有效治疗",
+        )
+        self.assertEqual(
+            window.history_dps_value._caption_label.values["text"], "团队 HPS"
+        )
+        self.assertEqual(window.history_detail_label.values["text"], "暂无治疗详情")
 
     def test_history_share_uses_two_decimal_w_dps_and_expands_collisions(self):
         record = {
@@ -4324,6 +4507,342 @@ class CombatModelTests(unittest.TestCase):
                 "unclassified_damage"
             ],
             10,
+        )
+
+    def test_exact_heal_callbacks_build_hps_overheal_peak_target_and_response(self):
+        model = CombatModel(run_id="healing-callback-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": SELF_ID, "name": "治疗者", "entity_type": "Player"}
+        )
+        model.ingest_profile(
+            {"entity_id": TEAMMATE_ID, "name": "队友", "entity_type": "Player"}
+        )
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+
+        self.assertTrue(
+            model.ingest_actor_health(
+                actor_health(BASE_FILETIME + 10_000_000, TEAMMATE_ID, 10_000, 10_000)
+            )
+        )
+        self.assertTrue(
+            model.ingest_actor_health(
+                actor_health(BASE_FILETIME + 20_000_000, TEAMMATE_ID, 7_000, 10_000)
+            )
+        )
+        self.assertTrue(
+            model.ingest_heal(
+                healing(
+                    BASE_FILETIME + 25_000_000,
+                    SELF_ID,
+                    TEAMMATE_ID,
+                    total=1_200,
+                    effective=900,
+                )
+            )
+        )
+
+        summary = model.healing_summary(duration=10.0)
+        healer = summary["healers"][0]
+        self.assertEqual(healer["coverage"], "live_exact_callbacks_unverified")
+        self.assertEqual(healer["total_healing"], 1_200)
+        self.assertEqual(healer["effective_healing"], 900)
+        self.assertEqual(healer["overhealing"], 300)
+        self.assertEqual(healer["overheal_rate"], 0.25)
+        self.assertEqual(healer["hps"], 90.0)
+        self.assertEqual(healer["peak_hps"], 180.0)
+        self.assertEqual(healer["skills"][0]["share"], 1.0)
+        self.assertEqual(healer["targets"][0]["name"], "队友")
+        self.assertEqual(healer["response"]["average_ms"], 500.0)
+        self.assertEqual(healer["response"]["fastest_ms"], 500.0)
+        self.assertEqual(healer["response"]["slowest_ms"], 500.0)
+        self.assertEqual(healer["response"]["samples"], 1)
+        self.assertEqual(healer["response"]["covered_target_count"], 1)
+
+    def test_healing_summary_reuses_same_second_aggregate_cache(self):
+        model = CombatModel(run_id="healing-cache-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        model.ingest_heal(
+            healing(
+                BASE_FILETIME + 20_000,
+                SELF_ID,
+                TEAMMATE_ID,
+                total=1_000,
+                effective=800,
+            )
+        )
+        calls = []
+        original = model._raw_healing_by_actor
+
+        def counted():
+            calls.append(True)
+            return original()
+
+        model._raw_healing_by_actor = counted
+        first = model.healing_summary(duration=10.1)
+        second = model.healing_summary(duration=10.9)
+
+        self.assertIs(first, second)
+        self.assertEqual(len(calls), 1)
+        third = model.healing_summary(duration=11.0)
+        self.assertIsNot(first, third)
+        self.assertEqual(len(calls), 2)
+
+    def test_distinct_heals_with_same_timestamp_and_amount_are_not_deduplicated(self):
+        model = CombatModel(run_id="healing-sequence-dedup")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        first = healing(
+            BASE_FILETIME + 20_000,
+            SELF_ID,
+            TEAMMATE_ID,
+            total=500,
+            effective=400,
+        )
+        first["sequence"] = 101
+        second = dict(first)
+        second["sequence"] = 102
+
+        self.assertTrue(model.ingest_heal(first))
+        self.assertTrue(model.ingest_heal(second))
+        healer = model.healing_summary(duration=10.0)["healers"][0]
+        self.assertEqual(healer["events"], 2)
+        self.assertEqual(healer["total_healing"], 1_000)
+        self.assertEqual(healer["effective_healing"], 800)
+
+    def test_healing_response_starts_at_first_unanswered_hp_drop(self):
+        model = CombatModel(run_id="healing-response-first-drop")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        model.ingest_actor_health(
+            actor_health(BASE_FILETIME + 10_000_000, TEAMMATE_ID, 10_000, 10_000)
+        )
+        model.ingest_actor_health(
+            actor_health(BASE_FILETIME + 20_000_000, TEAMMATE_ID, 8_000, 10_000)
+        )
+        model.ingest_actor_health(
+            actor_health(BASE_FILETIME + 24_000_000, TEAMMATE_ID, 6_000, 10_000)
+        )
+        model.ingest_heal(
+            healing(
+                BASE_FILETIME + 30_000_000,
+                SELF_ID,
+                TEAMMATE_ID,
+                total=1_500,
+                effective=1_500,
+            )
+        )
+
+        response = model.healing_summary(duration=10.0)["healers"][0]["response"]
+        self.assertEqual(response["samples"], 1)
+        self.assertEqual(response["average_ms"], 1_000.0)
+        self.assertEqual(response["fastest_ms"], 1_000.0)
+        self.assertEqual(response["slowest_ms"], 1_000.0)
+
+    def test_actor_merge_keeps_earliest_unanswered_hp_drop(self):
+        model = CombatModel(run_id="healing-response-actor-merge")
+        provisional_id = TEAMMATE_ID + 99
+        first_drop = BASE_FILETIME + 20_000_000
+        later_drop = BASE_FILETIME + 24_000_000
+        model.pending_health_drops[provisional_id] = first_drop
+        model.pending_health_drops[TEAMMATE_ID] = later_drop
+
+        self.assertTrue(
+            model.merge_actor(
+                {
+                    "from_actor_id": provisional_id,
+                    "to_actor_id": TEAMMATE_ID,
+                }
+            )
+        )
+        self.assertNotIn(provisional_id, model.pending_health_drops)
+        self.assertEqual(model.pending_health_drops[TEAMMATE_ID], first_drop)
+
+    def test_server_healing_total_does_not_scale_partial_callback_details(self):
+        model = CombatModel(run_id="healing-partial-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": TEAMMATE_ID, "name": "远端治疗", "entity_type": "Player"}
+        )
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        self.assertTrue(
+            model.ingest_heal(
+                healing(
+                    BASE_FILETIME + 20_000,
+                    TEAMMATE_ID,
+                    SELF_ID,
+                    total=100,
+                    effective=71,
+                    skill_id=86_011_010,
+                )
+            )
+        )
+        death_time = BASE_FILETIME + 30_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 1_000,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "healing-server-partial",
+                    "filetime_100ns": death_time + 10_000,
+                    "member_count": 2,
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {"actor_id": SELF_ID, "damage": 100},
+                        {
+                            "actor_id": TEAMMATE_ID,
+                            "damage": 0,
+                            "effective_healing": 1_928,
+                            "healing_skills": [
+                                {
+                                    "skill_id": 86_011_010,
+                                    "effective_healing": 1_928,
+                                }
+                            ],
+                        },
+                    ],
+                }
+            )
+        )
+
+        summary = model.healing_summary(duration=10.0)
+        healer = summary["healers"][0]
+        self.assertEqual(
+            healer["coverage"], "server_effective_with_partial_callbacks"
+        )
+        self.assertEqual(healer["effective_healing"], 1_928)
+        self.assertEqual(healer["hps"], 192.8)
+        self.assertIsNone(healer["total_healing"])
+        self.assertIsNone(healer["overhealing"])
+        self.assertIsNone(healer["peak_hps"])
+        self.assertEqual(healer["observed_effective_healing"], 71)
+        self.assertEqual(healer["skills"][0]["effective_healing"], 1_928)
+        self.assertIsNone(healer["skills"][0]["total_healing"])
+
+    def test_server_verified_healing_keeps_fully_overhealed_skill(self):
+        model = CombatModel(run_id="healing-zero-effective-skill")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        overheal = healing(
+            BASE_FILETIME + 20_000,
+            SELF_ID,
+            SELF_ID,
+            total=500,
+            effective=0,
+            skill_id=86_021_100,
+        )
+        overheal["sequence"] = 91
+        self.assertTrue(model.ingest_heal(overheal))
+        death_time = BASE_FILETIME + 30_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 1_000,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "healing-zero-effective-server",
+                    "filetime_100ns": death_time + 10_000,
+                    "member_count": 1,
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": SELF_ID,
+                            "damage": 100,
+                            "effective_healing": 0,
+                            "healing_skills": [],
+                        }
+                    ],
+                }
+            )
+        )
+
+        healer = model.healing_summary(duration=10.0)["healers"][0]
+        self.assertEqual(healer["coverage"], "server_verified_callbacks")
+        self.assertEqual(healer["total_healing"], 500)
+        self.assertEqual(healer["effective_healing"], 0)
+        self.assertEqual(healer["overhealing"], 500)
+        self.assertEqual(healer["overheal_rate"], 1.0)
+        self.assertEqual(len(healer["skills"]), 1)
+        self.assertEqual(healer["skills"][0]["total_healing"], 500)
+        self.assertEqual(healer["skills"][0]["effective_healing"], 0)
+        self.assertEqual(healer["skills"][0]["overhealing"], 500)
+
+    def test_midfight_exact_stage_total_enables_teammate_skill_distribution(self):
+        model = CombatModel(run_id="midfight-stage-skills")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        self.assertFalse(model.ingest_team_stat(team_stat(1, TEAMMATE_ID, 0)))
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 100))
+        self.assertTrue(model.ingest_team_stat(team_stat(3, TEAMMATE_ID, 200)))
+
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "midfight-skill-exact",
+                    "filetime_100ns": BASE_FILETIME + 40_000,
+                    "member_count": 2,
+                    "authoritative": False,
+                    "completion_confirmed": False,
+                    "actors": [
+                        {
+                            "actor_id": TEAMMATE_ID,
+                            "damage": 200,
+                            "skills": [
+                                {"skill_id": 86_021_010, "damage": 120, "hits": 3},
+                                {"skill_id": 86_021_020, "damage": 70, "hits": 2},
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+        teammate = model.stats[TEAMMATE_ID]
+        self.assertEqual(
+            {skill_id: row.damage for skill_id, row in teammate.skills.items()},
+            {86_021_010: 120, 86_021_020: 70, 0: 10},
         )
 
     def test_mismatched_stage_actor_total_cannot_replace_teammate_skills(self):

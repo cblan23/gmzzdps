@@ -257,6 +257,182 @@ class CombatHistoryStoreTests(unittest.TestCase):
             [11],
         )
 
+    def test_late_healing_settlement_keeps_partial_callback_detail_unscaled(self):
+        finished = record("late-healing", 1_788_058_851.0)
+        finished["duration_seconds"] = 10.0
+        finished["total_damage"] = 1_250
+        finished["participants"] = [
+            {"actor_id": 11, "name": "输出", "damage": 1_250, "skills": []}
+        ]
+        finished["healers"] = [
+            {
+                "actor_id": 22,
+                "name": "治疗",
+                "effective_healing": 71,
+                "observed_total_healing": 100,
+                "observed_effective_healing": 71,
+                "total_healing": 100,
+                "overhealing": 29,
+                "peak_hps": 14.2,
+                "skills": [
+                    {
+                        "skill_id": 301,
+                        "name": "治疗术",
+                        "total_healing": 100,
+                        "effective_healing": 71,
+                        "overhealing": 29,
+                    }
+                ],
+                "targets": [
+                    {
+                        "target_id": 11,
+                        "effective_healing": 71,
+                        "coverage": "exact_observed_partial",
+                    }
+                ],
+            }
+        ]
+        finished["damage_accounting"] = {
+            "stage_summary_validations": [],
+            "seen_stage_summary_ids": [],
+        }
+        self.store.save(finished)
+        summary_epoch = 1_788_058_852.0
+        summary = {
+            "summary_id": "settlement|healing|partial",
+            "filetime_100ns": int(
+                summary_epoch * 10_000_000 + 116_444_736_000_000_000
+            ),
+            "authoritative": True,
+            "completion_confirmed": True,
+            "member_count": 2,
+            "actors": [
+                {"actor_id": 11, "name": "输出", "damage": 1_250},
+                {
+                    "actor_id": 22,
+                    "name": "治疗",
+                    "damage": 0,
+                    "effective_healing": 1_928,
+                    "healing_skills": [
+                        {"skill_id": 301, "effective_healing": 1_928}
+                    ],
+                },
+            ],
+        }
+
+        attached = self.store.attach_stage_summary_validation(summary)
+
+        self.assertIsNotNone(attached)
+        loaded = self.store.load_recent()[0]
+        healer = loaded["healers"][0]
+        self.assertEqual(
+            healer["coverage"], "server_effective_with_partial_callbacks"
+        )
+        self.assertEqual(healer["effective_healing"], 1_928)
+        self.assertEqual(healer["hps"], 192.8)
+        self.assertIsNone(healer["total_healing"])
+        self.assertIsNone(healer["overhealing"])
+        self.assertIsNone(healer["peak_hps"])
+        self.assertEqual(healer["observed_effective_healing"], 71)
+        self.assertEqual(healer["targets"][0]["effective_healing"], 71)
+        self.assertEqual(healer["skills"][0]["effective_healing"], 1_928)
+        self.assertIsNone(loaded["team_total_healing"])
+        self.assertEqual(loaded["team_effective_healing"], 1_928)
+        self.assertEqual(
+            loaded["healing_accounting"][
+                "stage_healing_summary_applications"
+            ][0]["actor_ids"],
+            [22],
+        )
+
+    def test_late_verified_healing_keeps_exact_skill_gross_and_overheal(self):
+        finished = record("late-healing-verified", 1_788_058_851.0)
+        finished["duration_seconds"] = 10.0
+        finished["total_damage"] = 1_250
+        finished["participants"] = [
+            {"actor_id": 11, "name": "输出", "damage": 1_250, "skills": []}
+        ]
+        finished["healers"] = [
+            {
+                "actor_id": 22,
+                "name": "治疗",
+                "effective_healing": 800,
+                "observed_total_healing": 1_200,
+                "observed_effective_healing": 800,
+                "total_healing": 1_200,
+                "overhealing": 400,
+                "peak_hps": 160.0,
+                "skills": [
+                    {
+                        "skill_id": 301,
+                        "name": "治疗术",
+                        "total_healing": 1_000,
+                        "effective_healing": 800,
+                        "overhealing": 200,
+                        "events": 2,
+                    },
+                    {
+                        "skill_id": 302,
+                        "name": "护盾溢出",
+                        "total_healing": 200,
+                        "effective_healing": 0,
+                        "overhealing": 200,
+                        "events": 1,
+                    },
+                ],
+                "targets": [{"target_id": 11, "effective_healing": 800}],
+            }
+        ]
+        finished["damage_accounting"] = {
+            "stage_summary_validations": [],
+            "seen_stage_summary_ids": [],
+        }
+        self.store.save(finished)
+        summary = {
+            "summary_id": "settlement|healing|verified",
+            "filetime_100ns": int(
+                1_788_058_852.0 * 10_000_000 + 116_444_736_000_000_000
+            ),
+            "authoritative": True,
+            "completion_confirmed": True,
+            "member_count": 2,
+            "actors": [
+                {"actor_id": 11, "name": "输出", "damage": 1_250},
+                {
+                    "actor_id": 22,
+                    "name": "治疗",
+                    "damage": 0,
+                    "effective_healing": 800,
+                    "healing_skills": [
+                        {"skill_id": 301, "effective_healing": 800}
+                    ],
+                },
+            ],
+        }
+
+        attached = self.store.attach_stage_summary_validation(summary)
+
+        self.assertIsNotNone(attached)
+        loaded = self.store.load_recent()[0]
+        healer = loaded["healers"][0]
+        self.assertEqual(healer["coverage"], "server_verified_callbacks")
+        self.assertEqual(healer["total_healing"], 1_200)
+        self.assertEqual(healer["overhealing"], 400)
+        self.assertEqual(healer["peak_hps"], 160.0)
+        self.assertEqual(healer["skills"][0]["total_healing"], 1_000)
+        self.assertEqual(healer["skills"][0]["overhealing"], 200)
+        self.assertEqual(healer["skills"][0]["events"], 2)
+        self.assertEqual(healer["skills"][1]["total_healing"], 200)
+        self.assertEqual(healer["skills"][1]["effective_healing"], 0)
+        self.assertEqual(healer["skills"][1]["overhealing"], 200)
+        self.assertEqual(healer["targets"][0]["effective_healing"], 800)
+        self.assertEqual(
+            loaded["healing_accounting"][
+                "stage_healing_summary_applications"
+            ][0]["actor_ids"],
+            [22],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

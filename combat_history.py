@@ -274,6 +274,270 @@ class CombatHistoryStore:
         return updated, sorted(set(applied_actor_ids))
 
     @staticmethod
+    def _apply_exact_stage_healing(
+        record: dict,
+        summary: dict,
+        summary_id: str,
+    ) -> tuple[dict, list[int]]:
+        """Apply settlement healing without inventing missing callback detail."""
+        participant_damage = CombatHistoryStore._actor_damage(
+            record.get("participants")
+        )
+        existing_healers = {
+            int(row.get("actor_id", 0) or 0): dict(row)
+            for row in record.get("healers", [])
+            if isinstance(row, dict) and int(row.get("actor_id", 0) or 0) > 0
+        }
+        try:
+            duration = float(record.get("duration_seconds", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            duration = 0.0
+        divisor = float(max(1, int(duration))) if duration > 0 else 1.0
+        applied_actor_ids: list[int] = []
+
+        for raw_actor in summary.get("actors", []):
+            if not isinstance(raw_actor, dict):
+                continue
+            try:
+                actor_id = int(raw_actor.get("actor_id", 0) or 0)
+                actor_damage = max(0, int(raw_actor.get("damage", 0) or 0))
+                effective = max(
+                    0, int(raw_actor.get("effective_healing", 0) or 0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if actor_id <= 0:
+                continue
+            if actor_id in participant_damage:
+                if participant_damage[actor_id] != actor_damage:
+                    continue
+            elif actor_damage != 0:
+                continue
+
+            parsed_skills: dict[int, int] = {}
+            for raw_skill in raw_actor.get("healing_skills", []):
+                if not isinstance(raw_skill, dict):
+                    continue
+                try:
+                    skill_id = int(raw_skill.get("skill_id", 0) or 0)
+                    healing = max(
+                        0, int(raw_skill.get("effective_healing", 0) or 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if skill_id > 0 and healing > 0:
+                    parsed_skills[skill_id] = (
+                        parsed_skills.get(skill_id, 0) + healing
+                    )
+            classified = sum(parsed_skills.values())
+            if classified > effective:
+                continue
+            existing = existing_healers.get(actor_id, {})
+            if effective <= 0 and not existing:
+                continue
+            if str(existing.get("healing_summary_id", "")) == summary_id:
+                continue
+
+            try:
+                observed_total = max(
+                    0, int(existing.get("observed_total_healing", 0) or 0)
+                )
+                observed_effective = max(
+                    0,
+                    int(
+                        existing.get(
+                            "observed_effective_healing",
+                            existing.get("effective_healing", 0),
+                        )
+                        or 0
+                    ),
+                )
+            except (TypeError, ValueError, OverflowError):
+                observed_total = observed_effective = 0
+            observed_skill_effective: dict[int, int] = {}
+            skill_names: dict[int, str] = {}
+            observed_skill_rows: dict[int, dict] = {}
+            for raw_skill in existing.get("skills", []):
+                if not isinstance(raw_skill, dict):
+                    continue
+                try:
+                    skill_id = int(raw_skill.get("skill_id", 0) or 0)
+                    healing = max(
+                        0, int(raw_skill.get("effective_healing", 0) or 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if skill_id > 0:
+                    if healing > 0:
+                        observed_skill_effective[skill_id] = (
+                            observed_skill_effective.get(skill_id, 0) + healing
+                        )
+                    name = str(raw_skill.get("name", "")).strip()
+                    if name:
+                        skill_names[skill_id] = name
+                    observed_skill_rows[skill_id] = dict(raw_skill)
+            verified = bool(
+                observed_effective == effective
+                and observed_skill_effective == parsed_skills
+            )
+            total_healing = observed_total if verified else None
+            overhealing = (
+                observed_total - effective if verified else None
+            )
+            skills = []
+            for skill_id, skill_healing in sorted(
+                parsed_skills.items(), key=lambda item: item[1], reverse=True
+            ):
+                observed_skill = observed_skill_rows.get(skill_id, {})
+                raw_skill_total = observed_skill.get("total_healing")
+                try:
+                    skill_total = (
+                        max(0, int(raw_skill_total))
+                        if verified and raw_skill_total is not None
+                        else None
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    skill_total = None
+                skills.append(
+                    {
+                        "skill_id": skill_id,
+                        "name": skill_names.get(skill_id, f"技能 {skill_id}"),
+                        "total_healing": skill_total,
+                        "effective_healing": skill_healing,
+                        "overhealing": (
+                            skill_total - skill_healing
+                            if skill_total is not None
+                            else None
+                        ),
+                        "share": skill_healing / effective if effective else 0.0,
+                        "events": (
+                            observed_skill.get("events") if verified else None
+                        ),
+                        "source": "server_stage_summary",
+                    }
+                )
+            if verified:
+                for skill_id, observed_skill in observed_skill_rows.items():
+                    if skill_id in parsed_skills:
+                        continue
+                    try:
+                        skill_total = max(
+                            0,
+                            int(observed_skill.get("total_healing", 0) or 0),
+                        )
+                        skill_effective = max(
+                            0,
+                            int(observed_skill.get("effective_healing", 0) or 0),
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if skill_total <= 0 or skill_effective != 0:
+                        continue
+                    skills.append(
+                        {
+                            "skill_id": skill_id,
+                            "name": skill_names.get(skill_id, f"技能 {skill_id}"),
+                            "total_healing": skill_total,
+                            "effective_healing": 0,
+                            "overhealing": skill_total,
+                            "share": 0.0,
+                            "events": observed_skill.get("events"),
+                            "source": "network_exact_zero_effective",
+                        }
+                    )
+            unclassified = effective - classified
+            if unclassified > 0:
+                skills.append(
+                    {
+                        "skill_id": 0,
+                        "name": "未归类治疗",
+                        "total_healing": None,
+                        "effective_healing": unclassified,
+                        "overhealing": None,
+                        "share": unclassified / effective,
+                        "events": None,
+                        "source": "server_total_minus_server_skills",
+                    }
+                )
+            healer = dict(existing)
+            healer.update(
+                {
+                    "actor_id": actor_id,
+                    "name": str(raw_actor.get("name", "")).strip()
+                    or str(existing.get("name", "")).strip()
+                    or f"玩家 {actor_id}",
+                    "profession_id": int(
+                        raw_actor.get(
+                            "profession_id", existing.get("profession_id", 0)
+                        )
+                        or 0
+                    ),
+                    "hps": effective / divisor,
+                    "total_healing": total_healing,
+                    "effective_healing": effective,
+                    "overhealing": overhealing,
+                    "overheal_rate": (
+                        overhealing / total_healing
+                        if total_healing and overhealing is not None
+                        else None
+                    ),
+                    "peak_hps": existing.get("peak_hps") if verified else None,
+                    "observed_total_healing": observed_total,
+                    "observed_effective_healing": observed_effective,
+                    "coverage": (
+                        "server_verified_callbacks"
+                        if verified
+                        else "server_effective_with_partial_callbacks"
+                    ),
+                    "skills": skills,
+                    "healing_summary_id": summary_id,
+                }
+            )
+            existing_healers[actor_id] = healer
+            if effective > 0:
+                applied_actor_ids.append(actor_id)
+
+        healers = sorted(
+            existing_healers.values(),
+            key=lambda row: int(row.get("effective_healing", 0) or 0),
+            reverse=True,
+        )
+        team_effective = sum(
+            int(row.get("effective_healing", 0) or 0) for row in healers
+        )
+        totals = [row.get("total_healing") for row in healers]
+        team_total = (
+            sum(int(value or 0) for value in totals)
+            if all(value is not None for value in totals)
+            else None
+        )
+        updated = dict(record)
+        updated["healers"] = healers
+        updated["team_hps"] = team_effective / divisor
+        updated["team_effective_healing"] = team_effective
+        updated["team_total_healing"] = team_total
+        updated["team_overhealing"] = (
+            team_total - team_effective if team_total is not None else None
+        )
+        accounting = dict(
+            updated.get("healing_accounting", {})
+            if isinstance(updated.get("healing_accounting"), dict)
+            else {}
+        )
+        applications = list(accounting.get("stage_healing_summary_applications", []))
+        if applied_actor_ids:
+            applications.append(
+                {
+                    "summary_id": summary_id,
+                    "actor_ids": sorted(set(applied_actor_ids)),
+                    "policy": "exact_actor_damage_match_no_proportional_completion",
+                }
+            )
+        accounting["stage_healing_summary_applications"] = applications
+        updated["healing_accounting"] = accounting
+        return updated, sorted(set(applied_actor_ids))
+
+    @staticmethod
     def _skill_reconciliation(participants: object) -> list[dict]:
         rows: list[dict] = []
         if not isinstance(participants, list):
@@ -409,6 +673,13 @@ class CombatHistoryStore:
                 upgraded, actor_ids = self._apply_exact_stage_skills(
                     record, summary, summary_id
                 )
+                upgraded_with_healing, _healing_actor_ids = (
+                    self._apply_exact_stage_healing(
+                        upgraded, summary, summary_id
+                    )
+                )
+                healing_changed = upgraded_with_healing != upgraded
+                upgraded = upgraded_with_healing
                 next_accounting = dict(
                     upgraded.get("damage_accounting", {})
                     if isinstance(upgraded.get("damage_accounting"), dict)
@@ -420,7 +691,7 @@ class CombatHistoryStore:
                     summary_id,
                     actor_ids,
                 )
-                if changed:
+                if changed or healing_changed:
                     upgraded["damage_accounting"] = next_accounting
                     self.save(upgraded)
                     return upgraded
@@ -540,6 +811,9 @@ class CombatHistoryStore:
         }
         updated, applied_skill_actor_ids = self._apply_exact_stage_skills(
             record, summary, summary_id
+        )
+        updated, _applied_healing_actor_ids = self._apply_exact_stage_healing(
+            updated, summary, summary_id
         )
         next_accounting = dict(
             record.get("damage_accounting", {})

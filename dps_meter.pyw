@@ -120,8 +120,8 @@ MONSTER_NAME_CACHE_PATH = DATA_DIR / "monster_name_cache.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
-APP_VERSION = "0.0.14"
-CLIENT_BUILD = "0.0.14+20260831.4"
+APP_VERSION = "0.0.15"
+CLIENT_BUILD = "0.0.15+20260901.1"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
 UI_BRAND = APP_NAME
 BG = "#08090b"
@@ -297,6 +297,37 @@ def format_duration(seconds: float) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+def format_optional_number(value: object) -> str:
+    if value is None:
+        return "--"
+    try:
+        return format_number(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return "--"
+
+
+def format_response_time(value: object) -> str:
+    if value is None:
+        return "--"
+    try:
+        milliseconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "--"
+    if not math.isfinite(milliseconds) or milliseconds < 0:
+        return "--"
+    if milliseconds < 1000:
+        return f"{milliseconds:.0f}ms"
+    return f"{milliseconds / 1000.0:.2f}s"
+
+
+def healing_coverage_label(value: object) -> str:
+    return {
+        "server_verified_callbacks": "完整（结算与逐包一致）",
+        "server_effective_with_partial_callbacks": "有效治疗完整，明细为已观测部分",
+        "live_exact_callbacks_unverified": "实时逐包，等待结算校验",
+    }.get(str(value or ""), "覆盖状态未知")
+
+
 def dps_duration_seconds(seconds: object) -> float:
     """Use the same whole-second clock shown in the UI as the DPS divisor."""
     try:
@@ -346,9 +377,26 @@ def apply_combat_clock_to_record(
     except (TypeError, ValueError, OverflowError):
         total_damage = 0
     updated["participants"] = participants
+    healers: list[dict] = []
+    for raw_healer in updated.get("healers", []):
+        if not isinstance(raw_healer, dict):
+            continue
+        healer = dict(raw_healer)
+        try:
+            effective_healing = max(
+                0, int(healer.get("effective_healing", 0) or 0)
+            )
+        except (TypeError, ValueError, OverflowError):
+            effective_healing = 0
+        healer["hps"] = effective_healing / divisor
+        healers.append(healer)
     updated["duration_seconds"] = duration
     updated["dps_duration_seconds"] = divisor
     updated["team_dps"] = total_damage / divisor
+    updated["healers"] = healers
+    updated["team_hps"] = sum(
+        int(healer.get("effective_healing", 0) or 0) for healer in healers
+    ) / divisor
     updated["duration_source"] = "server_shared_clock"
     updated["shared_clock"] = {
         "clock_id": result.clock_id,
@@ -820,6 +868,17 @@ class StageSkillSnapshot:
     unclassified_damage: int = 0
 
 
+@dataclass(frozen=True)
+class StageHealingSnapshot:
+    summary_id: str
+    actor_id: int
+    actor_damage: int
+    filetime_100ns: int
+    effective_healing: int
+    skills: dict[int, int]
+    unclassified_healing: int = 0
+
+
 class CombatModel:
     def __init__(
         self,
@@ -906,12 +965,23 @@ class CombatModel:
         self.stage_summaries: dict[str, dict] = {}
         self.stage_actor_metrics: dict[int, tuple[int, int]] = {}
         self.stage_skill_snapshots: dict[int, StageSkillSnapshot] = {}
+        self.stage_healing_snapshots: dict[int, StageHealingSnapshot] = {}
         self.seen_stage_summary_ids: set[str] = set()
         self.rejected_stage_summary_ids: set[str] = set()
         self.stage_summary_guard_until = 0.0
         self.member_death_states: dict[int, bool] = {}
         self.member_life_times: dict[int, int] = {}
         self.member_death_counts: dict[int, int] = {}
+        self.healing_events: list[dict] = []
+        self.healing_event_keys: set[
+            tuple[int, int, int, int, int, int, int]
+        ] = set()
+        self.healing_responses: list[dict] = []
+        self.actor_health_states: dict[int, dict[str, float | int]] = {}
+        self.pending_health_drops: dict[int, int] = {}
+        self.healing_revision = 0
+        self.healing_summary_cache_key: tuple | None = None
+        self.healing_summary_cache: dict | None = None
         self.entity_combat_states: dict[int, bool] = {}
         self.entity_combat_state_times: dict[int, int] = {}
         self.boss_reset_pending_100ns = 0
@@ -1039,6 +1109,7 @@ class CombatModel:
         self.stage_summaries.clear()
         self.stage_actor_metrics.clear()
         self.stage_skill_snapshots.clear()
+        self.stage_healing_snapshots.clear()
         self.seen_stage_summary_ids.clear()
         self.rejected_stage_summary_ids.clear()
         self.stage_summary_guard_until = 0.0
@@ -1063,6 +1134,14 @@ class CombatModel:
         self.shared_clock_server_time = 0.0
         self.shared_clock_received_at = 0.0
         self.shared_clock_final = False
+        self.healing_events.clear()
+        self.healing_event_keys.clear()
+        self.healing_responses.clear()
+        self.actor_health_states.clear()
+        self.pending_health_drops.clear()
+        self.healing_revision += 1
+        self.healing_summary_cache_key = None
+        self.healing_summary_cache = None
         self.last_archive_signature = None
         if preserved_target_id is not None:
             # A manual clear starts a new local record while the same live Boss
@@ -1074,6 +1153,525 @@ class CombatModel:
 
     def _event_seconds(self, event: dict) -> float:
         return (event["filetime_100ns"] - 116_444_736_000_000_000) / 10_000_000
+
+    @staticmethod
+    def _healing_event_key(
+        event: dict,
+    ) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            int(event.get("filetime_100ns", 0) or 0),
+            int(event.get("sequence", 0) or 0),
+            int(event.get("healer_id", 0) or 0),
+            int(event.get("target_id", 0) or 0),
+            int(event.get("skill_id", 0) or 0),
+            int(event.get("total_healing", 0) or 0),
+            int(event.get("effective_healing", 0) or 0),
+        )
+
+    def ingest_actor_health(self, update: dict) -> bool:
+        """Track only guarded, real-time party HP samples for response timing."""
+        try:
+            actor_id = int(update.get("entity_id", 0) or 0)
+            timestamp = int(update.get("filetime_100ns", 0) or 0)
+            max_hp = float(update.get("max_hp", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (
+            actor_id not in self._current_member_ids()
+            or timestamp <= 0
+            or max_hp <= 0
+            or update.get("health_source") != "bound_realtime_hp"
+        ):
+            return False
+        state = self.actor_health_states.get(actor_id, {})
+        if timestamp < int(state.get("filetime_100ns", 0) or 0):
+            return False
+        next_state: dict[str, float | int] = dict(state)
+        next_state["max_hp"] = max_hp
+        next_state["filetime_100ns"] = timestamp
+        changed = next_state != state
+        if "current_hp" in update:
+            try:
+                current_hp = float(update["current_hp"])
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if not math.isfinite(current_hp) or not 0 <= current_hp <= max_hp * 1.02:
+                return False
+            previous_hp = state.get("current_hp")
+            next_state["current_hp"] = current_hp
+            next_state["sample_count"] = int(state.get("sample_count", 0) or 0) + 1
+            changed |= previous_hp != current_hp
+            if (
+                previous_hp is not None
+                and current_hp < float(previous_hp)
+                and self.first_damage_time
+                and self._event_seconds(update) >= self.first_damage_time
+                and not self.combat_end_time
+            ):
+                # One response sample starts at the first confirmed HP loss
+                # and ends at the first subsequent effective heal. Additional
+                # damage before that heal belongs to the same unanswered drop.
+                self.pending_health_drops.setdefault(actor_id, timestamp)
+                changed = True
+        self.actor_health_states[actor_id] = next_state
+        return changed
+
+    def ingest_heal(self, event: dict) -> bool:
+        """Ingest one exact HealSyncV2 callback without changing DPS clocks."""
+        try:
+            healer_id = int(event.get("healer_id", 0) or 0)
+            target_id = int(event.get("target_id", 0) or 0)
+            skill_id = int(event.get("skill_id", 0) or 0)
+            total_healing = int(event.get("total_healing", 0) or 0)
+            effective_healing = int(event.get("effective_healing", 0) or 0)
+            timestamp = int(event.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        members = self._current_member_ids()
+        if (
+            not self.first_damage_time
+            or healer_id not in members
+            or target_id not in members
+            or skill_id <= 0
+            or total_healing < 0
+            or not 0 <= effective_healing <= total_healing
+            or timestamp <= 0
+        ):
+            return False
+        event_time = self._event_seconds(event)
+        encounter_end = self.combat_end_time or 0.0
+        if event_time < self.first_damage_time - 0.25:
+            return False
+        if encounter_end and event_time > encounter_end + 1.0:
+            return False
+        key = self._healing_event_key(event)
+        if key in self.healing_event_keys:
+            return False
+        exact_event = dict(event)
+        exact_event["overhealing"] = total_healing - effective_healing
+        exact_event["healing_source"] = "network_exact"
+        self.healing_events.append(exact_event)
+        self.healing_event_keys.add(key)
+
+        drop_time = self.pending_health_drops.get(target_id)
+        if effective_healing > 0 and drop_time is not None and timestamp >= drop_time:
+            response_ms = (timestamp - drop_time) / 10_000.0
+            self.healing_responses.append(
+                {
+                    "healer_id": healer_id,
+                    "target_id": target_id,
+                    "drop_filetime_100ns": drop_time,
+                    "heal_filetime_100ns": timestamp,
+                    "response_ms": response_ms,
+                }
+            )
+            self.pending_health_drops.pop(target_id, None)
+        if self.combat_end_time:
+            self._queue_current_record_refresh()
+        return True
+
+    @staticmethod
+    def _rolling_peak_hps(events: list[tuple[float, int]]) -> float:
+        if not events:
+            return 0.0
+        window_seconds = 5.0
+        ordered = sorted(events)
+        left = 0
+        current = 0
+        maximum = 0
+        for right, (event_time, amount) in enumerate(ordered):
+            current += max(0, int(amount))
+            while left <= right and event_time - ordered[left][0] > window_seconds:
+                current -= max(0, int(ordered[left][1]))
+                left += 1
+            maximum = max(maximum, current)
+        return maximum / window_seconds
+
+    def active_stage_healing_snapshot(
+        self, actor_id: int
+    ) -> StageHealingSnapshot | None:
+        snapshot = self.stage_healing_snapshots.get(int(actor_id))
+        if snapshot is None:
+            return None
+        actor = self.stats.get(int(actor_id))
+        current_damage = int(actor.damage if actor is not None else 0)
+        if current_damage != snapshot.actor_damage:
+            return None
+        return snapshot
+
+    def _raw_healing_by_actor(self) -> dict[int, dict]:
+        result: dict[int, dict] = {}
+        for event in self.healing_events:
+            try:
+                actor_id = int(event.get("healer_id", 0) or 0)
+                target_id = int(event.get("target_id", 0) or 0)
+                skill_id = int(event.get("skill_id", 0) or 0)
+                total = max(0, int(event.get("total_healing", 0) or 0))
+                effective = max(0, int(event.get("effective_healing", 0) or 0))
+                timestamp = int(event.get("filetime_100ns", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if actor_id <= 0 or target_id <= 0 or skill_id <= 0 or effective > total:
+                continue
+            row = result.setdefault(
+                actor_id,
+                {
+                    "total": 0,
+                    "effective": 0,
+                    "events": 0,
+                    "skills": {},
+                    "targets": {},
+                    "effective_events": [],
+                },
+            )
+            row["total"] += total
+            row["effective"] += effective
+            row["events"] += 1
+            event_time = self._event_seconds({"filetime_100ns": timestamp})
+            if effective > 0:
+                row["effective_events"].append((event_time, effective))
+            for mapping_name, key in (("skills", skill_id), ("targets", target_id)):
+                detail = row[mapping_name].setdefault(
+                    key, {"total": 0, "effective": 0, "events": 0}
+                )
+                detail["total"] += total
+                detail["effective"] += effective
+                detail["events"] += 1
+        return result
+
+    def healing_summary(self, duration: float | None = None) -> dict:
+        divisor = dps_duration_seconds(
+            self.duration() if duration is None else duration
+        )
+        snapshot_signature = tuple(
+            sorted(
+                (
+                    actor_id,
+                    snapshot.summary_id,
+                    snapshot.actor_damage,
+                    int(self.stats.get(actor_id).damage)
+                    if self.stats.get(actor_id) is not None
+                    else 0,
+                    snapshot.effective_healing,
+                )
+                for actor_id, snapshot in self.stage_healing_snapshots.items()
+            )
+        )
+        member_ids = self._current_member_ids()
+        cache_key = (
+            self.healing_revision,
+            len(self.healing_events),
+            len(self.healing_responses),
+            divisor,
+            snapshot_signature,
+            tuple(self.friend_order),
+            tuple(
+                sorted(
+                    (actor_id, self.entity_names.get(actor_id, ""))
+                    for actor_id in member_ids
+                )
+            ),
+            tuple(
+                sorted(
+                    (actor_id, self.entity_professions.get(actor_id, 0))
+                    for actor_id in member_ids
+                )
+            ),
+            tuple(
+                sorted(
+                    (
+                        actor_id,
+                        int(state.get("sample_count", 0) or 0),
+                    )
+                    for actor_id, state in self.actor_health_states.items()
+                )
+            ),
+            len(self.runtime_skill_names),
+        )
+        if (
+            cache_key == self.healing_summary_cache_key
+            and self.healing_summary_cache is not None
+        ):
+            return self.healing_summary_cache
+
+        raw_by_actor = self._raw_healing_by_actor()
+        actor_ids = set(raw_by_actor)
+        actor_ids.update(
+            actor_id
+            for actor_id in self.stage_healing_snapshots
+            if self.active_stage_healing_snapshot(actor_id) is not None
+        )
+        response_by_actor: dict[int, list[dict]] = {}
+        for response in self.healing_responses:
+            try:
+                healer_id = int(response.get("healer_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            response_by_actor.setdefault(healer_id, []).append(response)
+
+        ordered_ids = list(self.friend_order)
+        ordered_ids.extend(actor_id for actor_id in actor_ids if actor_id not in ordered_ids)
+        healers: list[dict] = []
+        for actor_id in actor_ids:
+            raw = raw_by_actor.get(
+                actor_id,
+                {
+                    "total": 0,
+                    "effective": 0,
+                    "events": 0,
+                    "skills": {},
+                    "targets": {},
+                    "effective_events": [],
+                },
+            )
+            snapshot = self.active_stage_healing_snapshot(actor_id)
+            raw_skill_effective = {
+                int(skill_id): int(values.get("effective", 0) or 0)
+                for skill_id, values in raw["skills"].items()
+                if int(values.get("effective", 0) or 0) > 0
+            }
+            detail_verified = bool(
+                snapshot is not None
+                and int(raw["effective"]) == snapshot.effective_healing
+                and raw_skill_effective == snapshot.skills
+            )
+            if snapshot is None:
+                coverage = "live_exact_callbacks_unverified"
+                effective = int(raw["effective"])
+            elif detail_verified:
+                coverage = "server_verified_callbacks"
+                effective = snapshot.effective_healing
+            else:
+                coverage = "server_effective_with_partial_callbacks"
+                effective = snapshot.effective_healing
+            if int(raw["total"]) <= 0 and effective <= 0:
+                continue
+
+            total = (
+                int(raw["total"])
+                if snapshot is None or detail_verified
+                else None
+            )
+            overhealing = total - effective if total is not None else None
+            skill_rows: list[dict] = []
+            if snapshot is not None:
+                for skill_id, skill_effective in sorted(
+                    snapshot.skills.items(), key=lambda item: item[1], reverse=True
+                ):
+                    raw_skill = raw["skills"].get(skill_id, {})
+                    skill_total = (
+                        int(raw_skill.get("total", 0) or 0)
+                        if detail_verified
+                        else None
+                    )
+                    skill_rows.append(
+                        {
+                            "skill_id": skill_id,
+                            "name": self.display_skill_name(actor_id, skill_id),
+                            "total_healing": skill_total,
+                            "effective_healing": skill_effective,
+                            "overhealing": (
+                                skill_total - skill_effective
+                                if skill_total is not None
+                                else None
+                            ),
+                            "share": skill_effective / effective if effective else 0.0,
+                            "events": (
+                                int(raw_skill.get("events", 0) or 0)
+                                if detail_verified
+                                else None
+                            ),
+                            "source": "server_stage_summary",
+                        }
+                    )
+                if detail_verified:
+                    for skill_id, values in sorted(
+                        raw["skills"].items(),
+                        key=lambda item: int(item[1].get("total", 0) or 0),
+                        reverse=True,
+                    ):
+                        skill_total = int(values.get("total", 0) or 0)
+                        skill_effective = int(values.get("effective", 0) or 0)
+                        if (
+                            skill_id in snapshot.skills
+                            or skill_total <= 0
+                            or skill_effective != 0
+                        ):
+                            continue
+                        skill_rows.append(
+                            {
+                                "skill_id": skill_id,
+                                "name": self.display_skill_name(actor_id, skill_id),
+                                "total_healing": skill_total,
+                                "effective_healing": 0,
+                                "overhealing": skill_total,
+                                "share": 0.0,
+                                "events": int(values.get("events", 0) or 0),
+                                "source": "network_exact_zero_effective",
+                            }
+                        )
+                if snapshot.unclassified_healing > 0:
+                    skill_rows.append(
+                        {
+                            "skill_id": 0,
+                            "name": "未归类治疗",
+                            "total_healing": None,
+                            "effective_healing": snapshot.unclassified_healing,
+                            "overhealing": None,
+                            "share": snapshot.unclassified_healing / effective,
+                            "events": None,
+                            "source": "server_total_minus_server_skills",
+                        }
+                    )
+            else:
+                for skill_id, values in sorted(
+                    raw["skills"].items(),
+                    key=lambda item: int(item[1].get("effective", 0) or 0),
+                    reverse=True,
+                ):
+                    skill_total = int(values.get("total", 0) or 0)
+                    skill_effective = int(values.get("effective", 0) or 0)
+                    skill_rows.append(
+                        {
+                            "skill_id": skill_id,
+                            "name": self.display_skill_name(actor_id, skill_id),
+                            "total_healing": skill_total,
+                            "effective_healing": skill_effective,
+                            "overhealing": skill_total - skill_effective,
+                            "share": skill_effective / effective if effective else 0.0,
+                            "events": int(values.get("events", 0) or 0),
+                            "source": "network_exact_unverified_coverage",
+                        }
+                    )
+
+            target_rows = []
+            observed_effective = int(raw["effective"])
+            for target_id, values in sorted(
+                raw["targets"].items(),
+                key=lambda item: int(item[1].get("effective", 0) or 0),
+                reverse=True,
+            ):
+                target_total = int(values.get("total", 0) or 0)
+                target_effective = int(values.get("effective", 0) or 0)
+                target_rows.append(
+                    {
+                        "target_id": target_id,
+                        "name": self.display_name(target_id) or f"玩家 {target_id}",
+                        "total_healing": target_total,
+                        "effective_healing": target_effective,
+                        "overhealing": target_total - target_effective,
+                        "share": (
+                            target_effective / observed_effective
+                            if observed_effective
+                            else 0.0
+                        ),
+                        "events": int(values.get("events", 0) or 0),
+                        "coverage": (
+                            "verified_complete"
+                            if detail_verified
+                            else "exact_observed_partial"
+                        ),
+                    }
+                )
+
+            responses = response_by_actor.get(actor_id, [])
+            response_values = [
+                float(item.get("response_ms", 0.0) or 0.0)
+                for item in responses
+                if float(item.get("response_ms", 0.0) or 0.0) >= 0
+            ]
+            observed_peak_hps = self._rolling_peak_hps(raw["effective_events"])
+            try:
+                fallback_index = ordered_ids.index(actor_id) + 1
+            except ValueError:
+                fallback_index = len(healers) + 1
+            healers.append(
+                {
+                    "actor_id": actor_id,
+                    "name": self.display_name(actor_id) or f"玩家{fallback_index}",
+                    "is_self": actor_id == self.self_id,
+                    "profession_id": self.actor_profession_id(actor_id),
+                    "hps": effective / divisor if divisor else 0.0,
+                    "total_healing": total,
+                    "effective_healing": effective,
+                    "overhealing": overhealing,
+                    "overheal_rate": (
+                        overhealing / total
+                        if total is not None and total > 0
+                        else None
+                    ),
+                    "peak_hps": (
+                        observed_peak_hps
+                        if snapshot is None or detail_verified
+                        else None
+                    ),
+                    "observed_peak_hps": observed_peak_hps,
+                    "observed_total_healing": int(raw["total"]),
+                    "observed_effective_healing": observed_effective,
+                    "events": int(raw["events"]),
+                    "coverage": coverage,
+                    "skills": skill_rows,
+                    "targets": target_rows,
+                    "response": {
+                        "average_ms": (
+                            sum(response_values) / len(response_values)
+                            if response_values
+                            else None
+                        ),
+                        "fastest_ms": min(response_values) if response_values else None,
+                        "slowest_ms": max(response_values) if response_values else None,
+                        "samples": len(response_values),
+                        "covered_target_count": len(
+                            {
+                                int(item.get("target_id", 0) or 0)
+                                for item in responses
+                                if int(item.get("target_id", 0) or 0) > 0
+                            }
+                        ),
+                        "coverage": (
+                            "bound_realtime_hp"
+                            if self.actor_health_states
+                            else "unavailable"
+                        ),
+                    },
+                    "healing_summary_id": snapshot.summary_id if snapshot else "",
+                }
+            )
+
+        healers.sort(
+            key=lambda row: (
+                int(row.get("effective_healing", 0) or 0),
+                int(row.get("observed_total_healing", 0) or 0),
+            ),
+            reverse=True,
+        )
+        team_effective = sum(
+            int(row.get("effective_healing", 0) or 0) for row in healers
+        )
+        complete_totals = [row.get("total_healing") for row in healers]
+        team_total = (
+            sum(int(value or 0) for value in complete_totals)
+            if all(value is not None for value in complete_totals)
+            else None
+        )
+        summary = {
+            "peak_window_seconds": 5,
+            "team_hps": team_effective / divisor if divisor else 0.0,
+            "team_total_healing": team_total,
+            "team_effective_healing": team_effective,
+            "team_overhealing": (
+                team_total - team_effective if team_total is not None else None
+            ),
+            "healers": healers,
+            "source_policy": (
+                "server settlement supplies effective totals and skill amounts; "
+                "HealSyncV2 supplies exact observed gross, overheal, targets, "
+                "peak and response samples without proportional completion"
+            ),
+        }
+        self.healing_summary_cache_key = cache_key
+        self.healing_summary_cache = summary
+        return summary
 
     def _current_member_ids(self) -> set[int]:
         members = set(self.party_ids) | self.provisional_party_ids
@@ -1202,9 +1800,12 @@ class CombatModel:
             self.entity_professions,
             self.team_damage_states,
             self.stage_actor_metrics,
+            self.stage_healing_snapshots,
             self.member_death_states,
             self.member_life_times,
             self.member_death_counts,
+            self.actor_health_states,
+            self.pending_health_drops,
         ):
             if mapping.pop(entity_id, None) is not None:
                 changed = True
@@ -1224,6 +1825,27 @@ class CombatModel:
         ]
         if len(filtered_pending) != len(self.pending_member_events):
             self.pending_member_events = filtered_pending
+            changed = True
+        filtered_healing = [
+            event
+            for event in self.healing_events
+            if int(event.get("healer_id", 0) or 0) != entity_id
+            and int(event.get("target_id", 0) or 0) != entity_id
+        ]
+        if len(filtered_healing) != len(self.healing_events):
+            self.healing_events = filtered_healing
+            self.healing_event_keys = {
+                self._healing_event_key(event) for event in filtered_healing
+            }
+            changed = True
+        filtered_responses = [
+            response
+            for response in self.healing_responses
+            if int(response.get("healer_id", 0) or 0) != entity_id
+            and int(response.get("target_id", 0) or 0) != entity_id
+        ]
+        if len(filtered_responses) != len(self.healing_responses):
+            self.healing_responses = filtered_responses
             changed = True
 
         for summary_id, summary in list(self.stage_summaries.items()):
@@ -1999,6 +2621,34 @@ class CombatModel:
                 if (monster := self.monsters.get(entity_id)) is not None
             )
         )
+        healing = (
+            tuple(sorted(self.healing_event_keys)),
+            tuple(
+                sorted(
+                    (
+                        int(response.get("healer_id", 0) or 0),
+                        int(response.get("target_id", 0) or 0),
+                        int(response.get("drop_filetime_100ns", 0) or 0),
+                        int(response.get("heal_filetime_100ns", 0) or 0),
+                        round(float(response.get("response_ms", 0.0) or 0.0), 3),
+                    )
+                    for response in self.healing_responses
+                )
+            ),
+            tuple(
+                sorted(
+                    (
+                        actor_id,
+                        snapshot.summary_id,
+                        snapshot.actor_damage,
+                        snapshot.effective_healing,
+                        tuple(sorted(snapshot.skills.items())),
+                    )
+                    for actor_id, snapshot in self.stage_healing_snapshots.items()
+                    if self.active_stage_healing_snapshot(actor_id) is not None
+                )
+            ),
+        )
         return (
             self.encounter_id,
             round(self.first_damage_time, 3),
@@ -2011,6 +2661,7 @@ class CombatModel:
             tuple(sorted(self.encounter_member_ids)),
             actors,
             targets,
+            healing,
         )
 
     def build_combat_record(self, reason: str = "completed") -> dict | None:
@@ -2022,6 +2673,7 @@ class CombatModel:
         if not duration:
             duration = max(1.0, ended_at - self.first_damage_time)
         dps_duration = dps_duration_seconds(duration)
+        healing = self.healing_summary(duration)
         rows = sorted(
             (actor for actor in self.stats.values() if actor.damage > 0),
             key=lambda actor: actor.damage,
@@ -2327,6 +2979,33 @@ class CombatModel:
             ),
             "total_damage": total_damage,
             "team_dps": total_damage / dps_duration,
+            "team_hps": float(healing.get("team_hps", 0.0) or 0.0),
+            "team_total_healing": healing.get("team_total_healing"),
+            "team_effective_healing": int(
+                healing.get("team_effective_healing", 0) or 0
+            ),
+            "team_overhealing": healing.get("team_overhealing"),
+            "healers": list(healing.get("healers", [])),
+            "healing_accounting": {
+                "peak_window_seconds": int(
+                    healing.get("peak_window_seconds", 5) or 5
+                ),
+                "source_policy": str(healing.get("source_policy", "")),
+                "stage_healing_snapshots": [
+                    {
+                        "summary_id": snapshot.summary_id,
+                        "actor_id": actor_id,
+                        "actor_damage": snapshot.actor_damage,
+                        "effective_healing": snapshot.effective_healing,
+                        "classified_healing": sum(snapshot.skills.values()),
+                        "unclassified_healing": snapshot.unclassified_healing,
+                    }
+                    for actor_id, snapshot in sorted(
+                        self.stage_healing_snapshots.items()
+                    )
+                    if self.active_stage_healing_snapshot(actor_id) is not None
+                ],
+            },
             "team_size": (
                 len(participants)
                 if self._is_dummy_encounter()
@@ -3017,6 +3696,49 @@ class CombatModel:
             unclassified_damage=actor_damage - classified_damage,
         )
 
+    @staticmethod
+    def _stage_healing_snapshot(
+        summary_id: str,
+        timestamp: int,
+        raw_actor: dict,
+    ) -> StageHealingSnapshot | None:
+        try:
+            actor_id = int(raw_actor.get("actor_id", 0) or 0)
+            actor_damage = max(0, int(raw_actor.get("damage", 0) or 0))
+            effective_healing = max(
+                0, int(raw_actor.get("effective_healing", 0) or 0)
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if actor_id <= 0:
+            return None
+        parsed_skills: dict[int, int] = {}
+        for raw_skill in raw_actor.get("healing_skills", []):
+            if not isinstance(raw_skill, dict):
+                continue
+            try:
+                skill_id = int(raw_skill.get("skill_id", 0) or 0)
+                healing = max(
+                    0, int(raw_skill.get("effective_healing", 0) or 0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if skill_id <= 0 or healing <= 0:
+                continue
+            parsed_skills[skill_id] = parsed_skills.get(skill_id, 0) + healing
+        classified_healing = sum(parsed_skills.values())
+        if classified_healing > effective_healing:
+            return None
+        return StageHealingSnapshot(
+            summary_id=summary_id,
+            actor_id=actor_id,
+            actor_damage=actor_damage,
+            filetime_100ns=timestamp,
+            effective_healing=effective_healing,
+            skills=parsed_skills,
+            unclassified_healing=effective_healing - classified_healing,
+        )
+
     def active_stage_skill_snapshot(
         self,
         actor_id: int,
@@ -3249,7 +3971,17 @@ class CombatModel:
 
         skill_snapshots_changed = False
         applied_skill_actor_ids: list[int] = []
-        if end_snapshot and (authoritative or completion_confirmed):
+        midfight_summary = bool(
+            not authoritative
+            and self.first_damage_time
+            and summary_time >= self.first_damage_time
+            and -0.5 <= summary_delay <= 8.0
+        )
+        snapshot_eligible = bool(
+            (end_snapshot and (authoritative or completion_confirmed))
+            or midfight_summary
+        )
+        if snapshot_eligible:
             for raw_actor in update.get("actors", []):
                 if not isinstance(raw_actor, dict):
                     continue
@@ -3271,6 +4003,39 @@ class CombatModel:
                 applied_skill_actor_ids.append(snapshot.actor_id)
         validation_update["validation"]["server_skill_actor_ids"] = sorted(
             set(applied_skill_actor_ids)
+        )
+
+        healing_snapshots_changed = False
+        applied_healing_actor_ids: list[int] = []
+        if snapshot_eligible:
+            for raw_actor in update.get("actors", []):
+                if not isinstance(raw_actor, dict):
+                    continue
+                healing_snapshot = self._stage_healing_snapshot(
+                    summary_id, timestamp, raw_actor
+                )
+                if healing_snapshot is None or not self._actor_counts_for_encounter(
+                    healing_snapshot.actor_id
+                ):
+                    continue
+                observed_actor = self.stats.get(healing_snapshot.actor_id)
+                observed_damage = int(
+                    observed_actor.damage if observed_actor is not None else 0
+                )
+                if observed_damage != healing_snapshot.actor_damage:
+                    continue
+                if (
+                    self.stage_healing_snapshots.get(healing_snapshot.actor_id)
+                    != healing_snapshot
+                ):
+                    self.stage_healing_snapshots[
+                        healing_snapshot.actor_id
+                    ] = healing_snapshot
+                    healing_snapshots_changed = True
+                if healing_snapshot.effective_healing > 0:
+                    applied_healing_actor_ids.append(healing_snapshot.actor_id)
+        validation_update["validation"]["server_healing_actor_ids"] = sorted(
+            set(applied_healing_actor_ids)
         )
 
         metrics_changed = False
@@ -3312,7 +4077,7 @@ class CombatModel:
                             metrics_changed = True
                 # Stage rows can retain deaths from earlier pulls. Deaths are
                 # therefore always counted from live life-state transitions.
-        if skill_snapshots_changed or metrics_changed:
+        if skill_snapshots_changed or healing_snapshots_changed or metrics_changed:
             self._recompute()
             self._queue_current_record_refresh()
 
@@ -3359,6 +4124,8 @@ class CombatModel:
         self._resolve_combat_sides()
         self._recompute()
         replayed = self._replay_pending_member_events()
+        if changed or replayed:
+            self.healing_revision += 1
         return changed or replayed
 
     def ingest_party(self, update: dict) -> bool:
@@ -3685,6 +4452,63 @@ class CombatModel:
                 self.stage_actor_metrics[new_actor] = old_metrics
             changed = True
 
+        old_healing_snapshot = self.stage_healing_snapshots.pop(old_actor, None)
+        if old_healing_snapshot is not None:
+            rebound_snapshot = StageHealingSnapshot(
+                summary_id=old_healing_snapshot.summary_id,
+                actor_id=new_actor,
+                actor_damage=old_healing_snapshot.actor_damage,
+                filetime_100ns=old_healing_snapshot.filetime_100ns,
+                effective_healing=old_healing_snapshot.effective_healing,
+                skills=dict(old_healing_snapshot.skills),
+                unclassified_healing=old_healing_snapshot.unclassified_healing,
+            )
+            current_snapshot = self.stage_healing_snapshots.get(new_actor)
+            if (
+                current_snapshot is None
+                or rebound_snapshot.filetime_100ns
+                >= current_snapshot.filetime_100ns
+            ):
+                self.stage_healing_snapshots[new_actor] = rebound_snapshot
+            changed = True
+
+        old_health = self.actor_health_states.pop(old_actor, None)
+        if old_health is not None:
+            current_health = self.actor_health_states.get(new_actor)
+            if current_health is None or int(
+                old_health.get("filetime_100ns", 0) or 0
+            ) >= int(current_health.get("filetime_100ns", 0) or 0):
+                self.actor_health_states[new_actor] = old_health
+            changed = True
+        old_drop = self.pending_health_drops.pop(old_actor, 0)
+        if old_drop:
+            current_drop = self.pending_health_drops.get(new_actor, 0)
+            self.pending_health_drops[new_actor] = (
+                min(old_drop, current_drop) if current_drop else old_drop
+            )
+            changed = True
+
+        healing_rebound = False
+        for event in self.healing_events:
+            if int(event.get("healer_id", 0) or 0) == old_actor:
+                event["healer_id"] = new_actor
+                healing_rebound = True
+            if int(event.get("target_id", 0) or 0) == old_actor:
+                event["target_id"] = new_actor
+                healing_rebound = True
+        for response in self.healing_responses:
+            if int(response.get("healer_id", 0) or 0) == old_actor:
+                response["healer_id"] = new_actor
+                healing_rebound = True
+            if int(response.get("target_id", 0) or 0) == old_actor:
+                response["target_id"] = new_actor
+                healing_rebound = True
+        if healing_rebound:
+            self.healing_event_keys = {
+                self._healing_event_key(event) for event in self.healing_events
+            }
+            changed = True
+
         for event in self.events:
             if int(event.get("attacker_id", 0)) == old_actor:
                 event["attacker_id"] = new_actor
@@ -3705,6 +4529,8 @@ class CombatModel:
         self._resolve_combat_sides()
         self._recompute()
         replayed = self._replay_pending_member_events()
+        if changed or replayed:
+            self.healing_revision += 1
         return changed or replayed
 
     def ingest_life(self, update: dict) -> bool:
@@ -3728,6 +4554,8 @@ class CombatModel:
         changed = previous_dead != dead
         self.member_death_states[actor_id] = dead
         self.member_life_times[actor_id] = timestamp
+        if changed:
+            self.pending_health_drops.pop(actor_id, None)
         event_time = self._event_seconds(update)
         if (
             dead
@@ -4646,6 +5474,7 @@ class CombatModel:
         if self.runtime_skill_names.get(skill_id) == name:
             return False
         self.runtime_skill_names[skill_id] = name
+        self.healing_revision += 1
         return True
 
     def ingest_name(self, update: dict) -> bool:
@@ -6799,6 +7628,11 @@ class DpsWindow:
         self.show_critical_rate = bool(
             self.config.get("show_critical_rate", True)
         )
+        self.main_meter_mode = str(
+            self.config.get("main_meter_mode", "dps") or "dps"
+        ).casefold()
+        if self.main_meter_mode not in {"dps", "hps"}:
+            self.main_meter_mode = "dps"
         self.window_locked = bool(self.config.get("window_locked", False))
         self.window_lock_topmost_restore: bool | None = (
             bool(self.config.get("topmost", True))
@@ -6810,18 +7644,29 @@ class DpsWindow:
         self.window_lock_original_styles: dict[int, int] = {}
         self.main_scroll_offset = 0
         self.main_scroll_content_height = 0
+        self.latest_healing_summary: dict = {
+            "team_hps": 0.0,
+            "team_effective_healing": 0,
+            "healers": [],
+        }
         self.drag_state: dict[int, tuple[int, int]] = {}
         self.resize_state: dict[int, tuple[int, int, int, int]] = {}
         self.restore_geometry: dict[int, str] = {}
         self.skill_window: tk.Toplevel | None = None
         self.skill_actor_id: int | None = None
+        self.skill_panel_mode = (
+            "healing" if self.main_meter_mode == "hps" else "damage"
+        )
         self.skill_detail_mode = "skills"
         self.skill_mode_buttons: dict[str, tk.Label] = {}
+        self.skill_window_title_label: tk.Label | None = None
         self.skill_combat_metrics_label: tk.Label | None = None
         self.history_window: tk.Toplevel | None = None
         self.history_records: list[dict] = []
         self.history_selected_id = ""
         self.history_selected_actor = 0
+        self.history_meter_mode = "dps"
+        self.history_meter_buttons: dict[str, tk.Label] = {}
         self.history_detail_mode = "skills"
         self.history_detail_buttons: dict[str, tk.Label] = {}
         self.backend_current_page = "history"
@@ -6897,6 +7742,7 @@ class DpsWindow:
         self.main_content_overlay_root_geometry: tuple[int, int, int, int] | None = None
         self.main_content_overlay_click_through_ready = False
         self.main_content_overlay_topmost: bool | None = None
+        self.footer_tabs: dict[str, tuple[tk.Frame, tk.Label, tk.Frame]] = {}
         self.process_is_elevated = is_process_elevated()
         self.tray_icon = None
         self.tray_skill_hidden = False
@@ -6980,7 +7826,7 @@ class DpsWindow:
         self.root.after(45, self._apply_main_transparency)
         self.root.after(0, self._show_login)
 
-    def _enabled_main_metrics(self) -> tuple[str, ...]:
+    def _enabled_damage_metrics(self) -> tuple[str, ...]:
         return tuple(
             key
             for key, enabled in (
@@ -6991,6 +7837,11 @@ class DpsWindow:
             )
             if enabled
         )
+
+    def _enabled_main_metrics(self) -> tuple[str, ...]:
+        if getattr(self, "main_meter_mode", "dps") == "hps":
+            return ("effective", "hps", "overheal", "response")
+        return self._enabled_damage_metrics()
 
     def _compact_target_width(self) -> int:
         return compact_width_for_visible_metrics(len(self._enabled_main_metrics()))
@@ -8138,15 +8989,15 @@ class DpsWindow:
         total_group = tk.Frame(metric_frame, bg=BG)
         total_group.pack(side="left", fill="both", expand=True, padx=(28, 8))
         self._bind_drag(total_group, self.root)
-        total_caption = tk.Label(
+        self.total_caption = tk.Label(
             total_group,
             text="总伤害",
             bg=BG,
             fg=TEXT,
             font=self._ui_font("body"),
         )
-        total_caption.pack(side="left", padx=(0, 8))
-        self._bind_drag(total_caption, self.root)
+        self.total_caption.pack(side="left", padx=(0, 8))
+        self._bind_drag(self.total_caption, self.root)
         self.total_value = tk.Label(
             total_group,
             text="0",
@@ -8244,21 +9095,39 @@ class DpsWindow:
             before=self.table_panel,
         )
         self.footer.pack_propagate(False)
-        for index, (caption, enabled) in enumerate(
-            (("DPS", True), ("HPS", False), ("TANK", False), ("BOSS", False))
+        self.footer_tabs = {}
+        for index, (mode, caption, enabled) in enumerate(
+            (
+                ("dps", "DPS", True),
+                ("hps", "HPS", True),
+                ("tank", "TANK", False),
+                ("boss", "BOSS", False),
+            )
         ):
             tab = tk.Frame(self.footer, bg=BG, width=62, height=36)
             tab.pack(side="left", padx=(0 if index == 0 else 6, 0))
             tab.pack_propagate(False)
-            tk.Label(
+            indicator = tk.Frame(tab, bg=BG, height=2)
+            indicator.pack(side="bottom", fill="x")
+            label = tk.Label(
                 tab,
                 text=caption,
                 bg=BG,
-                fg=ACCENT if enabled else MUTED,
+                fg=TEXT if enabled else MUTED,
+                cursor="hand2" if enabled else "arrow",
                 font=self._ui_font("strong" if enabled else "body"),
-            ).pack(fill="both", expand=True)
+            )
+            label.pack(fill="both", expand=True)
             if enabled:
-                tk.Frame(tab, bg=ACCENT, height=2).pack(side="bottom", fill="x")
+                for widget in (tab, label):
+                    widget.configure(cursor="hand2")
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _event, selected=mode: self._set_main_meter_mode(
+                            selected
+                        ),
+                    )
+                self.footer_tabs[mode] = (tab, label, indicator)
         self.footer_brand_label = tk.Label(
             self.footer,
             text=f"{UI_BRAND} v{APP_VERSION}",
@@ -8267,6 +9136,7 @@ class DpsWindow:
             font=self._ui_font("small"),
         )
         self.footer_brand_label.pack(side="right", fill="y", padx=(8, 14))
+        self._sync_main_meter_tabs()
         self._sync_action_buttons()
         self.resize_grip = tk.Label(
             self.body,
@@ -8290,6 +9160,37 @@ class DpsWindow:
             ),
         )
         self.root.bind("<Configure>", self._main_window_configure, add="+")
+
+    def _sync_main_meter_tabs(self) -> None:
+        for mode, (tab, label, indicator) in getattr(
+            self, "footer_tabs", {}
+        ).items():
+            selected = mode == getattr(self, "main_meter_mode", "dps")
+            background = PANEL_2 if selected else BG
+            tab.configure(bg=background)
+            label.configure(
+                bg=background,
+                fg=ACCENT if selected else TEXT,
+                font=self._ui_font("strong" if selected else "body"),
+            )
+            indicator.configure(bg=ACCENT if selected else BG)
+
+    def _set_main_meter_mode(self, mode: str) -> None:
+        mode = str(mode or "").casefold()
+        if mode not in {"dps", "hps"} or mode == self.main_meter_mode:
+            return
+        self.main_meter_mode = mode
+        self.skill_panel_mode = "healing" if mode == "hps" else "damage"
+        self.main_scroll_offset = 0
+        self.main_scroll_content_height = 0
+        self.config["main_meter_mode"] = mode
+        self._sync_main_meter_tabs()
+        self._sync_compact_geometry_width()
+        self._draw_main_header()
+        self._draw_main_rows()
+        self._render_skill_details()
+        self._schedule_main_content_overlay_sync()
+        save_config(self.config)
 
     def _main_icon_button(
         self, parent: tk.Misc, icon_name: str, description: str, command
@@ -10182,6 +11083,25 @@ class DpsWindow:
             anchor="w",
             font=self._ui_font("strong"),
         ).pack(side="left", fill="y")
+        self.history_meter_buttons = {}
+        for mode, caption in (("dps", "DPS"), ("hps", "HPS")):
+            tab = tk.Label(
+                participant_heading,
+                text=caption,
+                bg=BG,
+                fg=MUTED,
+                padx=10,
+                cursor="hand2",
+                font=self._ui_font("strong"),
+            )
+            tab.pack(side="left", fill="y", padx=(8, 0))
+            tab.bind(
+                "<Button-1>",
+                lambda _event, selected_mode=mode: self._set_history_meter_mode(
+                    selected_mode
+                ),
+            )
+            self.history_meter_buttons[mode] = tab
         self.history_participant_panel = tk.Frame(
             right,
             bg=PANEL,
@@ -10308,6 +11228,7 @@ class DpsWindow:
             "<Configure>", lambda _event: self._draw_history_skills()
         )
 
+        self._sync_history_meter_tabs()
         self._set_history_detail_mode(self.history_detail_mode)
         return page
 
@@ -10319,13 +11240,14 @@ class DpsWindow:
         group.grid(row=0, column=column, sticky="nsew", padx=1, pady=8)
         if column:
             tk.Frame(group, bg=BORDER, width=1).pack(side="left", fill="y")
-        tk.Label(
+        caption_label = tk.Label(
             group,
             text=caption,
             bg=SURFACE,
             fg=MUTED,
             font=self._ui_font("small"),
-        ).pack(pady=(2, 1))
+        )
+        caption_label.pack(pady=(2, 1))
         label = tk.Label(
             group,
             text=value,
@@ -10334,6 +11256,7 @@ class DpsWindow:
             font=self._ui_font("number_large"),
         )
         label.pack()
+        label._caption_label = caption_label
         return label
 
     def _build_backend_updates_page(self, parent: tk.Misc) -> tk.Frame:
@@ -10823,11 +11746,38 @@ class DpsWindow:
             return
         self._feedback_history_record(str(record.get("encounter_id", "")))
 
+    def _sync_history_meter_tabs(self) -> None:
+        for mode, button in self.history_meter_buttons.items():
+            selected = mode == self.history_meter_mode
+            button.configure(
+                bg=PANEL_2 if selected else BG,
+                fg=ACCENT if selected else MUTED,
+            )
+
+    def _set_history_meter_mode(self, mode: str) -> None:
+        mode = str(mode or "").casefold()
+        if mode not in {"dps", "hps"}:
+            return
+        if mode != self.history_meter_mode:
+            self.history_meter_mode = mode
+            self.history_selected_actor = 0
+        self._sync_history_meter_tabs()
+        self._render_history_selection()
+
     def _set_history_detail_mode(self, mode: str) -> None:
         self.history_detail_mode = "targets" if mode == "targets" else "skills"
         for key, button in self.history_detail_buttons.items():
             button.configure(
-                fg=ACCENT if key == self.history_detail_mode else MUTED
+                text=(
+                    (
+                        "技能治疗"
+                        if key == "skills"
+                        else "治疗目标"
+                    )
+                    if self.history_meter_mode == "hps"
+                    else ("技能详情" if key == "skills" else "目标伤害")
+                ),
+                fg=ACCENT if key == self.history_detail_mode else MUTED,
             )
         self._draw_history_skills()
 
@@ -11007,24 +11957,38 @@ class DpsWindow:
     def _render_history_selection(self) -> None:
         record = self._selected_history_record()
         participants: list[dict] = []
+        healing_mode = self.history_meter_mode == "hps"
         if record is None:
+            self.history_selected_actor = 0
             if self.history_target_label is not None:
                 self.history_target_label.configure(text="暂无战斗记录", fg=MUTED)
                 self.history_time_label.configure(text="--")
             if self.history_total_value is not None:
                 self.history_total_value.configure(text="0")
+                self.history_total_value._caption_label.configure(
+                    text="总有效治疗" if healing_mode else "总伤害"
+                )
             if self.history_dps_value is not None:
                 self.history_dps_value.configure(text="0")
+                self.history_dps_value._caption_label.configure(
+                    text="团队 HPS" if healing_mode else "总 DPS"
+                )
             if self.history_team_value is not None:
                 self.history_team_value.configure(text="0 人")
             if self.history_favorite_button is not None:
                 self.history_favorite_button.configure(text="☆ 收藏", fg=MUTED)
             if self.history_detail_label is not None:
                 self.history_detail_label.configure(
-                    text="暴击率  --     死亡  0 次"
+                    text=(
+                        "暂无治疗详情"
+                        if healing_mode
+                        else "暴击率  --     死亡  0 次"
+                    )
                 )
         else:
-            participants = record.get("participants", [])
+            participants = record.get(
+                "healers" if healing_mode else "participants", []
+            )
             participants = participants if isinstance(participants, list) else []
             try:
                 team_size = max(
@@ -11053,11 +12017,23 @@ class DpsWindow:
             )
             if self.history_total_value is not None:
                 self.history_total_value.configure(
-                    text=format_number(record.get("total_damage", 0))
+                    text=(
+                        format_number(record.get("team_effective_healing", 0))
+                        if healing_mode
+                        else format_number(record.get("total_damage", 0))
+                    )
+                )
+                self.history_total_value._caption_label.configure(
+                    text="总有效治疗" if healing_mode else "总伤害"
                 )
             if self.history_dps_value is not None:
                 self.history_dps_value.configure(
-                    text=format_number(record.get("team_dps", 0))
+                    text=format_number(
+                        record.get("team_hps" if healing_mode else "team_dps", 0)
+                    )
+                )
+                self.history_dps_value._caption_label.configure(
+                    text="团队 HPS" if healing_mode else "总 DPS"
                 )
             if self.history_team_value is not None:
                 self.history_team_value.configure(text=f"{team_size} 人")
@@ -11077,36 +12053,61 @@ class DpsWindow:
                 None,
             )
             if self.history_detail_label is not None:
-                critical_rate = (
-                    selected_participant.get("critical_rate")
-                    if isinstance(selected_participant, dict)
-                    else None
-                )
-                try:
-                    critical_text = (
-                        f"{float(critical_rate) * 100:.1f}%"
-                        if critical_rate is not None
-                        else "--"
+                if healing_mode:
+                    if not isinstance(selected_participant, dict):
+                        self.history_detail_label.configure(text="暂无治疗详情")
+                        selected_participant = None
+                    else:
+                        response = selected_participant.get("response", {})
+                        response = response if isinstance(response, dict) else {}
+                        coverage = healing_coverage_label(
+                            selected_participant.get("coverage", "")
+                        )
+                        self.history_detail_label.configure(
+                            text=(
+                                f"{coverage}  ·  峰值 HPS "
+                                f"{format_optional_number(selected_participant.get('peak_hps'))}"
+                                f"  ·  响应 均{format_response_time(response.get('average_ms'))} / "
+                                f"快{format_response_time(response.get('fastest_ms'))} / "
+                                f"慢{format_response_time(response.get('slowest_ms'))}"
+                            )
+                        )
+                else:
+                    critical_rate = (
+                        selected_participant.get("critical_rate")
+                        if isinstance(selected_participant, dict)
+                        else None
                     )
-                except (TypeError, ValueError, OverflowError):
-                    critical_text = "--"
-                try:
-                    deaths = max(
-                        0,
-                        int(selected_participant.get("deaths", 0) or 0),
+                    try:
+                        critical_text = (
+                            f"{float(critical_rate) * 100:.1f}%"
+                            if critical_rate is not None
+                            else "--"
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        critical_text = "--"
+                    try:
+                        deaths = max(
+                            0,
+                            int(selected_participant.get("deaths", 0) or 0),
+                        )
+                    except (AttributeError, TypeError, ValueError, OverflowError):
+                        deaths = 0
+                    self.history_detail_label.configure(
+                        text=f"暴击率  {critical_text}     死亡  {deaths} 次"
                     )
-                except (AttributeError, TypeError, ValueError, OverflowError):
-                    deaths = 0
-                self.history_detail_label.configure(
-                    text=f"暴击率  {critical_text}     死亡  {deaths} 次"
-                )
+        self._set_history_detail_mode(self.history_detail_mode)
         self._draw_history_list()
         self._draw_history_participant_header()
         self._draw_history_participants()
         self._draw_history_skills()
 
     def _history_participant_columns(self, width: int) -> dict[str, int]:
-        enabled = list(self._enabled_main_metrics())
+        enabled = list(
+            ("effective", "hps", "overheal", "response")
+            if getattr(self, "history_meter_mode", "dps") == "hps"
+            else self._enabled_damage_metrics()
+        )
         right_edge = max(100, width - 16)
         name_ratio = 0.52 if len(enabled) <= 2 else 0.42
         name_limit = min(right_edge, max(100, int(width * name_ratio)))
@@ -11146,8 +12147,16 @@ class DpsWindow:
             "dps": "秒伤",
             "share": "占比",
             "critical": "暴击率",
+            "effective": "有效治疗",
+            "hps": "HPS",
+            "overheal": "过量率",
+            "response": "平均响应",
         }
-        for key in ("damage", "dps", "share", "critical"):
+        for key in (
+            ("effective", "hps", "overheal", "response")
+            if getattr(self, "history_meter_mode", "dps") == "hps"
+            else ("damage", "dps", "share", "critical")
+        ):
             if key not in columns:
                 continue
             canvas.create_text(
@@ -11167,13 +12176,18 @@ class DpsWindow:
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
         record = self._selected_history_record()
-        participants = record.get("participants", []) if record else []
+        healing_mode = getattr(self, "history_meter_mode", "dps") == "hps"
+        participants = (
+            record.get("healers" if healing_mode else "participants", [])
+            if record
+            else []
+        )
         participants = participants if isinstance(participants, list) else []
         if not participants:
             canvas.create_text(
                 width // 2,
                 height // 2,
-                text="暂无团队伤害",
+                text="暂无团队治疗" if healing_mode else "暂无团队伤害",
                 fill=MUTED,
                 font=("Microsoft YaHei UI", 9, "bold"),
             )
@@ -11181,7 +12195,15 @@ class DpsWindow:
             return
         highest_damage = max(
             (
-                max(0, int(participant.get("damage", 0) or 0))
+                max(
+                    0,
+                    int(
+                        participant.get(
+                            "effective_healing" if healing_mode else "damage", 0
+                        )
+                        or 0
+                    ),
+                )
                 for participant in participants
                 if isinstance(participant, dict)
             ),
@@ -11206,9 +12228,22 @@ class DpsWindow:
             class_id = int(participant.get("profession_id", 0) or 0)
             _profession, color = self._profession_info(class_id)
             base = PANEL_2 if selected else (PANEL if index % 2 == 0 else SURFACE)
-            share = float(participant.get("share", 0.0) or 0.0)
+            if healing_mode:
+                effective = max(
+                    0, int(participant.get("effective_healing", 0) or 0)
+                )
+                team_effective = max(
+                    0, int(record.get("team_effective_healing", 0) or 0)
+                )
+                share = effective / team_effective if team_effective else 0.0
+                primary_value = effective
+            else:
+                share = float(participant.get("share", 0.0) or 0.0)
+                primary_value = max(
+                    0, int(participant.get("damage", 0) or 0)
+                )
             bar_ratio = relative_damage_bar_ratio(
-                participant.get("damage", 0), highest_damage
+                primary_value, highest_damage
             )
             tag = f"history-actor:{index}"
             canvas.create_rectangle(
@@ -11252,41 +12287,56 @@ class DpsWindow:
                 font=self._ui_font("strong"),
                 tags=(tag,),
             )
-            try:
-                damage = max(
-                    0.0, float(participant.get("damage", 0.0) or 0.0)
-                )
-            except (TypeError, ValueError, OverflowError):
-                damage = 0.0
-            try:
-                raw_dps = participant.get("dps")
-                dps = (
-                    max(0.0, float(raw_dps))
-                    if raw_dps is not None
-                    else (
-                        damage / dps_duration
-                        if dps_duration
-                        else 0.0
+            if healing_mode:
+                response = participant.get("response", {})
+                response = response if isinstance(response, dict) else {}
+                overheal_rate = participant.get("overheal_rate")
+                values = {
+                    "effective": format_number(primary_value),
+                    "hps": format_number(participant.get("hps", 0)),
+                    "overheal": (
+                        f"{float(overheal_rate) * 100:.1f}%"
+                        if overheal_rate is not None
+                        else "--"
+                    ),
+                    "response": format_response_time(
+                        response.get("average_ms")
+                    ),
+                }
+                keys = ("effective", "hps", "overheal", "response")
+            else:
+                try:
+                    damage = max(
+                        0.0, float(participant.get("damage", 0.0) or 0.0)
                     )
-                )
-            except (TypeError, ValueError, OverflowError):
-                dps = damage / dps_duration if dps_duration else 0.0
-            critical_rate = participant.get("critical_rate")
-            try:
-                critical_text = (
-                    f"{float(critical_rate) * 100:.1f}%"
-                    if critical_rate is not None
-                    else "--"
-                )
-            except (TypeError, ValueError, OverflowError):
-                critical_text = "--"
-            values = {
-                "damage": format_number(damage),
-                "dps": format_number(dps),
-                "share": f"{share * 100:.1f}%",
-                "critical": critical_text,
-            }
-            for key in ("damage", "dps", "share", "critical"):
+                except (TypeError, ValueError, OverflowError):
+                    damage = 0.0
+                try:
+                    raw_dps = participant.get("dps")
+                    dps = (
+                        max(0.0, float(raw_dps))
+                        if raw_dps is not None
+                        else (damage / dps_duration if dps_duration else 0.0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    dps = damage / dps_duration if dps_duration else 0.0
+                critical_rate = participant.get("critical_rate")
+                try:
+                    critical_text = (
+                        f"{float(critical_rate) * 100:.1f}%"
+                        if critical_rate is not None
+                        else "--"
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    critical_text = "--"
+                values = {
+                    "damage": format_number(damage),
+                    "dps": format_number(dps),
+                    "share": f"{share * 100:.1f}%",
+                    "critical": critical_text,
+                }
+                keys = ("damage", "dps", "share", "critical")
+            for key in keys:
                 if key not in columns:
                     continue
                 canvas.create_text(
@@ -11296,7 +12346,9 @@ class DpsWindow:
                     fill=TEXT,
                     anchor="e",
                     font=self._ui_font(
-                        "number_strong" if key == "damage" else "number"
+                        "number_strong"
+                        if key in {"damage", "effective", "hps"}
+                        else "number"
                     ),
                     tags=(tag,),
                 )
@@ -11320,6 +12372,9 @@ class DpsWindow:
     def _draw_history_skills(self) -> None:
         canvas = self.history_skill_canvas
         if canvas is None:
+            return
+        if getattr(self, "history_meter_mode", "dps") == "hps":
+            self._draw_history_healing_details()
             return
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
@@ -11549,6 +12604,137 @@ class DpsWindow:
                     font=self._ui_font("number"),
                 )
                 top = bottom
+        canvas.configure(scrollregion=(0, 0, width, max(height, top)))
+
+    def _draw_history_healing_details(self) -> None:
+        canvas = self.history_skill_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        record = self._selected_history_record()
+        healers = record.get("healers", []) if record else []
+        healers = healers if isinstance(healers, list) else []
+        healer = next(
+            (
+                item
+                for item in healers
+                if isinstance(item, dict)
+                and int(item.get("actor_id", 0) or 0)
+                == self.history_selected_actor
+            ),
+            None,
+        )
+        if not isinstance(healer, dict):
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="暂无个人治疗详情",
+                fill=MUTED,
+                font=self._ui_font("strong"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        rows = healer.get(
+            "targets" if self.history_detail_mode == "targets" else "skills",
+            [],
+        )
+        rows = rows if isinstance(rows, list) else []
+        header_height = 30
+        row_height = 38
+        effective_x, share_x, total_x, overheal_x = (
+            int(width * (0.62 if self.history_detail_mode == "targets" else 0.57)),
+            int(width * (0.76 if self.history_detail_mode == "targets" else 0.72)),
+            int(width * (0.88 if self.history_detail_mode == "targets" else 0.86)),
+            width - 14,
+        )
+        canvas.create_rectangle(
+            0, 0, width, header_height, fill=SURFACE, outline=""
+        )
+        for text_value, x, anchor in (
+            (
+                "治疗目标"
+                if self.history_detail_mode == "targets"
+                else "治疗技能",
+                42 if self.history_detail_mode == "skills" else 12,
+                "w",
+            ),
+            ("有效治疗", effective_x, "e"),
+            ("占比", share_x, "e"),
+            ("总治疗", total_x, "e"),
+            ("过量", overheal_x, "e"),
+        ):
+            canvas.create_text(
+                x,
+                header_height // 2,
+                text=text_value,
+                fill=MUTED,
+                anchor=anchor,
+                font=self._ui_font("small"),
+            )
+        top = header_height
+        if not rows:
+            message = (
+                "已观测治疗目标为空；服务器不提供目标分布"
+                if self.history_detail_mode == "targets"
+                and healer.get("coverage")
+                == "server_effective_with_partial_callbacks"
+                else "暂无治疗明细"
+            )
+            canvas.create_text(
+                width // 2,
+                top + row_height // 2,
+                text=message,
+                fill=MUTED,
+                font=self._ui_font("body"),
+            )
+            top += row_height
+        class_id = int(healer.get("profession_id", 0) or 0)
+        for index, row in enumerate(rows):
+            bottom = top + row_height
+            base = PANEL if index % 2 == 0 else SURFACE
+            name = str(row.get("name", "")).strip() or (
+                "未命名玩家"
+                if self.history_detail_mode == "targets"
+                else "未命名治疗"
+            )
+            effective = int(row.get("effective_healing", 0) or 0)
+            share = max(0.0, min(1.0, float(row.get("share", 0.0) or 0.0)))
+            canvas.create_rectangle(
+                0, top, width, bottom - 1, fill=base, outline=""
+            )
+            name_x = 12
+            if self.history_detail_mode == "skills":
+                skill_id = int(row.get("skill_id", 0) or 0)
+                icon = self.icons.skill(skill_id, name, class_id, 24)
+                canvas.create_image(
+                    10, top + (row_height - 24) // 2, image=icon, anchor="nw"
+                )
+                name_x = 42
+            canvas.create_text(
+                name_x,
+                top + row_height // 2,
+                text=name,
+                fill=TEXT,
+                anchor="w",
+                font=self._ui_font("strong"),
+            )
+            for x, text_value, strong in (
+                (effective_x, format_number(effective), True),
+                (share_x, f"{share * 100:.1f}%", False),
+                (total_x, format_optional_number(row.get("total_healing")), False),
+                (overheal_x, format_optional_number(row.get("overhealing")), False),
+            ):
+                canvas.create_text(
+                    x,
+                    top + row_height // 2,
+                    text=text_value,
+                    fill=TEXT,
+                    anchor="e",
+                    font=self._ui_font("number_strong" if strong else "number"),
+                )
+            top = bottom
         canvas.configure(scrollregion=(0, 0, width, max(height, top)))
 
     def _draw_history_skills_legacy(self) -> None:
@@ -11901,6 +13087,7 @@ class DpsWindow:
         self.history_dps_value = None
         self.history_team_value = None
         self.history_detail_label = None
+        self.history_meter_buttons = {}
         self.history_detail_buttons = {}
         self.history_favorite_button = None
         self.history_max_button = None
@@ -12101,22 +13288,31 @@ class DpsWindow:
         width = max(1, canvas.winfo_width())
         columns = self._main_columns(width)
         compact = self.compact_mode
+        healing_mode = getattr(self, "main_meter_mode", "dps") == "hps"
         header_font = self._ui_font("small" if compact else "strong")
-        captions = (
-            {
-                "damage": "伤害",
-                "dps": "DPS",
-                "share": "占比",
-                "critical": "暴击",
+        if healing_mode:
+            captions = {
+                "effective": "有效" if compact else "有效治疗",
+                "hps": "HPS",
+                "overheal": "过量" if compact else "过量率",
+                "response": "响应" if compact else "平均响应",
             }
-            if compact
-            else {
-                "damage": "总伤害",
-                "dps": "秒伤",
-                "share": "占比",
-                "critical": "暴击率",
-            }
-        )
+        else:
+            captions = (
+                {
+                    "damage": "伤害",
+                    "dps": "DPS",
+                    "share": "占比",
+                    "critical": "暴击",
+                }
+                if compact
+                else {
+                    "damage": "总伤害",
+                    "dps": "秒伤",
+                    "share": "占比",
+                    "critical": "暴击率",
+                }
+            )
         canvas.create_text(
             34 if compact else 42,
             14,
@@ -12125,7 +13321,11 @@ class DpsWindow:
             anchor="w",
             font=header_font,
         )
-        for key in ("damage", "dps", "share", "critical"):
+        for key in (
+            ("effective", "hps", "overheal", "response")
+            if healing_mode
+            else ("damage", "dps", "share", "critical")
+        ):
             if key not in columns:
                 continue
             canvas.create_text(
@@ -12389,10 +13589,40 @@ class DpsWindow:
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
-        rows = sorted(self.model.current_stats(), key=lambda item: item.damage, reverse=True)
-        total = sum(row.damage for row in rows)
+        healing_mode = getattr(self, "main_meter_mode", "dps") == "hps"
         duration = dps_duration_seconds(self.model.duration())
-        highest_damage = max((row.damage for row in rows), default=0)
+        if healing_mode:
+            healing = getattr(self, "latest_healing_summary", {})
+            if not isinstance(healing, dict):
+                healing = {}
+            rows = [
+                row
+                for row in healing.get("healers", [])
+                if isinstance(row, dict)
+                and (
+                    int(row.get("effective_healing", 0) or 0) > 0
+                    or int(row.get("observed_total_healing", 0) or 0) > 0
+                )
+            ]
+            rows.sort(
+                key=lambda item: int(item.get("effective_healing", 0) or 0),
+                reverse=True,
+            )
+            total = sum(int(row.get("effective_healing", 0) or 0) for row in rows)
+            highest_value = max(
+                (int(row.get("effective_healing", 0) or 0) for row in rows),
+                default=0,
+            )
+            empty_text = "暂无治疗记录"
+        else:
+            rows = sorted(
+                self.model.current_stats(),
+                key=lambda item: item.damage,
+                reverse=True,
+            )
+            total = sum(row.damage for row in rows)
+            highest_value = max((row.damage for row in rows), default=0)
+            empty_text = "暂无伤害记录"
         columns = self._main_columns(width)
         compact = bool(getattr(self, "compact_mode", False))
         row_height = self._main_row_height()
@@ -12411,7 +13641,7 @@ class DpsWindow:
                 canvas.create_text(
                     width // 2,
                     height // 2,
-                    text="暂无伤害记录",
+                    text=empty_text,
                     fill=MUTED,
                     font=self._ui_font("strong"),
                 )
@@ -12421,12 +13651,21 @@ class DpsWindow:
         for index, row in enumerate(rows):
             top = index * row_height
             bottom = top + row_height
-            share = row.damage / total if total else 0.0
-            bar_ratio = relative_damage_bar_ratio(row.damage, highest_damage)
-            class_id = self.model.actor_profession_id(row.actor_id)
+            if healing_mode:
+                actor_id = int(row.get("actor_id", 0) or 0)
+                primary_value = int(row.get("effective_healing", 0) or 0)
+                class_id = int(row.get("profession_id", 0) or 0)
+                if not class_id:
+                    class_id = self.model.actor_profession_id(actor_id)
+            else:
+                actor_id = row.actor_id
+                primary_value = row.damage
+                class_id = self.model.actor_profession_id(actor_id)
+            share = primary_value / total if total else 0.0
+            bar_ratio = relative_damage_bar_ratio(primary_value, highest_value)
             _profession, color = self._profession_info(class_id)
             bar = blend_color(BG, color, 0.22)
-            tag = f"actor:{row.actor_id}"
+            tag = f"actor:{actor_id}"
             canvas.create_rectangle(
                 0,
                 top,
@@ -12444,9 +13683,8 @@ class DpsWindow:
                 anchor="nw",
                 tags=(tag,),
             )
-            critical_text = self._actor_critical_text(row)
             actor_name = self._fit_main_actor_name(
-                self._shown_actor_name(row.actor_id),
+                self._shown_actor_name(actor_id),
                 max(24, columns["name_limit"] - name_x - 6),
             )
             canvas.create_text(
@@ -12458,45 +13696,89 @@ class DpsWindow:
                 font=name_font,
                 tags=(tag,),
             )
-            if "damage" in columns:
-                canvas.create_text(
-                    columns["damage"],
-                    top + row_height // 2,
-                    text=format_number(row.damage),
-                    fill=TEXT,
-                    anchor="e",
-                    font=number_font,
-                    tags=(tag,),
+            if healing_mode:
+                response = row.get("response", {})
+                response = response if isinstance(response, dict) else {}
+                overheal_rate = row.get("overheal_rate")
+                values = {
+                    "effective": format_number(primary_value),
+                    "hps": format_number(row.get("hps", 0)),
+                    "overheal": (
+                        f"{float(overheal_rate) * 100:.1f}%"
+                        if overheal_rate is not None
+                        else "--"
+                    ),
+                    "response": format_response_time(
+                        response.get("average_ms")
+                    ),
+                }
+                for key in ("effective", "hps", "overheal", "response"):
+                    if key not in columns:
+                        continue
+                    canvas.create_text(
+                        columns[key],
+                        top + row_height // 2,
+                        text=values[key],
+                        fill=TEXT,
+                        anchor="e",
+                        font=(
+                            number_font
+                            if key in {"effective", "hps"}
+                            else secondary_number_font
+                        ),
+                        tags=(tag,),
+                    )
+            else:
+                critical_text = self._actor_critical_text(row)
+                values = {
+                    "damage": format_number(row.damage),
+                    "dps": format_number(
+                        row.damage / duration if duration else 0
+                    ),
+                    "share": f"{share * 100:.1f}%",
+                    "critical": critical_text,
+                }
+                for key in ("damage", "dps", "share", "critical"):
+                    if key not in columns:
+                        continue
+                    canvas.create_text(
+                        columns[key],
+                        top + row_height // 2,
+                        text=values[key],
+                        fill=TEXT,
+                        anchor="e",
+                        font=(
+                            number_font
+                            if key in {"damage", "dps"}
+                            else secondary_number_font
+                        ),
+                        tags=(tag,),
+                    )
+            if (
+                canvas is getattr(self, "rows_canvas", None)
+                and not compact
+                and hasattr(canvas, "tag_bind")
+            ):
+                detail_kind = "healing" if healing_mode else "damage"
+                canvas.tag_bind(
+                    tag,
+                    "<Button-1>",
+                    lambda _event, selected_actor=actor_id,
+                    selected_kind=detail_kind: self.show_skill_details(
+                        selected_actor, selected_kind
+                    ),
                 )
-            if "dps" in columns:
-                canvas.create_text(
-                    columns["dps"],
-                    top + row_height // 2,
-                    text=format_number(row.damage / duration if duration else 0),
-                    fill=TEXT,
-                    anchor="e",
-                    font=number_font,
-                    tags=(tag,),
+                canvas.tag_bind(
+                    tag,
+                    "<Enter>",
+                    lambda _event, target=canvas: target.configure(
+                        cursor="hand2"
+                    ),
                 )
-            if "share" in columns:
-                canvas.create_text(
-                    columns["share"],
-                    top + row_height // 2,
-                    text=f"{share * 100:.1f}%",
-                    fill=TEXT,
-                    anchor="e",
-                    font=secondary_number_font,
-                    tags=(tag,),
-                )
-            if "critical" in columns:
-                canvas.create_text(
-                    columns["critical"],
-                    top + row_height // 2,
-                    text=critical_text,
-                    fill=TEXT,
-                    anchor="e",
-                    font=secondary_number_font,
-                    tags=(tag,),
+                canvas.tag_bind(
+                    tag,
+                    "<Leave>",
+                    lambda _event, target=canvas: target.configure(cursor=""),
                 )
         content_height = max(height, len(rows) * row_height)
         scroll_offset = min(
@@ -12741,6 +14023,10 @@ class DpsWindow:
     def _dispatch_message(self, kind: str, payload: object) -> None:
         if kind == "event":
             self._ingest_combat_event(payload)
+        elif kind == "heal":
+            self.model.ingest_heal(payload)
+        elif kind == "actor_health":
+            self.model.ingest_actor_health(payload)
         elif kind == "active_boss":
             self.model.ingest_active_boss(payload)
         elif kind == "identity":
@@ -12870,13 +14156,43 @@ class DpsWindow:
         self._flush_combat_history()
         duration = self.model.duration(now)
         dps_duration = dps_duration_seconds(duration)
-        total = sum(row.damage for row in self.model.current_stats())
-        total_dps = total / dps_duration if dps_duration else 0.0
-        self.total_value.configure(text=format_number(total))
-        dps_text = format_number(total_dps)
+        damage_total = sum(row.damage for row in self.model.current_stats())
+        healing_detail_visible = bool(
+            getattr(self, "skill_panel_mode", "damage") == "healing"
+            and getattr(self, "skill_window", None) is not None
+            and self.skill_window.winfo_exists()
+        )
+        main_meter_mode = getattr(self, "main_meter_mode", "dps")
+        if main_meter_mode == "hps" or healing_detail_visible:
+            self.latest_healing_summary = self.model.healing_summary(duration)
+        if main_meter_mode == "hps":
+            shown_total = int(
+                self.latest_healing_summary.get(
+                    "team_effective_healing", 0
+                )
+                or 0
+            )
+            shown_rate = float(
+                self.latest_healing_summary.get("team_hps", 0.0) or 0.0
+            )
+            self.total_caption.configure(text="总有效治疗")
+            self.dps_caption.configure(text="团队 HPS")
+        else:
+            shown_total = damage_total
+            shown_rate = (
+                damage_total / dps_duration if dps_duration else 0.0
+            )
+            self.total_caption.configure(text="总伤害")
+            self.dps_caption.configure(text="总 DPS")
+        self.total_value.configure(text=format_number(shown_total))
+        dps_text = format_number(shown_rate)
         self.dps_value.configure(text=dps_text)
         self._draw_main_content_overlay_dps()
-        state = "战斗中" if self.model.active(now) else ("已结束" if total else "待机")
+        state = (
+            "战斗中"
+            if self.model.active(now)
+            else ("已结束" if damage_total else "待机")
+        )
         self.time_value.configure(
             text=format_duration(duration),
             fg=ACCENT if state == "战斗中" else TEXT,
@@ -12895,6 +14211,7 @@ class DpsWindow:
             self._draw_monster_hp()
         self._draw_main_rows()
         self._render_skill_details()
+        self._sync_main_meter_tabs()
         self._sync_action_buttons()
         self._sync_expiry_label()
         self._sync_unlock_window_position()
@@ -12963,10 +14280,20 @@ class DpsWindow:
         self._draw_main_rows()
         self._render_skill_details()
 
-    def show_skill_details(self, actor_id: int) -> None:
+    def show_skill_details(
+        self, actor_id: int, detail_kind: str | None = None
+    ) -> None:
         if self.compact_mode:
             return
         self.skill_actor_id = int(actor_id)
+        requested_kind = str(detail_kind or "").casefold()
+        if requested_kind not in {"damage", "healing"}:
+            requested_kind = (
+                "healing"
+                if getattr(self, "main_meter_mode", "dps") == "hps"
+                else "damage"
+            )
+        self.skill_panel_mode = requested_kind
         if self.skill_window is None or not self.skill_window.winfo_exists():
             self._build_skill_window()
         else:
@@ -13012,15 +14339,15 @@ class DpsWindow:
         logo.image = logo_image
         logo.pack(side="left", padx=(8, 2), pady=8)
         self._bind_drag(logo, window)
-        skill_title = tk.Label(
+        self.skill_window_title_label = tk.Label(
             titlebar,
             text="个人伤害详情",
             bg=SURFACE,
             fg=TEXT,
             font=("Microsoft YaHei UI", 9, "bold"),
         )
-        skill_title.pack(side="left", padx=(2, 8))
-        self._bind_drag(skill_title, window)
+        self.skill_window_title_label.pack(side="left", padx=(2, 8))
+        self._bind_drag(self.skill_window_title_label, window)
         close_button = self._label_button(
             titlebar,
             "×",
@@ -13155,6 +14482,13 @@ class DpsWindow:
         for mode, button in self.skill_mode_buttons.items():
             selected = mode == self.skill_detail_mode
             button.configure(
+                text=(
+                    ("技能治疗" if mode == "skills" else "治疗目标")
+                    if self.skill_panel_mode == "healing"
+                    else ("技能明细" if mode == "skills" else "伤害目标")
+                )
+            )
+            button.configure(
                 bg=PANEL_2 if selected else BG,
                 fg=ACCENT if selected else MUTED,
             )
@@ -13170,6 +14504,69 @@ class DpsWindow:
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
         font = ("Microsoft YaHei UI", 8, "bold")
+        if self.skill_panel_mode == "healing":
+            if self.skill_detail_mode == "targets":
+                effective_x = int(width * 0.62)
+                share_x = int(width * 0.76)
+                total_x = int(width * 0.88)
+                overheal_x = width - 17
+                canvas.create_text(
+                    12, 15, text="治疗目标", fill=MUTED, anchor="w", font=font
+                )
+                canvas.create_text(
+                    effective_x,
+                    15,
+                    text="有效治疗",
+                    fill=MUTED,
+                    anchor="e",
+                    font=font,
+                )
+                canvas.create_text(
+                    share_x, 15, text="占比", fill=MUTED, anchor="e", font=font
+                )
+                canvas.create_text(
+                    total_x, 15, text="总治疗", fill=MUTED, anchor="e", font=font
+                )
+                canvas.create_text(
+                    overheal_x,
+                    15,
+                    text="过量",
+                    fill=MUTED,
+                    anchor="e",
+                    font=font,
+                )
+            else:
+                effective_x = int(width * 0.57)
+                share_x = int(width * 0.72)
+                total_x = int(width * 0.86)
+                overheal_x = width - 17
+                canvas.create_text(
+                    36, 15, text="治疗技能", fill=MUTED, anchor="w", font=font
+                )
+                canvas.create_text(
+                    effective_x,
+                    15,
+                    text="有效治疗",
+                    fill=MUTED,
+                    anchor="e",
+                    font=font,
+                )
+                canvas.create_text(
+                    share_x, 15, text="占比", fill=MUTED, anchor="e", font=font
+                )
+                canvas.create_text(
+                    total_x, 15, text="总治疗", fill=MUTED, anchor="e", font=font
+                )
+                canvas.create_text(
+                    overheal_x,
+                    15,
+                    text="过量",
+                    fill=MUTED,
+                    anchor="e",
+                    font=font,
+                )
+            canvas.create_line(0, 29, width, 29, fill=BORDER)
+            return
         if self.skill_detail_mode == "targets":
             kind_x, damage_x, share_x = int(width * 0.58), int(width * 0.79), width - 17
             canvas.create_text(12, 15, text="目标", fill=MUTED, anchor="w", font=font)
@@ -13185,8 +14582,201 @@ class DpsWindow:
             canvas.create_text(max_x, 15, text="最大伤害", fill=MUTED, anchor="e", font=font)
         canvas.create_line(0, 29, width, 29, fill=BORDER)
 
+    def _current_healer_row(self, actor_id: int | None = None) -> dict | None:
+        selected_actor = int(
+            self.skill_actor_id if actor_id is None else actor_id
+        )
+        summary = getattr(self, "latest_healing_summary", {})
+        if not isinstance(summary, dict):
+            return None
+        for row in summary.get("healers", []):
+            if not isinstance(row, dict):
+                continue
+            if int(row.get("actor_id", 0) or 0) == selected_actor:
+                return row
+        return None
+
+    @staticmethod
+    def _healing_detail_columns(width: int) -> tuple[int, int, int, int]:
+        return int(width * 0.57), int(width * 0.72), int(width * 0.86), width - 17
+
+    def _draw_healing_skill_rows(self) -> None:
+        canvas = self.skill_rows_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        healer = self._current_healer_row()
+        rows = healer.get("skills", []) if healer else []
+        rows = rows if isinstance(rows, list) else []
+        if not rows:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="暂无技能治疗数据",
+                fill=MUTED,
+                font=self._ui_font("strong"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        class_id = int(healer.get("profession_id", 0) or 0)
+        _profession, color = self._profession_info(class_id)
+        effective_x, share_x, total_x, overheal_x = (
+            self._healing_detail_columns(width)
+        )
+        row_height = 38
+        for index, row in enumerate(rows):
+            top = index * row_height
+            bottom = top + row_height
+            effective = max(0, int(row.get("effective_healing", 0) or 0))
+            share = max(0.0, min(1.0, float(row.get("share", 0.0) or 0.0)))
+            total = row.get("total_healing")
+            overheal = row.get("overhealing")
+            try:
+                skill_id = int(row.get("skill_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                skill_id = 0
+            name = str(row.get("name", "")).strip() or "未命名治疗"
+            base = PANEL if index % 2 == 0 else blend_color(PANEL, SURFACE, 0.28)
+            bar = blend_color(base, color, 0.43)
+            canvas.create_rectangle(0, top, width, bottom - 1, fill=base, outline="")
+            canvas.create_rectangle(
+                0,
+                top,
+                max(3, int(width * share)),
+                bottom - 1,
+                fill=bar,
+                outline="",
+            )
+            canvas.create_rectangle(0, top, 3, bottom - 1, fill=color, outline="")
+            icon = self.icons.skill(skill_id, name, class_id, 22)
+            canvas.create_image(8, top + 8, image=icon, anchor="nw")
+            canvas.create_text(
+                38,
+                top + 19,
+                text=name,
+                fill=TEXT,
+                anchor="w",
+                font=self._ui_font("strong"),
+            )
+            for x, text_value, strong in (
+                (effective_x, format_number(effective), True),
+                (share_x, f"{share * 100:.1f}%", False),
+                (total_x, format_optional_number(total), False),
+                (overheal_x, format_optional_number(overheal), False),
+            ):
+                canvas.create_text(
+                    x,
+                    top + 19,
+                    text=text_value,
+                    fill=TEXT,
+                    anchor="e",
+                    font=self._ui_font("number_strong" if strong else "number"),
+                )
+            canvas.create_line(
+                0,
+                bottom - 1,
+                width,
+                bottom - 1,
+                fill=blend_color(BORDER, base, 0.45),
+            )
+        canvas.configure(
+            scrollregion=(0, 0, width, max(height, len(rows) * row_height))
+        )
+
+    def _draw_healing_target_rows(self) -> None:
+        canvas = self.skill_rows_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        healer = self._current_healer_row()
+        rows = healer.get("targets", []) if healer else []
+        rows = rows if isinstance(rows, list) else []
+        if not rows:
+            coverage = str(healer.get("coverage", "")) if healer else ""
+            message = (
+                "目标逐包数据未完整覆盖"
+                if coverage == "server_effective_with_partial_callbacks"
+                else "暂无治疗目标数据"
+            )
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text=message,
+                fill=MUTED,
+                font=self._ui_font("strong"),
+            )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            return
+        effective_x, share_x, total_x, overheal_x = (
+            int(width * 0.62),
+            int(width * 0.76),
+            int(width * 0.88),
+            width - 17,
+        )
+        class_id = int(healer.get("profession_id", 0) or 0)
+        _profession, color = self._profession_info(class_id)
+        row_height = 38
+        for index, row in enumerate(rows):
+            top = index * row_height
+            bottom = top + row_height
+            effective = max(0, int(row.get("effective_healing", 0) or 0))
+            share = max(0.0, min(1.0, float(row.get("share", 0.0) or 0.0)))
+            base = PANEL if index % 2 == 0 else blend_color(PANEL, SURFACE, 0.28)
+            canvas.create_rectangle(0, top, width, bottom - 1, fill=base, outline="")
+            canvas.create_rectangle(
+                0,
+                top,
+                max(3, int(width * share)),
+                bottom - 1,
+                fill=blend_color(base, color, 0.38),
+                outline="",
+            )
+            canvas.create_rectangle(0, top, 3, bottom - 1, fill=color, outline="")
+            canvas.create_text(
+                12,
+                top + 19,
+                text=str(row.get("name", "")).strip() or "未命名玩家",
+                fill=TEXT,
+                anchor="w",
+                font=self._ui_font("strong"),
+            )
+            for x, text_value, strong in (
+                (effective_x, format_number(effective), True),
+                (share_x, f"{share * 100:.1f}%", False),
+                (total_x, format_optional_number(row.get("total_healing")), False),
+                (overheal_x, format_optional_number(row.get("overhealing")), False),
+            ):
+                canvas.create_text(
+                    x,
+                    top + 19,
+                    text=text_value,
+                    fill=TEXT,
+                    anchor="e",
+                    font=self._ui_font("number_strong" if strong else "number"),
+                )
+            canvas.create_line(
+                0,
+                bottom - 1,
+                width,
+                bottom - 1,
+                fill=blend_color(BORDER, base, 0.45),
+            )
+        canvas.configure(
+            scrollregion=(0, 0, width, max(height, len(rows) * row_height))
+        )
+
     def _draw_skill_rows(self) -> None:
         if self.skill_rows_canvas is None or self.skill_actor_id is None:
+            return
+        if self.skill_panel_mode == "healing":
+            if self.skill_detail_mode == "targets":
+                self._draw_healing_target_rows()
+            else:
+                self._draw_healing_skill_rows()
             return
         if self.skill_detail_mode == "targets":
             self._draw_skill_target_rows()
@@ -13301,23 +14891,69 @@ class DpsWindow:
         ):
             return
         actor = self.model.stats.get(self.skill_actor_id)
-        class_id = self.model.actor_profession_id(self.skill_actor_id)
+        healer = (
+            self._current_healer_row()
+            if self.skill_panel_mode == "healing"
+            else None
+        )
+        class_id = int(healer.get("profession_id", 0) or 0) if healer else 0
+        if not class_id:
+            class_id = self.model.actor_profession_id(self.skill_actor_id)
         actor_name = self._shown_actor_name(self.skill_actor_id)
         icon = self.icons.profession(class_id, 30)
         self.skill_profession_icon.configure(image=icon)
         self.skill_profession_icon.image = icon
         self.skill_title_label.configure(text=actor_name)
-        total = actor.damage if actor else 0
-        duration = dps_duration_seconds(self.model.duration())
-        actor_dps = total / duration if duration else 0.0
-        self.skill_total_label.configure(text=f"总伤害  {format_number(total)}")
-        self.skill_dps_label.configure(text=f"DPS  {format_number(actor_dps)}")
-        critical_text = self._actor_critical_text(actor)
-        deaths = self.model.member_death_counts.get(self.skill_actor_id, 0)
-        if self.skill_combat_metrics_label is not None:
-            self.skill_combat_metrics_label.configure(
-                text=f"暴击率  {critical_text}     死亡  {deaths} 次"
+        if self.skill_panel_mode == "healing":
+            if self.skill_window_title_label is not None:
+                self.skill_window_title_label.configure(text="个人治疗详情")
+            effective = int(healer.get("effective_healing", 0) or 0) if healer else 0
+            hps = float(healer.get("hps", 0.0) or 0.0) if healer else 0.0
+            self.skill_total_label.configure(
+                text=f"有效治疗  {format_number(effective)}"
             )
+            self.skill_dps_label.configure(text=f"HPS  {format_number(hps)}")
+            if self.skill_combat_metrics_label is not None:
+                response = healer.get("response", {}) if healer else {}
+                response = response if isinstance(response, dict) else {}
+                total_text = format_optional_number(
+                    healer.get("total_healing") if healer else None
+                )
+                overheal_text = format_optional_number(
+                    healer.get("overhealing") if healer else None
+                )
+                peak_text = format_optional_number(
+                    healer.get("peak_hps") if healer else None
+                )
+                sample_count = int(response.get("samples", 0) or 0)
+                coverage = healing_coverage_label(
+                    healer.get("coverage", "") if healer else ""
+                )
+                self.skill_combat_metrics_label.configure(
+                    text=(
+                        f"{coverage}  ·  总治疗 {total_text}  ·  过量 {overheal_text}  ·  "
+                        f"峰值HPS {peak_text}  ·  响应 均"
+                        f"{format_response_time(response.get('average_ms'))} / 快"
+                        f"{format_response_time(response.get('fastest_ms'))} / 慢"
+                        f"{format_response_time(response.get('slowest_ms'))}"
+                        f"（{sample_count}次）"
+                    )
+                )
+        else:
+            if self.skill_window_title_label is not None:
+                self.skill_window_title_label.configure(text="个人伤害详情")
+            total = actor.damage if actor else 0
+            duration = dps_duration_seconds(self.model.duration())
+            actor_dps = total / duration if duration else 0.0
+            self.skill_total_label.configure(text=f"总伤害  {format_number(total)}")
+            self.skill_dps_label.configure(text=f"DPS  {format_number(actor_dps)}")
+            critical_text = self._actor_critical_text(actor)
+            deaths = self.model.member_death_counts.get(self.skill_actor_id, 0)
+            if self.skill_combat_metrics_label is not None:
+                self.skill_combat_metrics_label.configure(
+                    text=f"暴击率  {critical_text}     死亡  {deaths} 次"
+                )
+        self._sync_skill_detail_tabs()
         self._draw_skill_header()
         self._draw_skill_rows()
 
@@ -13330,6 +14966,7 @@ class DpsWindow:
         self.skill_window = None
         self.skill_actor_id = None
         self.skill_mode_buttons = {}
+        self.skill_window_title_label = None
         self.skill_combat_metrics_label = None
 
     def _save_preferences(self) -> None:
@@ -13342,6 +14979,9 @@ class DpsWindow:
         self.config["show_dps"] = self.show_dps
         self.config["show_damage_share"] = self.show_damage_share
         self.config["show_critical_rate"] = self.show_critical_rate
+        self.config["main_meter_mode"] = getattr(
+            self, "main_meter_mode", "dps"
+        )
         self.config["target_boss_lookup_enabled"] = (
             bool(getattr(self, "target_boss_lookup_enabled", False))
         )
@@ -13403,6 +15043,8 @@ class DpsWindow:
             "monster": self.model.ingest_monster,
             "team_stat": self.model.ingest_team_stat,
             "stage_summary": self._ingest_stage_summary,
+            "heal": self.model.ingest_heal,
+            "actor_health": self.model.ingest_actor_health,
             "combat_state": self.model.ingest_combat_state,
             "life": self.model.ingest_life,
             "scene": self.model.ingest_scene,

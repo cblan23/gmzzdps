@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "privacy": "no character names, user tokens, actor IDs or encounter IDs",
+  "source_sha256": "42CEA5F845E21A16AD032D73D139A3907CA87A4436D6E274CD5654EE59E338AE",
+  "line_count": 25511,
+  "update_counts": {
+    "actor_health": 585,
+    "actor_merge": 6,
+    "combat_state": 2516,
+    "event": 170,
+    "heal": 1740,
+    "identity": 2,
+    "life": 143,
+    "monster": 2709,
+    "party": 50,
+    "profile": 94,
+    "scene": 8,
+    "skill_name": 131,
+    "stage_summary": 7,
+    "team_stat": 5117
+  },
+  "combat_count": 6,
+  "summary_count": 7,
+  "damage_result_fingerprint": "B05438F788E3E82583329818AE7A17F5BB78B1E731344E998524DDD134819218",
+  "damage_result_material": [
+    [
+      7115080,
+      153780,
+      [
+        107092,
+        46688
+      ]
+    ],
+    [
+      7115080,
+      416521,
+      [
+        238676,
+        177845
+      ]
+    ],
+    [
+      7115080,
+      123061,
+      [
+        68738,
+        54323
+      ]
+    ],
+    [
+      7115080,
+      242763,
+      [
+        180008,
+        62755
+      ]
+    ],
+    [
+      7102834,
+      4013547,
+      [
+        1012806,
+        999421,
+        923052,
+        883495,
+        191319,
+        3454
+      ]
+    ],
+    [
+      7102873,
+      6276202,
+      [
+        1698448,
+        1586259,
+        1434201,
+        1363096,
+        186754,
+        7444
+      ]
+    ]
+  ],
+  "combats": [
+    {
+      "ordinal": 1,
+      "template_id": 7115080,
+      "archive_reason": "party_wipe",
+      "duration_seconds": 15.802,
+      "participant_count": 2,
+      "participant_damage_desc": [
+        107092,
+        46688
+      ],
+      "total_damage": 153780,
+      "exact_packet_damage": 46688,
+      "assigned_target_damage": 46688,
+      "unassigned_target_damage": 107092,
+      "server_skill_actor_count": 0,
+      "team_effective_healing": 2474,
+      "team_total_healing": 4515,
+      "healing_coverage": [
+        "live_exact_callbacks_unverified"
+      ],
+      "healing_response_samples": 1
+    },
+    {
+      "ordinal": 2,
+      "template_id": 7115080,
+      "archive_reason": "party_wipe",
+      "duration_seconds": 26.129,
+      "participant_count": 2,
+      "participant_damage_desc": [
+        238676,
+        177845
+      ],
+      "total_damage": 416521,
+      "exact_packet_damage": 177845,
+      "assigned_target_damage": 177845,
+      "unassigned_target_damage": 238676,
+      "server_skill_actor_count": 1,
+      "team_effective_healing": 3255,
+      "team_total_healing": null,
+      "healing_coverage": [
+        "server_effective_with_partial_callbacks"
+      ],
+      "healing_response_samples": 0
+    },
+    {
+      "ordinal": 3,
+      "template_id": 7115080,
+      "archive_reason": "party_wipe",
+      "duration_seconds": 8.729,
+      "participant_count": 2,
+      "participant_damage_desc": [
+        68738,
+        54323
+      ],
+      "total_damage": 123061,
+      "exact_packet_damage": 68738,
+      "assigned_target_damage": 68738,
+      "unassigned_target_damage": 54323,
+      "server_skill_actor_count": 0,
+      "team_effective_healing": 1961,
+      "team_total_healing": 5080,
+      "healing_coverage": [
+        "live_exact_callbacks_unverified"
+      ],
+      "healing_response_samples": 2
+    },
+    {
+      "ordinal": 4,
+      "template_id": 7115080,
+      "archive_reason": "party_wipe",
+      "duration_seconds": 8.078,
+      "participant_count": 2,
+      "participant_damage_desc": [
+        180008,
+        62755
+      ],
+      "total_damage": 242763,
+      "exact_packet_damage": 62755,
+      "assigned_target_damage": 62755,
+      "unassigned_target_damage": 180008,
+      "server_skill_actor_count": 0,
+      "team_effective_healing": 1423,
+      "team_total_healing": 2955,
+      "healing_coverage": [
+        "live_exact_callbacks_unverified"
+      ],
+      "healing_response_samples": 0
+    },
+    {
+      "ordinal": 5,
+      "template_id": 7102834,
+      "archive_reason": "target_defeated",
+      "duration_seconds": 66.935,
+      "participant_count": 6,
+      "participant_damage_desc": [
+        1012806,
+        999421,
+        923052,
+        883495,
+        191319,
+        3454
+      ],
+      "total_damage": 4013547,
+      "exact_packet_damage": 3454,
+      "assigned_target_damage": 3454,
+      "unassigned_target_damage": 4010093,
+      "server_skill_actor_count": 0,
+      "team_effective_healing": 9135,
+      "team_total_healing": 251876,
+      "healing_coverage": [
+        "live_exact_callbacks_unverified"
+      ],
+      "healing_response_samples": 8
+    },
+    {
+      "ordinal": 6,
+      "template_id": 7102873,
+      "archive_reason": "target_defeated",
+      "duration_seconds": 91.142,
+      "participant_count": 6,
+      "participant_damage_desc": [
+        1698448,
+        1586259,
+        1434201,
+        1363096,
+        186754,
+        7444
+      ],
+      "total_damage": 6276202,
+      "exact_packet_damage": 7444,
+      "assigned_target_damage": 7444,
+      "unassigned_target_damage": 6268758,
+      "server_skill_actor_count": 5,
+      "team_effective_healing": 29579,
+      "team_total_healing": null,
+      "healing_coverage": [
+        "server_effective_with_partial_callbacks"
+      ],
+      "healing_response_samples": 30
+    }
+  ],
+  "settlement_validations": [
+    {
+      "ordinal": 1,
+      "matched": true,
+      "template_id": 7115080,
+      "expected_total": 153780,
+      "observed_total": 153780,
+      "difference": 0
+    },
+    {
+      "ordinal": 2,
+      "matched": true,
+      "template_id": 7115080,
+      "expected_total": 416521,
+      "observed_total": 416521,
+      "difference": 0
+    },
+    {
+      "ordinal": 3,
+      "matched": true,
+      "template_id": 7115080,
+      "expected_total": 134340,
+      "observed_total": 153780,
+      "difference": -19440
+    },
+    {
+      "ordinal": 4,
+      "matched": true,
+      "template_id": 7115080,
+      "expected_total": 123061,
+      "observed_total": 123061,
+      "difference": 0
+    },
+    {
+      "ordinal": 5,
+      "matched": false,
+      "template_id": 0,
+      "expected_total": 3255874,
+      "observed_total": 0,
+      "difference": 3255874
+    },
+    {
+      "ordinal": 6,
+      "matched": true,
+      "template_id": 7102834,
+      "expected_total": 4013547,
+      "observed_total": 4013547,
+      "difference": 0
+    },
+    {
+      "ordinal": 7,
+      "matched": true,
+      "template_id": 7102873,
+      "expected_total": 6276202,
+      "observed_total": 6276202,
+      "difference": 0
+    }
+  ]
+}

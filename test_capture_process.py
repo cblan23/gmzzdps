@@ -92,6 +92,18 @@ class _NativeHook:
 
 
 class CaptureProcessTests(unittest.TestCase):
+    def test_target_boss_lookup_shared_event_defaults_off_and_updates(self):
+        client = CaptureProcessClient(parent_pid=1234)
+        try:
+            self.assertFalse(client.target_boss_lookup_event.is_set())
+            client.set_target_boss_lookup_enabled(True)
+            self.assertTrue(client.target_boss_lookup_event.is_set())
+            client.set_target_boss_lookup_enabled(False)
+            self.assertFalse(client.target_boss_lookup_event.is_set())
+        finally:
+            client.output_queue.close()
+            client.process.close()
+
     def test_reader_can_close_without_waiting_for_queue_feeder(self):
         events: list[str] = []
 
@@ -324,6 +336,30 @@ class HookWorkerBatchTests(unittest.TestCase):
         self.assertEqual(
             [line["function"] for line in map(__import__("json").loads, log_handle.getvalue().splitlines())],
             ["boss", "name", "skill", "damage", "network"],
+        )
+
+    def test_target_boss_lookup_config_missing_defaults_off(self):
+        enabled_from_config = self.module[
+            "target_boss_lookup_enabled_from_config"
+        ]
+
+        self.assertFalse(enabled_from_config({}))
+        self.assertFalse(enabled_from_config(None))
+        self.assertTrue(
+            enabled_from_config({"target_boss_lookup_enabled": True})
+        )
+
+    def test_hook_worker_accepts_runtime_target_lookup_toggle(self):
+        worker = self.module["HookWorker"](
+            self.module["queue"].Queue(),
+            self.module["threading"].Event(),
+        )
+
+        self.assertFalse(worker.target_boss_lookup_event.is_set())
+        worker.set_target_boss_lookup_enabled(True)
+        self.assertTrue(worker.target_boss_lookup_event.is_set())
+        self.assertTrue(
+            worker.diagnostic_snapshot()["target_boss_lookup_enabled"]
         )
 
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import math
 import multiprocessing
@@ -28,6 +29,7 @@ from capture_process import CaptureProcessClient
 from combat_history import CombatHistoryStore, HISTORY_SCHEMA_VERSION
 from device_identity import resolve_client_id
 from licensing import (
+    CombatClockResult,
     DEFAULT_SERVER_URL,
     LicensingConnectionError,
     LicensingService,
@@ -119,7 +121,7 @@ UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
 APP_VERSION = "0.0.14"
-CLIENT_BUILD = "0.0.14+20260831.2"
+CLIENT_BUILD = "0.0.14+20260831.4"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
 UI_BRAND = APP_NAME
 BG = "#08090b"
@@ -169,6 +171,10 @@ PROFESSION_COLORS = {
 TEAM_TARGET_ACTIVE_SECONDS = 10.0
 MONSTER_DISPLAY_ACTIVE_SECONDS = 30.0
 LICENSE_HEARTBEAT_FAILURE_GRACE_SECONDS = 50.0
+COMBAT_CLOCK_ACTIVE_INTERVAL_SECONDS = 1.0
+COMBAT_CLOCK_RETRY_INTERVAL_SECONDS = 2.0
+COMBAT_CLOCK_HISTORY_WAIT_SECONDS = 3.0
+COMBAT_CLOCK_MAX_SECONDS = 24 * 60 * 60
 UNVERIFIED_MEMBER_EVENT_WINDOW_SECONDS = 90.0
 UNKNOWN_TARGET_EVENT_WINDOW_SECONDS = 3.0
 UNKNOWN_TARGET_EVENT_LIMIT_PER_TARGET = 128
@@ -291,6 +297,69 @@ def format_duration(seconds: float) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+def dps_duration_seconds(seconds: object) -> float:
+    """Use the same whole-second clock shown in the UI as the DPS divisor."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(value) or value <= 0:
+        return 0.0
+    return float(max(1, int(value)))
+
+
+def combat_clock_digest(scope: str, values: object) -> str:
+    material = "|".join(str(value) for value in values)
+    payload = f"daodao-dps-clock-v1|{scope}|{material}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def apply_combat_clock_to_record(
+    record: dict, result: CombatClockResult
+) -> dict:
+    updated = dict(record)
+    updated.pop("_shared_clock_request", None)
+    if not result.synchronized or not result.final:
+        return updated
+    try:
+        duration = float(result.duration_seconds)
+    except (TypeError, ValueError, OverflowError):
+        return updated
+    if not math.isfinite(duration) or not 1.0 <= duration <= COMBAT_CLOCK_MAX_SECONDS:
+        return updated
+    divisor = dps_duration_seconds(duration)
+    if not divisor:
+        return updated
+    participants: list[dict] = []
+    for raw_participant in updated.get("participants", []):
+        if not isinstance(raw_participant, dict):
+            continue
+        participant = dict(raw_participant)
+        try:
+            damage = max(0, int(participant.get("damage", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            damage = 0
+        participant["dps"] = damage / divisor
+        participants.append(participant)
+    try:
+        total_damage = max(0, int(updated.get("total_damage", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        total_damage = 0
+    updated["participants"] = participants
+    updated["duration_seconds"] = duration
+    updated["dps_duration_seconds"] = divisor
+    updated["team_dps"] = total_damage / divisor
+    updated["duration_source"] = "server_shared_clock"
+    updated["shared_clock"] = {
+        "clock_id": result.clock_id,
+        "started_at_epoch": result.started_at,
+        "ended_at_epoch": result.ended_at,
+        "server_time": result.server_time,
+        "final": True,
+    }
+    return updated
+
+
 def relative_damage_bar_ratio(damage: object, highest_damage: object) -> float:
     try:
         value = max(0.0, float(damage))
@@ -337,6 +406,12 @@ def load_config() -> dict:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return {}
+
+
+def target_boss_lookup_enabled_from_config(config: object) -> bool:
+    if not isinstance(config, dict):
+        return False
+    return bool(config.get("target_boss_lookup_enabled", False))
 
 
 def load_skill_catalog() -> dict:
@@ -846,6 +921,8 @@ class CombatModel:
         self.latest_network_time_100ns = 0
         self.scene_id: int | None = None
         self.combat_target_id: int | None = None
+        self.pending_active_boss_id: int | None = None
+        self.pending_active_boss_time_100ns = 0
         self.encounter_target_ids: set[int] = set()
         self.encounter_add_target_ids: set[int] = set()
         self.encounter_target_order: list[int] = []
@@ -864,6 +941,13 @@ class CombatModel:
         self.encounter_gap = 60.0
         self.session_number = 0
         self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
+        self.shared_clock_id = ""
+        self.shared_clock_duration_seconds = 0.0
+        self.shared_clock_started_at = 0.0
+        self.shared_clock_ended_at = 0.0
+        self.shared_clock_server_time = 0.0
+        self.shared_clock_received_at = 0.0
+        self.shared_clock_final = False
 
     def set_boss_only(self, value: bool) -> bool:
         value = bool(value)
@@ -931,6 +1015,8 @@ class CombatModel:
             self.latest_network_time_100ns = 0
         self.active_target_id = preserved_target_id
         self.combat_target_id = preserved_target_id
+        self.pending_active_boss_id = None
+        self.pending_active_boss_time_100ns = 0
         self.encounter_target_ids.clear()
         self.encounter_add_target_ids.clear()
         self.encounter_target_order.clear()
@@ -970,6 +1056,13 @@ class CombatModel:
         self.combat_end_reason = ""
         self.session_number += 1
         self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
+        self.shared_clock_id = ""
+        self.shared_clock_duration_seconds = 0.0
+        self.shared_clock_started_at = 0.0
+        self.shared_clock_ended_at = 0.0
+        self.shared_clock_server_time = 0.0
+        self.shared_clock_received_at = 0.0
+        self.shared_clock_final = False
         self.last_archive_signature = None
         if preserved_target_id is not None:
             # A manual clear starts a new local record while the same live Boss
@@ -987,6 +1080,96 @@ class CombatModel:
         if self.self_id is not None:
             members.add(self.self_id)
         return members - self.non_player_actor_ids
+
+    def combat_clock_snapshot(
+        self, now: float | None = None, *, ended: bool | None = None
+    ) -> dict[str, object] | None:
+        if (
+            not self.first_damage_time
+            or not self.last_damage_time
+            or self.combat_target_id is None
+        ):
+            return None
+        members = self._current_member_ids()
+        expected_members = max(0, int(self.party_member_count or 0))
+        if (
+            not self.party_known
+            or expected_members < 2
+            or len(members) < expected_members
+        ):
+            return None
+        total_damage = sum(
+            max(0, int(actor.damage or 0)) for actor in self.stats.values()
+        )
+        if total_damage <= 0:
+            return None
+        now = time.time() if now is None else float(now)
+        if ended is None:
+            ended = bool(
+                self.combat_end_time
+                or self._result_frozen_by_target_death()
+                or not self.active(now)
+            )
+        if ended:
+            end_time = self.combat_end_time or self.last_damage_time
+            elapsed = max(0.001, end_time - self.first_damage_time)
+            end_age = max(0.0, now - end_time)
+        else:
+            elapsed = max(0.001, now - self.first_damage_time)
+            end_age = 0.0
+        return {
+            "party_key": combat_clock_digest("party", sorted(members)),
+            "target_key": combat_clock_digest(
+                "target", (int(self.combat_target_id),)
+            ),
+            "encounter_id": self.encounter_id,
+            "state": "ended" if ended else "active",
+            "elapsed_seconds": min(
+                float(COMBAT_CLOCK_MAX_SECONDS), max(0.001, float(elapsed))
+            ),
+            "end_age_seconds": min(
+                float(COMBAT_CLOCK_MAX_SECONDS), float(end_age)
+            ),
+            "total_damage": total_damage,
+        }
+
+    def apply_combat_clock(
+        self, result: CombatClockResult, *, received_at: float | None = None
+    ) -> bool:
+        if (
+            not result.synchronized
+            or result.encounter_id != self.encounter_id
+            or not result.clock_id
+        ):
+            return False
+        try:
+            duration = float(result.duration_seconds)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (
+            not math.isfinite(duration)
+            or duration < 1.0
+            or duration > COMBAT_CLOCK_MAX_SECONDS
+            or (self.shared_clock_final and not result.final)
+        ):
+            return False
+        changed = bool(
+            self.shared_clock_id != result.clock_id
+            or abs(self.shared_clock_duration_seconds - duration) >= 0.001
+            or self.shared_clock_final != bool(result.final)
+        )
+        self.shared_clock_id = result.clock_id
+        self.shared_clock_duration_seconds = duration
+        self.shared_clock_started_at = max(0.0, float(result.started_at or 0.0))
+        self.shared_clock_ended_at = max(0.0, float(result.ended_at or 0.0))
+        self.shared_clock_server_time = max(0.0, float(result.server_time or 0.0))
+        self.shared_clock_received_at = (
+            time.time() if received_at is None else float(received_at)
+        )
+        self.shared_clock_final = bool(result.final)
+        if self.shared_clock_final:
+            self._queue_current_record_refresh()
+        return changed
 
     def _mark_non_player_actor(self, entity_id: int) -> bool:
         """Remove a late-confirmed monster from every player-only data source."""
@@ -1492,6 +1675,68 @@ class CombatModel:
         self.combat_end_reason = "party_wipe"
         return True
 
+    def _combat_state_confirms_pull_reset(self) -> bool:
+        if (
+            not self.first_damage_time
+            or self.combat_end_time
+            or self._multiphase_encounter()
+        ):
+            return False
+        boss_id = int(self.combat_target_id or 0)
+        monster = self.monsters.get(boss_id)
+        if (
+            monster is None
+            or monster.current_hp is None
+            or monster.current_hp <= 0
+            or self.entity_combat_states.get(boss_id) is not False
+        ):
+            return False
+        participants = {
+            actor_id
+            for actor_id in self.encounter_member_ids
+            if actor_id not in self.non_player_actor_ids
+        }
+        expected = max(
+            self.encounter_team_size,
+            self.encounter_authoritative_team_size,
+        )
+        if not participants or expected > len(participants):
+            return False
+        non_local = participants - {int(self.self_id or 0)}
+        if non_local:
+            # The local player's ScriptEntity can keep a stale fight-mode flag
+            # after death. The Boss leaving combat plus every teammate leaving
+            # is still a complete reset boundary for this pull.
+            confirmed = all(
+                self.entity_combat_states.get(actor_id) is False
+                for actor_id in non_local
+            )
+        else:
+            confirmed = all(
+                self.entity_combat_states.get(actor_id) is False
+                for actor_id in participants
+            )
+        return confirmed
+
+    def _mark_party_wipe_from_replacement(
+        self, incoming: MonsterStats, event_time: float
+    ) -> bool:
+        current_id = int(self.combat_target_id or 0)
+        current = self.monsters.get(current_id)
+        if (
+            not current_id
+            or incoming.entity_id == current_id
+            or event_time < self.first_damage_time
+            or current is None
+            or not int(current.template_id or 0)
+            or int(current.template_id or 0) != int(incoming.template_id or 0)
+            or not self._combat_state_confirms_pull_reset()
+        ):
+            return False
+        self.combat_end_time = max(self.last_damage_time, event_time)
+        self.combat_end_reason = "party_wipe"
+        return True
+
     @staticmethod
     def _monster_max_hp(monster: MonsterStats) -> float:
         return max(monster.max_hp or 0.0, monster.observed_max_hp or 0.0)
@@ -1759,6 +2004,9 @@ class CombatModel:
             round(self.first_damage_time, 3),
             round(self.last_damage_time, 3),
             round(self.combat_end_time, 3),
+            self.shared_clock_id,
+            round(self.shared_clock_duration_seconds, 3),
+            self.shared_clock_final,
             self.encounter_team_size,
             tuple(sorted(self.encounter_member_ids)),
             actors,
@@ -1770,7 +2018,10 @@ class CombatModel:
         if signature is None:
             return None
         ended_at = self.combat_end_time or self.last_damage_time
-        duration = max(1.0, ended_at - self.first_damage_time)
+        duration = self.duration()
+        if not duration:
+            duration = max(1.0, ended_at - self.first_damage_time)
+        dps_duration = dps_duration_seconds(duration)
         rows = sorted(
             (actor for actor in self.stats.values() if actor.damage > 0),
             key=lambda actor: actor.damage,
@@ -1852,7 +2103,7 @@ class CombatModel:
                     "is_self": actor_id == self.self_id,
                     "profession_id": self.actor_profession_id(actor_id),
                     "damage": actor.damage,
-                    "dps": actor.damage / duration,
+                    "dps": actor.damage / dps_duration,
                     "share": actor.damage / total_damage if total_damage else 0.0,
                     "hits": actor.hits,
                     "max_hit": actor.max_hit,
@@ -2056,7 +2307,7 @@ class CombatModel:
             "encounter_target_ids": sorted(target_ids),
         }
         now = time.time()
-        return {
+        record = {
             "schema_version": HISTORY_SCHEMA_VERSION,
             "encounter_id": self.encounter_id,
             "source": "network_rpc",
@@ -2068,8 +2319,14 @@ class CombatModel:
             "saved_at_epoch": now,
             "saved_at": self._iso_timestamp(now),
             "duration_seconds": duration,
+            "dps_duration_seconds": dps_duration,
+            "duration_source": (
+                "server_shared_clock"
+                if self.shared_clock_final
+                else "local_network_events"
+            ),
             "total_damage": total_damage,
-            "team_dps": total_damage / duration,
+            "team_dps": total_damage / dps_duration,
             "team_size": (
                 len(participants)
                 if self._is_dummy_encounter()
@@ -2084,6 +2341,18 @@ class CombatModel:
             "participants": participants,
             "damage_accounting": damage_accounting,
         }
+        clock_request = self.combat_clock_snapshot(now, ended=True)
+        if clock_request is not None and not self.shared_clock_final:
+            record["_shared_clock_request"] = clock_request
+        if self.shared_clock_final:
+            record["shared_clock"] = {
+                "clock_id": self.shared_clock_id,
+                "started_at_epoch": self.shared_clock_started_at,
+                "ended_at_epoch": self.shared_clock_ended_at,
+                "server_time": self.shared_clock_server_time,
+                "final": True,
+            }
+        return record
 
     def _queue_current_record_refresh(self) -> bool:
         target_depleted = self._target_hp_depleted()
@@ -2234,6 +2503,10 @@ class CombatModel:
             or attacker in self.non_player_actor_ids
         ):
             return
+        if event.get("active_boss") is True:
+            active_update = dict(event)
+            active_update["entity_id"] = target
+            self.ingest_active_boss(active_update)
         self.latest_network_time_100ns = max(self.latest_network_time_100ns, timestamp)
         target_disposition = self._target_event_disposition(target)
         if target_disposition == "pending":
@@ -3468,6 +3741,78 @@ class CombatModel:
         wiped = self._mark_party_wipe_if_complete(event_time)
         return changed or wiped
 
+    def ingest_active_boss(self, update: dict) -> bool:
+        """Freeze the old pull when the parser confirms a new active Boss entity."""
+        try:
+            entity_id = int(update.get("entity_id", 0) or 0)
+            timestamp = int(update.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not entity_id:
+            return False
+
+        profile = dict(update)
+        profile.update(
+            {
+                "entity_id": entity_id,
+                "entity_type": "Boss",
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        changed = self.ingest_profile(profile)
+        try:
+            max_hp = float(update.get("max_hp", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            max_hp = 0.0
+        if max_hp > 0:
+            changed |= self.ingest_monster(
+                {
+                    "entity_id": entity_id,
+                    "max_hp": max_hp,
+                    "filetime_100ns": timestamp,
+                }
+            )
+        if not self._is_priority_target(entity_id):
+            return changed
+
+        current_id = int(self.combat_target_id or 0)
+        if current_id == entity_id:
+            self.pending_active_boss_id = None
+            self.pending_active_boss_time_100ns = 0
+            return changed
+
+        incoming = self.monsters.get(entity_id)
+        previous = self.monsters.get(current_id)
+        if current_id and self._boss_phase_continues(previous, incoming):
+            self.linked_boss_target_ids.update({current_id, entity_id})
+            self.combat_target_id = entity_id
+            self.active_target_id = entity_id
+            self._register_encounter_target(entity_id)
+            self.pending_active_boss_id = None
+            self.pending_active_boss_time_100ns = 0
+            self._resolve_combat_sides()
+            return True
+
+        if not current_id or not self._encounter_started():
+            self.combat_target_id = entity_id
+            self.active_target_id = entity_id
+            self._register_encounter_target(entity_id)
+            self.pending_active_boss_id = None
+            self.pending_active_boss_time_100ns = 0
+            self._resolve_combat_sides()
+            return True
+
+        self.pending_active_boss_id = entity_id
+        self.pending_active_boss_time_100ns = max(
+            self.pending_active_boss_time_100ns, timestamp
+        )
+        if not self.combat_end_time:
+            self.combat_end_time = self.last_damage_time
+            self.combat_end_reason = "boss_replaced"
+        self.archive_current(self.combat_end_reason or "boss_replaced")
+        return True
+
     def ingest_combat_state(self, update: dict) -> bool:
         try:
             entity_id = int(update.get("entity_id", 0) or 0)
@@ -3658,12 +4003,20 @@ class CombatModel:
             ):
                 self.encounter_target_ids.add(entity_id)
             self._recompute()
+        replacement_wipe = bool(
+            timestamp
+            and self._is_priority_target(entity_id)
+            and self._mark_party_wipe_from_replacement(
+                monster,
+                self._event_seconds({"filetime_100ns": timestamp}),
+            )
+        )
         self._mark_target_defeated(monster)
         replayed = False
         if self._is_priority_target(entity_id):
             replayed |= self._resolve_known_pending_target_events()
         replayed |= self._resolve_pending_target_events(entity_id)
-        return changed or replayed
+        return changed or replayed or replacement_wipe
 
     def ingest_monster(self, update: dict) -> bool:
         try:
@@ -3813,6 +4166,7 @@ class CombatModel:
     def _begin_team_counter_reset(
         self, server_time: int, timestamp: int
     ) -> None:
+        pending_target_id = int(self.pending_active_boss_id or 0)
         previous_update = self.team_server_update_100ns
         first_damage_100ns = (
             int(
@@ -3841,9 +4195,16 @@ class CombatModel:
             self.reset(
                 keep_identity=True,
                 keep_monsters=True,
-                preserve_active_target=True,
+                preserve_active_target=not pending_target_id,
                 archive_reason="team_counter_reset",
             )
+        if pending_target_id and self._is_priority_target(pending_target_id):
+            self.combat_target_id = pending_target_id
+            self.active_target_id = pending_target_id
+            self._register_encounter_target(pending_target_id)
+            self.pending_active_boss_id = None
+            self.pending_active_boss_time_100ns = 0
+            self._resolve_combat_sides()
         for state in self.team_damage_states.values():
             state.last_absolute = 0
             state.baseline_absolute = 0
@@ -4304,7 +4665,7 @@ class CombatModel:
             self.local_player_name = name
         return True
 
-    def duration(self, now: float | None = None) -> float:
+    def _local_duration(self, now: float | None = None) -> float:
         if not self.first_damage_time:
             return 0.0
         now = now if now is not None else time.time()
@@ -4321,6 +4682,30 @@ class CombatModel:
         else:
             end = self.last_damage_time
         return max(1.0, end - self.first_damage_time)
+
+    def duration(self, now: float | None = None) -> float:
+        local_duration = self._local_duration(now)
+        if not local_duration or not self.shared_clock_duration_seconds:
+            return local_duration
+        now = time.time() if now is None else float(now)
+        locally_finished = bool(
+            self.combat_end_time
+            or self._result_frozen_by_target_death()
+            or now - self.last_damage_time >= self._encounter_idle_timeout()
+        )
+        if self.shared_clock_final:
+            return (
+                self.shared_clock_duration_seconds
+                if locally_finished
+                else local_duration
+            )
+        if locally_finished:
+            return local_duration
+        elapsed_since_sync = max(0.0, now - self.shared_clock_received_at)
+        return max(
+            1.0,
+            self.shared_clock_duration_seconds + elapsed_since_sync,
+        )
 
     def combat_in_progress(self, now: float | None = None) -> bool:
         return self.active(now)
@@ -4903,6 +5288,96 @@ class LicenseHeartbeatWorker(threading.Thread):
             self.licensing.sign_out()
 
 
+class CombatClockWorker(threading.Thread):
+    def __init__(
+        self,
+        licensing: LicensingService,
+        messages: queue.Queue,
+        stop_event: threading.Event,
+    ):
+        super().__init__(name="DpsSharedCombatClock", daemon=True)
+        self.licensing = licensing
+        self.messages = messages
+        self.stop_event = stop_event
+        self.state_lock = threading.Lock()
+        self.pending: dict[str, dict[str, object]] = {}
+        self.finalized: set[str] = set()
+        self.last_sent: dict[str, float] = {}
+        self.wake_event = threading.Event()
+
+    def submit(self, snapshot: dict[str, object] | None) -> None:
+        if not isinstance(snapshot, dict):
+            return
+        encounter_id = str(snapshot.get("encounter_id", "")).strip()
+        if not encounter_id:
+            return
+        with self.state_lock:
+            if encounter_id in self.finalized:
+                return
+            previous = self.pending.get(encounter_id)
+            if (
+                isinstance(previous, dict)
+                and previous.get("state") == "ended"
+                and snapshot.get("state") != "ended"
+            ):
+                return
+            self.pending[encounter_id] = dict(snapshot)
+        self.wake_event.set()
+
+    def cancel(self, encounter_id: object) -> None:
+        key = str(encounter_id or "").strip()
+        if not key:
+            return
+        with self.state_lock:
+            self.pending.pop(key, None)
+            self.last_sent.pop(key, None)
+
+    def _due_snapshot(self) -> tuple[str, dict[str, object]] | None:
+        now = time.monotonic()
+        with self.state_lock:
+            candidates = sorted(
+                self.pending.items(),
+                key=lambda item: item[1].get("state") != "ended",
+            )
+            for encounter_id, snapshot in candidates:
+                interval = (
+                    0.0
+                    if snapshot.get("state") == "ended"
+                    else COMBAT_CLOCK_ACTIVE_INTERVAL_SECONDS
+                )
+                if now - self.last_sent.get(encounter_id, 0.0) < interval:
+                    continue
+                self.last_sent[encounter_id] = now
+                return encounter_id, dict(snapshot)
+        return None
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            due = self._due_snapshot()
+            if due is None:
+                self.wake_event.wait(0.15)
+                self.wake_event.clear()
+                continue
+            encounter_id, snapshot = due
+            try:
+                result = self.licensing.sync_combat_clock(snapshot)
+            except LicensingConnectionError:
+                self.stop_event.wait(COMBAT_CLOCK_RETRY_INTERVAL_SECONDS)
+                continue
+            except Exception:
+                self.stop_event.wait(COMBAT_CLOCK_RETRY_INTERVAL_SECONDS)
+                continue
+            if not result.synchronized:
+                self.stop_event.wait(COMBAT_CLOCK_RETRY_INTERVAL_SECONDS)
+                continue
+            self.messages.put(("combat_clock_result", result))
+            if result.final:
+                with self.state_lock:
+                    self.finalized.add(encounter_id)
+                    self.pending.pop(encounter_id, None)
+                    self.last_sent.pop(encounter_id, None)
+
+
 class BossNameResolver(threading.Thread):
     def __init__(
         self,
@@ -4989,10 +5464,19 @@ class BossNameResolver(threading.Thread):
 
 
 class HookWorker(threading.Thread):
-    def __init__(self, messages: queue.Queue, stop_event: threading.Event):
+    def __init__(
+        self,
+        messages: queue.Queue,
+        stop_event: threading.Event,
+        *,
+        target_boss_lookup_enabled: bool = False,
+    ):
         super().__init__(name="C7NetworkPackets", daemon=False)
         self.messages = messages
         self.stop_event = stop_event
+        self.target_boss_lookup_event = threading.Event()
+        if target_boss_lookup_enabled:
+            self.target_boss_lookup_event.set()
         self.diagnostic_lock = threading.Lock()
         self.diagnostics: dict[str, object] = {
             "stage": "created",
@@ -5018,6 +5502,9 @@ class HookWorker(threading.Thread):
             "network_records": 0,
             "native_damage_records": 0,
             "native_boss_records": 0,
+            "target_boss_lookup_enabled": bool(
+                target_boss_lookup_enabled
+            ),
             "boss_catalog_size": 0,
             "boss_catalog_promotions": 0,
             "parsed_damage_events": 0,
@@ -5082,16 +5569,47 @@ class HookWorker(threading.Thread):
             if cached_pid == int(game_pid or 0):
                 self._set_active_boss_cache({})
             return
-        self._set_active_boss_cache(
-            {
-                "game_pid": int(game_pid or 0),
-                **state,
-            }
+        next_state = {
+            "game_pid": int(game_pid or 0),
+            **state,
+        }
+        try:
+            previous_pid = int(self.active_boss_cache.get("game_pid", 0) or 0)
+            previous_entity_id = int(
+                self.active_boss_cache.get("entity_id", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            previous_pid = 0
+            previous_entity_id = 0
+        next_entity_id = int(state.get("entity_id", 0) or 0)
+        active_entity_changed = bool(
+            next_entity_id
+            and (
+                previous_pid != int(game_pid or 0)
+                or previous_entity_id != next_entity_id
+            )
         )
+        self._set_active_boss_cache(next_state)
+        if active_entity_changed:
+            self.emit(
+                "active_boss",
+                {
+                    **state,
+                    "source_method": "network_active_boss_transition",
+                },
+            )
 
     def _update_diagnostics(self, **values: object) -> None:
         with self.diagnostic_lock:
             self.diagnostics.update(values)
+
+    def set_target_boss_lookup_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled:
+            self.target_boss_lookup_event.set()
+        else:
+            self.target_boss_lookup_event.clear()
+        self._update_diagnostics(target_boss_lookup_enabled=enabled)
 
     def _add_diagnostic_counts(self, **values: int) -> None:
         with self.diagnostic_lock:
@@ -5481,7 +5999,13 @@ class HookWorker(threading.Thread):
             LOG_DIR.mkdir(parents=True, exist_ok=True)
             log_path = LOG_DIR / time.strftime("network_%Y%m%d_%H%M%S.jsonl")
             log_handle = log_path.open("a", encoding="utf-8", buffering=256 * 1024)
-            capture = CaptureProcessClient(parent_pid=os.getpid())
+            target_boss_lookup_sent = (
+                self.target_boss_lookup_event.is_set()
+            )
+            capture = CaptureProcessClient(
+                parent_pid=os.getpid(),
+                target_boss_lookup_enabled=target_boss_lookup_sent,
+            )
             capture.start()
             self._update_diagnostics(
                 stage="capture_process_starting",
@@ -5490,6 +6014,14 @@ class HookWorker(threading.Thread):
 
             while True:
                 now = time.monotonic()
+                target_boss_lookup_enabled = (
+                    self.target_boss_lookup_event.is_set()
+                )
+                if target_boss_lookup_enabled != target_boss_lookup_sent:
+                    capture.set_target_boss_lookup_enabled(
+                        target_boss_lookup_enabled
+                    )
+                    target_boss_lookup_sent = target_boss_lookup_enabled
                 if self.stop_event.is_set() and not shutdown_requested:
                     capture.request_stop()
                     shutdown_requested = True
@@ -5906,6 +6438,8 @@ class _LegacyDpsWindow:
                 kind, payload = self.messages.get_nowait()
                 if kind == "event":
                     self.model.ingest(payload)
+                elif kind == "active_boss":
+                    self.model.ingest_active_boss(payload)
                 elif kind == "name":
                     if self.model.ingest_name(payload):
                         self._save_preferences()
@@ -5944,9 +6478,10 @@ class _LegacyDpsWindow:
             return
         now = time.time()
         duration = self.model.duration(now)
+        dps_duration = dps_duration_seconds(duration)
         rows = sorted(self.model.stats.values(), key=lambda item: item.damage, reverse=True)
         total = sum(row.damage for row in rows)
-        total_dps = total / duration if duration else 0.0
+        total_dps = total / dps_duration if dps_duration else 0.0
         self.total_label.configure(text=f"总伤害  {format_number(total)}")
         self.dps_label.configure(text=f"每秒  {format_number(total_dps)}")
         state = "战斗中" if self.model.active(now) else ("已结束" if total else "待机")
@@ -5956,7 +6491,7 @@ class _LegacyDpsWindow:
         for row in rows:
             item_id = str(row.actor_id)
             present.add(item_id)
-            actor_dps = row.damage / duration if duration else 0.0
+            actor_dps = row.damage / dps_duration if dps_duration else 0.0
             share = row.damage / total * 100 if total else 0.0
             values = (
                 self.model.display_name(row.actor_id),
@@ -6179,6 +6714,9 @@ class DpsWindow:
 
     def __init__(self):
         self.config = load_config()
+        self.target_boss_lookup_enabled = (
+            target_boss_lookup_enabled_from_config(self.config)
+        )
         # The redesigned window has no pin toggle.  A legacy false value makes
         # the meter fall behind the game as soon as the game receives focus.
         self.config["topmost"] = True
@@ -6231,9 +6769,16 @@ class DpsWindow:
         self.messages: queue.Queue = queue.Queue()
         self.control_messages: queue.Queue = queue.Queue()
         self.stop_event = threading.Event()
-        self.worker = HookWorker(self.messages, self.stop_event)
+        self.worker = HookWorker(
+            self.messages,
+            self.stop_event,
+            target_boss_lookup_enabled=self.target_boss_lookup_enabled,
+        )
         self.heartbeat_stop_event = threading.Event()
         self.heartbeat_worker: LicenseHeartbeatWorker | None = None
+        self.combat_clock_stop_event = threading.Event()
+        self.combat_clock_worker: CombatClockWorker | None = None
+        self.pending_clock_records: dict[str, tuple[dict, float]] = {}
         self.connected = False
         self.game_pid = 0
         self.closing = False
@@ -6333,6 +6878,7 @@ class DpsWindow:
         self.opacity_value_label: tk.Label | None = None
         self.opacity_scale: ModernSlider | None = None
         self.settings_opacity_var: tk.IntVar | None = None
+        self.settings_target_boss_lookup_var: tk.BooleanVar | None = None
         self.settings_font_size_var: tk.IntVar | None = None
         self.settings_show_names_var: tk.BooleanVar | None = None
         self.settings_show_damage_var: tk.BooleanVar | None = None
@@ -6816,6 +7362,13 @@ class DpsWindow:
             self.licensing, self.control_messages, self.heartbeat_stop_event
         )
         self.heartbeat_worker.start()
+        self.combat_clock_stop_event = threading.Event()
+        self.combat_clock_worker = CombatClockWorker(
+            self.licensing,
+            self.control_messages,
+            self.combat_clock_stop_event,
+        )
+        self.combat_clock_worker.start()
         self._start_capture()
         self._start_update_check()
 
@@ -6823,7 +7376,11 @@ class DpsWindow:
         if self.capture_started or self.closing:
             return
         self.stop_event = threading.Event()
-        self.worker = HookWorker(self.messages, self.stop_event)
+        self.worker = HookWorker(
+            self.messages,
+            self.stop_event,
+            target_boss_lookup_enabled=self.target_boss_lookup_enabled,
+        )
         self.capture_started = True
         self.worker.start()
 
@@ -7098,6 +7655,7 @@ class DpsWindow:
         self.dot.configure(fg=WARN)
         self.status_label.configure(text="正在安全停止", fg=WARN)
         self.heartbeat_stop_event.set()
+        self.combat_clock_stop_event.set()
         self.stop_event.set()
         self.login_status_message = str(message).strip() or "请重新输入卡号。"
         self.root.after(50, self._finish_return_to_login)
@@ -7117,9 +7675,10 @@ class DpsWindow:
         self.model.entity_names.clear()
         self.model.entity_professions.clear()
         self.model.local_player_name = ""
-        self._flush_combat_history()
+        self._flush_combat_history(force=True)
         self.capture_started = False
         self.heartbeat_worker = None
+        self.combat_clock_worker = None
         self.update_check_started = False
         self.pending_update = None
         self.connected = False
@@ -8626,6 +9185,9 @@ class DpsWindow:
             "saved_at_epoch": float(record.get("saved_at_epoch", 0.0) or 0.0),
             "archive_reason": str(record.get("archive_reason", "")),
             "duration_seconds": float(record.get("duration_seconds", 0.0) or 0.0),
+            "dps_duration_seconds": float(
+                record.get("dps_duration_seconds", 0.0) or 0.0
+            ),
             "total_damage": int(record.get("total_damage", 0) or 0),
             "team_dps": float(record.get("team_dps", 0.0) or 0.0),
             "team_size": int(record.get("team_size", 0) or 0),
@@ -8918,19 +9480,79 @@ class DpsWindow:
         self.feedback_submit_button = None
         self.tray_feedback_hidden = False
 
-    def _flush_combat_history(self) -> int:
+    def _save_combat_history_record(self, record: dict) -> bool:
+        try:
+            enriched_record = dict(record)
+            enriched_record.pop("_shared_clock_request", None)
+            enriched_record["capture_pipeline_at_archive"] = (
+                self.worker.diagnostic_snapshot()
+            )
+            self.history_store.save(enriched_record)
+            return True
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def _handle_combat_clock_result(self, result: CombatClockResult) -> None:
+        self.model.apply_combat_clock(result)
+        if not result.final:
+            return
+        pending = self.pending_clock_records.pop(result.encounter_id, None)
+        if pending is None:
+            return
+        record, _deadline = pending
+        updated = apply_combat_clock_to_record(record, result)
+        if not self._save_combat_history_record(updated):
+            self.model.completed_combats.append(updated)
+            return
+        if (
+            self.history_window is not None
+            and self.history_window.winfo_exists()
+            and self.history_window.state() == "normal"
+        ):
+            self._refresh_history_records()
+
+    def _flush_combat_history(self, *, force: bool = False) -> int:
         records = self.model.pop_completed_combats()
         saved = 0
         failed: list[dict] = []
+        now = time.monotonic()
+        worker = self.combat_clock_worker
         for record in records:
-            try:
-                enriched_record = dict(record)
-                enriched_record["capture_pipeline_at_archive"] = (
-                    self.worker.diagnostic_snapshot()
+            encounter_id = str(record.get("encounter_id", "")).strip()
+            clock_request = record.get("_shared_clock_request")
+            can_wait_for_clock = bool(
+                not force
+                and encounter_id
+                and isinstance(clock_request, dict)
+                and worker is not None
+                and worker.is_alive()
+            )
+            if can_wait_for_clock:
+                previous = self.pending_clock_records.get(encounter_id)
+                deadline = (
+                    previous[1]
+                    if previous is not None
+                    else now + COMBAT_CLOCK_HISTORY_WAIT_SECONDS
                 )
-                self.history_store.save(enriched_record)
+                self.pending_clock_records[encounter_id] = (record, deadline)
+                worker.submit(clock_request)
+                continue
+            if self._save_combat_history_record(record):
                 saved += 1
-            except (OSError, ValueError, TypeError):
+            else:
+                failed.append(record)
+
+        for encounter_id, (record, deadline) in list(
+            self.pending_clock_records.items()
+        ):
+            if not force and now < deadline:
+                continue
+            self.pending_clock_records.pop(encounter_id, None)
+            if worker is not None:
+                worker.cancel(encounter_id)
+            if self._save_combat_history_record(record):
+                saved += 1
+            else:
                 failed.append(record)
         if failed:
             self.model.completed_combats.extend(failed)
@@ -8992,6 +9614,9 @@ class DpsWindow:
             duration = max(1.0, float(record.get("duration_seconds", 0.0) or 0.0))
         except (TypeError, ValueError, OverflowError):
             duration = 1.0
+        dps_duration = dps_duration_seconds(
+            record.get("dps_duration_seconds", duration)
+        ) or 1.0
         share_rows: list[tuple[str, int]] = []
         for index, participant in enumerate(participants):
             if not isinstance(participant, dict):
@@ -9004,7 +9629,9 @@ class DpsWindow:
                 name = name[:4]
             try:
                 damage = max(0.0, float(participant.get("damage", 0.0) or 0.0))
-                dps = float(participant.get("dps", damage / duration) or 0.0)
+                dps = float(
+                    participant.get("dps", damage / dps_duration) or 0.0
+                )
             except (TypeError, ValueError, OverflowError):
                 dps = 0.0
             share_rows.append((name, int(round(max(0.0, dps)))))
@@ -9967,6 +10594,17 @@ class DpsWindow:
         )
         self.opacity_value_label.pack(side="right", padx=(18, 4))
 
+        self.settings_target_boss_lookup_var = tk.BooleanVar(
+            master=self.history_window,
+            value=self.target_boss_lookup_enabled,
+        )
+        self._settings_check_row(
+            general,
+            "通过目标读取 Boss",
+            self.settings_target_boss_lookup_var,
+            disabled=False,
+        )
+
         tk.Label(
             dps,
             text="DPS 设置",
@@ -10153,6 +10791,13 @@ class DpsWindow:
             self.ui_font_size = min(18, max(12, self.settings_font_size_var.get()))
         if self.settings_opacity_var is not None:
             self._set_window_alpha(self.settings_opacity_var.get(), persist=False)
+        if self.settings_target_boss_lookup_var is not None:
+            self.target_boss_lookup_enabled = bool(
+                self.settings_target_boss_lookup_var.get()
+            )
+            self.worker.set_target_boss_lookup_enabled(
+                self.target_boss_lookup_enabled
+            )
         if self.settings_show_names_var is not None:
             self.hide_names = not bool(self.settings_show_names_var.get())
         if self.settings_show_damage_var is not None:
@@ -10549,6 +11194,9 @@ class DpsWindow:
             )
         except (AttributeError, TypeError, ValueError, OverflowError):
             duration = 0.0
+        dps_duration = dps_duration_seconds(
+            record.get("dps_duration_seconds", duration)
+        )
         row_height = 34
         for index, participant in enumerate(participants):
             top = index * row_height
@@ -10615,10 +11263,14 @@ class DpsWindow:
                 dps = (
                     max(0.0, float(raw_dps))
                     if raw_dps is not None
-                    else (damage / duration if duration else 0.0)
+                    else (
+                        damage / dps_duration
+                        if dps_duration
+                        else 0.0
+                    )
                 )
             except (TypeError, ValueError, OverflowError):
-                dps = damage / duration if duration else 0.0
+                dps = damage / dps_duration if dps_duration else 0.0
             critical_rate = participant.get("critical_rate")
             try:
                 critical_text = (
@@ -11079,7 +11731,7 @@ class DpsWindow:
         )
 
     def _clear_unfavorited_history(self) -> None:
-        self._flush_combat_history()
+        self._flush_combat_history(force=True)
         unfavorited_count = self.history_store.unfavorited_count()
         if unfavorited_count <= 0:
             self._show_notice(
@@ -11266,6 +11918,7 @@ class DpsWindow:
         self.opacity_value_label = None
         self.settings_font_size_var = None
         self.settings_opacity_var = None
+        self.settings_target_boss_lookup_var = None
         self.settings_show_names_var = None
         self.settings_show_damage_var = None
         self.settings_show_dps_var = None
@@ -11738,7 +12391,7 @@ class DpsWindow:
         height = max(1, canvas.winfo_height())
         rows = sorted(self.model.current_stats(), key=lambda item: item.damage, reverse=True)
         total = sum(row.damage for row in rows)
-        duration = self.model.duration()
+        duration = dps_duration_seconds(self.model.duration())
         highest_damage = max((row.damage for row in rows), default=0)
         columns = self._main_columns(width)
         compact = bool(getattr(self, "compact_mode", False))
@@ -12088,6 +12741,8 @@ class DpsWindow:
     def _dispatch_message(self, kind: str, payload: object) -> None:
         if kind == "event":
             self._ingest_combat_event(payload)
+        elif kind == "active_boss":
+            self.model.ingest_active_boss(payload)
         elif kind == "identity":
             self.model.ingest_identity(payload)
         elif kind == "actor_merge":
@@ -12124,6 +12779,10 @@ class DpsWindow:
             self._handle_update_downloaded(payload)
         elif kind == "update_download_failed":
             self._handle_update_download_failed(payload)
+        elif kind == "combat_clock_result" and isinstance(
+            payload, CombatClockResult
+        ):
+            self._handle_combat_clock_result(payload)
         elif kind == "name":
             self.model.ingest_name(payload)
         elif kind == "skill_name":
@@ -12204,10 +12863,15 @@ class DpsWindow:
             return
         now = time.time()
         self.model.finalize_if_idle(now)
+        if self.combat_clock_worker is not None:
+            self.combat_clock_worker.submit(
+                self.model.combat_clock_snapshot(now)
+            )
         self._flush_combat_history()
         duration = self.model.duration(now)
+        dps_duration = dps_duration_seconds(duration)
         total = sum(row.damage for row in self.model.current_stats())
-        total_dps = total / duration if duration else 0.0
+        total_dps = total / dps_duration if dps_duration else 0.0
         self.total_value.configure(text=format_number(total))
         dps_text = format_number(total_dps)
         self.dps_value.configure(text=dps_text)
@@ -12644,7 +13308,7 @@ class DpsWindow:
         self.skill_profession_icon.image = icon
         self.skill_title_label.configure(text=actor_name)
         total = actor.damage if actor else 0
-        duration = self.model.duration()
+        duration = dps_duration_seconds(self.model.duration())
         actor_dps = total / duration if duration else 0.0
         self.skill_total_label.configure(text=f"总伤害  {format_number(total)}")
         self.skill_dps_label.configure(text=f"DPS  {format_number(actor_dps)}")
@@ -12678,6 +13342,9 @@ class DpsWindow:
         self.config["show_dps"] = self.show_dps
         self.config["show_damage_share"] = self.show_damage_share
         self.config["show_critical_rate"] = self.show_critical_rate
+        self.config["target_boss_lookup_enabled"] = (
+            bool(getattr(self, "target_boss_lookup_enabled", False))
+        )
         self.config["font_size"] = self.ui_font_size
         self.config["window_locked"] = self.window_locked
         self.config["layout_version"] = 15
@@ -12721,12 +13388,14 @@ class DpsWindow:
         )
         self._save_preferences()
         self.heartbeat_stop_event.set()
+        self.combat_clock_stop_event.set()
         self.stop_event.set()
         self.root.after(50, self._finish_close)
 
     def _ingest_pending_capture_messages(self) -> bool:
         handlers = {
             "event": self._ingest_combat_event,
+            "active_boss": self.model.ingest_active_boss,
             "identity": self.model.ingest_identity,
             "actor_merge": self.model.merge_actor,
             "party": self.model.ingest_party,
@@ -12775,7 +13444,7 @@ class DpsWindow:
             return
         self.close_finalized = True
         self.model.archive_current("exit")
-        self._flush_combat_history()
+        self._flush_combat_history(force=True)
         self._save_preferences()
         self.root.destroy()
 

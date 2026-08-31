@@ -151,6 +151,7 @@ class NetworkPacketParserTests(unittest.TestCase):
         event = next(value for kind, value in damage_updates if kind == "event")
         self.assertEqual(event["attacker_id"], low_player_id)
         self.assertEqual(event["target_id"], low_boss_id)
+        self.assertTrue(event["active_boss"])
         self.assertTrue(event["player_attacker"])
         self.assertIn(low_player_id, parser.combat_source_actors)
 
@@ -1992,6 +1993,19 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(parser.active_boss_entity_id, respawn_id)
         self.assertIsNone(parser.active_boss_pointer)
         self.assertEqual(parser.pending_target_hits, {})
+        damage_updates = parser.process_native_damage(
+            {
+                "entity_id": respawn_id,
+                "filetime_100ns": first_time + 7 * 10_000_000,
+                "attacker_id": PLAYER_ID,
+                "target_id": respawn_id,
+                "arg4_u64": 860_100_100,
+                "raw_damage": 500,
+                "damage": 500,
+            }
+        )
+        event = next(value for kind, value in damage_updates if kind == "event")
+        self.assertTrue(event["active_boss"])
 
     def test_lost_control_lokin_replaces_previous_boss_but_never_merges_back(self):
         lokin_id = MONSTER_ID + 1_213

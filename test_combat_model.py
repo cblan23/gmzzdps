@@ -21,6 +21,8 @@ IconFactory = MODULE["IconFactory"]
 HookWorker = MODULE["HookWorker"]
 NetworkPacketParser = MODULE["NetworkPacketParser"]
 UpdateInfo = MODULE["UpdateInfo"]
+CombatClockResult = MODULE["CombatClockResult"]
+apply_combat_clock_to_record = MODULE["apply_combat_clock_to_record"]
 APP_VERSION = MODULE["APP_VERSION"]
 CLIENT_BUILD = MODULE["CLIENT_BUILD"]
 PROFESSION_COLORS = MODULE["PROFESSION_COLORS"]
@@ -34,6 +36,7 @@ resolve_program_path = MODULE["resolve_program_path"]
 window_exstyle_for_lock = MODULE["window_exstyle_for_lock"]
 membership_label_for_card_tier = MODULE["membership_label_for_card_tier"]
 format_duration = MODULE["format_duration"]
+dps_duration_seconds = MODULE["dps_duration_seconds"]
 relative_damage_bar_ratio = MODULE["relative_damage_bar_ratio"]
 compact_width_for_visible_metrics = MODULE["compact_width_for_visible_metrics"]
 main = MODULE["main"]
@@ -77,6 +80,109 @@ def team_stat(
 
 
 class CombatModelTests(unittest.TestCase):
+    @staticmethod
+    def _clock_ready_model(run_id: str) -> object:
+        model = CombatModel(run_id=run_id)
+        model.self_id = SELF_ID
+        model.party_ids = {TEAMMATE_ID}
+        model.party_known = True
+        model.party_member_count = 2
+        model.combat_target_id = MONSTER_ID
+        model.first_damage_time = 990.0
+        model.last_damage_time = 1005.0
+        model.stats = {
+            SELF_ID: ActorStats(SELF_ID, damage=800_000),
+            TEAMMATE_ID: ActorStats(TEAMMATE_ID, damage=1_200_000),
+        }
+        return model
+
+    def test_combat_clock_identity_is_shared_without_uploading_entity_ids(self):
+        first = self._clock_ready_model("clock-first")
+        second = self._clock_ready_model("clock-second")
+
+        first_snapshot = first.combat_clock_snapshot(1007.0)
+        second_snapshot = second.combat_clock_snapshot(1008.0)
+
+        self.assertIsNotNone(first_snapshot)
+        self.assertIsNotNone(second_snapshot)
+        self.assertEqual(first_snapshot["party_key"], second_snapshot["party_key"])
+        self.assertEqual(first_snapshot["target_key"], second_snapshot["target_key"])
+        self.assertNotEqual(
+            first_snapshot["encounter_id"], second_snapshot["encounter_id"]
+        )
+        serialized = json.dumps(first_snapshot)
+        self.assertNotIn(str(SELF_ID), serialized)
+        self.assertNotIn(str(TEAMMATE_ID), serialized)
+        self.assertNotIn(str(MONSTER_ID), serialized)
+
+    def test_combat_clock_changes_only_the_duration_divisor(self):
+        model = self._clock_ready_model("clock-duration")
+        before_damage = {actor_id: row.damage for actor_id, row in model.stats.items()}
+        active = CombatClockResult(
+            synchronized=True,
+            encounter_id=model.encounter_id,
+            clock_id="a" * 32,
+            started_at=500.0,
+            duration_seconds=12.0,
+            server_time=512.0,
+        )
+        self.assertTrue(model.apply_combat_clock(active, received_at=1005.0))
+        self.assertEqual(model.duration(1007.0), 14.0)
+
+        final = CombatClockResult(
+            synchronized=True,
+            encounter_id=model.encounter_id,
+            clock_id="a" * 32,
+            started_at=500.0,
+            ended_at=520.9,
+            duration_seconds=20.9,
+            final=True,
+            server_time=521.0,
+        )
+        self.assertTrue(model.apply_combat_clock(final, received_at=1008.0))
+        self.assertEqual(model.duration(5000.0), 20.9)
+        self.assertEqual(
+            before_damage,
+            {actor_id: row.damage for actor_id, row in model.stats.items()},
+        )
+
+    def test_final_combat_clock_recalculates_history_dps_only(self):
+        record = {
+            "encounter_id": "clock-history-000001",
+            "duration_seconds": 21.9,
+            "dps_duration_seconds": 21.0,
+            "total_damage": 2_000_000,
+            "team_dps": 2_000_000 / 21,
+            "participants": [
+                {"actor_id": SELF_ID, "damage": 800_000, "dps": 800_000 / 21},
+                {
+                    "actor_id": TEAMMATE_ID,
+                    "damage": 1_200_000,
+                    "dps": 1_200_000 / 21,
+                },
+            ],
+            "_shared_clock_request": {"state": "ended"},
+        }
+        result = CombatClockResult(
+            synchronized=True,
+            encounter_id=record["encounter_id"],
+            clock_id="b" * 32,
+            started_at=100.0,
+            ended_at=120.9,
+            duration_seconds=20.9,
+            final=True,
+            server_time=121.0,
+        )
+
+        updated = apply_combat_clock_to_record(record, result)
+
+        self.assertEqual(updated["total_damage"], 2_000_000)
+        self.assertEqual(updated["dps_duration_seconds"], 20.0)
+        self.assertEqual(updated["team_dps"], 100_000.0)
+        self.assertEqual(updated["participants"][0]["dps"], 40_000.0)
+        self.assertNotIn("_shared_clock_request", updated)
+        self.assertEqual(updated["duration_source"], "server_shared_clock")
+
     def test_second_instance_restores_existing_window_without_starting_ui(self):
         calls = []
 
@@ -175,6 +281,46 @@ class CombatModelTests(unittest.TestCase):
         dps = [total / value for value in durations]
         self.assertGreater(dps[0], dps[1])
         self.assertGreater(dps[2], dps[3])
+
+    def test_dps_uses_shared_whole_second_divisor_for_subsecond_jitter(self):
+        def record_for_duration(duration: float) -> dict:
+            model = CombatModel(run_id=f"dps-duration-{duration}")
+            model.ingest_identity({"entity_id": SELF_ID})
+            model.ingest_profile(
+                {
+                    "entity_id": MONSTER_ID,
+                    "name": "测试 Boss",
+                    "entity_type": "Boss",
+                    "boss_rank": 3,
+                }
+            )
+            opening = damage(1, SELF_ID, MONSTER_ID, 100_000)
+            opening["filetime_100ns"] = BASE_FILETIME
+            model.ingest(opening)
+            closing = damage(2, SELF_ID, MONSTER_ID, 200_000)
+            closing["filetime_100ns"] = BASE_FILETIME + round(
+                duration * 10_000_000
+            )
+            model.ingest(closing)
+            return model.build_combat_record("test")
+
+        early_observer = record_for_duration(45.12)
+        late_observer = record_for_duration(45.82)
+
+        self.assertNotEqual(
+            early_observer["duration_seconds"],
+            late_observer["duration_seconds"],
+        )
+        self.assertEqual(early_observer["dps_duration_seconds"], 45.0)
+        self.assertEqual(
+            early_observer["dps_duration_seconds"],
+            late_observer["dps_duration_seconds"],
+        )
+        self.assertEqual(early_observer["team_dps"], late_observer["team_dps"])
+        self.assertEqual(
+            early_observer["participants"][0]["dps"],
+            late_observer["participants"][0]["dps"],
+        )
 
     def test_profession_colors_match_game_party_tiles(self):
         self.assertEqual(
@@ -1051,6 +1197,130 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.combat_end_time, ended_at)
         self.assertFalse(model.combat_in_progress(ended_at + 1.0))
 
+    def test_same_template_respawn_ends_wipe_with_stale_local_flag(self):
+        model = CombatModel(run_id="combat-state-wipe-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID],
+                "member_count": 2,
+                "authoritative": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "entity_type": "Boss",
+                "template_id": 7_115_080,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 5_000_000,
+                "max_hp": 7_500_000,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        model.ingest(damage(2, TEAMMATE_ID, MONSTER_ID, 200))
+        for sequence, entity_id in enumerate(
+            (SELF_ID, TEAMMATE_ID, MONSTER_ID), start=3
+        ):
+            model.ingest_combat_state(
+                {
+                    "entity_id": entity_id,
+                    "in_combat": True,
+                    "filetime_100ns": BASE_FILETIME + sequence * 10_000,
+                }
+            )
+        model.ingest_combat_state(
+            {
+                "entity_id": TEAMMATE_ID,
+                "in_combat": False,
+                "filetime_100ns": BASE_FILETIME + 6 * 10_000,
+            }
+        )
+        self.assertFalse(model.combat_end_time)
+        wipe_time = BASE_FILETIME + 7 * 10_000
+        model.ingest_combat_state(
+            {
+                "entity_id": MONSTER_ID,
+                "in_combat": False,
+                "filetime_100ns": wipe_time,
+            }
+        )
+        self.assertFalse(model.combat_end_time)
+        replacement_time = BASE_FILETIME + 8 * 10_000
+        model.ingest_profile(
+            {
+                "entity_id": SECOND_MONSTER_ID,
+                "entity_type": "Boss",
+                "template_id": 7_115_080,
+                "boss_rank": 3,
+                "filetime_100ns": replacement_time,
+            }
+        )
+
+        self.assertEqual(model.combat_end_reason, "party_wipe")
+        self.assertEqual(
+            model.combat_end_time,
+            model._event_seconds({"filetime_100ns": replacement_time}),
+        )
+        self.assertFalse(model.combat_in_progress(model.combat_end_time + 0.1))
+
+    def test_multiphase_boss_fight_mode_gap_does_not_end_encounter(self):
+        model = CombatModel(run_id="multiphase-combat-state-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID], "member_count": 2})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "entity_type": "Boss",
+                "template_id": 7_102_403,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 20_000_000,
+                "max_hp": 33_270_350,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        model.ingest(damage(2, TEAMMATE_ID, MONSTER_ID, 200))
+        for sequence, (entity_id, in_combat) in enumerate(
+            (
+                (SELF_ID, True),
+                (TEAMMATE_ID, True),
+                (MONSTER_ID, True),
+                (TEAMMATE_ID, False),
+                (MONSTER_ID, False),
+            ),
+            start=3,
+        ):
+            model.ingest_combat_state(
+                {
+                    "entity_id": entity_id,
+                    "in_combat": in_combat,
+                    "filetime_100ns": BASE_FILETIME + sequence * 10_000,
+                }
+            )
+        model.ingest_profile(
+            {
+                "entity_id": SECOND_MONSTER_ID,
+                "entity_type": "Boss",
+                "template_id": 7_102_403,
+                "boss_rank": 3,
+                "filetime_100ns": BASE_FILETIME + 8 * 10_000,
+            }
+        )
+
+        self.assertFalse(model.combat_end_time)
+
     def test_explicit_boss_death_is_not_delayed_by_recent_add_damage(self):
         model = CombatModel(run_id="boss-add-death-test")
         model.ingest_identity({"entity_id": SELF_ID})
@@ -1240,6 +1510,92 @@ class CombatModelTests(unittest.TestCase):
                 }
             )
         self.assertFalse(model.combat_end_time)
+
+    def test_confirmed_active_boss_replacement_freezes_incomplete_wipe(self):
+        model = CombatModel(run_id="active-boss-wipe-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID],
+                "member_count": 2,
+                "authoritative": True,
+            }
+        )
+        for entity_id in (MONSTER_ID, SECOND_MONSTER_ID):
+            model.ingest_profile(
+                {
+                    "entity_id": entity_id,
+                    "name": "Drill",
+                    "entity_type": "Boss",
+                    "template_id": 7_115_080,
+                    "boss_type": 3,
+                    "boss_rank": 3,
+                }
+            )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        model.ingest_team_stat(team_stat(2, SELF_ID, 500))
+        model.ingest_life(
+            {
+                "actor_id": SELF_ID,
+                "dead": True,
+                "death_confirmed": True,
+                "filetime_100ns": BASE_FILETIME + 3 * 10_000,
+            }
+        )
+        self.assertFalse(model.combat_end_time)
+
+        model.ingest_active_boss(
+            {
+                "entity_id": SECOND_MONSTER_ID,
+                "name": "Drill",
+                "template_id": 7_115_080,
+                "filetime_100ns": BASE_FILETIME + 4 * 10_000,
+            }
+        )
+
+        self.assertEqual(model.combat_end_time, model.last_damage_time)
+        self.assertEqual(model.combat_end_reason, "boss_replaced")
+        self.assertFalse(model.combat_in_progress(model.last_damage_time + 0.1))
+        self.assertEqual(model.pending_active_boss_id, SECOND_MONSTER_ID)
+
+        model.ingest_team_stat(team_stat(5, SELF_ID, 0))
+        self.assertEqual(model.combat_target_id, SECOND_MONSTER_ID)
+        self.assertIsNone(model.pending_active_boss_id)
+        model.ingest(damage(6, SELF_ID, SECOND_MONSTER_ID, 200))
+
+        history = model.pop_completed_combats()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["archive_reason"], "boss_replaced")
+        self.assertEqual(history[0]["monster"]["entity_id"], MONSTER_ID)
+        self.assertEqual(history[0]["total_damage"], 500)
+        self.assertEqual(model.current_monster().entity_id, SECOND_MONSTER_ID)
+        self.assertEqual(model.stats[SELF_ID].damage, 200)
+
+    def test_active_boss_damage_switches_target_before_idle_timeout(self):
+        model = CombatModel(run_id="active-boss-first-hit-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        for entity_id in (MONSTER_ID, SECOND_MONSTER_ID):
+            model.ingest_profile(
+                {
+                    "entity_id": entity_id,
+                    "name": "Drill",
+                    "entity_type": "Boss",
+                    "template_id": 7_115_080,
+                    "boss_type": 3,
+                    "boss_rank": 3,
+                }
+            )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        repull = damage(2, SELF_ID, SECOND_MONSTER_ID, 250)
+        repull["active_boss"] = True
+        model.ingest(repull)
+
+        history = model.pop_completed_combats()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["total_damage"], 100)
+        self.assertEqual(history[0]["monster"]["entity_id"], MONSTER_ID)
+        self.assertEqual(model.combat_target_id, SECOND_MONSTER_ID)
+        self.assertEqual(model.stats[SELF_ID].damage, 250)
 
     def test_higher_level_add_cannot_replace_living_boss(self):
         model = CombatModel(run_id="boss-lock-test")
@@ -1511,7 +1867,7 @@ class CombatModelTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertEqual(APP_VERSION, "0.0.14")
-        self.assertEqual(CLIENT_BUILD, "0.0.14+20260831.2")
+        self.assertEqual(CLIENT_BUILD, "0.0.14+20260831.4")
         self.assertIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
@@ -2260,7 +2616,7 @@ class CombatModelTests(unittest.TestCase):
         window.model = Model()
         window._ingest_combat_event = window.model.ingest
         window._ingest_stage_summary = lambda _payload: None
-        window._flush_combat_history = lambda: None
+        window._flush_combat_history = lambda **_kwargs: None
         window._save_preferences = lambda: None
         for index in range(MODULE["MESSAGE_DRAIN_BATCH_SIZE"] + 5):
             window.messages.put(("event", {"index": index}))
@@ -2473,8 +2829,9 @@ class CombatModelTests(unittest.TestCase):
             cache_path = Path(directory) / "active_boss.json"
             worker_globals["ACTIVE_BOSS_CACHE_PATH"] = cache_path
             try:
+                messages = MODULE["queue"].Queue()
                 worker = HookWorker(
-                    MODULE["queue"].Queue(), MODULE["threading"].Event()
+                    messages, MODULE["threading"].Event()
                 )
                 game_pid = 43210
                 template_id = 7_102_403
@@ -2502,6 +2859,21 @@ class CombatModelTests(unittest.TestCase):
                 self.assertEqual(saved["game_pid"], game_pid)
                 self.assertEqual(saved["max_hp"], 9_876_543.0)
                 self.assertNotIn("current_hp", saved)
+
+                while not messages.empty():
+                    messages.get_nowait()
+                parser.active_boss_entity_id = SECOND_MONSTER_ID
+                parser.active_boss_time_100ns = BASE_FILETIME + 10_000
+                parser.entity_template_ids[SECOND_MONSTER_ID] = template_id
+                parser.entity_profiles[SECOND_MONSTER_ID] = {
+                    "name": "Replacement Boss",
+                    "level": 61,
+                }
+                parser.entity_max_hp[SECOND_MONSTER_ID] = 8_765_432.0
+                worker._sync_active_boss_cache(parser, game_pid)
+                kind, payload = messages.get_nowait()
+                self.assertEqual(kind, "active_boss")
+                self.assertEqual(payload["entity_id"], SECOND_MONSTER_ID)
 
                 parser.active_boss_entity_id = None
                 worker._sync_active_boss_cache(parser, game_pid)

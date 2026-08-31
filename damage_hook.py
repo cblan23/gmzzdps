@@ -96,6 +96,11 @@ NAME_CACHE_ENTRY_SIZE = 0x20
 NAME_CACHE_READ_BATCH_ENTRIES = 4096
 SKILL_CACHE_ENTRY_SIZE = 0x1D8
 SKILL_CACHE_READ_BATCH_ENTRIES = 512
+UOBJECT_CLASS_PRIVATE_OFFSET = 0x10
+TARGET_BOSS_LOOKUP_RETRY_SECONDS = 0.2
+TARGET_BOSS_LOOKUP_MAX_WAIT_SECONDS = 10.0
+TARGET_BOSS_LOOKUP_MAX_PENDING = 256
+TARGET_BOSS_LOOKUP_MAX_OBSERVED_COMPONENTS = 4096
 
 
 class DamageHook:
@@ -108,6 +113,7 @@ class DamageHook:
         rva: int = DAMAGE_RVA,
         capture_names: bool = True,
         capture_boss_types: bool = True,
+        target_boss_lookup_enabled: bool = False,
     ):
         self.requested_pid = pid
         self.process_name = process_name
@@ -162,6 +168,21 @@ class DamageHook:
         # cache.  In a dense pull that turns one compatibility fallback into an
         # unbounded stream of millions of cross-process reads.
         self.existing_boss_full_scan_complete = False
+        # Optional compatibility route for clients where CommonComponent is
+        # observed before its template ID is initialized.  It is fail-closed:
+        # this layer only recovers an exact target/component/template tuple;
+        # NetworkPacketParser still requires that template in the shipped Boss
+        # catalog before any damage is accepted.
+        self.target_boss_lookup_enabled = bool(target_boss_lookup_enabled)
+        self.pending_target_boss_lookups: dict[int, float] = {}
+        self.target_boss_lookup_attempted: set[int] = set()
+        self.target_boss_lookup_emitted: set[int] = set()
+        self.observed_common_components: dict[int, dict] = {}
+        self.common_components_by_entity: dict[int, set[int]] = {}
+        self.trusted_common_component_classes: set[int] = set()
+        self.target_boss_object_index_complete = False
+        self.target_boss_object_scan_count = 0
+        self._last_target_boss_lookup_poll = 0.0
 
     def _read_exact(self, address: int, size: int) -> bytes:
         data = read_region(self.process, address, size)
@@ -226,6 +247,20 @@ class DamageHook:
     @property
     def alive(self) -> bool:
         return bool(self.process) and process_alive(self.process)
+
+    def set_target_boss_lookup_enabled(self, enabled: bool) -> None:
+        """Enable the exact target-to-template compatibility route at runtime."""
+        enabled = bool(enabled)
+        if enabled == self.target_boss_lookup_enabled:
+            return
+        self.target_boss_lookup_enabled = enabled
+        self.pending_target_boss_lookups.clear()
+        self.target_boss_lookup_attempted.clear()
+        self.target_boss_lookup_emitted.clear()
+        self.trusted_common_component_classes.clear()
+        self.target_boss_object_index_complete = False
+        self.target_boss_object_scan_count = 0
+        self._last_target_boss_lookup_poll = 0.0
 
     def _adopt_existing(self, patch: bytes) -> bool:
         if len(patch) != len(PROLOGUE) or patch[:6] != b"\xff\x25\0\0\0\0":
@@ -709,6 +744,23 @@ class DamageHook:
                 )
             ):
                 self.pending_existing_boss_targets.add(target_id)
+            if (
+                self.target_boss_lookup_enabled
+                and self._plausible_entity_id(target_id)
+                and target_id != self.local_player_id
+                and target_id not in self.target_boss_lookup_attempted
+                and target_id not in self.target_boss_lookup_emitted
+            ):
+                self.pending_target_boss_lookups.setdefault(
+                    target_id, time.monotonic()
+                )
+                while (
+                    len(self.pending_target_boss_lookups)
+                    > TARGET_BOSS_LOOKUP_MAX_PENDING
+                ):
+                    oldest = next(iter(self.pending_target_boss_lookups))
+                    self.pending_target_boss_lookups.pop(oldest, None)
+                    self.target_boss_lookup_attempted.add(oldest)
             records.append(record)
             self.next_sequence += 1
         return records
@@ -719,6 +771,180 @@ class DamageHook:
             LOW_COMBAT_ENTITY_ID_MIN <= value <= LOW_COMBAT_ENTITY_ID_MAX
             or ENTITY_ID_MIN <= value <= ENTITY_ID_MAX
         )
+
+    @staticmethod
+    def _plausible_pointer(value: int) -> bool:
+        return 0x10000 <= int(value or 0) <= 0x0000_7FFF_FFFF_FFFF
+
+    def _remember_common_component_record(self, record: dict) -> None:
+        """Index only pointers proven by a CommonComponent hook callback."""
+        component = int(record.get("component", 0) or 0)
+        if not self._plausible_pointer(component):
+            return
+        previous = self.observed_common_components.pop(component, None)
+        if previous is not None:
+            previous_entity = int(previous.get("entity_id", 0) or 0)
+            components = self.common_components_by_entity.get(previous_entity)
+            if components is not None:
+                components.discard(component)
+                if not components:
+                    self.common_components_by_entity.pop(previous_entity, None)
+        saved = dict(record)
+        self.observed_common_components[component] = saved
+        entity_id = int(saved.get("entity_id", 0) or 0)
+        if self._plausible_entity_id(entity_id):
+            self.common_components_by_entity.setdefault(entity_id, set()).add(
+                component
+            )
+        while (
+            len(self.observed_common_components)
+            > TARGET_BOSS_LOOKUP_MAX_OBSERVED_COMPONENTS
+        ):
+            stale_component = next(iter(self.observed_common_components))
+            stale = self.observed_common_components.pop(stale_component)
+            stale_entity = int(stale.get("entity_id", 0) or 0)
+            components = self.common_components_by_entity.get(stale_entity)
+            if components is not None:
+                components.discard(stale_component)
+                if not components:
+                    self.common_components_by_entity.pop(stale_entity, None)
+
+    def _remember_common_component_class(self, component: int) -> bool:
+        try:
+            class_pointer = self._u64(
+                component + UOBJECT_CLASS_PRIVATE_OFFSET
+            )
+        except (OSError, RuntimeError, struct.error):
+            return False
+        if not self._plausible_pointer(class_pointer):
+            return False
+        self.trusted_common_component_classes.add(class_pointer)
+        return True
+
+    def _prime_common_component_classes(self) -> None:
+        if self.trusted_common_component_classes:
+            return
+        for component in list(self.observed_common_components)[-64:]:
+            self._remember_common_component_class(component)
+
+    def _read_target_common_component(
+        self, component: int, target_id: int
+    ) -> dict | None:
+        raw = read_region(self.process, component, BOSS_COMPONENT_READ_SIZE)
+        if not raw or len(raw) < BOSS_COMPONENT_READ_SIZE:
+            return None
+        if component not in self.observed_common_components:
+            class_pointer = struct.unpack_from(
+                "<Q", raw, UOBJECT_CLASS_PRIVATE_OFFSET
+            )[0]
+            if class_pointer not in self.trusted_common_component_classes:
+                return None
+        entity_id = struct.unpack_from(
+            "<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET
+        )[0]
+        if entity_id != target_id:
+            return None
+        template_id = struct.unpack_from(
+            "<I", raw, BOSS_TEMPLATE_ID_OFFSET
+        )[0]
+        if not template_id:
+            return None
+        return {
+            "filetime_100ns": (
+                time.time_ns() // 100 + FILETIME_UNIX_EPOCH_100NS
+            ),
+            "sequence": -1,
+            "function": "CommonComponent_TargetIdLookup",
+            "component": component,
+            "entity_id": entity_id,
+            "boss_type": int(raw[BOSS_TYPE_FIELD_OFFSET]),
+            "template_id": template_id,
+            "target_id_lookup": True,
+            "boss_source": "target_id_common_component",
+        }
+
+    def _build_target_common_component_index_once(self) -> None:
+        """Build one UClass-filtered component index per enable cycle."""
+        if self.target_boss_object_index_complete:
+            return
+        self._prime_common_component_classes()
+        if not self.trusted_common_component_classes:
+            return
+        self.target_boss_object_scan_count += 1
+        for component in self._iter_live_object_pointers():
+            try:
+                class_pointer = self._u64(
+                    component + UOBJECT_CLASS_PRIVATE_OFFSET
+                )
+            except (OSError, RuntimeError, struct.error):
+                continue
+            if class_pointer not in self.trusted_common_component_classes:
+                continue
+            raw = read_region(self.process, component, BOSS_COMPONENT_READ_SIZE)
+            if not raw or len(raw) < BOSS_COMPONENT_READ_SIZE:
+                continue
+            entity_id = struct.unpack_from(
+                "<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET
+            )[0]
+            if not self._plausible_entity_id(entity_id):
+                continue
+            self._remember_common_component_record(
+                {
+                    "filetime_100ns": (
+                        time.time_ns() // 100 + FILETIME_UNIX_EPOCH_100NS
+                    ),
+                    "sequence": -1,
+                    "function": "CommonComponent_TargetIdIndex",
+                    "component": component,
+                    "entity_id": entity_id,
+                    "boss_type": int(raw[BOSS_TYPE_FIELD_OFFSET]),
+                    "template_id": struct.unpack_from(
+                        "<I", raw, BOSS_TEMPLATE_ID_OFFSET
+                    )[0],
+                    "target_id_index": True,
+                }
+            )
+        self.target_boss_object_index_complete = True
+
+    def _resolve_target_boss_lookups(self) -> list[dict]:
+        if not self.target_boss_lookup_enabled or not self.pending_target_boss_lookups:
+            return []
+        now = time.monotonic()
+        if (
+            now - self._last_target_boss_lookup_poll
+            < TARGET_BOSS_LOOKUP_RETRY_SECONDS
+        ):
+            return []
+        self._last_target_boss_lookup_poll = now
+        unresolved_without_component = any(
+            not self.common_components_by_entity.get(target_id)
+            for target_id in self.pending_target_boss_lookups
+        )
+        if unresolved_without_component:
+            self._build_target_common_component_index_once()
+
+        resolved: list[dict] = []
+        for target_id, first_seen in list(
+            self.pending_target_boss_lookups.items()
+        ):
+            update = None
+            for component in tuple(
+                self.common_components_by_entity.get(target_id, ())
+            ):
+                update = self._read_target_common_component(
+                    component, target_id
+                )
+                if update is not None:
+                    break
+            if update is not None:
+                resolved.append(update)
+                self.target_boss_lookup_emitted.add(target_id)
+                self.target_boss_lookup_attempted.add(target_id)
+                self.pending_target_boss_lookups.pop(target_id, None)
+            elif now - first_seen >= TARGET_BOSS_LOOKUP_MAX_WAIT_SECONDS:
+                self.target_boss_lookup_attempted.add(target_id)
+                self.pending_target_boss_lookups.pop(target_id, None)
+        return resolved
 
     def _iter_live_object_pointers(self):
         try:
@@ -891,6 +1117,7 @@ class DamageHook:
             )
             updates.extend(records)
         for record in updates:
+            self._remember_common_component_record(record)
             component = int(record.get("component", 0) or 0)
             entity_id = int(record.get("entity_id", 0) or 0)
             if (
@@ -902,7 +1129,19 @@ class DamageHook:
                     record,
                     time.monotonic(),
                 )
-        updates.extend(self._resolve_pending_boss_components())
+        late_updates = self._resolve_pending_boss_components()
+        for record in late_updates:
+            self._remember_common_component_record(record)
+        updates.extend(late_updates)
+        if self.target_boss_lookup_enabled:
+            for record in updates:
+                entity_id = int(record.get("entity_id", 0) or 0)
+                template_id = int(record.get("template_id", 0) or 0)
+                if self._plausible_entity_id(entity_id) and template_id:
+                    # The normal hook path already supplied complete identity;
+                    # target lookup must remain a fallback, not emit duplicates.
+                    self.target_boss_lookup_attempted.add(entity_id)
+                    self.pending_target_boss_lookups.pop(entity_id, None)
         observed_boss_ids = {
             int(record.get("entity_id", 0) or 0)
             for record in updates
@@ -924,6 +1163,7 @@ class DamageHook:
             )
             self.existing_boss_scan_attempted.update(scan_targets)
             self.pending_existing_boss_targets.difference_update(scan_targets)
+        updates.extend(self._resolve_target_boss_lookups())
         return updates
 
     @staticmethod
@@ -1215,6 +1455,15 @@ class DamageHook:
         self.existing_boss_scan_attempted.clear()
         self.existing_boss_component_cache.clear()
         self.existing_boss_full_scan_complete = False
+        self.pending_target_boss_lookups.clear()
+        self.target_boss_lookup_attempted.clear()
+        self.target_boss_lookup_emitted.clear()
+        self.observed_common_components.clear()
+        self.common_components_by_entity.clear()
+        self.trusted_common_component_classes.clear()
+        self.target_boss_object_index_complete = False
+        self.target_boss_object_scan_count = 0
+        self._last_target_boss_lookup_poll = 0.0
 
     def __enter__(self) -> "DamageHook":
         return self.install()

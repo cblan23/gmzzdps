@@ -47,8 +47,8 @@ try {
         --include-data-files=monster_metadata.json=monster_metadata.json `
         --include-data-files=boss_allowlist.txt=boss_allowlist.txt `
         --include-data-files=cacert.pem=cacert.pem `
-        --file-version=1.0.1.0 `
-        --product-version=1.0.1.0 `
+        --file-version=1.0.2.0 `
+        --product-version=1.0.2.0 `
         --product-name="$ProductName" `
         --file-description="$ProductName" `
         --copyright="$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)" `

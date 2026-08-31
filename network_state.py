@@ -469,6 +469,7 @@ class NetworkPacketParser:
         self.dungeon_stage_phase = 0
         self.dungeon_context_time_100ns = 0
         self.reconnect_dungeon_candidates: tuple[int, ...] = ()
+        self.stage_combat_seconds_by_actor: dict[tuple[int, str], int] = {}
         self.entity_max_hp: dict[int, float] = {}
         self.entity_max_hp_time: dict[int, int] = {}
         self.entity_current_hp: dict[int, float] = {}
@@ -3356,6 +3357,10 @@ class NetworkPacketParser:
                 break
         if not stage:
             return []
+        try:
+            stage_id = max(0, int(stage.get(0, 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            stage_id = 0
         completion_confirmed = stage.get(3) is True
         authoritative = settlement_method or completion_confirmed
         raw_entries = map_pairs(stage.get(5))
@@ -3510,6 +3515,24 @@ class NetworkPacketParser:
                 critical_hits = 0
                 deaths = 0
                 profession_id = 0
+            try:
+                combat_seconds_total = max(0, int(fields.get(19, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                combat_seconds_total = 0
+            combat_seconds_delta = 0
+            if stage_id and combat_seconds_total:
+                seconds_key = (stage_id, token)
+                previous_seconds = self.stage_combat_seconds_by_actor.get(
+                    seconds_key, 0
+                )
+                combat_seconds_delta = (
+                    combat_seconds_total - previous_seconds
+                    if combat_seconds_total >= previous_seconds
+                    else combat_seconds_total
+                )
+                self.stage_combat_seconds_by_actor[seconds_key] = (
+                    combat_seconds_total
+                )
             valid_critical_counts = bool(
                 damage_hits > 0 and critical_hits <= damage_hits
             )
@@ -3537,6 +3560,8 @@ class NetworkPacketParser:
                 "damage": damage,
                 "damage_hits": damage_hits if valid_critical_counts else None,
                 "critical_hits": critical_hits if valid_critical_counts else None,
+                "combat_seconds_total": combat_seconds_total,
+                "combat_seconds_delta": combat_seconds_delta,
                 "skills": skills,
             }
             if authoritative or 18 in fields:
@@ -4002,6 +4027,7 @@ class NetworkPacketParser:
             "function": "OnMsgDamageSyncV2/network",
             "attacker_id": attacker_id,
             "target_id": target_id,
+            "active_boss": target_id == self.active_boss_entity_id,
             "player_attacker": (
                 False
                 if confirmed_non_player

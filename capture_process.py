@@ -298,7 +298,12 @@ def _emit_batch(
     return True
 
 
-def _capture_forever(stop_event, output_queue, watchdog: ParentProcessWatchdog) -> None:
+def _capture_forever(
+    stop_event,
+    output_queue,
+    watchdog: ParentProcessWatchdog,
+    target_boss_lookup_event,
+) -> None:
     session_id = 0
     while not _should_stop(stop_event, watchdog):
         _put(
@@ -381,6 +386,9 @@ def _capture_forever(stop_event, output_queue, watchdog: ParentProcessWatchdog) 
                     pid=game_pid,
                     capture_names=True,
                     capture_boss_types=True,
+                    target_boss_lookup_enabled=(
+                        target_boss_lookup_event.is_set()
+                    ),
                 ).install()
             except Exception:
                 _put(
@@ -396,6 +404,9 @@ def _capture_forever(stop_event, output_queue, watchdog: ParentProcessWatchdog) 
                         pid=game_pid,
                         capture_names=False,
                         capture_boss_types=True,
+                        target_boss_lookup_enabled=(
+                            target_boss_lookup_event.is_set()
+                        ),
                     ).install()
                 except Exception:
                     native_hook = None
@@ -439,6 +450,10 @@ def _capture_forever(stop_event, output_queue, watchdog: ParentProcessWatchdog) 
                 and network_hook.alive
                 and network_poller.is_alive()
             ):
+                if native_hook is not None:
+                    native_hook.set_target_boss_lookup_enabled(
+                        target_boss_lookup_event.is_set()
+                    )
                 network_records = network_poller.drain_records()
                 sequence_gaps = network_poller.drain_sequence_gaps()
                 native_records, native_error = collect_native_records(native_hook)
@@ -525,6 +540,10 @@ def _capture_forever(stop_event, output_queue, watchdog: ParentProcessWatchdog) 
 
             network_records = network_poller.drain_records()
             sequence_gaps = network_poller.drain_sequence_gaps()
+            if native_hook is not None:
+                native_hook.set_target_boss_lookup_enabled(
+                    target_boss_lookup_event.is_set()
+                )
             native_records, native_error = collect_native_records(native_hook)
             native_installed_during_final_poll = native_hook is not None
             if native_error:
@@ -595,7 +614,12 @@ def _capture_forever(stop_event, output_queue, watchdog: ParentProcessWatchdog) 
             )
 
 
-def capture_process_main(parent_pid: int, stop_event, output_queue) -> None:
+def capture_process_main(
+    parent_pid: int,
+    stop_event,
+    output_queue,
+    target_boss_lookup_event,
+) -> None:
     """Multiprocessing spawn target. This module deliberately imports no UI."""
     watchdog = ParentProcessWatchdog(parent_pid)
     parent_alive = watchdog.is_alive()
@@ -606,7 +630,12 @@ def capture_process_main(parent_pid: int, stop_event, output_queue) -> None:
             "process_started",
             {"pid": os.getpid(), "parent_pid": parent_pid, **priority},
         )
-        _capture_forever(stop_event, output_queue, watchdog)
+        _capture_forever(
+            stop_event,
+            output_queue,
+            watchdog,
+            target_boss_lookup_event,
+        )
     except BaseException:
         _put(output_queue, "fatal", traceback.format_exc())
     finally:
@@ -632,14 +661,27 @@ def capture_process_main(parent_pid: int, stop_event, output_queue) -> None:
 class CaptureProcessClient:
     """Parent-side lifecycle wrapper used by the UI's HookWorker thread."""
 
-    def __init__(self, *, parent_pid: int | None = None):
+    def __init__(
+        self,
+        *,
+        parent_pid: int | None = None,
+        target_boss_lookup_enabled: bool = False,
+    ):
         self.context = multiprocessing.get_context("spawn")
         self.stop_event = self.context.Event()
+        self.target_boss_lookup_event = self.context.Event()
+        if target_boss_lookup_enabled:
+            self.target_boss_lookup_event.set()
         self.output_queue = self.context.Queue(maxsize=0)
         self.process = self.context.Process(
             name="GMZZCapture",
             target=capture_process_main,
-            args=(int(parent_pid or os.getpid()), self.stop_event, self.output_queue),
+            args=(
+                int(parent_pid or os.getpid()),
+                self.stop_event,
+                self.output_queue,
+                self.target_boss_lookup_event,
+            ),
             daemon=False,
         )
 
@@ -652,6 +694,12 @@ class CaptureProcessClient:
 
     def get(self, timeout: float | None = None):
         return self.output_queue.get(timeout=timeout)
+
+    def set_target_boss_lookup_enabled(self, enabled: bool) -> None:
+        if enabled:
+            self.target_boss_lookup_event.set()
+        else:
+            self.target_boss_lookup_event.clear()
 
     def request_stop(self) -> None:
         self.stop_event.set()

@@ -202,6 +202,26 @@ def scan_rip_xrefs_fast(pe: PE, targets: set[int]):
                 yield insn, target_rva
 
 
+def scan_relative_calls_fast(pe: PE, targets: set[int]):
+    """Find direct x64 CALL rel32 instructions that resolve to target RVAs."""
+    for sec in pe.sections:
+        if not sec.executable or not sec.raw_size:
+            continue
+        start = sec.raw_offset
+        end = start + sec.raw_size
+        raw = start
+        while True:
+            raw = pe.data.find(b"\xe8", raw, end)
+            if raw < 0 or raw + 5 > end:
+                break
+            instruction_rva = sec.virtual_address + raw - sec.raw_offset
+            displacement = struct.unpack_from("<i", pe.data, raw + 1)[0]
+            target_rva = instruction_rva + 5 + displacement
+            if target_rva in targets:
+                yield instruction_rva, target_rva
+            raw += 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("exe", type=Path)
@@ -260,6 +280,14 @@ def main() -> int:
             )
 
         if not args.no_disasm:
+            print("direct CALL references:")
+            for insn_rva, target_rva in scan_relative_calls_fast(
+                pe, set(targets)
+            ):
+                print(
+                    f"  rva=0x{insn_rva:x} ({pe.describe_rva(insn_rva)}): "
+                    f"call -> {targets[target_rva]!r}"
+                )
             print("RIP-relative code references:")
             scanner = scan_rip_xrefs if args.full_disasm else scan_rip_xrefs_fast
             for insn, target_rva in scanner(pe, set(targets)):

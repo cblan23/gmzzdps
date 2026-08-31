@@ -22,11 +22,15 @@ from network_state import NetworkPacketParser
 
 
 TOOL_NAME = "叨叨诡秘问题检测工具"
-TOOL_VERSION = "1.0.1+20260831.2"
-DIAGNOSTIC_SCHEMA_VERSION = 1
+TOOL_VERSION = "1.0.2+20260831.3"
+DIAGNOSTIC_SCHEMA_VERSION = 2
 MAX_REPORTED_METHODS = 80
 MAX_REPORTED_ERRORS = 20
 MAX_REPORTED_BOSSES = 24
+MAX_REPORTED_DAMAGE_TARGETS = 16
+MAX_REPORTED_NATIVE_TEMPLATES = 32
+MAX_TRACKED_DAMAGE_TARGETS = 64
+MAX_TRACKED_NATIVE_ENTITIES = 4096
 MAX_UPLOAD_BYTES = 224 * 1024
 
 
@@ -97,6 +101,10 @@ class DiagnosticAnalyzer:
         self.team_stat_updates = 0
         self.team_status: dict[str, int] = {}
         self.bosses: dict[tuple[int, str], dict[str, object]] = {}
+        self.native_entity_templates: dict[int, dict[str, object]] = {}
+        self.native_template_counts: Counter[tuple[int, int]] = Counter()
+        self.native_template_stats: Counter[str] = Counter()
+        self.damage_targets: dict[int, dict[str, object]] = {}
 
     def _stage(self, value: object) -> None:
         stage = str(value or "").strip()[:64]
@@ -133,6 +141,86 @@ class DiagnosticAnalyzer:
         while len(self.bosses) > MAX_REPORTED_BOSSES:
             self.bosses.pop(next(iter(self.bosses)))
 
+    def _catalog_metadata(self, template_id: int) -> dict:
+        metadata = self.catalog.get(str(template_id), {})
+        return metadata if isinstance(metadata, dict) else {}
+
+    def _remember_native_template(self, record: dict) -> None:
+        entity_id = _safe_int(record.get("entity_id"))
+        template_id = _safe_int(record.get("template_id"))
+        boss_type = _safe_int(record.get("boss_type", -1), -1)
+        catalog_match = bool(
+            template_id and str(template_id) in self.parser.boss_template_catalog
+        )
+        self.native_template_counts[(template_id, boss_type)] += 1
+        self.native_template_stats["records"] += 1
+        if entity_id:
+            self.native_template_stats["records_with_entity_id"] += 1
+        if template_id:
+            self.native_template_stats["records_with_template_id"] += 1
+        if boss_type == 3:
+            self.native_template_stats["runtime_type3_records"] += 1
+        if catalog_match:
+            self.native_template_stats["catalog_match_records"] += 1
+        if not entity_id:
+            return
+        observation = {
+            "template_id": template_id,
+            "runtime_boss_type": boss_type,
+            "catalog_match": catalog_match,
+        }
+        self.native_entity_templates.pop(entity_id, None)
+        self.native_entity_templates[entity_id] = observation
+        while len(self.native_entity_templates) > MAX_TRACKED_NATIVE_ENTITIES:
+            self.native_entity_templates.pop(next(iter(self.native_entity_templates)))
+        target = self.damage_targets.get(entity_id)
+        if target is not None:
+            target.update(observation)
+
+    def _remember_damage_event(self, payload: dict, *, forwarded: bool) -> None:
+        target_id = _safe_int(payload.get("target_id"))
+        damage = max(0, _safe_int(payload.get("damage")))
+        if not target_id or damage <= 0:
+            return
+        active_boss = target_id == int(self.parser.active_boss_entity_id or 0)
+        confirmed_boss = target_id in self.parser.confirmed_boss_entities
+        encounter_auxiliary = target_id in self.parser.encounter_auxiliary_entities
+        boss_mode_confirmed = bool(
+            confirmed_boss
+            or (encounter_auxiliary and self.parser.active_boss_entity_id is not None)
+        )
+        existing = self.damage_targets.pop(target_id, None) or {
+            "records": 0,
+            "damage": 0,
+            "forwarded_records": 0,
+            "filtered_records": 0,
+            "boss_mode_confirmed_records": 0,
+            "active_boss_seen": False,
+            "template_id": 0,
+            "runtime_boss_type": -1,
+            "catalog_match": False,
+        }
+        existing["records"] = int(existing.get("records", 0) or 0) + 1
+        existing["damage"] = int(existing.get("damage", 0) or 0) + damage
+        count_key = "forwarded_records" if forwarded else "filtered_records"
+        existing[count_key] = int(existing.get(count_key, 0) or 0) + 1
+        if boss_mode_confirmed:
+            existing["boss_mode_confirmed_records"] = int(
+                existing.get("boss_mode_confirmed_records", 0) or 0
+            ) + 1
+        existing["active_boss_seen"] = bool(
+            existing.get("active_boss_seen") or active_boss
+        )
+        existing["last_filetime_100ns"] = _safe_int(
+            payload.get("filetime_100ns")
+        )
+        observation = self.native_entity_templates.get(target_id)
+        if observation is not None:
+            existing.update(observation)
+        self.damage_targets[target_id] = existing
+        while len(self.damage_targets) > MAX_TRACKED_DAMAGE_TARGETS:
+            self.damage_targets.pop(next(iter(self.damage_targets)))
+
     def _consume_updates(self, updates: list[tuple[str, dict]]) -> None:
         for kind, payload in updates:
             self.parser_update_counts[str(kind)] += 1
@@ -140,10 +228,12 @@ class DiagnosticAnalyzer:
                 continue
             if kind == "event":
                 self.parsed_damage_events += 1
-                if self.parser.should_forward_damage_event(payload):
+                forwarded = self.parser.should_forward_damage_event(payload)
+                if forwarded:
                     self.forwarded_damage_events += 1
                 else:
                     self.filtered_damage_events += 1
+                self._remember_damage_event(payload, forwarded=forwarded)
             elif kind == "team_stat":
                 self.team_stat_updates += 1
             elif kind == "profile":
@@ -205,6 +295,7 @@ class DiagnosticAnalyzer:
 
         for record in native_boss_records:
             try:
+                self._remember_native_template(record)
                 self._consume_updates(
                     self.parser.process_native_boss_type(
                         self._enrich_native_boss(record)
@@ -255,6 +346,107 @@ class DiagnosticAnalyzer:
                     team_status.get("last_request_filetime")
                 ),
             }
+
+    def _damage_target_summaries(self) -> list[dict[str, object]]:
+        selected = list(self.damage_targets.items())[-MAX_REPORTED_DAMAGE_TARGETS:]
+        summaries: list[dict[str, object]] = []
+        for index, (target_id, observed) in enumerate(selected, 1):
+            native = self.native_entity_templates.get(target_id, {})
+            template_id = _safe_int(
+                native.get(
+                    "template_id",
+                    observed.get(
+                        "template_id",
+                        self.parser.entity_template_ids.get(target_id, 0),
+                    ),
+                )
+            )
+            boss_type = _safe_int(
+                native.get(
+                    "runtime_boss_type",
+                    observed.get(
+                        "runtime_boss_type",
+                        self.parser.entity_boss_types.get(target_id, -1),
+                    ),
+                ),
+                -1,
+            )
+            metadata = self._catalog_metadata(template_id)
+            catalog_match = bool(
+                template_id and str(template_id) in self.parser.boss_template_catalog
+            )
+            confirmed_boss = target_id in self.parser.confirmed_boss_entities
+            encounter_auxiliary = target_id in self.parser.encounter_auxiliary_entities
+            records = max(0, _safe_int(observed.get("records")))
+            boss_mode_events = max(
+                0, _safe_int(observed.get("boss_mode_confirmed_records"))
+            )
+            if confirmed_boss:
+                boss_mode_events = records
+            summaries.append(
+                {
+                    "target": f"target_{index}",
+                    "records": records,
+                    "damage": max(0, _safe_int(observed.get("damage"))),
+                    "forwarded_records": max(
+                        0, _safe_int(observed.get("forwarded_records"))
+                    ),
+                    "filtered_records": max(
+                        0, _safe_int(observed.get("filtered_records"))
+                    ),
+                    "template_id": template_id,
+                    "runtime_boss_type": boss_type,
+                    "catalog_known": bool(template_id and metadata),
+                    "catalog_match": catalog_match,
+                    "catalog_name": str(metadata.get("name", "")).strip()[:64],
+                    "native_template_observed": bool(native),
+                    "identity_observed": bool(
+                        native
+                        or template_id
+                        or boss_type >= 0
+                        or target_id in self.parser.entity_profiles
+                    ),
+                    "confirmed_boss": confirmed_boss,
+                    "encounter_auxiliary": encounter_auxiliary,
+                    "active_boss_seen": bool(observed.get("active_boss_seen")),
+                    "boss_mode_events": boss_mode_events,
+                    "boss_mode_displayable": boss_mode_events > 0,
+                }
+            )
+        return summaries
+
+    def _native_template_summaries(self) -> list[dict[str, object]]:
+        def sort_key(item: tuple[tuple[int, int], int]) -> tuple[int, int, int, int]:
+            (template_id, boss_type), count = item
+            catalog_match = str(template_id) in self.parser.boss_template_catalog
+            interesting = bool(catalog_match or boss_type == 3)
+            return (-int(interesting), -count, template_id, boss_type)
+
+        summaries: list[dict[str, object]] = []
+        for (template_id, boss_type), count in sorted(
+            self.native_template_counts.items(), key=sort_key
+        )[:MAX_REPORTED_NATIVE_TEMPLATES]:
+            metadata = self._catalog_metadata(template_id)
+            summaries.append(
+                {
+                    "template_id": template_id,
+                    "runtime_boss_type": boss_type,
+                    "records": count,
+                    "catalog_known": bool(template_id and metadata),
+                    "catalog_match": bool(
+                        template_id
+                        and str(template_id) in self.parser.boss_template_catalog
+                    ),
+                    "catalog_name": str(metadata.get("name", "")).strip()[:64],
+                }
+            )
+        return summaries
+
+    def _boss_confirmed_damage_events(self) -> int:
+        return sum(
+            max(0, _safe_int(target.get("boss_mode_events")))
+            for target in self._damage_target_summaries()
+        )
 
     def handle(self, kind: str, payload: object = None) -> None:
         kind = str(kind or "")
@@ -326,17 +518,23 @@ class DiagnosticAnalyzer:
                 "confidence": "high",
                 "summary": "原生伤害入口已安装但没有产出，网络伤害回退同时被抑制。",
             }
-        if self.forwarded_damage_events > 0:
+        if self._boss_confirmed_damage_events() > 0:
             return {
                 "code": "capture_pipeline_ok",
                 "confidence": "high",
-                "summary": "采集、解析与目标过滤均产生了可显示伤害。",
+                "summary": "采集、解析与主程序 Boss 门槛均产生了可显示伤害。",
             }
-        if self.parsed_damage_events > 0 and self.filtered_damage_events > 0:
+        if self.parsed_damage_events > 0 and not self.parser.boss_template_catalog:
+            return {
+                "code": "boss_catalog_unavailable",
+                "confidence": "high",
+                "summary": "已解析到伤害，但检测工具未加载到 Boss 模板目录。",
+            }
+        if self.parsed_damage_events > 0:
             return {
                 "code": "damage_target_not_confirmed",
                 "confidence": "high",
-                "summary": "已解析到伤害，但目标未被确认为 Boss 或木桩。",
+                "summary": "已解析到伤害，但没有受击目标通过主程序 Boss 门槛。",
             }
         if self.network_damage_messages > 0 or self.native_damage_records > 0:
             return {
@@ -358,6 +556,7 @@ class DiagnosticAnalyzer:
 
     def finish(self, environment: dict[str, object]) -> dict[str, object]:
         self.finished_at = time.time()
+        damage_targets = self._damage_target_summaries()
         methods = sorted(
             self.method_counts.items(), key=lambda item: (-item[1], item[0])
         )[:MAX_REPORTED_METHODS]
@@ -402,11 +601,23 @@ class DiagnosticAnalyzer:
                 "native_boss_records": self.native_boss_records,
                 "native_name_records": self.native_name_records,
                 "native_skill_name_records": self.native_skill_name_records,
+                "monster_catalog_size": len(self.catalog),
+                "boss_catalog_size": len(self.parser.boss_template_catalog),
+                "native_template_stats": {
+                    key: int(value)
+                    for key, value in sorted(self.native_template_stats.items())
+                },
+                "native_template_candidates": self._native_template_summaries(),
                 "sequence_gaps": self.sequence_gaps,
                 "parser_updates": dict(self.parser_update_counts),
                 "parsed_damage_events": self.parsed_damage_events,
                 "forwarded_damage_events": self.forwarded_damage_events,
                 "filtered_damage_events": self.filtered_damage_events,
+                "boss_confirmed_damage_events": sum(
+                    max(0, _safe_int(target.get("boss_mode_events")))
+                    for target in damage_targets
+                ),
+                "damage_targets": damage_targets,
                 "team_stat_updates": self.team_stat_updates,
                 "team_status": dict(self.team_status),
                 "bosses": list(self.bosses.values()),
@@ -417,6 +628,8 @@ class DiagnosticAnalyzer:
                 "card_number_uploaded": False,
                 "player_names_uploaded": False,
                 "local_paths_uploaded": False,
+                "combat_entity_ids_uploaded": False,
+                "monster_template_ids_uploaded": True,
             },
         }
 

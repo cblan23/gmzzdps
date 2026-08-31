@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import os
 import re
 import secrets
@@ -35,6 +36,8 @@ CLIENT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 CARD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CARD_PATTERN = re.compile(r"^GMZZ[A-HJ-NP-Z2-9]{26}$")
 CUSTOM_CARD_PATTERN = re.compile(r"^[A-Za-z0-9]{6,64}$")
+COMBAT_CLOCK_KEY_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+COMBAT_CLOCK_ENCOUNTER_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,96}$")
 PARTNER_CARD_KEY = os.environ.get("GMZZ_MONITOR_PARTNER_CARD", "").strip()
 MAX_CARD_DURATION_DAYS = 3650
 MIN_CARD_DURATION_SECONDS = 60 * 60
@@ -45,6 +48,11 @@ MAX_FEEDBACK_CONTENT = 2000
 MAX_FEEDBACK_DIAGNOSTICS_BYTES = 384 * 1024
 MAX_DIAGNOSTIC_REPORT_BYTES = 192 * 1024
 MAX_DIAGNOSTIC_REPORTS_PER_HOUR = 6
+COMBAT_CLOCK_MAX_SECONDS = 24 * 60 * 60
+COMBAT_CLOCK_ACTIVE_MATCH_SECONDS = 20.0
+COMBAT_CLOCK_ENDED_MATCH_SECONDS = 20.0
+COMBAT_CLOCK_LATE_REPORT_SECONDS = 45.0
+COMBAT_CLOCK_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DIAGNOSTIC_TOOL_NAME = "叨叨诡秘问题检测工具"
 UPDATE_METADATA_PATH = Path(
     os.environ.get(
@@ -343,6 +351,26 @@ def initialize_database() -> None:
                 diagnostics_json TEXT NOT NULL DEFAULT '{}',
                 remote_ip TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS combat_clocks (
+                clock_id TEXT PRIMARY KEY,
+                party_key TEXT NOT NULL,
+                target_key TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                created_at REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                max_total_damage INTEGER NOT NULL DEFAULT 0,
+                report_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS combat_clock_clients (
+                session_id TEXT NOT NULL REFERENCES sessions(session_id),
+                client_encounter_id TEXT NOT NULL,
+                clock_id TEXT NOT NULL REFERENCES combat_clocks(clock_id)
+                    ON DELETE CASCADE,
+                last_seen REAL NOT NULL,
+                ended INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(session_id, client_encounter_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_sessions_last_seen
                 ON sessions(last_seen DESC);
             CREATE INDEX IF NOT EXISTS idx_sessions_client
@@ -351,6 +379,10 @@ def initialize_database() -> None:
                 ON cards(expires_at);
             CREATE INDEX IF NOT EXISTS idx_feedbacks_created
                 ON feedbacks(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_combat_clocks_match
+                ON combat_clocks(party_key, target_key, last_seen DESC);
+            CREATE INDEX IF NOT EXISTS idx_combat_clock_clients_clock
+                ON combat_clock_clients(clock_id, last_seen DESC);
             """
         )
         session_columns = {
@@ -620,6 +652,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/v1/dps/diagnostic":
             self._submit_diagnostic()
+            return
+        if path == "/api/v1/dps/combat/clock":
+            self._sync_combat_clock()
             return
         if path == "/api/v1/dps/admin/revoke":
             if self._require_admin():
@@ -1004,6 +1039,212 @@ class MonitorHandler(BaseHTTPRequestHandler):
             if not expires_at or expires_at <= timestamp:
                 return "card_expired"
         return ""
+
+    @staticmethod
+    def _combat_clock_number(
+        value: object, *, minimum: float = 0.0, maximum: float
+    ) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(parsed) or parsed < minimum or parsed > maximum:
+            return None
+        return parsed
+
+    def _sync_combat_clock(self) -> None:
+        body = self._body()
+        session = self._session_for_token(self._bearer_token())
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        if session is None:
+            self._authorization_denied("invalid_session")
+            return
+        timestamp = now_epoch()
+        authorization_error = self._feedback_session_error(session, timestamp)
+        if authorization_error:
+            self._end_authorized_session(session["session_id"])
+            self._authorization_denied(authorization_error)
+            return
+
+        party_key = clean_text(body.get("party_key"), 64).casefold()
+        target_key = clean_text(body.get("target_key"), 64).casefold()
+        client_encounter_id = clean_text(body.get("encounter_id"), 96)
+        state = clean_text(body.get("state"), 16).casefold()
+        elapsed = self._combat_clock_number(
+            body.get("elapsed_seconds"),
+            minimum=0.001,
+            maximum=float(COMBAT_CLOCK_MAX_SECONDS),
+        )
+        end_age = self._combat_clock_number(
+            body.get("end_age_seconds", 0.0),
+            minimum=0.0,
+            maximum=float(COMBAT_CLOCK_MAX_SECONDS),
+        )
+        try:
+            total_damage = max(0, int(body.get("total_damage", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            total_damage = -1
+        if (
+            not COMBAT_CLOCK_KEY_PATTERN.fullmatch(party_key)
+            or not COMBAT_CLOCK_KEY_PATTERN.fullmatch(target_key)
+            or not COMBAT_CLOCK_ENCOUNTER_PATTERN.fullmatch(client_encounter_id)
+            or state not in {"active", "ended"}
+            or elapsed is None
+            or end_age is None
+            or total_damage <= 0
+        ):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "bad_combat_clock"},
+            )
+            return
+
+        report_ended = state == "ended"
+        candidate_end = timestamp - end_age if report_ended else 0.0
+        candidate_start = (candidate_end or timestamp) - elapsed
+        clock_id = ""
+        with database() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            mapped = connection.execute(
+                """
+                SELECT c.* FROM combat_clock_clients m
+                JOIN combat_clocks c ON c.clock_id=m.clock_id
+                WHERE m.session_id=? AND m.client_encounter_id=?
+                """,
+                (session["session_id"], client_encounter_id),
+            ).fetchone()
+            clock = mapped
+            if clock is None:
+                candidates = connection.execute(
+                    """
+                    SELECT * FROM combat_clocks
+                    WHERE party_key=? AND target_key=? AND last_seen>=?
+                    ORDER BY last_seen DESC LIMIT 8
+                    """,
+                    (
+                        party_key,
+                        target_key,
+                        timestamp - COMBAT_CLOCK_RETENTION_SECONDS,
+                    ),
+                ).fetchall()
+                best: sqlite3.Row | None = None
+                best_difference = float("inf")
+                for candidate in candidates:
+                    difference = abs(
+                        float(candidate["started_at"]) - candidate_start
+                    )
+                    ended_at = candidate["ended_at"]
+                    if ended_at is None:
+                        eligible = difference <= COMBAT_CLOCK_ACTIVE_MATCH_SECONDS
+                    else:
+                        eligible = bool(
+                            report_ended
+                            and timestamp - float(ended_at)
+                            <= COMBAT_CLOCK_LATE_REPORT_SECONDS
+                            and difference <= COMBAT_CLOCK_ENDED_MATCH_SECONDS
+                            and int(candidate["max_total_damage"] or 0)
+                            == total_damage
+                        )
+                    if eligible and difference < best_difference:
+                        best = candidate
+                        best_difference = difference
+                clock = best
+
+            if clock is None:
+                clock_id = secrets.token_hex(16)
+                initial_end = candidate_end if report_ended else None
+                connection.execute(
+                    """
+                    INSERT INTO combat_clocks(
+                        clock_id, party_key, target_key, started_at, ended_at,
+                        created_at, last_seen, max_total_damage, report_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        clock_id,
+                        party_key,
+                        target_key,
+                        candidate_start,
+                        initial_end,
+                        timestamp,
+                        timestamp,
+                        total_damage,
+                    ),
+                )
+                started_at = candidate_start
+                ended_at = initial_end
+            else:
+                clock_id = str(clock["clock_id"])
+                started_at = float(clock["started_at"])
+                ended_at = (
+                    None
+                    if clock["ended_at"] is None
+                    else float(clock["ended_at"])
+                )
+                if ended_at is None:
+                    # A later peer may have observed the opening packet first.
+                    # Only move the shared start within the strict match window.
+                    if abs(candidate_start - started_at) <= COMBAT_CLOCK_ACTIVE_MATCH_SECONDS:
+                        started_at = min(started_at, candidate_start)
+                    if report_ended:
+                        ended_at = max(started_at + 0.001, candidate_end)
+                connection.execute(
+                    """
+                    UPDATE combat_clocks SET
+                        started_at=?, ended_at=?, last_seen=?,
+                        max_total_damage=MAX(max_total_damage, ?),
+                        report_count=report_count+1
+                    WHERE clock_id=?
+                    """,
+                    (
+                        started_at,
+                        ended_at,
+                        timestamp,
+                        total_damage,
+                        clock_id,
+                    ),
+                )
+
+            connection.execute(
+                """
+                INSERT INTO combat_clock_clients(
+                    session_id, client_encounter_id, clock_id, last_seen, ended
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, client_encounter_id) DO UPDATE SET
+                    last_seen=excluded.last_seen,
+                    ended=MAX(combat_clock_clients.ended, excluded.ended)
+                """,
+                (
+                    session["session_id"],
+                    client_encounter_id,
+                    clock_id,
+                    timestamp,
+                    1 if report_ended else 0,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM combat_clocks WHERE last_seen<?",
+                (timestamp - COMBAT_CLOCK_RETENTION_SECONDS,),
+            )
+
+        effective_end = ended_at if ended_at is not None else timestamp
+        duration = max(1.0, effective_end - started_at)
+        self._json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "synchronized": True,
+                "encounter_id": client_encounter_id,
+                "clock_id": clock_id,
+                "started_at": started_at,
+                "ended_at": ended_at or 0.0,
+                "duration_seconds": duration,
+                "final": ended_at is not None,
+                "server_time": timestamp,
+            },
+        )
 
     def _submit_feedback(self) -> None:
         body = self._body()

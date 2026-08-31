@@ -1299,6 +1299,102 @@ class MonitorServerTests(unittest.TestCase):
         self.assertRegex(feedback.feedback_id, r"^FB[0-9A-F]{16}$")
         licensing.sign_out()
 
+    def test_shared_combat_clock_unifies_two_clients_and_splits_next_pull(self):
+        first_card, second_card = self.create_card(count=2)
+        first = LicensingService(
+            ServerLicensingGateway(
+                self.base_url, "1" * 32, "0.0.14+clock-test", timeout=2
+            )
+        )
+        second = LicensingService(
+            ServerLicensingGateway(
+                self.base_url, "2" * 32, "0.0.14+clock-test", timeout=2
+            )
+        )
+        self.assertTrue(first.sign_in_card(first_card).active)
+        self.assertTrue(second.sign_in_card(second_card).active)
+        common = {
+            "party_key": "a" * 64,
+            "target_key": "b" * 64,
+            "state": "active",
+            "end_age_seconds": 0.0,
+        }
+
+        first_active = first.sync_combat_clock(
+            {
+                **common,
+                "encounter_id": "first-run-000001",
+                "elapsed_seconds": 12.0,
+                "total_damage": 1_000_000,
+            }
+        )
+        second_active = second.sync_combat_clock(
+            {
+                **common,
+                "encounter_id": "second-run-000001",
+                "elapsed_seconds": 13.0,
+                "total_damage": 1_000_000,
+            }
+        )
+        self.assertTrue(first_active.synchronized)
+        self.assertEqual(first_active.clock_id, second_active.clock_id)
+        self.assertFalse(second_active.final)
+
+        first_final = first.sync_combat_clock(
+            {
+                **common,
+                "encounter_id": "first-run-000001",
+                "state": "ended",
+                "elapsed_seconds": 25.0,
+                "end_age_seconds": 0.0,
+                "total_damage": 5_000_000,
+            }
+        )
+        second_final = second.sync_combat_clock(
+            {
+                **common,
+                "encounter_id": "second-run-000001",
+                "state": "ended",
+                "elapsed_seconds": 26.0,
+                "end_age_seconds": 0.0,
+                "total_damage": 5_000_000,
+            }
+        )
+        self.assertTrue(first_final.final)
+        self.assertTrue(second_final.final)
+        self.assertEqual(first_final.clock_id, second_final.clock_id)
+        self.assertEqual(first_final.duration_seconds, second_final.duration_seconds)
+        self.assertEqual(first_final.started_at, second_final.started_at)
+        self.assertEqual(first_final.ended_at, second_final.ended_at)
+
+        next_pull = first.sync_combat_clock(
+            {
+                **common,
+                "encounter_id": "first-run-000002",
+                "elapsed_seconds": 1.0,
+                "total_damage": 10_000,
+            }
+        )
+        self.assertTrue(next_pull.synchronized)
+        self.assertNotEqual(first_final.clock_id, next_pull.clock_id)
+
+    def test_shared_combat_clock_requires_an_authorized_session(self):
+        status, value = self.request(
+            "/api/v1/dps/combat/clock",
+            method="POST",
+            body={
+                "party_key": "a" * 64,
+                "target_key": "b" * 64,
+                "encounter_id": "client-run-000001",
+                "state": "active",
+                "elapsed_seconds": 10.0,
+                "end_age_seconds": 0.0,
+                "total_damage": 100,
+            },
+        )
+        self.assertEqual(status, 403)
+        self.assertFalse(value["authorized"])
+
     def test_weekly_card_tier_is_returned_to_client(self):
         card_key = self.create_card(
             duration_seconds=7 * 86400, note="周卡"

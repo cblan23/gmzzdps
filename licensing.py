@@ -92,6 +92,18 @@ class FeedbackResult:
 
 
 @dataclass(frozen=True)
+class CombatClockResult:
+    synchronized: bool = False
+    encounter_id: str = ""
+    clock_id: str = ""
+    started_at: float = 0.0
+    ended_at: float = 0.0
+    duration_seconds: float = 0.0
+    final: bool = False
+    server_time: float = 0.0
+
+
+@dataclass(frozen=True)
 class UpdateInfo:
     available: bool = False
     latest_version: str = ""
@@ -134,6 +146,10 @@ class LicensingGateway(Protocol):
         character_name: str,
         diagnostics: dict[str, object] | None = None,
     ) -> FeedbackResult: ...
+
+    def sync_combat_clock(
+        self, session: LicenseSession, snapshot: dict[str, object]
+    ) -> CombatClockResult: ...
 
     def redeem_card(self, session: LicenseSession, card_key: str) -> CardRedemption: ...
 
@@ -195,6 +211,12 @@ class LocalLicensingGateway:
     ) -> FeedbackResult:
         del session, category, content, character_name, diagnostics
         return FeedbackResult(False, message="反馈服务需要连接服务器")
+
+    def sync_combat_clock(
+        self, session: LicenseSession, snapshot: dict[str, object]
+    ) -> CombatClockResult:
+        del session, snapshot
+        return CombatClockResult()
 
     def redeem_card(self, session: LicenseSession, card_key: str) -> CardRedemption:
         del session, card_key
@@ -473,6 +495,41 @@ class ServerLicensingGateway:
             ),
         )
 
+    def sync_combat_clock(
+        self, session: LicenseSession, snapshot: dict[str, object]
+    ) -> CombatClockResult:
+        if not session.access_token:
+            return CombatClockResult()
+        value = self._request(
+            "/api/v1/dps/combat/clock",
+            dict(snapshot),
+            access_token=session.access_token,
+            allow_forbidden=True,
+        )
+        if not value.get("synchronized"):
+            return CombatClockResult(
+                encounter_id=str(snapshot.get("encounter_id", ""))[:96]
+            )
+        try:
+            started_at = max(0.0, float(value.get("started_at", 0.0) or 0.0))
+            ended_at = max(0.0, float(value.get("ended_at", 0.0) or 0.0))
+            duration = max(
+                1.0, float(value.get("duration_seconds", 0.0) or 0.0)
+            )
+            server_time = max(0.0, float(value.get("server_time", 0.0) or 0.0))
+        except (TypeError, ValueError, OverflowError):
+            return CombatClockResult()
+        return CombatClockResult(
+            synchronized=True,
+            encounter_id=str(value.get("encounter_id", "")).strip()[:96],
+            clock_id=str(value.get("clock_id", "")).strip()[:64],
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_seconds=duration,
+            final=bool(value.get("final")),
+            server_time=server_time,
+        )
+
     def redeem_card(self, session: LicenseSession, card_key: str) -> CardRedemption:
         del session, card_key
         return CardRedemption(False, "卡密服务尚未启用")
@@ -669,6 +726,11 @@ class LicensingService:
             character_name=character_name,
             diagnostics=diagnostics,
         )
+
+    def sync_combat_clock(
+        self, snapshot: dict[str, object]
+    ) -> CombatClockResult:
+        return self.gateway.sync_combat_clock(self.session, snapshot)
 
     def check_update(self) -> UpdateInfo:
         return self.gateway.check_update()

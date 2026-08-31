@@ -1,4 +1,5 @@
 import struct
+import time
 import unittest
 from unittest.mock import patch
 
@@ -32,6 +33,7 @@ from network_capture import (
     build_message_stub,
     parse_message_record,
 )
+from network_state import NetworkPacketParser
 
 
 class BossTypeCaptureTests(unittest.TestCase):
@@ -407,6 +409,138 @@ class BossTypeCaptureTests(unittest.TestCase):
 
         full_scan.assert_called_once_with({first_target})
         self.assertEqual(updates[0]["entity_id"], recovered_boss)
+
+    def test_target_boss_lookup_is_disabled_by_default(self):
+        hook = DamageHook(pid=1234)
+        hook.pending_target_boss_lookups[4_642_860_057_279] = (
+            time.monotonic()
+        )
+
+        with patch("damage_hook.read_region") as read:
+            self.assertEqual(hook._resolve_target_boss_lookups(), [])
+
+        self.assertFalse(hook.target_boss_lookup_enabled)
+        read.assert_not_called()
+
+    def test_target_lookup_delays_zero_template_then_recovers_first_karl(self):
+        component = 0x0000_0003_C369_5890
+        target_id = 4_642_860_057_279
+        raw = bytearray(BOSS_TEMPLATE_ID_OFFSET + 4)
+        struct.pack_into("<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET, target_id)
+        raw[BOSS_TYPE_FIELD_OFFSET] = 0
+        hook = DamageHook(pid=1234, target_boss_lookup_enabled=True)
+        hook.process = 99
+        hook._remember_common_component_record(
+            {
+                "component": component,
+                "entity_id": target_id,
+                "boss_type": 0,
+                "template_id": 0,
+            }
+        )
+        hook.pending_target_boss_lookups[target_id] = time.monotonic()
+
+        with patch("damage_hook.read_region", return_value=bytes(raw)):
+            self.assertEqual(hook._resolve_target_boss_lookups(), [])
+        self.assertIn(target_id, hook.pending_target_boss_lookups)
+
+        struct.pack_into("<I", raw, BOSS_TEMPLATE_ID_OFFSET, 7_107_030)
+        hook._last_target_boss_lookup_poll = 0.0
+        with patch("damage_hook.read_region", return_value=bytes(raw)):
+            updates = hook._resolve_target_boss_lookups()
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]["entity_id"], target_id)
+        self.assertEqual(updates[0]["template_id"], 7_107_030)
+        self.assertEqual(updates[0]["boss_type"], 0)
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7107030": {
+                    "boss_type": 0,
+                    "name": "卡尔·埃德加",
+                    "level": 60,
+                }
+            }
+        )
+        parsed = parser.process_native_boss_type(updates[0])
+        profile = next(value for kind, value in parsed if kind == "profile")
+        self.assertEqual(profile["entity_type"], "Boss")
+        self.assertEqual(profile["template_id"], 7_107_030)
+
+    def test_target_lookup_small_monster_template_fails_closed(self):
+        target_id = 4_642_860_057_280
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7107030": {"boss_type": 0, "name": "卡尔·埃德加"}
+            }
+        )
+        updates = parser.process_native_boss_type(
+            {
+                "function": "CommonComponent_TargetIdLookup",
+                "entity_id": target_id,
+                "template_id": 7_000_001,
+                "boss_type": 3,
+                "target_id_lookup": True,
+            }
+        )
+
+        self.assertEqual(updates, [])
+        self.assertNotIn(target_id, parser.confirmed_boss_entities)
+
+    def test_target_lookup_object_index_runs_once_for_multiple_targets(self):
+        observed_component = 0x0000_0003_C369_5000
+        indexed_component = observed_component + 0x1000
+        common_class = 0x0000_0001_5000_1000
+        observed_entity = 4_642_860_050_000
+        first_target = observed_entity + 1
+        second_target = observed_entity + 2
+        third_target = observed_entity + 3
+        raw = bytearray(BOSS_TEMPLATE_ID_OFFSET + 4)
+        struct.pack_into("<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET, first_target)
+        raw[BOSS_TYPE_FIELD_OFFSET] = 0
+        struct.pack_into("<I", raw, BOSS_TEMPLATE_ID_OFFSET, 7_107_030)
+        hook = DamageHook(pid=1234, target_boss_lookup_enabled=True)
+        hook.process = 99
+        hook._remember_common_component_record(
+            {
+                "component": observed_component,
+                "entity_id": observed_entity,
+                "boss_type": 0,
+                "template_id": 0,
+            }
+        )
+        now = time.monotonic()
+        hook.pending_target_boss_lookups = {
+            first_target: now,
+            second_target: now,
+        }
+        object_walks = 0
+
+        def iter_objects():
+            nonlocal object_walks
+            object_walks += 1
+            return iter((indexed_component,))
+
+        def fake_read(_process, address, size):
+            if size == 8 and address in {
+                observed_component + 0x10,
+                indexed_component + 0x10,
+            }:
+                return struct.pack("<Q", common_class)
+            if address == indexed_component and size == len(raw):
+                return bytes(raw)
+            return None
+
+        hook._iter_live_object_pointers = iter_objects
+        with patch("damage_hook.read_region", side_effect=fake_read):
+            updates = hook._resolve_target_boss_lookups()
+            hook.pending_target_boss_lookups[third_target] = time.monotonic()
+            hook._last_target_boss_lookup_poll = 0.0
+            hook._resolve_target_boss_lookups()
+
+        self.assertEqual(updates[0]["entity_id"], first_target)
+        self.assertEqual(object_walks, 1)
+        self.assertEqual(hook.target_boss_object_scan_count, 1)
 
     def test_local_controlled_entity_refreshes_after_transformation(self):
         hook = DamageHook(pid=1234)

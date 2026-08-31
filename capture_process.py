@@ -406,7 +406,26 @@ def _capture_forever(stop_event, output_queue, watchdog: ParentProcessWatchdog) 
                 {
                     "session_id": session_id,
                     "game_pid": game_pid,
+                    "network_hook_adopted": bool(
+                        getattr(network_hook, "adopted", False)
+                    ),
                     "native_damage_hook_installed": native_hook is not None,
+                    "native_damage_hook_adopted": bool(
+                        native_hook is not None
+                        and getattr(native_hook, "adopted", False)
+                    ),
+                    "native_name_hook_installed": bool(
+                        native_hook is not None
+                        and getattr(native_hook, "name_installed", False)
+                    ),
+                    "native_boss_type_hook_installed": bool(
+                        native_hook is not None
+                        and getattr(native_hook, "boss_type_installed", False)
+                    ),
+                    "native_boss_init_hook_installed": bool(
+                        native_hook is not None
+                        and getattr(native_hook, "boss_init_installed", False)
+                    ),
                     "team_stats_hook_installed": team_hook is not None,
                     "damage_source": (
                         "native" if native_hook is not None else "script"
@@ -647,10 +666,23 @@ class CaptureProcessClient:
         if self.process.is_alive():
             self.process.terminate()
 
-    def close(self) -> None:
+    def close(self, *, wait_for_queue: bool = True) -> None:
+        """Release parent-side IPC resources after the child has exited.
+
+        Normal application shutdown waits for a local queue feeder, preserving
+        the existing lossless behavior. Short-lived consumers such as the
+        diagnostic tool can opt out: they only read this queue, and waiting for
+        multiprocessing's feeder finalizer can otherwise stall the transition
+        from capture cleanup to report upload on some Windows systems.
+        """
         try:
+            if not wait_for_queue:
+                cancel_join = getattr(self.output_queue, "cancel_join_thread", None)
+                if callable(cancel_join):
+                    cancel_join()
             self.output_queue.close()
-            self.output_queue.join_thread()
+            if wait_for_queue:
+                self.output_queue.join_thread()
         finally:
             close_process = getattr(self.process, "close", None)
             if callable(close_process) and not self.process.is_alive():

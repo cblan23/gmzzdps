@@ -1,5 +1,5 @@
 param(
-    [string]$OutputDirectory = "dist",
+    [string]$OutputDirectory = "diagnostic-dist",
     [string]$OutputFilename = ""
 )
 
@@ -8,14 +8,8 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python = Join-Path $ProjectDir ".venv-build310\Scripts\python.exe"
 $CapstoneDll = Join-Path $ProjectDir ".venv-build310\Lib\site-packages\capstone\lib\capstone.dll"
-$ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)"
-$DisplayName = "$ProductName Dps-Logs"
-$Description = "$DisplayName $([char]0x56E2)$([char]0x961F)$([char]0x4F24)$([char]0x5BB3)$([char]0x7EDF)$([char]0x8BA1)"
-$OutputName = if ($OutputFilename) {
-    $OutputFilename
-} else {
-    "$ProductName-Dps-Logs-v0.0.14.exe"
-}
+$ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)$([char]0x95EE)$([char]0x9898)$([char]0x68C0)$([char]0x6D4B)$([char]0x5DE5)$([char]0x5177)"
+$OutputName = if ($OutputFilename) { $OutputFilename } else { "$ProductName.exe" }
 $OutputDirectoryPath = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
     [System.IO.Path]::GetFullPath($OutputDirectory)
 } else {
@@ -49,18 +43,16 @@ try {
         --windows-icon-from-ico=assets/app_icon.ico `
         --include-package=capstone `
         --include-data-files=$CapstoneDll=capstone/lib/capstone.dll `
-        --include-data-dir=assets=assets `
-        --include-data-files=skill_names.json=skill_names.json `
-        --include-data-files=skill_metadata.json=skill_metadata.json `
+        --include-data-files=assets/app_icon.ico=assets/app_icon.ico `
         --include-data-files=monster_metadata.json=monster_metadata.json `
         --include-data-files=boss_allowlist.txt=boss_allowlist.txt `
         --include-data-files=cacert.pem=cacert.pem `
-        --file-version=0.0.14.0 `
-        --product-version=0.0.14.0 `
-        --product-name="$DisplayName" `
-        --file-description=$Description `
-        --copyright=$ProductName `
-        dps_meter.pyw
+        --file-version=1.0.1.0 `
+        --product-version=1.0.1.0 `
+        --product-name="$ProductName" `
+        --file-description="$ProductName" `
+        --copyright="$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)" `
+        diagnostic_tool.pyw
 
     if ($LASTEXITCODE -ne 0) {
         throw "Nuitka build failed with exit code $LASTEXITCODE"

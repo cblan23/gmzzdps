@@ -476,6 +476,150 @@ class CombatModelTests(unittest.TestCase):
             layered_original,
         )
 
+    def test_window_lock_temporarily_forces_topmost_and_restores_preference(self):
+        class FakeRoot:
+            def __init__(self, topmost):
+                self.topmost = topmost
+                self.lift_calls = 0
+                self.focus_calls = 0
+
+            def attributes(self, name, *values):
+                self.assert_attribute_name(name)
+                if values:
+                    self.topmost = bool(values[0])
+                return self.topmost
+
+            @staticmethod
+            def assert_attribute_name(name):
+                if name != "-topmost":
+                    raise AssertionError(name)
+
+            @staticmethod
+            def winfo_exists():
+                return True
+
+            @staticmethod
+            def state():
+                return "normal"
+
+            def lift(self):
+                self.lift_calls += 1
+
+            def focus_force(self):
+                self.focus_calls += 1
+
+        def make_window(topmost):
+            window = object.__new__(DpsWindow)
+            window.root = FakeRoot(topmost)
+            window.config = {"topmost": topmost}
+            window.closing = False
+            window.window_locked = True
+            window.window_lock_topmost_restore = None
+            window.main_content_overlay_window = None
+            window.main_content_overlay_topmost = None
+            window._apply_main_transparency = lambda: None
+            window._set_window_click_through = lambda _root, _locked: True
+            window._show_unlock_window = lambda: None
+            window._destroy_unlock_window = lambda: None
+            window._sync_action_buttons = lambda: None
+            window._draw_main_header = lambda: None
+            return window
+
+        window = make_window(False)
+        window._apply_window_lock_state()
+        self.assertTrue(window.root.topmost)
+        self.assertFalse(window.window_lock_topmost_restore)
+        self.assertFalse(window.config["topmost"])
+
+        window.model = mock.Mock(runtime_skill_names={})
+        window.hide_names = False
+        window.show_total_damage = True
+        window.show_dps = True
+        window.show_damage_share = True
+        window.show_critical_rate = True
+        window.ui_font_size = 10
+        window.window_alpha = 0.85
+        window.history_window = None
+        window._remember_root_geometry = lambda: None
+        with mock.patch.dict(
+            DpsWindow._save_preferences.__globals__,
+            {"save_config": lambda _config: None},
+        ):
+            window._save_preferences()
+        self.assertFalse(window.config["topmost"])
+
+        window.window_locked = False
+        window._apply_window_lock_state()
+        self.assertFalse(window.root.topmost)
+        self.assertIsNone(window.window_lock_topmost_restore)
+        self.assertEqual(window.root.lift_calls, 1)
+        self.assertEqual(window.root.focus_calls, 1)
+
+        pinned = make_window(True)
+        pinned._apply_window_lock_state()
+        pinned.window_locked = False
+        pinned._apply_window_lock_state()
+        self.assertTrue(pinned.root.topmost)
+        self.assertEqual(pinned.root.lift_calls, 1)
+
+        startup_locked = make_window(True)
+        startup_locked.config["topmost"] = False
+        startup_locked.window_lock_topmost_restore = False
+        startup_locked._apply_window_lock_state()
+        startup_locked.window_locked = False
+        startup_locked._apply_window_lock_state()
+        self.assertFalse(startup_locked.root.topmost)
+
+    def test_action_button_hover_survives_periodic_state_sync(self):
+        class FakeButton:
+            def __init__(self, icon_name):
+                self._icon_name = icon_name
+                self._description = ""
+                self._normal_color = MODULE["TEXT"]
+                self._disabled = False
+                self._hovered = False
+                self.options = {}
+                self.image = None
+
+            @staticmethod
+            def winfo_exists():
+                return True
+
+            def configure(self, **options):
+                self.options.update(options)
+
+        class FakeIcons:
+            @staticmethod
+            def toolbar(icon_name, size, color):
+                return icon_name, size, color
+
+        window = object.__new__(DpsWindow)
+        window.icons = FakeIcons()
+        window.window_locked = False
+        window.hide_names = False
+        window.lock_button = FakeButton("unlock")
+        window.privacy_button = FakeButton("eye")
+        window.reset_button = FakeButton("reset")
+        window.pin_button = None
+        window.compact_button = None
+        window.model = mock.Mock()
+        window.model.combat_in_progress.return_value = False
+        window._hide_main_tooltip = lambda: None
+
+        buttons = (
+            window.reset_button,
+            window.privacy_button,
+            window.lock_button,
+        )
+        for button in buttons:
+            window._main_icon_enter(button)
+        window._sync_action_buttons()
+
+        for button in buttons:
+            self.assertTrue(button._hovered)
+            self.assertEqual(button.options["bg"], MODULE["PANEL_2"])
+            self.assertEqual(button.image[2], MODULE["ACCENT"])
+
     def test_membership_label_follows_server_card_tier(self):
         self.assertEqual(membership_label_for_card_tier("partner"), "莫雪的小伙伴")
         self.assertEqual(membership_label_for_card_tier("monthly"), "VVVVVIP用户")
@@ -1366,8 +1510,9 @@ class CombatModelTests(unittest.TestCase):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(APP_VERSION, "0.0.13")
-        self.assertEqual(CLIENT_BUILD, "0.0.13+20260831.5")
+        self.assertEqual(APP_VERSION, "0.0.14")
+        self.assertEqual(CLIENT_BUILD, "0.0.14+20260831.2")
+        self.assertIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
         self.assertIn('(\"反馈\", self._feedback_selected_history)', source)
@@ -1599,6 +1744,27 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn("dps", without_dps)
         self.assertEqual(set(columns) - {"dps"}, set(without_dps))
 
+    def test_history_columns_follow_main_dps_visibility_settings(self):
+        window = object.__new__(DpsWindow)
+        window.show_total_damage = True
+        window.show_dps = True
+        window.show_damage_share = True
+        window.show_critical_rate = True
+
+        columns = window._history_participant_columns(720)
+        self.assertLess(columns["damage"], columns["dps"])
+        self.assertLess(columns["dps"], columns["share"])
+        self.assertLess(columns["share"], columns["critical"])
+
+        window.show_total_damage = False
+        window.show_damage_share = False
+        window.show_critical_rate = False
+        dps_only = window._history_participant_columns(720)
+        self.assertIn("dps", dps_only)
+        self.assertNotIn("damage", dps_only)
+        self.assertNotIn("share", dps_only)
+        self.assertNotIn("critical", dps_only)
+
     def test_transparency_overlay_does_not_duplicate_empty_damage_message(self):
         class Canvas:
             def __init__(self):
@@ -1788,6 +1954,7 @@ class CombatModelTests(unittest.TestCase):
         class Canvas:
             def __init__(self):
                 self.images = []
+                self.texts = []
 
             @staticmethod
             def winfo_width():
@@ -1805,9 +1972,8 @@ class CombatModelTests(unittest.TestCase):
             def create_rectangle(*_args, **_kwargs):
                 return None
 
-            @staticmethod
-            def create_text(*_args, **_kwargs):
-                return None
+            def create_text(self, *args, **kwargs):
+                self.texts.append((args, kwargs))
 
             def create_image(self, *args, **kwargs):
                 self.images.append((args, kwargs))
@@ -1833,16 +1999,25 @@ class CombatModelTests(unittest.TestCase):
             "name": "莫雪",
             "profession_id": 1_200_003,
             "damage": 123_456,
+            "dps": 12_345,
             "share": 1.0,
         }
         window = object.__new__(DpsWindow)
         window.history_participant_canvas = Canvas()
         window.history_selected_actor = SELF_ID
         window.hide_names = False
+        window.show_total_damage = False
+        window.show_dps = True
+        window.show_damage_share = False
+        window.show_critical_rate = False
         window.icons = Icons()
-        window._selected_history_record = lambda: {"participants": [participant]}
+        window._selected_history_record = lambda: {
+            "duration_seconds": 10,
+            "participants": [participant],
+        }
         window._profession_info = lambda _class_id: ("", "#4fd1c5")
         window._ui_font = lambda _kind: ("Microsoft YaHei UI", 9)
+        window._fit_main_actor_name = lambda value, _maximum: value
 
         window._draw_history_participants()
 
@@ -1852,6 +2027,12 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(image_args, (34, 7))
         self.assertEqual(image_options["image"], "profession:1200003:20")
         self.assertEqual(image_options["tags"], ("history-actor:0",))
+        rendered_text = [
+            options.get("text")
+            for _args, options in window.history_participant_canvas.texts
+        ]
+        self.assertIn("12,345", rendered_text)
+        self.assertNotIn("123,456", rendered_text)
 
     def test_history_share_uses_two_decimal_w_dps_and_expands_collisions(self):
         record = {

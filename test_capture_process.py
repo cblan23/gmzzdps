@@ -10,7 +10,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from capture_process import NetworkPoller, collect_native_records
+from capture_process import CaptureProcessClient, NetworkPoller, collect_native_records
 
 
 def _ipc_pressure_producer(output_queue, total: int, batch_size: int) -> None:
@@ -92,6 +92,36 @@ class _NativeHook:
 
 
 class CaptureProcessTests(unittest.TestCase):
+    def test_reader_can_close_without_waiting_for_queue_feeder(self):
+        events: list[str] = []
+
+        class OutputQueue:
+            def cancel_join_thread(self) -> None:
+                events.append("cancel_join")
+
+            def close(self) -> None:
+                events.append("queue_close")
+
+            def join_thread(self) -> None:
+                raise AssertionError("non-blocking close must not join the feeder")
+
+        class Process:
+            @staticmethod
+            def is_alive() -> bool:
+                return False
+
+            @staticmethod
+            def close() -> None:
+                events.append("process_close")
+
+        client = object.__new__(CaptureProcessClient)
+        client.output_queue = OutputQueue()
+        client.process = Process()
+
+        client.close(wait_for_queue=False)
+
+        self.assertEqual(events, ["cancel_join", "queue_close", "process_close"])
+
     def test_native_rings_keep_existing_poll_order(self):
         calls: list[str] = []
         records, error = collect_native_records(_NativeHook(calls))

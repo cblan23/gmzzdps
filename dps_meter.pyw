@@ -118,8 +118,8 @@ MONSTER_NAME_CACHE_PATH = DATA_DIR / "monster_name_cache.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
-APP_VERSION = "0.0.13"
-CLIENT_BUILD = "0.0.13+20260831.5"
+APP_VERSION = "0.0.14"
+CLIENT_BUILD = "0.0.14+20260831.2"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
 UI_BRAND = APP_NAME
 BG = "#08090b"
@@ -6179,6 +6179,9 @@ class DpsWindow:
 
     def __init__(self):
         self.config = load_config()
+        # The redesigned window has no pin toggle.  A legacy false value makes
+        # the meter fall behind the game as soon as the game receives focus.
+        self.config["topmost"] = True
         self.metadata = load_skill_metadata()
         self.professions = (
             self.metadata.get("professions", {})
@@ -6252,6 +6255,11 @@ class DpsWindow:
             self.config.get("show_critical_rate", True)
         )
         self.window_locked = bool(self.config.get("window_locked", False))
+        self.window_lock_topmost_restore: bool | None = (
+            bool(self.config.get("topmost", True))
+            if self.window_locked
+            else None
+        )
         self.unlock_window: tk.Toplevel | None = None
         self.unlock_button: tk.Label | None = None
         self.window_lock_original_styles: dict[int, int] = {}
@@ -6393,7 +6401,10 @@ class DpsWindow:
             MINI_MIN_WIDTH if self.compact_mode else MAIN_MIN_WIDTH,
             MINI_MIN_HEIGHT if self.compact_mode else MAIN_MIN_HEIGHT,
         )
-        self.root.attributes("-topmost", bool(self.config.get("topmost", True)))
+        self.root.attributes(
+            "-topmost",
+            self.window_locked or bool(self.config.get("topmost", True)),
+        )
         self.root.attributes("-alpha", self.window_alpha)
         self.root.overrideredirect(True)
         self._initialize_ui_fonts()
@@ -7297,6 +7308,37 @@ class DpsWindow:
         self.unlock_window = None
         self.unlock_button = None
 
+    def _preferred_main_topmost(self) -> bool:
+        restore = getattr(self, "window_lock_topmost_restore", None)
+        if restore is not None:
+            return bool(restore)
+        return bool(self.root.attributes("-topmost"))
+
+    def _set_main_topmost(self, value: bool) -> None:
+        value = bool(value)
+        self.root.attributes("-topmost", value)
+        window = getattr(self, "main_content_overlay_window", None)
+        if window is not None and window.winfo_exists():
+            if self._set_window_topmost_noactivate(window, value):
+                self.main_content_overlay_topmost = value
+
+    def _force_main_topmost_while_locked(self) -> None:
+        if self.window_lock_topmost_restore is None:
+            self.window_lock_topmost_restore = bool(
+                self.root.attributes("-topmost")
+            )
+        self.config["topmost"] = self.window_lock_topmost_restore
+        self._set_main_topmost(True)
+
+    def _restore_main_topmost_after_unlock(self) -> bool:
+        restore = self.window_lock_topmost_restore
+        if restore is None:
+            return False
+        self._set_main_topmost(restore)
+        self.config["topmost"] = bool(restore)
+        self.window_lock_topmost_restore = None
+        return True
+
     def _sync_unlock_window_position(self) -> None:
         window = self.unlock_window
         if (
@@ -7376,6 +7418,11 @@ class DpsWindow:
     def _apply_window_lock_state(self) -> None:
         if self.closing or not self.root.winfo_exists():
             return
+        restored_after_unlock = False
+        if self.window_locked:
+            self._force_main_topmost_while_locked()
+        else:
+            restored_after_unlock = self._restore_main_topmost_after_unlock()
         # Tk may rewrite WS_EX_LAYERED when applying alpha. Apply opacity first,
         # then make click-through the final native style operation.
         self._apply_main_transparency()
@@ -7392,6 +7439,9 @@ class DpsWindow:
                 )
         else:
             self._destroy_unlock_window()
+            if restored_after_unlock and self.root.state() == "normal":
+                self.root.lift()
+                self.root.focus_force()
         self._sync_action_buttons()
         self._draw_main_header()
 
@@ -7700,6 +7750,7 @@ class DpsWindow:
         label._description = description
         label._icon_name = icon_name
         label._normal_color = TEXT
+        label._hovered = False
         label.bind(
             "<Enter>",
             lambda _event: self._main_icon_enter(label),
@@ -7725,15 +7776,25 @@ class DpsWindow:
         button.configure(image=image, bg=background)
         button.image = image
 
+    def _sync_main_icon_button_visual(self, button: tk.Label) -> None:
+        hovered = bool(getattr(button, "_hovered", False)) and not bool(
+            getattr(button, "_disabled", False)
+        )
+        self._render_main_icon_button(
+            button,
+            ACCENT if hovered else button._normal_color,
+            PANEL_2 if hovered else BG,
+        )
+
     def _main_icon_enter(self, button: tk.Label) -> None:
-        if getattr(button, "_disabled", False):
-            return
-        self._render_main_icon_button(button, ACCENT, PANEL_2)
+        button._hovered = True
+        self._sync_main_icon_button_visual(button)
         self._hide_main_tooltip()
 
     def _main_icon_leave(self, button: tk.Label) -> None:
+        button._hovered = False
         self._hide_main_tooltip()
-        self._render_main_icon_button(button, button._normal_color, BG)
+        self._sync_main_icon_button_visual(button)
 
     def _show_main_tooltip(self, button: tk.Label) -> None:
         # Icon hover is rendered in-place.  Extra tooltip windows are avoided
@@ -9712,6 +9773,16 @@ class DpsWindow:
         content.pack(fill="both", expand=True, padx=40, pady=(0, 26))
         releases = (
             (
+                "v0.0.14",
+                "• 修复部分用户锁定后主窗口被游戏覆盖、只剩解锁按钮的问题\n"
+                "• 锁定期间保持主窗口可见，解锁后恢复原来的置顶设置\n"
+                "• 修复点击解锁后主窗口没有立即回到前台的问题\n"
+                "• 修复程序重启或从托盘恢复时已锁定窗口层级异常\n"
+                "• 修复刷新/清空、隐藏名称、锁定按钮缺少悬停反馈的问题\n"
+                "• 修复旧配置导致点击游戏后主窗口被盖住的问题\n"
+                "• 历史团队排行新增秒伤，并跟随 DPS 设置显示对应列",
+            ),
+            (
                 "v0.0.13",
                 "• 根除小怪密集场景的重复扫描、同步等待和无关消息开销\n"
                 "• 新增主窗口透明度与新版字体、透明度滑杆\n"
@@ -10390,13 +10461,21 @@ class DpsWindow:
         self._draw_history_skills()
 
     def _history_participant_columns(self, width: int) -> dict[str, int]:
-        return {
+        enabled = list(self._enabled_main_metrics())
+        right_edge = max(100, width - 16)
+        name_ratio = 0.52 if len(enabled) <= 2 else 0.42
+        name_limit = min(right_edge, max(100, int(width * name_ratio)))
+        columns = {
             "rank": 20,
             "name": 58,
-            "damage": int(width * 0.65),
-            "share": int(width * 0.82),
-            "critical": width - 16,
+            "name_limit": name_limit,
         }
+        if not enabled:
+            return columns
+        step = max(1, (right_edge - name_limit) / len(enabled))
+        for index, key in enumerate(enabled, start=1):
+            columns[key] = int(name_limit + step * index)
+        return columns
 
     def _draw_history_participant_header(self) -> None:
         canvas = self.history_participant_header_canvas
@@ -10408,9 +10487,6 @@ class DpsWindow:
         for text, x, anchor in (
             ("排名", columns["rank"], "w"),
             ("玩家名称", columns["name"], "w"),
-            ("总伤害", columns["damage"], "e"),
-            ("占比", columns["share"], "e"),
-            ("暴击率", columns["critical"], "e"),
         ):
             canvas.create_text(
                 x,
@@ -10418,6 +10494,23 @@ class DpsWindow:
                 text=text,
                 fill=MUTED,
                 anchor=anchor,
+                font=self._ui_font("small"),
+            )
+        captions = {
+            "damage": "总伤害",
+            "dps": "秒伤",
+            "share": "占比",
+            "critical": "暴击率",
+        }
+        for key in ("damage", "dps", "share", "critical"):
+            if key not in columns:
+                continue
+            canvas.create_text(
+                columns[key],
+                15,
+                text=captions[key],
+                fill=MUTED,
+                anchor="e",
                 font=self._ui_font("small"),
             )
 
@@ -10450,6 +10543,12 @@ class DpsWindow:
             default=0,
         )
         columns = self._history_participant_columns(width)
+        try:
+            duration = max(
+                0.0, float(record.get("duration_seconds", 0.0) or 0.0)
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            duration = 0.0
         row_height = 34
         for index, participant in enumerate(participants):
             top = index * row_height
@@ -10496,30 +10595,30 @@ class DpsWindow:
             canvas.create_text(
                 columns["name"],
                 top + 17,
-                text=self._history_actor_name(participant, index, self.hide_names),
+                text=self._fit_main_actor_name(
+                    self._history_actor_name(participant, index, self.hide_names),
+                    max(40, columns["name_limit"] - columns["name"] - 8),
+                ),
                 fill=TEXT,
                 anchor="w",
                 font=self._ui_font("strong"),
                 tags=(tag,),
             )
-            canvas.create_text(
-                columns["damage"],
-                top + 17,
-                text=format_number(participant.get("damage", 0)),
-                fill=TEXT,
-                anchor="e",
-                font=self._ui_font("number_strong"),
-                tags=(tag,),
-            )
-            canvas.create_text(
-                columns["share"],
-                top + 17,
-                text=f"{share * 100:.1f}%",
-                fill=TEXT,
-                anchor="e",
-                font=self._ui_font("number"),
-                tags=(tag,),
-            )
+            try:
+                damage = max(
+                    0.0, float(participant.get("damage", 0.0) or 0.0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                damage = 0.0
+            try:
+                raw_dps = participant.get("dps")
+                dps = (
+                    max(0.0, float(raw_dps))
+                    if raw_dps is not None
+                    else (damage / duration if duration else 0.0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                dps = damage / duration if duration else 0.0
             critical_rate = participant.get("critical_rate")
             try:
                 critical_text = (
@@ -10529,15 +10628,26 @@ class DpsWindow:
                 )
             except (TypeError, ValueError, OverflowError):
                 critical_text = "--"
-            canvas.create_text(
-                columns["critical"],
-                top + 17,
-                text=critical_text,
-                fill=TEXT,
-                anchor="e",
-                font=self._ui_font("number"),
-                tags=(tag,),
-            )
+            values = {
+                "damage": format_number(damage),
+                "dps": format_number(dps),
+                "share": f"{share * 100:.1f}%",
+                "critical": critical_text,
+            }
+            for key in ("damage", "dps", "share", "critical"):
+                if key not in columns:
+                    continue
+                canvas.create_text(
+                    columns[key],
+                    top + 17,
+                    text=values[key],
+                    fill=TEXT,
+                    anchor="e",
+                    font=self._ui_font(
+                        "number_strong" if key == "damage" else "number"
+                    ),
+                    tags=(tag,),
+                )
             canvas.tag_bind(
                 tag,
                 "<Button-1>",
@@ -11186,9 +11296,7 @@ class DpsWindow:
             self.lock_button._icon_name = "lock" if self.window_locked else "unlock"
             self.lock_button._description = "解锁" if self.window_locked else "锁定"
             self.lock_button._normal_color = ACCENT if self.window_locked else TEXT
-            self._render_main_icon_button(
-                self.lock_button, self.lock_button._normal_color
-            )
+            self._sync_main_icon_button_visual(self.lock_button)
         if (
             getattr(self, "privacy_button", None) is not None
             and self.privacy_button.winfo_exists()
@@ -11198,15 +11306,13 @@ class DpsWindow:
                 "显示名称" if self.hide_names else "隐藏名称"
             )
             self.privacy_button._normal_color = ACCENT if self.hide_names else TEXT
-            self._render_main_icon_button(
-                self.privacy_button, self.privacy_button._normal_color
-            )
+            self._sync_main_icon_button_visual(self.privacy_button)
         if (
             getattr(self, "pin_button", None) is not None
             and self.pin_button.winfo_exists()
         ):
             self.pin_button.configure(
-                fg=ACCENT if bool(self.root.attributes("-topmost")) else MUTED
+                fg=ACCENT if self._preferred_main_topmost() else MUTED
             )
         if (
             getattr(self, "compact_button", None) is not None
@@ -11214,7 +11320,7 @@ class DpsWindow:
         ):
             self.compact_button._description = "迷你模式"
             self.compact_button._normal_color = TEXT
-            self._render_main_icon_button(self.compact_button, TEXT)
+            self._sync_main_icon_button_visual(self.compact_button)
         reset_disabled = self.model.combat_in_progress()
         if (
             getattr(self, "reset_button", None) is not None
@@ -11225,9 +11331,7 @@ class DpsWindow:
             self.reset_button.configure(
                 cursor="arrow" if reset_disabled else "hand2"
             )
-            self._render_main_icon_button(
-                self.reset_button, self.reset_button._normal_color
-            )
+            self._sync_main_icon_button_visual(self.reset_button)
 
     def _sync_expiry_label(self) -> None:
         if (
@@ -12144,22 +12248,16 @@ class DpsWindow:
         self._draw_history_participants()
 
     def toggle_topmost(self) -> None:
-        value = not bool(self.root.attributes("-topmost"))
-        self.root.attributes("-topmost", value)
+        if getattr(self, "window_locked", False):
+            return
+        value = not self._preferred_main_topmost()
+        self._set_main_topmost(value)
         if self.skill_window is not None and self.skill_window.winfo_exists():
             self.skill_window.attributes("-topmost", value)
         if self.history_window is not None and self.history_window.winfo_exists():
             self.history_window.attributes("-topmost", value)
         if self.feedback_window is not None and self.feedback_window.winfo_exists():
             self.feedback_window.attributes("-topmost", value)
-        if (
-            self.main_content_overlay_window is not None
-            and self.main_content_overlay_window.winfo_exists()
-        ):
-            if self._set_window_topmost_noactivate(
-                self.main_content_overlay_window, value
-            ):
-                self.main_content_overlay_topmost = value
         self._sync_action_buttons()
         self._save_preferences()
 
@@ -12584,7 +12682,7 @@ class DpsWindow:
         self.config["window_locked"] = self.window_locked
         self.config["layout_version"] = 15
         self.config["compact_layout_version"] = 3
-        self.config["topmost"] = bool(self.root.attributes("-topmost"))
+        self.config["topmost"] = self._preferred_main_topmost()
         self.config["alpha"] = self.window_alpha
         self._remember_root_geometry()
         if self.history_window is not None and self.history_window.winfo_exists():

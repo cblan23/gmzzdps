@@ -43,6 +43,9 @@ MAX_CARD_BATCH = 500
 CARD_REBIND_COOLDOWN_SECONDS = 12 * 60 * 60
 MAX_FEEDBACK_CONTENT = 2000
 MAX_FEEDBACK_DIAGNOSTICS_BYTES = 384 * 1024
+MAX_DIAGNOSTIC_REPORT_BYTES = 192 * 1024
+MAX_DIAGNOSTIC_REPORTS_PER_HOUR = 6
+DIAGNOSTIC_TOOL_NAME = "叨叨诡秘问题检测工具"
 UPDATE_METADATA_PATH = Path(
     os.environ.get(
         "GMZZ_MONITOR_UPDATE_METADATA",
@@ -56,6 +59,7 @@ FEEDBACK_CATEGORIES = {
     "team": "队伍成员",
     "ui": "界面显示",
     "connection": "登录或连接",
+    "diagnostic": "问题检测",
     "other": "其他问题",
 }
 CARD_TYPES = {
@@ -98,6 +102,14 @@ def version_tuple(value: object) -> tuple[int, ...]:
     if not re.fullmatch(r"\d+(?:\.\d+){1,3}", main):
         return ()
     return tuple(int(part) for part in main.split("."))
+
+
+def same_release_version(left: object, right: object) -> bool:
+    left_parts = version_tuple(left)
+    right_parts = version_tuple(right)
+    if left_parts and right_parts:
+        return left_parts == right_parts
+    return clean_text(left, 32) == clean_text(right, 32)
 
 
 def version_is_older(current: object, latest: object) -> bool:
@@ -606,6 +618,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/dps/feedback":
             self._submit_feedback()
             return
+        if path == "/api/v1/dps/diagnostic":
+            self._submit_diagnostic()
+            return
         if path == "/api/v1/dps/admin/revoke":
             if self._require_admin():
                 self._set_revoked()
@@ -780,13 +795,29 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     card_hash,
                 ),
             )
-            connection.execute(
+            client_sessions = connection.execute(
+                """
+                SELECT session_id, app_version FROM sessions
+                WHERE client_id=? AND ended_at IS NULL
+                """,
+                (client_id,),
+            ).fetchall()
+            replaced_session_ids = [
+                str(active_session["session_id"])
+                for active_session in client_sessions
+                if not same_release_version(
+                    active_session["app_version"], app_version
+                )
+            ]
+            connection.executemany(
                 """
                 UPDATE sessions SET ended_at=?, using_app=0
-                WHERE client_id=? AND ended_at IS NULL
-                    AND COALESCE(app_version, '')<>?
+                WHERE session_id=? AND ended_at IS NULL
                 """,
-                (timestamp, client_id, app_version),
+                (
+                    (timestamp, replaced_session_id)
+                    for replaced_session_id in replaced_session_ids
+                ),
             )
             connection.execute(
                 """
@@ -1055,6 +1086,124 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "feedback_id": feedback_id,
                 "message": "反馈已提交。",
+            },
+        )
+
+    def _submit_diagnostic(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        tool_name = clean_text(body.get("tool_name"), 64)
+        if tool_name != DIAGNOSTIC_TOOL_NAME:
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "invalid_diagnostic_tool"},
+            )
+            return
+        diagnostics = body.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "diagnostics_required"},
+            )
+            return
+        try:
+            diagnostics_json = json.dumps(
+                diagnostics, ensure_ascii=False, separators=(",", ":")
+            )
+        except (TypeError, ValueError, OverflowError):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "invalid_diagnostics"},
+            )
+            return
+        if len(diagnostics_json.encode("utf-8")) > MAX_DIAGNOSTIC_REPORT_BYTES:
+            self._json(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                {"ok": False, "error": "diagnostics_too_large"},
+            )
+            return
+
+        timestamp = now_epoch()
+        remote_ip = self._remote_ip()
+        client_id = clean_client_id(body.get("client_id"))
+        tool_version = clean_text(body.get("tool_version"), 32)
+        diagnostic_id = "DG" + secrets.token_hex(8).upper()
+        with database() as connection:
+            recent_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM feedbacks
+                WHERE category='diagnostic' AND remote_ip=? AND created_at>=?
+                """,
+                (remote_ip, timestamp - 3600),
+            ).fetchone()[0]
+            if int(recent_count or 0) >= MAX_DIAGNOSTIC_REPORTS_PER_HOUR:
+                self._json(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    {
+                        "ok": False,
+                        "error": "diagnostic_rate_limited",
+                        "message": "检测报告上传过于频繁，请稍后重试。",
+                    },
+                )
+                return
+
+            recent_session = None
+            if client_id:
+                recent_session = connection.execute(
+                    """
+                    SELECT s.session_id, s.card_hash, s.character_name,
+                        s.app_version, k.card_key
+                    FROM sessions s
+                    LEFT JOIN cards k ON k.card_hash=s.card_hash
+                    WHERE s.client_id=?
+                    ORDER BY s.last_seen DESC
+                    LIMIT 1
+                    """,
+                    (client_id,),
+                ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO feedbacks(
+                    feedback_id, created_at, updated_at, session_id,
+                    client_id, card_hash, card_key, character_name,
+                    app_version, category, content, diagnostics_json,
+                    remote_ip
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    diagnostic_id,
+                    timestamp,
+                    timestamp,
+                    str(recent_session["session_id"] or "")
+                    if recent_session is not None
+                    else "",
+                    client_id,
+                    str(recent_session["card_hash"] or "")
+                    if recent_session is not None
+                    else "",
+                    str(recent_session["card_key"] or "")
+                    if recent_session is not None
+                    else "",
+                    str(recent_session["character_name"] or "")[:48]
+                    if recent_session is not None
+                    else "",
+                    str(recent_session["app_version"] or "")[:32]
+                    if recent_session is not None
+                    else tool_version,
+                    "diagnostic",
+                    f"{DIAGNOSTIC_TOOL_NAME}自动报告",
+                    diagnostics_json,
+                    remote_ip,
+                ),
+            )
+        self._json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "diagnostic_id": diagnostic_id,
+                "message": "检测报告已上传。",
             },
         )
 

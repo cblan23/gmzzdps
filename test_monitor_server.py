@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from diagnostic_report import submit_diagnostic_report
 from licensing import LicensingService, ServerLicensingGateway
 from server import dps_monitor_server as monitor
 
@@ -250,14 +251,14 @@ class MonitorServerTests(unittest.TestCase):
 
     def test_update_metadata_can_replace_an_older_same_version_build(self):
         update_bytes = b"MZ" + bytes(range(32))
-        update_name = "dps-logs-v0.0.13.exe"
+        update_name = "dps-logs-v0.0.14.exe"
         update_path = monitor.UPDATE_METADATA_PATH.parent / update_name
         update_path.write_bytes(update_bytes)
         monitor.UPDATE_METADATA_PATH.write_text(
             json.dumps(
                 {
-                    "latest_version": "0.0.13",
-                    "client_build": "0.0.13+20260831.5",
+                    "latest_version": "0.0.14",
+                    "client_build": "0.0.14+20260831.2",
                     "filename": update_name,
                     "size": len(update_bytes),
                     "sha256": hashlib.sha256(update_bytes).hexdigest(),
@@ -269,9 +270,9 @@ class MonitorServerTests(unittest.TestCase):
         )
 
         for old_build in (
-            "0.0.12+20260830.9",
-            "0.0.13",
-            "0.0.13+20260831.4",
+            "0.0.13+20260831.5",
+            "0.0.14",
+            "0.0.14+20260831.1",
         ):
             with self.subTest(old_build=old_build):
                 status, update = self.request(
@@ -279,13 +280,13 @@ class MonitorServerTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 200)
                 self.assertTrue(update["available"])
-                self.assertEqual(update["latest_version"], "0.0.13")
+                self.assertEqual(update["latest_version"], "0.0.14")
                 self.assertEqual(update["notes"], "")
 
         for current_build in (
-            "0.0.13+20260831.5",
-            "0.0.13+20260831.6",
-            "0.0.14",
+            "0.0.14+20260831.2",
+            "0.0.14+20260831.3",
+            "0.0.15",
         ):
             with self.subTest(current_build=current_build):
                 status, update = self.request(
@@ -502,7 +503,7 @@ class MonitorServerTests(unittest.TestCase):
                 body={
                     "client_id": client_id,
                     "card_key": card_key,
-                    "app_version": "0.0.13+20260831.5",
+                    "app_version": "0.0.14+20260831.2",
                 },
             )
             self.assertEqual(status, 200)
@@ -528,6 +529,51 @@ class MonitorServerTests(unittest.TestCase):
                 (client_id,),
             ).fetchone()[0]
         self.assertEqual(active_count, 2)
+
+    def test_same_release_different_builds_do_not_revoke_each_other(self):
+        card_key = self.create_card(duration_seconds=7200)[0]
+        client_id = "8" * 32
+        sessions = []
+        for app_version in (
+            "0.0.14+20260831.1",
+            "0.0.14+20260831.2",
+        ):
+            status, session = self.request(
+                "/api/v1/dps/session/start",
+                method="POST",
+                body={
+                    "client_id": client_id,
+                    "card_key": card_key,
+                    "app_version": app_version,
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(session["authorized"])
+            sessions.append(session)
+
+        for session in sessions:
+            status, heartbeat = self.request(
+                "/api/v1/dps/session/heartbeat",
+                method="POST",
+                token=session["access_token"],
+                body={"using": True},
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(heartbeat["authorized"])
+
+        with monitor.database() as connection:
+            active_versions = connection.execute(
+                """
+                SELECT app_version FROM sessions
+                WHERE client_id=? AND ended_at IS NULL
+                ORDER BY app_version
+                """,
+                (client_id,),
+            ).fetchall()
+        self.assertEqual(
+            [row["app_version"] for row in active_versions],
+            ["0.0.14+20260831.1", "0.0.14+20260831.2"],
+        )
 
     def test_new_version_takes_over_same_device_without_rebinding_card(self):
         card_key = self.create_card(duration_seconds=7200)[0]
@@ -1083,6 +1129,116 @@ class MonitorServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 403)
         self.assertEqual(denied["error"], "invalid_session")
+
+    def test_anonymous_diagnostic_links_recent_device_session(self):
+        card_key = self.create_card()[0]
+        client_id = "d" * 32
+        status, started = self.request(
+            "/api/v1/dps/session/start",
+            method="POST",
+            body={
+                "client_id": client_id,
+                "card_key": card_key,
+                "app_version": "0.0.13+20260831.5",
+            },
+        )
+        self.assertEqual(status, 200)
+        status, heartbeat = self.request(
+            "/api/v1/dps/session/heartbeat",
+            method="POST",
+            token=started["access_token"],
+            body={
+                "using": True,
+                "character_name": "芒果凤梨",
+                "game_pid": 9784,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(heartbeat["authorized"])
+
+        diagnostic_body = {
+            "tool_name": monitor.DIAGNOSTIC_TOOL_NAME,
+            "tool_version": "1.0.0+20260831.1",
+            "client_id": client_id,
+            "diagnostics": {
+                "schema_version": 1,
+                "assessment": {"code": "native_hook_silent"},
+                "capture": {
+                    "network_damage_messages": 18,
+                    "native_damage_records": 0,
+                },
+            },
+        }
+        self.assertNotIn("card_key", diagnostic_body)
+        status, submitted = self.request(
+            "/api/v1/dps/diagnostic",
+            method="POST",
+            body=diagnostic_body,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(submitted["ok"])
+        diagnostic_id = submitted["diagnostic_id"]
+        self.assertRegex(diagnostic_id, r"^DG[0-9A-F]{16}$")
+
+        status, listed = self.request(
+            "/api/v1/dps/admin/feedback", admin=True
+        )
+        self.assertEqual(status, 200)
+        report = listed["feedbacks"][0]
+        self.assertEqual(report["feedback_id"], diagnostic_id)
+        self.assertEqual(report["category"], "diagnostic")
+        self.assertEqual(report["category_label"], "问题检测")
+        self.assertEqual(report["client_id"], client_id)
+        self.assertEqual(report["card_key"], card_key)
+        self.assertEqual(report["character_name"], "芒果凤梨")
+        self.assertEqual(report["app_version"], "0.0.13+20260831.5")
+
+        status, detail = self.request(
+            "/api/v1/dps/admin/feedback/detail",
+            method="POST",
+            admin=True,
+            body={"feedback_id": diagnostic_id},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            detail["feedback"]["diagnostics"]["assessment"]["code"],
+            "native_hook_silent",
+        )
+
+    def test_anonymous_diagnostic_rejects_invalid_payload(self):
+        status, invalid_tool = self.request(
+            "/api/v1/dps/diagnostic",
+            method="POST",
+            body={
+                "tool_name": "unknown",
+                "client_id": "a" * 32,
+                "diagnostics": {},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(invalid_tool["error"], "invalid_diagnostic_tool")
+
+        status, missing_report = self.request(
+            "/api/v1/dps/diagnostic",
+            method="POST",
+            body={"tool_name": monitor.DIAGNOSTIC_TOOL_NAME},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(missing_report["error"], "diagnostics_required")
+
+    def test_diagnostic_uploader_round_trip(self):
+        submission = submit_diagnostic_report(
+            self.base_url,
+            "c" * 32,
+            {
+                "schema_version": 1,
+                "assessment": {"code": "network_hook_silent"},
+            },
+            timeout=2,
+        )
+
+        self.assertRegex(submission.diagnostic_id, r"^DG[0-9A-F]{16}$")
+        self.assertEqual(submission.message, "检测报告已上传。")
 
     def test_non_ascii_invalid_card_returns_json_instead_of_closing_connection(self):
         status, denied = self.request(

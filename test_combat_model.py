@@ -4,25 +4,39 @@ from __future__ import annotations
 
 import runpy
 import json
+import sys
 import tempfile
+import time
+import tkinter as tk
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
 MODULE = runpy.run_path(str(Path(__file__).with_name("dps_meter.pyw")))
 CombatModel = MODULE["CombatModel"]
 DpsWindow = MODULE["DpsWindow"]
+ActorStats = MODULE["ActorStats"]
+IconFactory = MODULE["IconFactory"]
 HookWorker = MODULE["HookWorker"]
 NetworkPacketParser = MODULE["NetworkPacketParser"]
+UpdateInfo = MODULE["UpdateInfo"]
 APP_VERSION = MODULE["APP_VERSION"]
 CLIENT_BUILD = MODULE["CLIENT_BUILD"]
+PROFESSION_COLORS = MODULE["PROFESSION_COLORS"]
 boss_name_is_allowed = MODULE["boss_name_is_allowed"]
 load_boss_name_allowlist = MODULE["load_boss_name_allowlist"]
 load_monster_catalog = MODULE["load_monster_catalog"]
 load_skill_catalog = MODULE["load_skill_catalog"]
 load_skill_metadata = MODULE["load_skill_metadata"]
+restore_history_boss_names = MODULE["restore_history_boss_names"]
 resolve_program_path = MODULE["resolve_program_path"]
 window_exstyle_for_lock = MODULE["window_exstyle_for_lock"]
+membership_label_for_card_tier = MODULE["membership_label_for_card_tier"]
+format_duration = MODULE["format_duration"]
+relative_damage_bar_ratio = MODULE["relative_damage_bar_ratio"]
+compact_width_for_visible_metrics = MODULE["compact_width_for_visible_metrics"]
+main = MODULE["main"]
 
 SELF_ID = 57_266_949_828_970
 TEAMMATE_ID = 57_266_949_828_971
@@ -45,15 +59,137 @@ def damage(sequence: int, attacker: int, target: int, amount: int = 100) -> dict
     }
 
 
-def team_stat(sequence: int, actor: int, absolute_damage: int) -> dict:
-    return {
+def team_stat(
+    sequence: int,
+    actor: int,
+    absolute_damage: int,
+    *,
+    server_time: int = 0,
+) -> dict:
+    update = {
         "filetime_100ns": BASE_FILETIME + sequence * 10_000,
         "actor_id": actor,
         "absolute_damage": absolute_damage,
     }
+    if server_time:
+        update["server_time"] = server_time
+    return update
 
 
 class CombatModelTests(unittest.TestCase):
+    def test_second_instance_restores_existing_window_without_starting_ui(self):
+        calls = []
+
+        class FakeGuard:
+            already_running = False
+
+            def acquire(self):
+                calls.append("acquire")
+                self.already_running = True
+
+            def close(self):
+                calls.append("close")
+
+        class UnexpectedWindow:
+            def __init__(self):
+                calls.append("window")
+
+            def run(self):
+                calls.append("run")
+
+        with mock.patch.dict(
+            main.__globals__,
+            {
+                "SingleInstanceGuard": FakeGuard,
+                "activate_existing_instance": (
+                    lambda attempts=0: calls.append(("activate", attempts))
+                ),
+                "DpsWindow": UnexpectedWindow,
+            },
+        ):
+            main()
+
+        self.assertEqual(calls, ["acquire", ("activate", 20), "close"])
+
+    def test_damage_bar_is_relative_to_highest_actor_not_team_total(self):
+        self.assertEqual(relative_damage_bar_ratio(4_000_000, 4_000_000), 1.0)
+        self.assertEqual(relative_damage_bar_ratio(2_000_000, 4_000_000), 0.5)
+        self.assertEqual(relative_damage_bar_ratio(1_000_000, 4_000_000), 0.25)
+        self.assertEqual(relative_damage_bar_ratio(0, 0), 0.0)
+
+    def test_toolbar_icons_are_nonblank_and_lock_states_are_distinct(self):
+        rendered = {
+            name: IconFactory._draw_toolbar_icon(name, 20, "#f4f6f8")
+            for name in (
+                "share",
+                "reset",
+                "eye",
+                "eye_off",
+                "lock",
+                "unlock",
+                "menu",
+                "user",
+                "settings",
+                "minimize",
+            )
+        }
+        self.assertTrue(all(image.size == (20, 20) for image in rendered.values()))
+        self.assertTrue(
+            all(image.getchannel("A").getbbox() is not None for image in rendered.values())
+        )
+        self.assertNotEqual(rendered["lock"].tobytes(), rendered["unlock"].tobytes())
+
+    def test_dps_is_continuous_across_minute_boundaries(self):
+        """FB985AA2E794890AB5: 00:59/01:00 cannot reset elapsed time."""
+        model = CombatModel(run_id="minute-boundary-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "伤害木桩",
+                "entity_type": "Boss",
+                "template_id": 7_114_233,
+                "boss_rank": 3,
+            }
+        )
+        # Keep the encounter active past both boundaries without leaving an
+        # idle gap that would intentionally freeze the timer.
+        for sequence, elapsed in enumerate(range(0, 126, 5), start=1):
+            event = damage(sequence, SELF_ID, MONSTER_ID, 100_000)
+            event["filetime_100ns"] = BASE_FILETIME + elapsed * 10_000_000
+            model.ingest(event)
+
+        start = model.first_damage_time
+        durations = [
+            model.duration(start + offset)
+            for offset in (59.999, 60.001, 119.999, 120.001)
+        ]
+        self.assertEqual(
+            [format_duration(value) for value in durations],
+            ["00:59", "01:00", "01:59", "02:00"],
+        )
+        self.assertAlmostEqual(durations[1] - durations[0], 0.002, places=5)
+        self.assertAlmostEqual(durations[3] - durations[2], 0.002, places=5)
+
+        total = sum(actor.damage for actor in model.current_stats())
+        dps = [total / value for value in durations]
+        self.assertGreater(dps[0], dps[1])
+        self.assertGreater(dps[2], dps[3])
+
+    def test_profession_colors_match_game_party_tiles(self):
+        self.assertEqual(
+            PROFESSION_COLORS,
+            {
+                1_200_001: "#f2cd32",  # Bard / Singer
+                1_200_002: "#7ecfa5",  # Spectator
+                1_200_003: "#5869c4",  # Fortune Teller
+                1_200_004: "#6687c5",  # Arbitrator
+                1_200_005: "#68b6e5",  # Apprentice
+                1_200_006: "#ee8c2f",  # Warrior
+                1_200_007: "#a255c7",  # Mystery Pryer
+            },
+        )
+
     def test_drill_feedback_profile_repair_keeps_each_players_skills_and_damage(self):
         """FB3F3C449BEB21689D: correcting labels must not move damage rows."""
         actors = [
@@ -171,7 +307,6 @@ class CombatModelTests(unittest.TestCase):
         model.ingest_profile(
             {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
         )
-
         model.ingest(damage(1, NEARBY_ID, MONSTER_ID, 25_000))
         self.assertEqual(model.stats[NEARBY_ID].damage, 25_000)
         self.assertEqual(model.pending_member_events, [])
@@ -341,6 +476,37 @@ class CombatModelTests(unittest.TestCase):
             layered_original,
         )
 
+    def test_membership_label_follows_server_card_tier(self):
+        self.assertEqual(membership_label_for_card_tier("partner"), "莫雪的小伙伴")
+        self.assertEqual(membership_label_for_card_tier("monthly"), "VVVVVIP用户")
+        self.assertEqual(membership_label_for_card_tier("weekly"), "VIP用户")
+        self.assertEqual(membership_label_for_card_tier("normal"), "尊贵的用户")
+        self.assertEqual(membership_label_for_card_tier("unknown"), "尊贵的用户")
+
+    @unittest.skipUnless(sys.platform == "win32", "requires native Windows HWNDs")
+    def test_window_lock_is_written_to_real_tk_top_level_handle(self):
+        root = tk.Tk()
+        root.withdraw()
+        root.overrideredirect(True)
+        root.attributes("-alpha", 0.85)
+        root.update_idletasks()
+        window = DpsWindow.__new__(DpsWindow)
+        window.window_lock_original_styles = {}
+        try:
+            hwnd = window._win32_root_handle(root)
+            original = window._win32_extended_style(hwnd)
+            self.assertIsNotNone(original)
+            self.assertTrue(window._set_window_click_through(root, True))
+            locked = window._win32_extended_style(hwnd)
+            self.assertIsNotNone(locked)
+            self.assertEqual(locked & 0x00080020, 0x00080020)
+            self.assertTrue(window._set_window_click_through(root, False))
+            restored = window._win32_extended_style(hwnd)
+            self.assertIsNotNone(restored)
+            self.assertEqual(restored & 0x00080020, original & 0x00080020)
+        finally:
+            root.destroy()
+
     def test_star_guard_damage_merges_into_astrologer_encounter(self):
         guard_id = SECOND_MONSTER_ID + 10_000
         model = CombatModel(run_id="astrologer-guard-test")
@@ -385,6 +551,58 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn(guard_id, model.stats)
         self.assertIn(guard_id, model._encounter_damage_target_ids())
 
+    def test_astrologer_guards_and_imprisonments_group_separately(self):
+        """FB7408AA158422D3F4: unknown targets 1/3/5 are imprisonments."""
+        model = CombatModel(run_id="astrologer-auxiliary-groups-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "星象仪者",
+                "entity_type": "Boss",
+                "template_id": 7_102_403,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100_000))
+        guard_ids = [SECOND_MONSTER_ID + 20_000 + index for index in range(6)]
+        imprisonment_ids = [
+            SECOND_MONSTER_ID + 20_006 + index for index in range(3)
+        ]
+        for guard_id in guard_ids:
+            model.ingest_profile(
+                {
+                    "entity_id": guard_id,
+                    "name": "星光守卫",
+                    "entity_type": "Monster",
+                    "template_id": 7_102_405,
+                    "encounter_auxiliary": True,
+                    "encounter_parent_template_ids": [7_102_403],
+                }
+            )
+        for sequence, target_id in enumerate(
+            [*guard_ids, *imprisonment_ids], start=2
+        ):
+            model.ingest(damage(sequence, SELF_ID, target_id, 10_000))
+
+        rows = {
+            row["name"]: row for row in model.actor_target_rows(SELF_ID)
+        }
+        self.assertEqual(rows["星光守卫"]["damage"], 60_000)
+        self.assertEqual(set(rows["星光守卫"]["entity_ids"]), set(guard_ids))
+        self.assertEqual(rows["禁锢"]["damage"], 30_000)
+        self.assertEqual(set(rows["禁锢"]["entity_ids"]), set(imprisonment_ids))
+        self.assertFalse(
+            any(row["name"].startswith("小怪 ") for row in model.actor_target_rows(SELF_ID))
+        )
+        for imprisonment_id in imprisonment_ids:
+            self.assertEqual(
+                model.monsters[imprisonment_id].template_id, 7_102_404
+            )
+            self.assertTrue(
+                model.monsters[imprisonment_id].encounter_auxiliary
+            )
+
     def test_late_star_guard_identity_removes_attacker_but_keeps_target_damage(self):
         guard_id = SECOND_MONSTER_ID + 10_050
         model = CombatModel(run_id="late-star-guard-test")
@@ -400,13 +618,15 @@ class CombatModelTests(unittest.TestCase):
         )
         model.ingest(damage(1, SELF_ID, MONSTER_ID, 100_000))
 
-        # Native template metadata can trail the first damage record. Before
-        # that metadata arrives, the guard's player-range skill looks valid.
+        # Missing metadata initially uses the encounter's template-less
+        # auxiliary identity. Explicit native metadata must correct it later.
         mistaken_guard_hit = damage(2, guard_id, guard_id, 9_148)
         model.ingest(mistaken_guard_hit)
         model.ingest(damage(3, SELF_ID, guard_id, 50_000))
-        self.assertIn(guard_id, model.stats)
-        self.assertEqual(model.stats[guard_id].damage, 9_148)
+        self.assertNotIn(guard_id, model.stats)
+        self.assertEqual(model.stats[SELF_ID].damage, 150_000)
+        self.assertEqual(model.stats[SELF_ID].target_damage[guard_id], 50_000)
+        self.assertEqual(model.display_target_name(guard_id), "禁锢")
 
         model.ingest_profile(
             {
@@ -515,7 +735,9 @@ class CombatModelTests(unittest.TestCase):
         self.assertTrue(boss_name_is_allowed("梦境捕手", allowlist))
         self.assertFalse(boss_name_is_allowed("纸人替身-保护", allowlist))
         catalog = load_monster_catalog()
-        self.assertIn("7102873", catalog)
+        for template_id in ("7102873", "7103012", "7103309"):
+            self.assertIn(template_id, catalog)
+            self.assertEqual(catalog[template_id]["name"], "小丑")
         for template_id in (
             "7110820",
             "7110825",
@@ -533,6 +755,88 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn("7113014", catalog)
         self.assertIn("7110641", catalog)
         self.assertIn("7110642", catalog)
+
+    def test_placeholder_name_cannot_replace_real_boss_name(self):
+        model = CombatModel(run_id="boss-placeholder-name-test")
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "异化猎犬",
+                "entity_type": "Boss",
+                "template_id": 7_109_821,
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "首领",
+                "entity_type": "Boss",
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+
+        self.assertEqual(model.entity_names[MONSTER_ID], "异化猎犬")
+        self.assertEqual(model.monsters[MONSTER_ID].name, "异化猎犬")
+
+    def test_history_placeholder_boss_names_are_restored_from_template(self):
+        record = {
+            "monster": {
+                "entity_id": MONSTER_ID,
+                "template_id": 7_109_821,
+                "name": "首领",
+            },
+            "targets": [
+                {
+                    "entity_id": MONSTER_ID,
+                    "template_id": 7_109_821,
+                    "name": "未命名Boss",
+                }
+            ],
+            "participants": [
+                {
+                    "actor_id": SELF_ID,
+                    "targets": [
+                        {
+                            "entity_id": MONSTER_ID,
+                            "entity_ids": [MONSTER_ID],
+                            "kind": "Boss",
+                            "name": "Boss",
+                            "damage": 100,
+                        },
+                        {
+                            "entity_id": 0,
+                            "kind": "汇总",
+                            "name": "未分配目标",
+                            "damage": 50,
+                        },
+                    ],
+                }
+            ],
+        }
+        restored = restore_history_boss_names(
+            record,
+            {
+                "7109821": {
+                    "boss_type": 3,
+                    "name": "异化猎犬",
+                }
+            },
+        )
+
+        self.assertEqual(record["monster"]["name"], "首领")
+        self.assertEqual(restored["monster"]["name"], "异化猎犬")
+        self.assertEqual(restored["targets"][0]["name"], "异化猎犬")
+        self.assertEqual(
+            restored["participants"][0]["targets"][0]["name"],
+            "异化猎犬",
+        )
+        self.assertEqual(
+            restored["participants"][0]["targets"][1]["name"],
+            "未分配目标",
+        )
 
     def test_boss_profile_timestamp_makes_target_immediately_visible(self):
         model = CombatModel(run_id="boss-profile-activity-test")
@@ -555,7 +859,7 @@ class CombatModelTests(unittest.TestCase):
             model.target_activity_100ns[MONSTER_ID], BASE_FILETIME + 10_000
         )
 
-    def test_explicit_boss_death_freezes_encounter_and_ignores_late_team_total(self):
+    def test_explicit_boss_death_accepts_late_common_without_reopening(self):
         model = CombatModel(run_id="explicit-death-test")
         model.ingest_identity({"entity_id": SELF_ID})
         model.ingest_profile(
@@ -597,9 +901,11 @@ class CombatModelTests(unittest.TestCase):
         self.assertTrue(model.combat_end_time)
         self.assertEqual(model.combat_end_reason, "target_defeated")
         self.assertTrue(model.finalize_if_idle(model.combat_end_time))
-        total_before = model.stats[SELF_ID].damage
-        self.assertFalse(model.ingest_team_stat(team_stat(6, SELF_ID, 900_000)))
-        self.assertEqual(model.stats[SELF_ID].damage, total_before)
+        ended_at = model.combat_end_time
+        self.assertTrue(model.ingest_team_stat(team_stat(6, SELF_ID, 900_000)))
+        self.assertEqual(model.stats[SELF_ID].damage, 900_000)
+        self.assertEqual(model.combat_end_time, ended_at)
+        self.assertFalse(model.combat_in_progress(ended_at + 1.0))
 
     def test_explicit_boss_death_is_not_delayed_by_recent_add_damage(self):
         model = CombatModel(run_id="boss-add-death-test")
@@ -857,6 +1163,44 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(record["total_damage"], 300_000)
         self.assertEqual(len(record["targets"]), 2)
 
+    def test_generic_ancestor_to_baldwin_long_transition_stays_one_encounter(self):
+        """FBFDDB9EEE0DF9294F/FB3B530638A93D7659: P1 and P2 are one pull."""
+        model = CombatModel(run_id="generic-boss-phase-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        for entity_id, template_id in (
+            (MONSTER_ID, 7_103_402),
+            (SECOND_MONSTER_ID, 7_103_401),
+        ):
+            model.ingest_profile(
+                {
+                    "entity_id": entity_id,
+                    "name": "首领",
+                    "entity_type": "Boss",
+                    "template_id": template_id,
+                    "boss_rank": 3,
+                }
+            )
+        first = damage(1, SELF_ID, MONSTER_ID, 100_000)
+        first["filetime_100ns"] = BASE_FILETIME
+        second = damage(2, TEAMMATE_ID, SECOND_MONSTER_ID, 200_000)
+        second["filetime_100ns"] = BASE_FILETIME + 65 * 10_000_000
+
+        model.ingest(first)
+        encounter_id = model.encounter_id
+        model.ingest(second)
+
+        self.assertEqual(model.encounter_id, encounter_id)
+        self.assertEqual(model.pop_completed_combats(), [])
+        self.assertEqual(model.combat_target_id, SECOND_MONSTER_ID)
+        self.assertEqual(
+            {actor_id: actor.damage for actor_id, actor in model.stats.items()},
+            {SELF_ID: 100_000, TEAMMATE_ID: 200_000},
+        )
+        self.assertEqual(
+            model._encounter_damage_target_ids(),
+            {MONSTER_ID, SECOND_MONSTER_ID},
+        )
+
     def test_baldwin_to_new_ancestor_starts_a_fresh_pull(self):
         model = CombatModel(run_id="boss-phase-repull-test")
         model.ingest_identity({"entity_id": SELF_ID})
@@ -1018,46 +1362,508 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.encounter_id, encounter_id)
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
-    def test_v007_keeps_feedback_update_lock_and_fixed_target_scope(self):
+    def test_v011_keeps_feedback_update_lock_and_fixed_target_scope(self):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(APP_VERSION, "0.0.8")
-        self.assertEqual(CLIENT_BUILD, "0.0.8+20260829.1")
+        self.assertEqual(APP_VERSION, "0.0.13")
+        self.assertEqual(CLIENT_BUILD, "0.0.13+20260831.5")
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
-        self.assertIn('"反馈",\n            self.show_feedback', source)
-        self.assertIn('"更新",\n            lambda: self._start_update_check(manual=True)', source)
+        self.assertIn('(\"反馈\", self._feedback_selected_history)', source)
+        self.assertIn(
+            'lambda _event: self._start_update_check(manual=True)', source
+        )
         self.assertIn("UPDATE_DIR = APP_DIR", source)
         self.assertIn('text=f"保存位置：{UPDATE_DIR}"', source)
         self.assertIn('text="附带运行摘要"', source)
         self.assertNotIn("load_recent_restart_context", source)
         self.assertNotIn("restart_target_profiles", source)
         self.assertIn("entity_names={}", source)
-        self.assertIn("self.lock_button = self._label_button(", source)
+        self.assertIn("self.lock_button = self._main_icon_button(", source)
         self.assertIn('tags=("compact_lock", "compact_lock_bg")', source)
-        self.assertIn("self._set_window_click_through(self.root, self.window_locked)", source)
+        self.assertIn("click_through_applied = self._set_window_click_through(", source)
+        self.assertIn("get_ancestor = user32.GetAncestor", source)
+        self.assertIn('unlock_icon = self.icons.toolbar("unlock", 16, ACCENT)', source)
         self.assertIn('self.config["window_locked"] = self.window_locked', source)
         self.assertNotIn("不包含完整封包", source)
         self.assertNotIn("分享功能将在后续版本开放", source)
-        self.assertIn('actions, "分享", self._share_current', source)
+        self.assertIn('actions, "share", "分享", self._share_current', source)
         self.assertNotIn("clear_if_expired", source)
-        self.assertIn('text="暴击率"', source)
-        self.assertIn('text="死亡"', source)
-        self.assertIn("critical_x, top + 17", source)
-        self.assertIn("deaths_x, top + 17", source)
+        self.assertIn('"critical": "暴击率"', source)
+        self.assertIn('("显示死亡次数", tk.BooleanVar', source)
+        self.assertIn('columns["critical"]', source)
+        self.assertIn('("DPS", True), ("HPS", False)', source)
+        self.assertNotIn('"HDPS"', source)
+        self.assertIn(
+            "self.titlebar = tk.Frame(self.body, bg=BG, height=44)",
+            source,
+        )
+        self.assertIn("self.summary = tk.Frame(self.body, bg=BG, height=76)", source)
+        self.assertIn("height=36,\n            bg=BG,", source)
+        self.assertIn("height=28,\n            bg=BG,", source)
+        self.assertIn(
+            "self.rows_canvas = tk.Canvas(\n            self.table_panel,\n            bg=BG,",
+            source,
+        )
+        self.assertIn(
+            'window.attributes("-transparentcolor", MAIN_CONTENT_OVERLAY_KEY)',
+            source,
+        )
+        self.assertIn(
+            "draw_empty_state=False",
+            source,
+        )
+        self.assertIn('"dps": "秒伤"', source)
+        self.assertIn('("显示秒伤", self.settings_show_dps_var, False)', source)
+        self.assertIn('self.config["show_dps"] = self.show_dps', source)
+        self.assertIn('self.config["layout_version"] = 15', source)
+        self.assertIn("class ModernSlider(tk.Canvas):", source)
+        self.assertIn('text="主窗口透明度"', source)
+        self.assertNotIn('text="团队 DPS"', source)
+        self.assertIn('actions, "compact", "迷你模式"', source)
+        self.assertIn('actions, "menu", "主菜单", self.show_main_menu', source)
+        self.assertIn('def show_main_menu(self)', source)
+        self.assertIn("MAIN_MIN_WIDTH = 430", source)
+        self.assertIn("MINI_DEFAULT_WIDTH = 340", source)
+        self.assertIn("MINI_MIN_WIDTH = 188", source)
+        self.assertIn("MINI_DEFAULT_HEIGHT = 118", source)
+        self.assertIn('tags=("compact_restore", "compact_restore_bg")', source)
+        self.assertIn('text="当前身份"', source)
+        self.assertIn(
+            "membership_label_for_card_tier(self.licensing.session.card_tier)",
+            source,
+        )
+        self.assertNotIn('identity_icon = self.icons.toolbar("user"', source)
+        self.assertIn('self.root.bind("<MouseWheel>", self._scroll_main, add="+")', source)
+        self.assertIn("self._dismiss_compact_auxiliary_windows()", source)
+        nav_source = source[
+            source.index("    def _backend_nav_button(") : source.index(
+                "    def _sync_backend_navigation("
+            )
+        ]
+        self.assertIn("caption_label = tk.Label(", nav_source)
+        self.assertIn("width=2", nav_source)
+        self.assertNotIn('text=f"{icon_text}   {caption}"', nav_source)
+        checkbox_source = source[
+            source.index("    def _settings_check_row(") : source.index(
+                "    def _select_settings_section("
+            )
+        ]
+        self.assertIn("checkbox = tk.Canvas(", checkbox_source)
+        self.assertIn("width=22", checkbox_source)
+        self.assertIn("height=22", checkbox_source)
+        self.assertNotIn("tk.Checkbutton(", checkbox_source)
+        self.assertNotIn(
+            'lambda _event, actor_id=row.actor_id: self.show_skill_details',
+            source,
+        )
 
-    def test_history_share_copies_name_and_dps_within_110_characters(self):
+    def test_window_alpha_clamps_and_accepts_percent_or_fraction(self):
+        class Root:
+            def __init__(self):
+                self.alpha = 1.0
+
+            @staticmethod
+            def winfo_exists():
+                return True
+
+            @staticmethod
+            def update_idletasks():
+                return None
+
+            @staticmethod
+            def configure(**_kwargs):
+                return None
+
+            def attributes(self, name, *values):
+                self.assert_alpha_name(name)
+                if values:
+                    self.alpha = float(values[0])
+                return self.alpha
+
+            @staticmethod
+            def assert_alpha_name(name):
+                if name != "-alpha":
+                    raise AssertionError(name)
+
+        window = object.__new__(DpsWindow)
+        window.root = Root()
+        window.history_window = type(
+            "AuxiliaryWindow", (), {"alpha_changes": []}
+        )()
+        window.closing = False
+        window.main_content_overlay_supported = False
+        window.window_alpha = 1.0
+        window.opacity_value_label = None
+        window.settings_opacity_var = None
+        window.config = {}
+
+        window._set_window_alpha(40, persist=False)
+        self.assertEqual(window.window_alpha, 0.55)
+        self.assertEqual(window.root.alpha, 0.55)
+        window._set_window_alpha(82, persist=False)
+        self.assertEqual(window.window_alpha, 0.82)
+        window._set_window_alpha(0.73, persist=False)
+        self.assertEqual(window.window_alpha, 0.73)
+        self.assertEqual(window.config["alpha"], 0.73)
+        self.assertEqual(window.history_window.alpha_changes, [])
+
+    def test_compact_width_tracks_the_number_of_visible_metrics(self):
+        self.assertEqual(
+            [compact_width_for_visible_metrics(count) for count in range(5)],
+            [188, 220, 260, 300, 340],
+        )
+        window = object.__new__(DpsWindow)
+        window.show_total_damage = False
+        window.show_dps = True
+        window.show_damage_share = False
+        window.show_critical_rate = False
+        self.assertEqual(window._compact_target_width(), 220)
+        window.show_total_damage = True
+        window.show_damage_share = True
+        window.show_critical_rate = True
+        self.assertEqual(window._compact_target_width(), 340)
+
+    def test_boss_hp_uses_one_continuous_fill_without_a_name_block(self):
+        class Canvas:
+            def __init__(self):
+                self.rectangles = []
+                self.texts = []
+
+            @staticmethod
+            def delete(*_args):
+                return None
+
+            @staticmethod
+            def winfo_width():
+                return 500
+
+            @staticmethod
+            def winfo_height():
+                return 36
+
+            def create_rectangle(self, *args, **kwargs):
+                self.rectangles.append((args, kwargs))
+
+            def create_text(self, *args, **kwargs):
+                self.texts.append((args, kwargs))
+
+        monster = type(
+            "Monster",
+            (),
+            {
+                "name": "测试 Boss",
+                "level": 60,
+                "current_hp": 50,
+                "max_hp": 100,
+                "observed_max_hp": 100,
+            },
+        )()
+        window = object.__new__(DpsWindow)
+        window.monster_hp_canvas = Canvas()
+        window.model = type(
+            "Model", (), {"current_monster": lambda _self: monster}
+        )()
+        window._fit_main_actor_name = lambda value, _width: value
+        window._ui_font = lambda _role: None
+
+        window._draw_monster_hp()
+
+        self.assertEqual(len(window.monster_hp_canvas.rectangles), 2)
+        track, fill = window.monster_hp_canvas.rectangles
+        self.assertEqual(track[0][:2], (1, 3))
+        self.assertEqual(fill[0][:2], (2, 4))
+        self.assertAlmostEqual(fill[0][2], 248, delta=1)
+        self.assertEqual(len(window.monster_hp_canvas.texts), 1)
+        text_args, text_options = window.monster_hp_canvas.texts[0]
+        self.assertEqual(text_args[:2], (250, 18))
+        self.assertEqual(
+            text_options["text"], "Lv.60   测试 Boss   50 / 100   50.0%"
+        )
+
+    def test_main_columns_include_configurable_dps_in_expected_order(self):
+        window = object.__new__(DpsWindow)
+        window.show_total_damage = True
+        window.show_dps = True
+        window.show_damage_share = True
+        window.show_critical_rate = True
+
+        columns = window._main_columns(600)
+        self.assertLess(columns["damage"], columns["dps"])
+        self.assertLess(columns["dps"], columns["share"])
+        self.assertLess(columns["share"], columns["critical"])
+
+        window.show_dps = False
+        without_dps = window._main_columns(600)
+        self.assertNotIn("dps", without_dps)
+        self.assertEqual(set(columns) - {"dps"}, set(without_dps))
+
+    def test_transparency_overlay_does_not_duplicate_empty_damage_message(self):
+        class Canvas:
+            def __init__(self):
+                self.texts = []
+
+            @staticmethod
+            def delete(*_args):
+                return None
+
+            @staticmethod
+            def winfo_width():
+                return 430
+
+            @staticmethod
+            def winfo_height():
+                return 180
+
+            def create_text(self, *args, **kwargs):
+                self.texts.append((args, kwargs))
+
+            @staticmethod
+            def configure(**_kwargs):
+                return None
+
+            @staticmethod
+            def yview_moveto(*_args):
+                return None
+
+        window = object.__new__(DpsWindow)
+        window.model = type(
+            "Model",
+            (),
+            {
+                "current_stats": lambda _self: [],
+                "duration": lambda _self: 0.0,
+            },
+        )()
+        window.compact_mode = False
+        window.main_scroll_offset = 0
+        window.main_scroll_content_height = 0
+        window._main_columns = lambda _width: {}
+        window._main_row_height = lambda: 32
+        window._ui_font = lambda _role: None
+        main_canvas = Canvas()
+        overlay_canvas = Canvas()
+
+        window._draw_main_rows_on_canvas(
+            main_canvas, update_scroll_state=True
+        )
+        window._draw_main_rows_on_canvas(
+            overlay_canvas,
+            update_scroll_state=False,
+            draw_empty_state=False,
+        )
+
+        self.assertEqual(
+            [options["text"] for _args, options in main_canvas.texts],
+            ["暂无伤害记录"],
+        )
+        self.assertEqual(overlay_canvas.texts, [])
+
+    def test_main_wheel_scrolls_normal_and_compact_dps_lists(self):
+        class Canvas:
+            def __init__(self):
+                self.positions = []
+                self.indicators = []
+
+            @staticmethod
+            def winfo_width():
+                return 220
+
+            @staticmethod
+            def winfo_height():
+                return 60
+
+            @staticmethod
+            def canvasy(_value):
+                return 0.0
+
+            @staticmethod
+            def delete(*_args):
+                return None
+
+            def yview_moveto(self, position):
+                self.positions.append(position)
+
+            def create_rectangle(self, *args, **kwargs):
+                self.indicators.append((args, kwargs))
+
+        window = object.__new__(DpsWindow)
+        window.rows_canvas = Canvas()
+        window.window_locked = False
+        window.ui_font_size = 14
+        window.compact_mode = False
+        window.main_scroll_offset = 0
+        window.main_scroll_content_height = 192
+        wheel_down = type("Wheel", (), {"delta": -120, "num": "??"})()
+        wheel_up = type("Wheel", (), {"delta": 120, "num": "??"})()
+
+        self.assertEqual(window._scroll_main(wheel_down), "break")
+        self.assertEqual(window.main_scroll_offset, 32)
+        self.assertAlmostEqual(window.rows_canvas.positions[-1], 32 / 192)
+        window._scroll_main(wheel_up)
+        self.assertEqual(window.main_scroll_offset, 0)
+
+        window.compact_mode = True
+        window.main_scroll_content_height = 112
+        window._scroll_main(wheel_down)
+        self.assertEqual(window.main_scroll_offset, 28)
+        self.assertTrue(window.rows_canvas.indicators)
+
+    def test_main_player_rows_are_compact_and_touch_without_a_gap(self):
+        class Canvas:
+            def __init__(self):
+                self.rectangles = []
+                self.options = {}
+
+            @staticmethod
+            def winfo_width():
+                return 600
+
+            @staticmethod
+            def winfo_height():
+                return 180
+
+            @staticmethod
+            def delete(*_args, **_kwargs):
+                return None
+
+            @staticmethod
+            def yview():
+                return (0.0, 1.0)
+
+            @staticmethod
+            def yview_moveto(*_args, **_kwargs):
+                return None
+
+            def create_rectangle(self, *args, **kwargs):
+                self.rectangles.append((args, kwargs))
+
+            @staticmethod
+            def create_image(*_args, **_kwargs):
+                return None
+
+            @staticmethod
+            def create_text(*_args, **_kwargs):
+                return None
+
+            def configure(self, **kwargs):
+                self.options.update(kwargs)
+
+        first = ActorStats(SELF_ID, damage=200, damage_hits=2, critical_hits=1)
+        second = ActorStats(TEAMMATE_ID, damage=100)
+        window = object.__new__(DpsWindow)
+        window.rows_canvas = Canvas()
+        window.main_content_overlay_rows = None
+        window.ui_font_size = 14
+        window.show_total_damage = True
+        window.show_dps = True
+        window.show_damage_share = True
+        window.show_critical_rate = True
+        window.model = type(
+            "Model",
+            (),
+            {
+                "current_stats": lambda _self: [first, second],
+                "duration": lambda _self: 10.0,
+                "actor_profession_id": lambda _self, _actor_id: 1_200_003,
+            },
+        )()
+        window.icons = type(
+            "Icons", (), {"profession": lambda _self, _class_id, _size: object()}
+        )()
+        window._profession_info = lambda _class_id: ("", "#5869c4")
+        window._shown_actor_name = lambda actor_id: str(actor_id)
+        window._fit_main_actor_name = lambda value, _maximum: value
+        window._ui_font = lambda _role: None
+
+        window._draw_main_rows()
+
+        first_rect, second_rect = window.rows_canvas.rectangles
+        self.assertEqual(first_rect[0][3], second_rect[0][1])
+        self.assertEqual(second_rect[0][3] - second_rect[0][1], 32)
+        self.assertEqual(window.rows_canvas.options["yscrollincrement"], 1)
+
+    def test_history_participant_name_has_profession_icon(self):
+        class Canvas:
+            def __init__(self):
+                self.images = []
+
+            @staticmethod
+            def winfo_width():
+                return 640
+
+            @staticmethod
+            def winfo_height():
+                return 220
+
+            @staticmethod
+            def delete(*_args, **_kwargs):
+                return None
+
+            @staticmethod
+            def create_rectangle(*_args, **_kwargs):
+                return None
+
+            @staticmethod
+            def create_text(*_args, **_kwargs):
+                return None
+
+            def create_image(self, *args, **kwargs):
+                self.images.append((args, kwargs))
+
+            @staticmethod
+            def tag_bind(*_args, **_kwargs):
+                return None
+
+            @staticmethod
+            def configure(*_args, **_kwargs):
+                return None
+
+        class Icons:
+            def __init__(self):
+                self.calls = []
+
+            def profession(self, class_id, size):
+                self.calls.append((class_id, size))
+                return f"profession:{class_id}:{size}"
+
+        participant = {
+            "actor_id": SELF_ID,
+            "name": "莫雪",
+            "profession_id": 1_200_003,
+            "damage": 123_456,
+            "share": 1.0,
+        }
+        window = object.__new__(DpsWindow)
+        window.history_participant_canvas = Canvas()
+        window.history_selected_actor = SELF_ID
+        window.hide_names = False
+        window.icons = Icons()
+        window._selected_history_record = lambda: {"participants": [participant]}
+        window._profession_info = lambda _class_id: ("", "#4fd1c5")
+        window._ui_font = lambda _kind: ("Microsoft YaHei UI", 9)
+
+        window._draw_history_participants()
+
+        self.assertEqual(window.icons.calls, [(1_200_003, 20)])
+        self.assertEqual(len(window.history_participant_canvas.images), 1)
+        image_args, image_options = window.history_participant_canvas.images[0]
+        self.assertEqual(image_args, (34, 7))
+        self.assertEqual(image_options["image"], "profession:1200003:20")
+        self.assertEqual(image_options["tags"], ("history-actor:0",))
+
+    def test_history_share_uses_two_decimal_w_dps_and_expands_collisions(self):
         record = {
             "duration_seconds": 10,
             "participants": [
-                {"name": "莫雪", "damage": 125_000, "dps": 12_500},
-                {"name": "队友甲", "damage": 134_000, "dps": 13_400},
+                {"name": "莫雪", "damage": 123_450, "dps": 12_345},
+                {"name": "队友甲乙丙", "damage": 134_000, "dps": 13_400},
             ],
         }
         self.assertEqual(
             DpsWindow._history_share_text(record),
-            "莫雪:1.2w 队友:1.3w",
+            "莫雪:1.23w 队友甲乙:1.34w",
         )
         crowded = {
             "duration_seconds": 1,
@@ -1072,8 +1878,388 @@ class CombatModelTests(unittest.TestCase):
         self.assertTrue(all(":" in part for part in shared.split(" ")))
         self.assertEqual(
             DpsWindow._history_share_text(record, hide_names=True),
-            "玩家1:1.2w 玩家2:1.3w",
+            "玩家1:1.23w 玩家2:1.34w",
         )
+        collision = {
+            "duration_seconds": 10,
+            "participants": [
+                {"name": "甲", "dps": 12_340},
+                {"name": "乙", "dps": 12_349},
+                {"name": "丙", "dps": 13_400},
+            ],
+        }
+        self.assertEqual(
+            DpsWindow._history_share_text(collision),
+            "甲:1.234w 乙:1.235w 丙:1.34w",
+        )
+        exact_tie = {
+            "participants": [
+                {"name": "甲", "dps": 12_345},
+                {"name": "乙", "dps": 12_345},
+            ]
+        }
+        self.assertEqual(
+            DpsWindow._history_share_text(exact_tie),
+            "甲:1.23w 乙:1.23w",
+        )
+
+    def test_share_uses_inline_status_instead_of_dialog(self):
+        clipboard_calls = []
+        notices = []
+
+        class ClipboardRoot:
+            def clipboard_clear(self):
+                clipboard_calls.append(("clear", ""))
+
+            def clipboard_append(self, value):
+                clipboard_calls.append(("append", value))
+
+            def update_idletasks(self):
+                clipboard_calls.append(("update", ""))
+
+        window = object.__new__(DpsWindow)
+        window.root = ClipboardRoot()
+        window._show_notice = lambda *args, **kwargs: notices.append((args, kwargs))
+
+        window._copy_share_text("莫雪:12500", None)
+
+        self.assertEqual(
+            clipboard_calls,
+            [("clear", ""), ("append", "莫雪:12500"), ("update", "")],
+        )
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0][0][1], "已复制到剪贴板。")
+
+        window._copy_share_text("", None)
+        self.assertEqual(len(notices), 2)
+        self.assertEqual(notices[1][0][1], "当前没有可分享的 DPS。")
+
+    def test_message_drain_yields_to_tk_while_capture_queue_has_backlog(self):
+        scheduled = []
+
+        class ScheduledRoot:
+            def after(self, delay, callback):
+                scheduled.append((delay, callback))
+
+        window = object.__new__(DpsWindow)
+        window.closing = False
+        window.root = ScheduledRoot()
+        window.messages = MODULE["queue"].Queue()
+        ingested = []
+        window._ingest_combat_event = ingested.append
+        batch_size = MODULE["MESSAGE_DRAIN_BATCH_SIZE"]
+        for index in range(batch_size + 3):
+            window.messages.put(("event", {"index": index}))
+
+        window._drain_messages()
+
+        self.assertEqual(len(ingested), batch_size)
+        self.assertEqual(window.messages.qsize(), 3)
+        self.assertEqual(scheduled[0][0], 1)
+
+        window._drain_messages()
+        self.assertEqual(len(ingested), batch_size + 3)
+        self.assertTrue(window.messages.empty())
+        self.assertEqual(scheduled[1][0], 50)
+
+    def test_message_drain_stress_keeps_every_message_and_honors_time_budget(self):
+        scheduled = []
+        ingested = []
+        batch_sizes = []
+        last_ingested = [0]
+
+        class ScheduledRoot:
+            def after(self, delay, callback):
+                batch_sizes.append(len(ingested) - last_ingested[0])
+                last_ingested[0] = len(ingested)
+                scheduled.append((delay, callback))
+
+        window = object.__new__(DpsWindow)
+        window.closing = False
+        window.root = ScheduledRoot()
+        window.messages = MODULE["queue"].Queue()
+        window._ingest_combat_event = lambda payload: ingested.append(
+            payload["index"]
+        )
+        message_count = 20_000
+        for index in range(message_count):
+            window.messages.put(("event", {"index": index}))
+
+        clock = [0.0]
+        original_counter = MODULE["time"].perf_counter
+
+        def fake_counter():
+            clock[0] += 0.005
+            return clock[0]
+
+        MODULE["time"].perf_counter = fake_counter
+        try:
+            window._drain_messages()
+            callback_index = 0
+            while not window.messages.empty():
+                _delay, callback = scheduled[callback_index]
+                callback_index += 1
+                callback()
+        finally:
+            MODULE["time"].perf_counter = original_counter
+
+        self.assertEqual(ingested, list(range(message_count)))
+        self.assertTrue(window.messages.empty())
+        self.assertLessEqual(max(batch_sizes), 3)
+        self.assertTrue(all(delay == 1 for delay, _callback in scheduled[:-1]))
+        self.assertEqual(scheduled[-1][0], 50)
+
+    def test_update_control_result_bypasses_combat_queue_backlog(self):
+        scheduled = []
+        handled = []
+
+        class ScheduledRoot:
+            def after(self, delay, callback):
+                scheduled.append((delay, callback))
+
+        window = object.__new__(DpsWindow)
+        window.closing = False
+        window.root = ScheduledRoot()
+        window.messages = MODULE["queue"].Queue()
+        window.control_messages = MODULE["queue"].Queue()
+        window._ingest_combat_event = lambda payload: handled.append(
+            ("event", payload["index"])
+        )
+        window._handle_update_check_result = lambda payload: handled.append(
+            ("update", payload["status"])
+        )
+        for index in range(20_000):
+            window.messages.put(("event", {"index": index}))
+        window.control_messages.put(
+            ("update_check_result", {"status": "complete"})
+        )
+
+        window._drain_messages()
+
+        self.assertEqual(handled[0], ("update", "complete"))
+        self.assertGreater(window.messages.qsize(), 0)
+        self.assertEqual(scheduled[0][0], 1)
+
+    def test_close_drains_capture_backlog_in_bounded_batches(self):
+        scheduled = []
+        destroyed = []
+        ingested = []
+
+        class ScheduledRoot:
+            def after(self, delay, callback):
+                scheduled.append((delay, callback))
+
+            def destroy(self):
+                destroyed.append(True)
+
+        class StoppedWorker:
+            @staticmethod
+            def is_alive():
+                return False
+
+        class Model:
+            @staticmethod
+            def ingest(payload):
+                ingested.append(payload["index"])
+
+            @staticmethod
+            def archive_current(_reason):
+                return True
+
+            def __getattr__(self, _name):
+                return lambda _payload: None
+
+        window = object.__new__(DpsWindow)
+        window.root = ScheduledRoot()
+        window.worker = StoppedWorker()
+        window.heartbeat_worker = None
+        window.close_started_at = time.monotonic()
+        window.close_finalized = False
+        window.messages = MODULE["queue"].Queue()
+        window.model = Model()
+        window._ingest_combat_event = window.model.ingest
+        window._ingest_stage_summary = lambda _payload: None
+        window._flush_combat_history = lambda: None
+        window._save_preferences = lambda: None
+        for index in range(MODULE["MESSAGE_DRAIN_BATCH_SIZE"] + 5):
+            window.messages.put(("event", {"index": index}))
+
+        window._finish_close()
+
+        self.assertFalse(destroyed)
+        self.assertEqual(len(ingested), MODULE["MESSAGE_DRAIN_BATCH_SIZE"])
+        self.assertEqual(scheduled[0][0], 1)
+        scheduled.pop(0)[1]()
+        self.assertTrue(destroyed)
+        self.assertEqual(
+            ingested,
+            list(range(MODULE["MESSAGE_DRAIN_BATCH_SIZE"] + 5)),
+        )
+
+    def test_update_check_unexpected_error_always_posts_terminal_result(self):
+        class FailingLicensing:
+            @staticmethod
+            def check_update():
+                raise ValueError("unexpected")
+
+        window = object.__new__(DpsWindow)
+        window.closing = False
+        window.update_check_started = False
+        window.update_check_in_progress = False
+        window.update_button = None
+        window.licensing = FailingLicensing()
+        window.control_messages = MODULE["queue"].Queue()
+
+        window._start_update_check(manual=True)
+        kind, payload = window.control_messages.get(timeout=1.0)
+
+        self.assertEqual(kind, "update_check_result")
+        self.assertTrue(payload["manual"])
+        self.assertIsNone(payload["update"])
+        self.assertIn("失败", payload["error"])
+
+    def test_update_download_unexpected_error_always_posts_terminal_result(self):
+        class FailingLicensing:
+            @staticmethod
+            def download_update(_update, _destination, _progress):
+                raise ValueError("unexpected")
+
+        window = object.__new__(DpsWindow)
+        window.pending_update = UpdateInfo(
+            available=True,
+            latest_version="0.0.12",
+            download_path="/api/v1/dps/update/download",
+            sha256="a" * 64,
+            size=1024,
+            filename="dps.exe",
+        )
+        window.update_downloading = False
+        window.closing = False
+        window.update_status_label = None
+        window.update_action_button = None
+        window.licensing = FailingLicensing()
+        window.control_messages = MODULE["queue"].Queue()
+
+        window._download_pending_update()
+        kind, payload = window.control_messages.get(timeout=1.0)
+
+        self.assertEqual(kind, "update_download_failed")
+        self.assertIn("失败", payload)
+        window._handle_update_download_failed(payload)
+        self.assertFalse(window.update_downloading)
+
+    def test_feedback_can_select_exactly_one_combat_record(self):
+        records = [
+            {
+                "encounter_id": "encounter-new",
+                "ended_at_epoch": 1_787_990_000,
+                "total_damage": 5_500_000,
+                "team_size": 2,
+                "monster": {"name": "星象仪者"},
+                "targets": [{"name": "星象仪者", "kind": "Boss"}],
+                "participants": [
+                    {
+                        "actor_id": SELF_ID,
+                        "name": "莫雪",
+                        "profession_id": 1_200_002,
+                        "damage": 3_000_000,
+                        "critical_rate": 0.4,
+                        "deaths": 1,
+                        "skills": [
+                            {
+                                "skill_id": 86_021_070,
+                                "name": "测试技能",
+                                "damage": 3_000_000,
+                                "hits": 20,
+                            }
+                        ],
+                        "targets": [
+                            {
+                                "entity_id": MONSTER_ID,
+                                "name": "星象仪者",
+                                "kind": "Boss",
+                                "damage": 2_000_000,
+                            },
+                            {
+                                "entity_id": SECOND_MONSTER_ID,
+                                "name": "星光守卫",
+                                "kind": "小怪",
+                                "damage": 1_000_000,
+                            },
+                        ],
+                    }
+                ],
+            },
+            {
+                "encounter_id": "encounter-old",
+                "ended_at_epoch": 1_787_980_000,
+                "total_damage": 1_000_000,
+                "monster": {"name": "小丑"},
+                "participants": [],
+            },
+        ]
+
+        choices = DpsWindow._feedback_record_choices(records, True)
+        self.assertEqual(choices[0], ("当前战斗（进行中）", "__current__"))
+        self.assertEqual([value for _label, value in choices[1:]], [
+            "encounter-new",
+            "encounter-old",
+        ])
+        self.assertIn("星象仪者", choices[1][0])
+
+        selected = DpsWindow._feedback_history_summary(records[0])
+        self.assertEqual(selected["encounter_id"], "encounter-new")
+        self.assertEqual(len(selected["participants"]), 1)
+        self.assertEqual(selected["participants"][0]["skills"][0]["damage"], 3_000_000)
+        self.assertEqual(
+            [target["name"] for target in selected["participants"][0]["targets"]],
+            ["星象仪者", "星光守卫"],
+        )
+
+        complete_record = dict(records[0])
+        complete_record["participants"] = [
+            {
+                **records[0]["participants"][0],
+                "skills": [
+                    {"skill_id": index + 1, "damage": 100 + index}
+                    for index in range(16)
+                ],
+                "targets": [
+                    {"entity_id": index + 1, "damage": 200 + index}
+                    for index in range(14)
+                ],
+            }
+        ]
+        complete_record["damage_accounting"] = {"packet_event_count": 99}
+        complete = DpsWindow._feedback_history_summary(complete_record)
+        self.assertEqual(len(complete["participants"][0]["skills"]), 16)
+        self.assertEqual(len(complete["participants"][0]["targets"]), 14)
+        self.assertEqual(complete["damage_accounting"]["packet_event_count"], 99)
+
+        older_records = [
+            {
+                "encounter_id": f"encounter-{index}",
+                "ended_at_epoch": 1_787_990_000 - index,
+                "total_damage": index,
+                "monster": {"name": f"Boss {index}"},
+            }
+            for index in range(25)
+        ]
+        older_choices = DpsWindow._feedback_record_choices(
+            older_records,
+            False,
+            "encounter-24",
+        )
+        self.assertEqual(len(older_choices), 21)
+        self.assertIn("encounter-24", dict(older_choices).values())
+
+    def test_each_history_row_has_direct_feedback_action(self):
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('feedback_tag = f"history-feedback:{index}"', source)
+        self.assertIn("self._feedback_history_record(", source)
+        self.assertIn("self.show_feedback(encounter_id)", source)
 
     def test_feedback_diagnostics_match_damage_target_to_boss_catalog(self):
         worker = HookWorker(MODULE["queue"].Queue(), MODULE["threading"].Event())
@@ -1369,6 +2555,158 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.stats, {})
         self.assertIsNone(model.current_monster())
 
+    def test_small_monster_damage_stress_is_discarded_before_history(self):
+        model = CombatModel(run_id="small-monster-stress-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "entity_type": "Monster",
+                "template_id": 7_000_001,
+                "boss_type": 1,
+            }
+        )
+
+        started = time.perf_counter()
+        for sequence in range(20_000):
+            model.ingest(damage(sequence, SELF_ID, MONSTER_ID, 100))
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(model.events, [])
+        self.assertEqual(len(model.pending_target_events), 0)
+        self.assertEqual(model.stats, {})
+        self.assertEqual(model.discarded_non_encounter_events, 20_000)
+
+    def test_hound_late_flower_profiles_do_not_recompute_long_history(self):
+        model = CombatModel(run_id="hound-flower-stress-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "异化猎犬",
+                "entity_type": "Boss",
+                "template_id": 7_109_801,
+                "boss_rank": 3,
+            }
+        )
+        for sequence in range(1, 20_001):
+            model.ingest(damage(sequence, SELF_ID, MONSTER_ID, 100))
+
+        flower_ids = [SECOND_MONSTER_ID + index for index in range(512)]
+        started = time.perf_counter()
+        for index, flower_id in enumerate(flower_ids, start=20_001):
+            model.ingest(damage(index, SELF_ID, flower_id, 100))
+            model.ingest_profile(
+                {
+                    "entity_id": flower_id,
+                    "name": "花",
+                    "entity_type": "Monster",
+                    "template_id": 7_109_802,
+                    "boss_type": 1,
+                }
+            )
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(len(model.encounter_add_target_ids), len(flower_ids))
+        self.assertEqual(model.stats[SELF_ID].damage, 2_051_200)
+        flower_rows = [
+            row for row in model.actor_target_rows(SELF_ID) if row["name"] == "花"
+        ]
+        self.assertEqual(len(flower_rows), 1)
+        self.assertEqual(flower_rows[0]["damage"], 51_200)
+        self.assertEqual(set(flower_rows[0]["entity_ids"]), set(flower_ids))
+
+    def test_ancestor_cavalry_remain_identified_under_damage_stress(self):
+        model = CombatModel(run_id="ancestor-cavalry-stress-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "先祖铠甲",
+                "entity_type": "Boss",
+                "template_id": 7_103_402,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 1_000))
+
+        cavalry_ids = [SECOND_MONSTER_ID + index for index in range(512)]
+        for cavalry_id in cavalry_ids:
+            model.ingest_profile(
+                {
+                    "entity_id": cavalry_id,
+                    "name": "骑兵",
+                    "entity_type": "Monster",
+                    "template_id": 7_103_403,
+                    "boss_type": 2,
+                }
+            )
+
+        started = time.perf_counter()
+        for sequence in range(2, 20_002):
+            model.ingest(
+                damage(
+                    sequence,
+                    SELF_ID,
+                    cavalry_ids[sequence % len(cavalry_ids)],
+                    100,
+                )
+            )
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(len(model.encounter_add_target_ids), len(cavalry_ids))
+        self.assertEqual(model.stats[SELF_ID].damage, 2_001_000)
+        cavalry_rows = [
+            row for row in model.actor_target_rows(SELF_ID) if row["name"] == "骑兵"
+        ]
+        self.assertEqual(len(cavalry_rows), 1)
+        self.assertEqual(cavalry_rows[0]["damage"], 2_000_000)
+        self.assertEqual(set(cavalry_rows[0]["entity_ids"]), set(cavalry_ids))
+
+    def test_unknown_first_hits_replay_when_boss_identity_arrives(self):
+        model = CombatModel(run_id="late-boss-identity-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        for sequence in range(1, 6):
+            model.ingest(damage(sequence, SELF_ID, MONSTER_ID, 1_000))
+
+        self.assertEqual(model.events, [])
+        self.assertEqual(len(model.pending_target_events), 5)
+
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "entity_type": "Boss",
+                "template_id": 7_103_401,
+                "boss_rank": 3,
+                "filetime_100ns": BASE_FILETIME + 6 * 10_000,
+            }
+        )
+
+        self.assertEqual(len(model.pending_target_events), 0)
+        self.assertEqual(len(model.events), 5)
+        self.assertEqual(model.stats[SELF_ID].damage, 5_000)
+
+    def test_unknown_target_buffer_is_strictly_bounded(self):
+        model = CombatModel(run_id="unknown-target-bound-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+
+        for sequence in range(20_000):
+            model.ingest(damage(sequence, SELF_ID, MONSTER_ID, 100))
+
+        self.assertLessEqual(
+            len(model.pending_target_events),
+            MODULE["UNKNOWN_TARGET_EVENT_LIMIT_PER_TARGET"],
+        )
+        self.assertLessEqual(
+            len(model.pending_target_events),
+            MODULE["UNKNOWN_TARGET_EVENT_LIMIT_GLOBAL"],
+        )
+        self.assertEqual(model.events, [])
+        self.assertEqual(model.stats, {})
+
     def test_all_monsters_mode_tracks_non_boss_damage_and_history(self):
         model = CombatModel(boss_only=False)
         model.ingest_identity({"entity_id": SELF_ID})
@@ -1620,7 +2958,6 @@ class CombatModelTests(unittest.TestCase):
             {row.actor_id for row in model.current_stats()},
             {SELF_ID, TEAMMATE_ID},
         )
-
         model.ingest_party({"entity_ids": [NEARBY_ID], "member_count": 2})
         self.assertEqual(
             {row.actor_id for row in model.current_stats()},
@@ -1628,7 +2965,605 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertIn(TEAMMATE_ID, model.friend_order)
 
-    def test_team_snapshot_calibrates_old_hits_while_new_hits_remain_realtime(self):
+    def test_unchanged_team_snapshot_does_not_extend_damage_time(self):
+        model = CombatModel(run_id="unchanged-team-time-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "异化猎犬",
+                "entity_type": "Boss",
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 1_000_000,
+                "max_hp": 1_000_000,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        baseline = team_stat(1, TEAMMATE_ID, 0)
+        baseline["full_snapshot"] = True
+        self.assertFalse(model.ingest_team_stat(baseline))
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 100))
+        self.assertTrue(
+            model.ingest_team_stat(team_stat(3, TEAMMATE_ID, 200))
+        )
+        damage_time = model.last_damage_time
+        duration = model.duration(damage_time + model.idle_gap + 1.0)
+
+        duplicate = team_stat(60_000, TEAMMATE_ID, 200)
+        self.assertFalse(model.ingest_team_stat(duplicate))
+        self.assertEqual(model.last_damage_time, damage_time)
+        self.assertEqual(
+            model.duration(damage_time + model.idle_gap + 1.0), duration
+        )
+        self.assertFalse(model.active(damage_time + model.idle_gap + 1.0))
+
+    def test_team_absolute_drop_starts_a_new_round_without_old_damage(self):
+        model = CombatModel(run_id="team-absolute-drop-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 1_000_000,
+                "max_hp": 1_000_000,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+
+        instance = 1_788_020_043
+        self.assertFalse(
+            model.ingest_team_stat(
+                team_stat(1, TEAMMATE_ID, 50_000, server_time=instance)
+            )
+        )
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 100))
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(3, TEAMMATE_ID, 350_000, server_time=instance)
+            )
+        )
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 300_000)
+
+        # A wipe resets the game's absolute counter even when field 10 keeps
+        # the same instance value. The lower snapshot is the new baseline.
+        self.assertFalse(
+            model.ingest_team_stat(
+                team_stat(4, TEAMMATE_ID, 10_000, server_time=instance)
+            )
+        )
+        self.assertEqual(model.stats, {})
+        self.assertEqual(
+            model.team_damage_states[TEAMMATE_ID].baseline_absolute,
+            10_000,
+        )
+
+        model.ingest(damage(5, SELF_ID, MONSTER_ID, 200))
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(6, TEAMMATE_ID, 90_000, server_time=instance)
+            )
+        )
+        self.assertEqual(model.stats[SELF_ID].damage, 200)
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 80_000)
+
+    def test_member_server_time_changes_do_not_split_continuous_team_damage(self):
+        model = CombatModel(run_id="member-server-time-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID, NEARBY_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+
+        self.assertFalse(
+            model.ingest_team_stat(
+                team_stat(1, TEAMMATE_ID, 20_000, server_time=100)
+            )
+        )
+        self.assertFalse(
+            model.ingest_team_stat(
+                team_stat(2, NEARBY_ID, 30_000, server_time=200)
+            )
+        )
+        model.ingest(damage(3, SELF_ID, MONSTER_ID, 100))
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(4, TEAMMATE_ID, 120_000, server_time=101)
+            )
+        )
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(5, NEARBY_ID, 230_000, server_time=205)
+            )
+        )
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 100_000)
+        self.assertEqual(model.stats[NEARBY_ID].damage, 200_000)
+
+        # Field 10 rolls independently for active members while their absolute
+        # counters remain monotonic. Neither change is an encounter boundary.
+        encounter_id = model.encounter_id
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(6, TEAMMATE_ID, 500_000, server_time=300)
+            )
+        )
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(7, NEARBY_ID, 550_000, server_time=205)
+            )
+        )
+        self.assertEqual(model.encounter_id, encounter_id)
+        self.assertEqual(model.pop_completed_combats(), [])
+        self.assertEqual(model.team_server_time, 300)
+        self.assertEqual(model.team_damage_states[TEAMMATE_ID].server_time, 300)
+        self.assertEqual(model.team_damage_states[NEARBY_ID].server_time, 205)
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 480_000)
+        self.assertEqual(model.stats[NEARBY_ID].damage, 520_000)
+        self.assertEqual(
+            sum(actor.damage for actor in model.stats.values()),
+            1_000_100,
+        )
+
+    def test_omitted_common_zero_preserves_first_member_damage(self):
+        model = CombatModel(run_id="omitted-common-zero-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        zero = team_stat(1, TEAMMATE_ID, 0, server_time=100)
+        zero["omitted_zero"] = True
+        self.assertFalse(model.ingest_team_stat(zero))
+
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 100))
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(3, TEAMMATE_ID, 250_000, server_time=101)
+            )
+        )
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 250_000)
+
+        omitted_after_damage = team_stat(
+            4, TEAMMATE_ID, 0, server_time=101
+        )
+        omitted_after_damage["omitted_zero"] = True
+        self.assertFalse(model.ingest_team_stat(omitted_after_damage))
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 250_000)
+        self.assertEqual(model.pop_completed_combats(), [])
+
+    def test_zero_baseline_survives_damage_before_delayed_boss_signal(self):
+        model = CombatModel(run_id="pre-signal-common-damage-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        provisional_id = -12_723_086_689
+        model.ingest_party({"entity_ids": [provisional_id]})
+        opening = team_stat(1, provisional_id, 5_046, server_time=101)
+        opening["full_snapshot"] = True
+        self.assertFalse(
+            model.ingest_team_stat(opening)
+        )
+        state = model.team_damage_states[provisional_id]
+        self.assertEqual(state.baseline_absolute, 0)
+        self.assertEqual(state.accepted_damage, 0)
+
+        model.merge_actor(
+            {
+                "from_actor_id": provisional_id,
+                "to_actor_id": TEAMMATE_ID,
+            }
+        )
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 100))
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(3, TEAMMATE_ID, 5_827, server_time=101)
+            )
+        )
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 5_827)
+
+    def test_final_common_snapshot_updates_finished_pull_without_reopening(self):
+        model = CombatModel(run_id="late-final-common-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 300,
+                "max_hp": 300,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        instance = 1_788_020_043
+        model.ingest_team_stat(
+            team_stat(1, SELF_ID, 1_000_000, server_time=instance)
+        )
+        model.ingest_team_stat(
+            team_stat(2, TEAMMATE_ID, 2_000_000, server_time=instance)
+        )
+        model.ingest(damage(3, SELF_ID, MONSTER_ID, 100))
+        model.ingest(damage(4, TEAMMATE_ID, MONSTER_ID, 200))
+        model.ingest_team_stat(
+            team_stat(5, SELF_ID, 1_000_080, server_time=instance)
+        )
+        model.ingest_team_stat(
+            team_stat(6, TEAMMATE_ID, 2_000_150, server_time=instance)
+        )
+
+        for offset, actor_id in enumerate((SELF_ID, TEAMMATE_ID), start=1):
+            model.ingest_combat_state(
+                {
+                    "entity_id": actor_id,
+                    "in_combat": True,
+                    "filetime_100ns": BASE_FILETIME + 60_000 + offset,
+                }
+            )
+
+        death_timestamp = BASE_FILETIME + 7 * 10_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 300,
+                "death_confirmed": True,
+                "filetime_100ns": death_timestamp,
+            }
+        )
+        for offset, actor_id in enumerate((SELF_ID, TEAMMATE_ID), start=1):
+            model.ingest_combat_state(
+                {
+                    "entity_id": actor_id,
+                    "in_combat": False,
+                    "filetime_100ns": death_timestamp + offset,
+                }
+            )
+        ended_at = model.combat_end_time
+        self.assertTrue(ended_at)
+        self.assertEqual(sum(row.damage for row in model.stats.values()), 230)
+
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(10, SELF_ID, 1_000_100, server_time=instance)
+            )
+        )
+        self.assertTrue(
+            model.ingest_team_stat(
+                team_stat(11, TEAMMATE_ID, 2_000_200, server_time=instance)
+            )
+        )
+        self.assertEqual(model.combat_end_time, ended_at)
+        self.assertFalse(model.combat_in_progress(ended_at + 1.0))
+        self.assertLessEqual(model.last_damage_time, ended_at)
+        self.assertEqual(
+            {actor_id: row.damage for actor_id, row in model.stats.items()},
+            {SELF_ID: 100, TEAMMATE_ID: 200},
+        )
+        self.assertEqual(model.pop_completed_combats()[-1]["total_damage"], 300)
+
+    def test_identical_common_snapshots_match_on_all_twelve_clients(self):
+        actors = [SELF_ID + index for index in range(12)]
+        baselines = {
+            actor_id: (index + 1) * 1_000_000
+            for index, actor_id in enumerate(actors)
+        }
+        expected = {
+            actor_id: (index + 1) * 12_345
+            for index, actor_id in enumerate(actors)
+        }
+
+        def client_result(self_index: int) -> dict[int, int]:
+            model = CombatModel(run_id=f"common-client-{self_index}")
+            self_actor = actors[self_index]
+            model.ingest_identity({"entity_id": self_actor})
+            model.ingest_party(
+                {"entity_ids": [actor for actor in actors if actor != self_actor]}
+            )
+            model.ingest_profile(
+                {
+                    "entity_id": MONSTER_ID,
+                    "entity_type": "Boss",
+                    "boss_rank": 3,
+                }
+            )
+            for sequence, actor_id in enumerate(actors, start=1):
+                model.ingest_team_stat(
+                    team_stat(
+                        sequence,
+                        actor_id,
+                        baselines[actor_id],
+                        server_time=1_788_020_043,
+                    )
+                )
+
+            # Each machine can observe a different local callback amount. The
+            # shared Common absolute values must replace that observer detail.
+            model.ingest(
+                damage(20, self_actor, MONSTER_ID, 7_777 + self_index * 9_001)
+            )
+            for sequence, actor_id in enumerate(actors, start=21):
+                model.ingest_team_stat(
+                    team_stat(
+                        sequence,
+                        actor_id,
+                        baselines[actor_id] + expected[actor_id],
+                        server_time=1_788_020_043,
+                    )
+                )
+            return {
+                actor_id: row.damage
+                for actor_id, row in model.stats.items()
+            }
+
+        for self_index in range(12):
+            with self.subTest(self_actor=actors[self_index]):
+                self.assertEqual(client_result(self_index), expected)
+
+    def test_boss_hp_drop_starts_team_stats_for_healer_without_local_hit(self):
+        model = CombatModel(run_id="healer-shared-start-test")
+        damage_actor_ids = (TEAMMATE_ID, NEARBY_ID)
+        healer_id = SELF_ID
+        model.ingest_identity({"entity_id": healer_id})
+        model.ingest_party(
+            {
+                "entity_ids": list(damage_actor_ids),
+                "member_count": 3,
+                "authoritative": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "entity_type": "Boss",
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 1_000_000,
+                "max_hp": 1_000_000,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+
+        baselines = {
+            healer_id: 200_000,
+            TEAMMATE_ID: 300_000,
+            NEARBY_ID: 400_000,
+        }
+        for sequence, actor_id in enumerate(baselines, start=1):
+            model.ingest_team_stat(
+                team_stat(
+                    sequence,
+                    actor_id,
+                    baselines[actor_id],
+                    server_time=1_788_020_043,
+                )
+            )
+
+        shared_start = BASE_FILETIME + 1_000_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 999_900,
+                "max_hp": 1_000_000,
+                "filetime_100ns": shared_start,
+            }
+        )
+        self.assertEqual(model.encounter_start_signal_100ns, shared_start)
+        self.assertEqual(
+            model.monsters[MONSTER_ID].last_hp_drop_100ns, shared_start
+        )
+
+        final_damage = {
+            healer_id: 0,
+            TEAMMATE_ID: 125_000,
+            NEARBY_ID: 275_000,
+        }
+        for offset, actor_id in enumerate(final_damage, start=1):
+            model.ingest_team_stat(
+                {
+                    "filetime_100ns": shared_start + 1_000_000 + offset,
+                    "actor_id": actor_id,
+                    "absolute_damage": (
+                        baselines[actor_id] + final_damage[actor_id]
+                    ),
+                    "server_time": 1_788_020_043,
+                }
+            )
+
+        self.assertEqual(
+            {actor_id: row.damage for actor_id, row in model.stats.items()},
+            {TEAMMATE_ID: 125_000, NEARBY_ID: 275_000},
+        )
+        self.assertNotIn(healer_id, model.stats)
+        self.assertEqual(
+            model.first_damage_time,
+            model._event_seconds({"filetime_100ns": shared_start}),
+        )
+
+    def test_shared_boss_hp_start_matches_when_local_first_hits_differ(self):
+        actors = [SELF_ID + index for index in range(12)]
+        healer_id = actors[-1]
+        baselines = {
+            actor_id: (index + 1) * 500_000
+            for index, actor_id in enumerate(actors)
+        }
+        expected = {
+            actor_id: (index + 1) * 23_457
+            for index, actor_id in enumerate(actors[:-1])
+        }
+        shared_start = BASE_FILETIME + 1_000_000
+        expected_start = (
+            shared_start - 116_444_736_000_000_000
+        ) / 10_000_000
+
+        def client_result(self_index: int) -> tuple[dict[int, int], float, int]:
+            model = CombatModel(run_id=f"shared-start-client-{self_index}")
+            self_actor = actors[self_index]
+            model.ingest_identity({"entity_id": self_actor})
+            model.ingest_party(
+                {
+                    "entity_ids": [
+                        actor_id for actor_id in actors if actor_id != self_actor
+                    ],
+                    "member_count": 12,
+                    "authoritative": True,
+                }
+            )
+            model.ingest_profile(
+                {
+                    "entity_id": MONSTER_ID,
+                    "entity_type": "Boss",
+                    "boss_rank": 3,
+                }
+            )
+            model.ingest_monster(
+                {
+                    "entity_id": MONSTER_ID,
+                    "current_hp": 10_000_000,
+                    "max_hp": 10_000_000,
+                    "filetime_100ns": BASE_FILETIME,
+                }
+            )
+            for sequence, actor_id in enumerate(actors, start=1):
+                model.ingest_team_stat(
+                    team_stat(
+                        sequence,
+                        actor_id,
+                        baselines[actor_id],
+                        server_time=1_788_020_043,
+                    )
+                )
+            model.ingest_monster(
+                {
+                    "entity_id": MONSTER_ID,
+                    "current_hp": 9_999_000,
+                    "max_hp": 10_000_000,
+                    "filetime_100ns": shared_start,
+                }
+            )
+
+            if self_actor != healer_id:
+                local_hit = damage(
+                    1,
+                    self_actor,
+                    MONSTER_ID,
+                    expected[self_actor],
+                )
+                local_hit["filetime_100ns"] = (
+                    shared_start + (self_index + 1) * 100_000
+                )
+                model.ingest(local_hit)
+
+            for offset, actor_id in enumerate(actors, start=1):
+                model.ingest_team_stat(
+                    {
+                        "filetime_100ns": shared_start + 2_000_000 + offset,
+                        "actor_id": actor_id,
+                        "absolute_damage": (
+                            baselines[actor_id] + expected.get(actor_id, 0)
+                        ),
+                        "server_time": 1_788_020_043,
+                    }
+                )
+            return (
+                {
+                    actor_id: row.damage
+                    for actor_id, row in model.stats.items()
+                },
+                model.first_damage_time,
+                model.encounter_start_signal_100ns,
+            )
+
+        for self_index in range(12):
+            with self.subTest(self_actor=actors[self_index]):
+                damage_by_actor, first_damage_time, start_signal = client_result(
+                    self_index
+                )
+                self.assertEqual(damage_by_actor, expected)
+                self.assertEqual(first_damage_time, expected_start)
+                self.assertEqual(start_signal, shared_start)
+
+    def test_post_pull_counter_drop_reapplies_zero_baseline_to_team(self):
+        model = CombatModel(run_id="team-zero-baseline-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "entity_type": "Boss",
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 1_000_000,
+                "max_hp": 1_000_000,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        instance = 1_788_020_043
+        model.ingest_team_stat(
+            team_stat(1, SELF_ID, 900_000, server_time=instance)
+        )
+        model.ingest_team_stat(
+            team_stat(2, TEAMMATE_ID, 800_000, server_time=instance)
+        )
+
+        shared_start = BASE_FILETIME + 1_000_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 999_000,
+                "max_hp": 1_000_000,
+                "filetime_100ns": shared_start,
+            }
+        )
+        self.assertTrue(
+            model.ingest_team_stat(
+                {
+                    "filetime_100ns": shared_start + 1,
+                    "actor_id": SELF_ID,
+                    "absolute_damage": 12_000,
+                    "server_time": instance,
+                }
+            )
+        )
+        self.assertTrue(
+            model.ingest_team_stat(
+                {
+                    "filetime_100ns": shared_start + 2,
+                    "actor_id": TEAMMATE_ID,
+                    "absolute_damage": 34_000,
+                    "server_time": instance,
+                }
+            )
+        )
+
+        self.assertEqual(
+            {actor_id: row.damage for actor_id, row in model.stats.items()},
+            {SELF_ID: 12_000, TEAMMATE_ID: 34_000},
+        )
+        for state in model.team_damage_states.values():
+            self.assertEqual(state.baseline_absolute, 0)
+            self.assertEqual(
+                state.baseline_snapshot_time_100ns, shared_start
+            )
+
+    def test_team_snapshot_never_rescales_exact_skill_or_target_amounts(self):
         model = CombatModel(run_id="realtime-calibration-test")
         model.ingest_identity({"entity_id": SELF_ID})
         model.ingest_party({"entity_ids": [TEAMMATE_ID]})
@@ -1670,18 +3605,254 @@ class CombatModelTests(unittest.TestCase):
         final_live_hit["provisional_damage"] = True
         model.ingest(final_live_hit)
         self.assertEqual(model.stats[TEAMMATE_ID].damage, 200)
+        # The Common total is authoritative for the actor total, but it cannot
+        # explain an observer stream that already contains 260. Exact skill and
+        # target amounts remain untouched instead of being silently shrunk to
+        # 200; the conflict stays visible for diagnostics.
         self.assertEqual(
             sum(model.stats[TEAMMATE_ID].target_damage.values()),
-            200,
+            260,
         )
         self.assertEqual(
             sum(skill.damage for skill in model.stats[TEAMMATE_ID].skills.values()),
-            200,
+            260,
         )
         self.assertTrue(model.combat_in_progress(model.last_damage_time))
         self.assertFalse(
             model.combat_in_progress(model.last_damage_time + model.idle_gap + 0.1)
         )
+
+    def test_team_snapshot_puts_only_positive_unknown_remainder_in_unclassified(self):
+        model = CombatModel(run_id="unclassified-skill-gap-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": TEAMMATE_ID, "name": "队友", "entity_type": "Player"}
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "测试首领",
+                "entity_type": "Boss",
+                "boss_rank": 3,
+            }
+        )
+
+        self.assertFalse(model.ingest_team_stat(team_stat(1, TEAMMATE_ID, 0)))
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 10))
+        first = damage(3, TEAMMATE_ID, MONSTER_ID, 30)
+        first["skill_id"] = 86_021_010
+        second = damage(4, TEAMMATE_ID, MONSTER_ID, 20)
+        second["skill_id"] = 86_021_020
+        model.ingest(first)
+        model.ingest(second)
+
+        self.assertTrue(model.ingest_team_stat(team_stat(5, TEAMMATE_ID, 200)))
+        actor = model.stats[TEAMMATE_ID]
+        self.assertEqual(actor.damage, 200)
+        self.assertEqual(
+            {skill_id: skill.damage for skill_id, skill in actor.skills.items()},
+            {86_021_010: 30, 86_021_020: 20, 0: 150},
+        )
+        self.assertEqual(model.display_skill_name(TEAMMATE_ID, 0), "未归类伤害")
+        self.assertEqual(actor.target_damage, {MONSTER_ID: 50})
+        target_rows = model.actor_target_rows(TEAMMATE_ID)
+        self.assertEqual(
+            [(row["name"], row["damage"]) for row in target_rows],
+            [("测试首领", 50), ("未分配目标", 150)],
+        )
+        record = model.build_combat_record()
+        self.assertEqual(record["damage_accounting"]["skill_amount_policy"], "absolute_only")
+        self.assertFalse(record["damage_accounting"]["skill_amounts_rescaled"])
+        reconciliation = next(
+            row
+            for row in record["damage_accounting"]["skill_reconciliation"]
+            if row["actor_id"] == TEAMMATE_ID
+        )
+        self.assertEqual(
+            reconciliation,
+            {
+                "actor_id": TEAMMATE_ID,
+                "name": "队友",
+                "damage": 200,
+                "classified_skill_damage": 50,
+                "unclassified_damage": 150,
+                "accounted_skill_damage": 200,
+                "difference": 0,
+            },
+        )
+
+    def test_matching_stage_summary_adds_exact_teammate_skills_without_rewriting_damage(self):
+        model = CombatModel(run_id="stage-skill-snapshot-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": TEAMMATE_ID, "name": "队友", "entity_type": "Player"}
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "测试首领",
+                "entity_type": "Boss",
+                "boss_rank": 3,
+            }
+        )
+
+        self.assertFalse(model.ingest_team_stat(team_stat(1, TEAMMATE_ID, 0)))
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 100))
+        teammate_hit = damage(3, TEAMMATE_ID, MONSTER_ID, 50)
+        teammate_hit["skill_id"] = 86_021_010
+        model.ingest(teammate_hit)
+        self.assertTrue(model.ingest_team_stat(team_stat(4, TEAMMATE_ID, 200)))
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 200)
+        self.assertEqual(
+            {skill_id: row.damage for skill_id, row in model.stats[TEAMMATE_ID].skills.items()},
+            {86_021_010: 50, 0: 150},
+        )
+
+        death_time = BASE_FILETIME + 5 * 10_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 1_000,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "stage-skill-exact",
+                    "filetime_100ns": death_time + 10_000,
+                    "member_count": 2,
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": TEAMMATE_ID,
+                            "damage": 200,
+                            "skills": [
+                                {"skill_id": 86_021_010, "damage": 120, "hits": 3},
+                                {"skill_id": 86_021_020, "damage": 70, "hits": 2},
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+        teammate = model.stats[TEAMMATE_ID]
+        self.assertEqual(teammate.damage, 200)
+        self.assertEqual(
+            {
+                skill_id: (row.damage, row.hits)
+                for skill_id, row in teammate.skills.items()
+            },
+            {
+                86_021_010: (120, 3),
+                86_021_020: (70, 2),
+                0: (10, 0),
+            },
+        )
+        self.assertEqual(model.stats[SELF_ID].damage, 100)
+        record = model.build_combat_record("target_defeated")
+        teammate_record = next(
+            row for row in record["participants"] if row["actor_id"] == TEAMMATE_ID
+        )
+        self.assertEqual(teammate_record["skill_source"], "server_stage_summary")
+        self.assertEqual(teammate_record["damage"], 200)
+        self.assertEqual(sum(row["damage"] for row in teammate_record["skills"]), 200)
+        self.assertTrue(
+            all(row["max_hit"] is None for row in teammate_record["skills"])
+        )
+        self.assertEqual(
+            record["damage_accounting"]["stage_skill_snapshots"][0][
+                "unclassified_damage"
+            ],
+            10,
+        )
+
+    def test_mismatched_stage_actor_total_cannot_replace_teammate_skills(self):
+        model = CombatModel(run_id="stage-skill-mismatch-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        self.assertFalse(model.ingest_team_stat(team_stat(1, TEAMMATE_ID, 0)))
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 100))
+        teammate_hit = damage(3, TEAMMATE_ID, MONSTER_ID, 50)
+        teammate_hit["skill_id"] = 86_021_010
+        model.ingest(teammate_hit)
+        self.assertTrue(model.ingest_team_stat(team_stat(4, TEAMMATE_ID, 200)))
+        death_time = BASE_FILETIME + 5 * 10_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 1_000,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "stage-skill-mismatch",
+                    "filetime_100ns": death_time + 10_000,
+                    "member_count": 2,
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": TEAMMATE_ID,
+                            "damage": 201,
+                            "skills": [
+                                {"skill_id": 86_021_020, "damage": 201, "hits": 4}
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertIsNone(model.active_stage_skill_snapshot(TEAMMATE_ID))
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 200)
+        self.assertEqual(
+            {skill_id: row.damage for skill_id, row in model.stats[TEAMMATE_ID].skills.items()},
+            {86_021_010: 50, 0: 150},
+        )
+
+    def test_legacy_hp_correlated_events_are_rejected(self):
+        model = CombatModel()
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+
+        local_exact = damage(2, SELF_ID, MONSTER_ID, 900)
+        local_exact["damage_source"] = "network_exact"
+        model.ingest(local_exact)
+
+        for sequence, actor_id in ((3, SELF_ID), (4, TEAMMATE_ID)):
+            correlated = damage(sequence, actor_id, MONSTER_ID, 500)
+            correlated.update(
+                {
+                    "damage_source": "hp_correlated",
+                    "provisional_damage": True,
+                }
+            )
+            model.ingest(correlated)
+
+        self.assertEqual(model.stats[SELF_ID].damage, 900)
+        self.assertNotIn(TEAMMATE_ID, model.stats)
+        self.assertEqual(len(model.events), 1)
+
+        fallback = damage(7, SELF_ID, MONSTER_ID, 50)
+        fallback["damage_source"] = "network_exact"
+        model.ingest(fallback)
+        self.assertEqual(model.stats[SELF_ID].damage, 950)
 
     def test_team_snapshot_adds_positive_party_member_without_exact_hit(self):
         model = CombatModel()
@@ -1708,7 +3879,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn(ZERO_TEAMMATE_ID, model.stats)
         self.assertEqual(
             model.display_skill_name(TEAMMATE_ID, 0),
-            "团队伤害汇总",
+            "未归类伤害",
         )
 
     def test_inferred_teammate_damage_survives_party_exit_and_archives(self):
@@ -2213,7 +4384,7 @@ class CombatModelTests(unittest.TestCase):
         model.ingest(post_summary)
         self.assertEqual(model.stats[SELF_ID].damage, 1_100_000)
 
-    def test_final_settlement_replaces_hp_inference_and_rewrites_same_encounter(self):
+    def test_final_settlement_is_validation_only_and_never_rewrites_damage(self):
         model = CombatModel(run_id="settlement-correction-test")
         actor_ids = [SELF_ID + index for index in range(6)]
         names = ["莫雪", "知幻", "綠鱼", "杨再兴", "恋缘", "汐序"]
@@ -2310,27 +4481,467 @@ class CombatModelTests(unittest.TestCase):
             {actor_id: actor.damage for actor_id, actor in model.stats.items()},
             {
                 actor_id: amount
-                for actor_id, amount in zip(actor_ids, exact)
+                for actor_id, amount in zip(actor_ids, inferred)
                 if amount
             },
         )
-        corrected = model.pop_completed_combats()
-        self.assertEqual(len(corrected), 1)
-        self.assertEqual(corrected[0]["encounter_id"], encounter_id)
-        self.assertEqual(corrected[0]["total_damage"], 2_594_381)
+        refreshed = model.pop_completed_combats()
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(refreshed[0]["archive_reason"], "target_defeated")
+        self.assertEqual(refreshed[0]["total_damage"], sum(inferred))
+        validated = model.build_combat_record("target_defeated")
+        self.assertEqual(validated["encounter_id"], encounter_id)
+        self.assertEqual(validated["total_damage"], 2_152_634)
         self.assertEqual(
-            [(row["name"], row["damage"]) for row in corrected[0]["participants"]],
-            [
-                ("知幻", 763_225),
-                ("綠鱼", 660_893),
-                ("杨再兴", 593_997),
-                ("恋缘", 415_704),
-                ("汐序", 160_562),
-            ],
+            [row["damage"] for row in validated["participants"]],
+            inferred[1:],
+        )
+        validation = validated["damage_accounting"][
+            "stage_summary_validations"
+        ][0]
+        self.assertTrue(validation["validation_only"])
+        self.assertFalse(validation["validation"]["damage_correction_applied"])
+        self.assertTrue(
+            validation["validation"]["would_allow_legacy_correction"]
+        )
+        self.assertFalse(validation["validation"]["per_actor_exact_match"])
+        self.assertEqual(validation["validation"]["summary_total"], 2_594_381)
+        self.assertEqual(validation["validation"]["observed_total"], 2_152_634)
+        self.assertEqual(validation["validation"]["difference"], 441_747)
+
+    def test_feedback_fb9466_common_matches_all_twelve_completion_rows(self):
+        """FB9466C5D00ECF5699: Common is exact before completion arrives."""
+        model = CombatModel(run_id="fb9466-astrologer-completion-test")
+        actors = [
+            (57_185_883_868_347, "歌莉雅丶", 1_200_003, 3_925_579, 3_925_579),
+            (57_386_136_789_472, "紫丶涩", 1_200_002, 25_457, 13_431),
+            (57_192_862_116_237, "烟雨乂江南", 1_200_003, 4_391_742, 4_337_458),
+            (57_202_526_989_526, "曲戈", 1_200_003, 3_641_908, 4_334_496),
+            (57_271_246_667_082, "风华", 1_200_006, 727_606, 423_219),
+            (57_425_865_521_285, "羽落凡辰", 1_200_005, 4_427_567, 4_121_193),
+            (57_338_355_340_533, "露娜丶", 1_200_007, 1_894_287, 3_077_155),
+            (57_338_892_134_378, "小孩这庙灵吗", 1_200_001, 2_108_340, 2_606_822),
+            (57_404_390_650_055, "哈哈嘿", 1_200_007, 3_399_390, 3_956_911),
+            (57_427_476_113_084, "中奖名单", 1_200_003, 3_712_152, 4_195_377),
+            (57_430_160_023_251, "夜空中最靓的星", 1_200_002, 101_416, 459),
+            (57_421_570_080_938, "与其追风去", 1_200_005, 5_234_877, 4_105_790),
+        ]
+        self_id = actors[0][0]
+        model.ingest_identity({"entity_id": self_id})
+        model.ingest_party(
+            {
+                "entity_ids": [actor_id for actor_id, *_rest in actors[1:]],
+                "member_count": 12,
+                "authoritative": True,
+            }
+        )
+        for actor_id, name, profession_id, _packet_damage, _game_damage in actors:
+            model.ingest_profile(
+                {
+                    "entity_id": actor_id,
+                    "name": name,
+                    "profession_id": profession_id,
+                    "entity_type": "Player",
+                }
+            )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "星象仪者",
+                "entity_type": "Boss",
+                "template_id": 7_102_403,
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 33_270_350,
+                "max_hp": 33_270_350,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        instance = 1_788_020_043
+        for actor_id, *_rest in actors:
+            model.ingest_team_stat(
+                {
+                    "filetime_100ns": BASE_FILETIME,
+                    "actor_id": actor_id,
+                    "absolute_damage": 0,
+                    "server_time": instance,
+                }
+            )
+        for sequence, (actor_id, _name, _profession, packet_damage, _game) in enumerate(
+            actors, start=1
+        ):
+            model.ingest(damage(sequence, actor_id, MONSTER_ID, packet_damage))
+        self.assertEqual(sum(row.damage for row in model.stats.values()), 33_590_321)
+
+        for sequence, (actor_id, _name, _profession, _packet, game_damage) in enumerate(
+            actors, start=20
+        ):
+            model.ingest_team_stat(
+                team_stat(
+                    sequence,
+                    actor_id,
+                    game_damage,
+                    server_time=instance,
+                )
+            )
+        self.assertEqual(sum(row.damage for row in model.stats.values()), 35_097_890)
+
+        death_time = BASE_FILETIME + 20 * 10_000_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 33_270_350,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "settlement|5150060|3|apLvgXqQbOZkQ5DX",
+                    "filetime_100ns": death_time + 149_642_340,
+                    "member_count": 12,
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": actor_id,
+                            "name": name,
+                            "profession_id": profession_id,
+                            "damage": game_damage,
+                            "skills": [],
+                        }
+                        for actor_id, name, profession_id, _packet, game_damage in actors
+                    ],
+                }
+            )
         )
 
-    def test_multiphase_settlement_ends_and_archives_exact_result(self):
-        """FBE64D87D66CCBE07C: settlement ends Astrologer explicitly."""
+        exact_damage = {
+            actor_id: game_damage
+            for actor_id, _name, _profession, _packet, game_damage in actors
+        }
+        self.assertEqual(
+            {actor_id: row.damage for actor_id, row in model.stats.items()},
+            exact_damage,
+        )
+        self.assertEqual(sum(row.damage for row in model.stats.values()), 35_097_890)
+        self.assertEqual(model.stats[57_421_570_080_938].damage, 4_105_790)
+        self.assertEqual(model.stats[57_425_865_521_285].damage, 4_121_193)
+        record = model.build_combat_record("target_defeated")
+        validation = record["damage_accounting"]["stage_summary_validations"][0]
+        self.assertTrue(validation["validation_only"])
+        self.assertTrue(validation["validation"]["confirmed_multiphase_completion"])
+        self.assertFalse(validation["validation"]["damage_correction_applied"])
+        self.assertEqual(validation["validation"]["difference"], 0)
+        self.assertTrue(validation["validation"]["per_actor_exact_match"])
+        self.assertTrue(
+            all(
+                row["difference"] == 0
+                for row in validation["validation"]["actor_differences"]
+            )
+        )
+        self.assertEqual(record["total_damage"], 35_097_890)
+
+    def test_feedback_fb9561_common_replaces_inflated_observer_damage(self):
+        """FB9561E555D7298DFF: Common replaces observer-local inflation."""
+        model = CombatModel(run_id="fb9561-astrologer-common-test")
+        self_id = 26_469_350_884_919
+        exact_damage = {
+            39_655_974_394_423: 4_698_584,
+            44_114_686_660_146: 743_738,
+            57_405_461_980_853: 556_930,
+            39_841_194_850_739: 2_799_002,
+            39_859_448_560_268: 0,
+            self_id: 3_656_999,
+            88_021_600_320_006: 3_188_306,
+            87_966_302_592_094: 3_677_249,
+            88_021_600_332_760: 2_659_879,
+            88_232_053_545_579: 3_191_948,
+            61_700_430_230_730: 3_721_554,
+            57_234_739_124_420: 0,
+        }
+        model.ingest_identity({"entity_id": self_id})
+        model.ingest_party(
+            {
+                "entity_ids": [
+                    actor_id for actor_id in exact_damage if actor_id != self_id
+                ],
+                "member_count": 12,
+                "authoritative": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "星象仪者",
+                "entity_type": "Boss",
+                "template_id": 7_102_403,
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 33_270_350,
+                "max_hp": 33_270_350,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        instance = 1_788_020_043
+        for sequence, actor_id in enumerate(exact_damage, start=1):
+            model.ingest_team_stat(
+                team_stat(sequence, actor_id, 0, server_time=instance)
+            )
+
+        # The affected build accumulated 8,390,816 from observer-local events
+        # for this player even though the game's per-player value was 3,656,999.
+        model.ingest(damage(20, self_id, MONSTER_ID, 8_390_816))
+        self.assertEqual(model.stats[self_id].damage, 8_390_816)
+        for sequence, (actor_id, amount) in enumerate(
+            exact_damage.items(), start=30
+        ):
+            model.ingest_team_stat(
+                team_stat(
+                    sequence,
+                    actor_id,
+                    amount,
+                    server_time=instance,
+                )
+            )
+
+        expected_visible = {
+            actor_id: amount for actor_id, amount in exact_damage.items() if amount
+        }
+        self.assertEqual(
+            {actor_id: row.damage for actor_id, row in model.stats.items()},
+            expected_visible,
+        )
+        self.assertEqual(model.stats[self_id].damage, 3_656_999)
+        self.assertEqual(sum(row.damage for row in model.stats.values()), 28_894_189)
+
+        death_time = BASE_FILETIME + 20 * 10_000_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 33_270_350,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "5150060|3|fb9561",
+                    "filetime_100ns": death_time + 31 * 10_000_000,
+                    "member_count": 12,
+                    "authoritative": False,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {"actor_id": actor_id, "damage": amount, "skills": []}
+                        for actor_id, amount in exact_damage.items()
+                    ],
+                }
+            )
+        )
+        self.assertEqual(
+            {actor_id: row.damage for actor_id, row in model.stats.items()},
+            expected_visible,
+        )
+        validation = model.build_combat_record("target_defeated")[
+            "damage_accounting"
+        ]["stage_summary_validations"][0]
+        self.assertTrue(validation["validation_only"])
+        self.assertEqual(validation["validation"]["difference"], 0)
+        self.assertTrue(validation["validation"]["per_actor_exact_match"])
+        self.assertFalse(validation["validation"]["damage_correction_applied"])
+
+    def test_delayed_final_common_matches_baldwin_completion_table(self):
+        """The last Common is exact before the table arrives 171 seconds later."""
+        model = CombatModel(run_id="baldwin-completed-stage-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID, NEARBY_ID],
+                "member_count": 3,
+                "authoritative": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "Baldwin",
+                "entity_type": "Boss",
+                "template_id": 7_103_401,
+                "boss_rank": 3,
+            }
+        )
+        instance = 1_788_020_043
+        for actor_id in (SELF_ID, TEAMMATE_ID, NEARBY_ID):
+            model.ingest_team_stat(
+                {
+                    "filetime_100ns": BASE_FILETIME,
+                    "actor_id": actor_id,
+                    "absolute_damage": 0,
+                    "server_time": instance,
+                }
+            )
+
+        self_damage = damage(1, SELF_ID, MONSTER_ID, 46_776)
+        self_damage["filetime_100ns"] = BASE_FILETIME + 1 * 10_000_000
+        model.ingest(self_damage)
+        teammate_damage = damage(2, TEAMMATE_ID, MONSTER_ID, 35_666_894)
+        teammate_damage["filetime_100ns"] = BASE_FILETIME + 2 * 10_000_000
+        model.ingest(teammate_damage)
+        omitted_zero_damage = damage(3, NEARBY_ID, MONSTER_ID, 40_787)
+        omitted_zero_damage["filetime_100ns"] = BASE_FILETIME + 3 * 10_000_000
+        model.ingest(omitted_zero_damage)
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 35_754_457,
+                "death_confirmed": True,
+                "filetime_100ns": BASE_FILETIME + 3 * 10_000_000 + 1,
+            }
+        )
+        self.assertTrue(model.finalize_if_idle(model.last_damage_time + 10.1))
+        initial = model.pop_completed_combats()
+        self.assertEqual(initial[0]["total_damage"], 35_754_457)
+
+        final_common = (
+            (SELF_ID, 5_832),
+            (TEAMMATE_ID, 38_528_659),
+            (NEARBY_ID, 0),
+        )
+        for sequence, (actor_id, amount) in enumerate(final_common, start=4_000):
+            model.ingest_team_stat(
+                team_stat(
+                    sequence,
+                    actor_id,
+                    amount,
+                    server_time=instance,
+                )
+            )
+        self.assertEqual(sum(row.damage for row in model.stats.values()), 38_534_491)
+        common_refreshes = model.pop_completed_combats()
+        self.assertTrue(common_refreshes)
+        self.assertEqual(common_refreshes[-1]["total_damage"], 38_534_491)
+
+        completion_time = BASE_FILETIME + 174 * 10_000_000
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "settlement|5150059|2|completed-stage",
+                    "filetime_100ns": completion_time,
+                    "member_count": 3,
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {"actor_id": SELF_ID, "damage": 5_832, "skills": []},
+                        {
+                            "actor_id": TEAMMATE_ID,
+                            "damage": 38_528_659,
+                            "skills": [],
+                        },
+                        {"actor_id": NEARBY_ID, "damage": 0, "skills": []},
+                    ],
+                }
+            )
+        )
+
+        self.assertEqual(sum(row.damage for row in model.stats.values()), 38_534_491)
+        self.assertNotIn(NEARBY_ID, model.stats)
+        refreshed = model.pop_completed_combats()
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(refreshed[0]["total_damage"], 38_534_491)
+        validation = refreshed[0]["damage_accounting"][
+            "stage_summary_validations"
+        ][0]
+        self.assertTrue(validation["completion_confirmed"])
+        self.assertTrue(validation["validation"]["end_snapshot"])
+        self.assertAlmostEqual(
+            validation["validation"]["summary_delay_seconds"], 171.0
+        )
+        self.assertFalse(validation["validation"]["damage_correction_applied"])
+        self.assertEqual(validation["validation"]["difference"], 0)
+        self.assertTrue(validation["validation"]["per_actor_exact_match"])
+
+    def test_ancestor_knight_damage_survives_form_changes_and_final_mvp(self):
+        model = CombatModel(run_id="ancestor-knight-test")
+        knight_actor = SELF_ID + 90_000
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "先祖铠甲",
+                "entity_type": "Boss",
+                "template_id": 7_103_402,
+                "boss_rank": 3,
+            }
+        )
+
+        normal = damage(1, SELF_ID, MONSTER_ID, 1_000)
+        normal["skill_id"] = 86_060_040
+        model.ingest(normal)
+
+        model.merge_actor(
+            {"from_actor_id": SELF_ID, "to_actor_id": knight_actor}
+        )
+        model.ingest_identity({"entity_id": knight_actor})
+        for sequence, (skill_id, amount) in enumerate(
+            ((820_600_101, 2_000), (800_011_802, 1_500)), start=2
+        ):
+            transformed = damage(sequence, knight_actor, MONSTER_ID, amount)
+            transformed["skill_id"] = skill_id
+            model.ingest(transformed)
+
+        model.merge_actor(
+            {"from_actor_id": knight_actor, "to_actor_id": SELF_ID}
+        )
+        model.ingest_identity({"entity_id": SELF_ID})
+        self.assertEqual(model.stats[SELF_ID].damage, 4_500)
+
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "settlement|ancestor|cross-boss-mvp",
+                    "filetime_100ns": BASE_FILETIME + 5 * 10_000_000,
+                    "member_count": 1,
+                    "authoritative": True,
+                    "actors": [
+                        {
+                            "actor_id": SELF_ID,
+                            "damage": 1_000,
+                            "skills": [],
+                        }
+                    ],
+                }
+            )
+        )
+
+        actor = model.stats[SELF_ID]
+        self.assertEqual(actor.damage, 4_500)
+        self.assertEqual(
+            {skill_id: skill.damage for skill_id, skill in actor.skills.items()},
+            {86_060_040: 1_000, 820_600_101: 2_000, 800_011_802: 1_500},
+        )
+        validation = model.build_combat_record()["damage_accounting"][
+            "stage_summary_validations"
+        ][0]["validation"]
+        self.assertEqual(validation["summary_total"], 1_000)
+        self.assertEqual(validation["observed_total"], 4_500)
+
+    def test_multiphase_settlement_does_not_end_or_replace_live_encounter(self):
+        """A cross-Boss MVP table cannot control a live Astrologer pull."""
         model = CombatModel(run_id="multiphase-settlement-test")
         model.ingest_identity({"entity_id": SELF_ID})
         model.ingest_party(
@@ -2382,14 +4993,18 @@ class CombatModelTests(unittest.TestCase):
                 }
             )
         )
-        self.assertEqual(model.combat_end_reason, "settlement")
-        self.assertEqual(model.combat_end_time, realtime_end)
-        self.assertEqual(sum(row.damage for row in model.stats.values()), 350_000)
-        record = model.pop_completed_combats()[0]
-        self.assertEqual(record["archive_reason"], "settlement")
-        self.assertEqual(record["total_damage"], 350_000)
+        self.assertFalse(model.combat_end_reason)
+        self.assertFalse(model.combat_end_time)
+        self.assertEqual(model.last_damage_time, realtime_end)
+        self.assertEqual(sum(row.damage for row in model.stats.values()), 300_000)
+        self.assertEqual(model.pop_completed_combats(), [])
+        validation = model.build_combat_record()["damage_accounting"][
+            "stage_summary_validations"
+        ][0]
+        self.assertTrue(validation["validation_only"])
+        self.assertTrue(validation["validation"]["would_have_matched"])
 
-    def test_settlement_keeps_boss_add_split_critical_rate_and_death_count(self):
+    def test_settlement_cannot_overwrite_target_split_or_death_count(self):
         model = CombatModel(run_id="settlement-detail-test")
         ice_one = SECOND_MONSTER_ID + 20_001
         ice_two = SECOND_MONSTER_ID + 20_002
@@ -2495,26 +5110,26 @@ class CombatModelTests(unittest.TestCase):
             int(row["actor_id"]): row for row in record["participants"]
         }
         self_row = participants[SELF_ID]
-        self.assertEqual(self_row["damage"], 2_000)
-        self.assertEqual(self_row["damage_hits"], 20)
-        self.assertEqual(self_row["critical_hits"], 8)
-        self.assertEqual(self_row["critical_rate"], 0.4)
-        self.assertEqual(self_row["deaths"], 3)
-        self.assertEqual(participants[TEAMMATE_ID]["deaths"], 2)
+        self.assertEqual(self_row["damage"], 1_000)
+        self.assertIsNone(self_row["damage_hits"])
+        self.assertIsNone(self_row["critical_hits"])
+        self.assertIsNone(self_row["critical_rate"])
+        self.assertEqual(self_row["deaths"], 1)
+        self.assertEqual(participants[TEAMMATE_ID]["deaths"], 0)
         self.assertEqual(
             [
                 (row["kind"], row["name"], row["damage"], row["share"])
                 for row in self_row["targets"]
             ],
             [
-                ("Boss", "朗伯·绞索", 1_200, 0.6),
-                ("小怪", "冰牢", 800, 0.4),
+                ("Boss", "朗伯·绞索", 600, 0.6),
+                ("小怪", "冰牢", 400, 0.4),
             ],
         )
         teammate_targets = participants[TEAMMATE_ID]["targets"]
         self.assertEqual(
             [(row["name"], row["damage"]) for row in teammate_targets],
-            [("朗伯·绞索", 800), ("冰牢", 200)],
+            [("朗伯·绞索", 400), ("冰牢", 100)],
         )
 
     def test_realtime_critical_rate_uses_explicit_hit_type_without_settlement(self):
@@ -2662,6 +5277,38 @@ class CombatModelTests(unittest.TestCase):
             ),
             1_995,
         )
+
+    def test_pre_pull_team_snapshot_cannot_shadow_exact_dummy_hits(self):
+        model = CombatModel(run_id="dummy-pre-pull-snapshot-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        pre_pull = team_stat(1, SELF_ID, 37_500)
+        pre_pull["full_snapshot"] = True
+        model.ingest_team_stat(pre_pull)
+        self.assertTrue(
+            model.team_damage_states[SELF_ID].authoritative_snapshot
+        )
+
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "伤害木桩",
+                "entity_type": "Boss",
+                "template_id": 7_114_223,
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest(damage(2, SELF_ID, MONSTER_ID, 812))
+        self.assertFalse(model.ingest_team_stat(team_stat(3, SELF_ID, 812)))
+        self.assertEqual(model.stats[SELF_ID].damage, 812)
+        self.assertFalse(
+            model.team_damage_states[SELF_ID].authoritative_snapshot
+        )
+
+        model.ingest(damage(4, SELF_ID, MONSTER_ID, 1_183))
+        self.assertFalse(model.ingest_team_stat(team_stat(5, SELF_ID, 1_995)))
+        self.assertEqual(model.stats[SELF_ID].damage, 1_995)
+        self.assertEqual(model.stats[SELF_ID].hits, 2)
 
     def test_midfight_stage_metrics_update_critical_without_importing_old_deaths(self):
         model = CombatModel(run_id="stage-metrics-test")
@@ -3141,8 +5788,8 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(set(model.stats), {TEAMMATE_ID})
         self.assertEqual(model.stats[TEAMMATE_ID].damage, 50_000)
 
-    def test_astrologer_full_hp_reset_does_not_wait_for_the_add_phase_gap(self):
-        """FBB286B655A129BAC3: a full Boss refill ends the wiped pull."""
+    def test_astrologer_phase_refill_and_long_gap_stay_in_one_encounter(self):
+        """FB3958DB48DB1D4CE8: a guard phase must not split one Boss pull."""
         model = CombatModel(run_id="astrologer-wipe-reset-test")
         model.ingest_identity({"entity_id": SELF_ID})
         model.ingest_profile(
@@ -3167,7 +5814,7 @@ class CombatModelTests(unittest.TestCase):
         model.ingest_monster(
             {
                 "entity_id": MONSTER_ID,
-                "current_hp": 29_375_701,
+                "current_hp": 20_888_137,
                 "filetime_100ns": BASE_FILETIME + 2 * 10_000_000,
             }
         )
@@ -3181,27 +5828,122 @@ class CombatModelTests(unittest.TestCase):
         model.ingest_monster(
             {
                 "entity_id": MONSTER_ID,
-                "current_hp": 33_270_350,
+                "reset_candidate_hp": 33_270_350,
+                "max_hp": 33_270_350,
                 "filetime_100ns": reset_time,
             }
         )
 
         self.assertFalse(model.combat_end_time)
         self.assertTrue(model.boss_reset_pending_100ns)
-        self.assertTrue(
-            model.finalize_if_idle(model.last_damage_time + model.idle_gap + 1.0)
+        encounter_id = model.encounter_id
+        self.assertFalse(
+            model.finalize_if_idle(
+                model.last_damage_time + model.encounter_gap + 14.0
+            )
         )
-        self.assertEqual(model.combat_end_reason, "target_reset")
-        self.assertEqual(model.combat_end_time, model.last_damage_time)
+        self.assertFalse(model.combat_end_reason)
+        self.assertFalse(model.combat_end_time)
 
-        next_pull = damage(2, TEAMMATE_ID, MONSTER_ID, 250_000)
-        next_pull["filetime_100ns"] = reset_time + 10_000
-        model.ingest(next_pull)
-        self.assertEqual(set(model.stats), {TEAMMATE_ID})
+        resumed_hit = damage(2, TEAMMATE_ID, MONSTER_ID, 250_000)
+        resumed_hit["filetime_100ns"] = int(
+            (model.last_damage_time + model.encounter_gap + 14.0) * 10_000_000
+            + 116_444_736_000_000_000
+        )
+        model.ingest(resumed_hit)
+        self.assertEqual(model.encounter_id, encounter_id)
+        self.assertEqual(set(model.stats), {SELF_ID, TEAMMATE_ID})
+        self.assertEqual(model.stats[SELF_ID].damage, 3_894_649)
         self.assertEqual(model.stats[TEAMMATE_ID].damage, 250_000)
-        history = model.pop_completed_combats()
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["archive_reason"], "target_reset")
+        self.assertFalse(model.boss_reset_pending_100ns)
+        self.assertEqual(model.pop_completed_combats(), [])
+
+    def test_astrologer_final_death_freezes_dps_before_delayed_archive(self):
+        """FB7408AA158422D3F4: final DPS must not fall and rebound."""
+        model = CombatModel(run_id="astrologer-final-death-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "星象仪者",
+                "entity_type": "Boss",
+                "template_id": 7_102_403,
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 33_270_350,
+                "max_hp": 33_270_350,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 1_000_000))
+
+        guard_phase_time = BASE_FILETIME + 5 * 10_000_000
+        model.ingest_monster(
+            {
+                "entity_id": SECOND_MONSTER_ID,
+                "template_id": 7_102_405,
+                "current_hp": 1_325_792,
+                "max_hp": 1_325_792,
+                "filetime_100ns": guard_phase_time + 10_000,
+            }
+        )
+        phase_hit = damage(2, SELF_ID, SECOND_MONSTER_ID, 200_000)
+        phase_hit["filetime_100ns"] = guard_phase_time + 20_000
+        model.ingest(phase_hit)
+        self.assertTrue(model.active(model._event_seconds(phase_hit)))
+        self.assertEqual(model.stats[SELF_ID].damage, 1_200_000)
+
+        final_hit = damage(3, SELF_ID, MONSTER_ID, 500_000)
+        final_hit["filetime_100ns"] = guard_phase_time + 50_000
+        model.ingest(final_hit)
+        final_death_time = guard_phase_time + 5 * 10_000_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "death_confirmed": True,
+                "filetime_100ns": final_death_time,
+            }
+        )
+
+        # The real settlement sequence leaves a live guard on screen and sends
+        # one final in-flight HP drop after the primary Boss death. Neither may
+        # reopen the encounter or lower the frozen DPS result.
+        model.ingest_monster(
+            {
+                "entity_id": SECOND_MONSTER_ID,
+                "current_hp": 941_056,
+                "filetime_100ns": final_death_time + 400_000,
+            }
+        )
+        damage_before_cleanup = model.stats[SELF_ID].damage
+        cleanup_hit = damage(4, SELF_ID, SECOND_MONSTER_ID, 10_667)
+        cleanup_hit["filetime_100ns"] = final_death_time + 410_000
+        model.ingest(cleanup_hit)
+
+        frozen_duration = model.duration(model.last_damage_time + 1)
+        self.assertFalse(model.active(model.last_damage_time + 1))
+        self.assertEqual(model.stats[SELF_ID].damage, damage_before_cleanup)
+        self.assertEqual(
+            frozen_duration,
+            model.duration(model.last_damage_time + model.encounter_gap - 0.1),
+        )
+        self.assertFalse(
+            model.finalize_if_idle(
+                model.last_damage_time + model.encounter_gap - 0.1
+            )
+        )
+        self.assertTrue(
+            model.finalize_if_idle(model.last_damage_time + model.encounter_gap)
+        )
+        record = model.pop_completed_combats()[0]
+        self.assertEqual(record["archive_reason"], "target_defeated")
+        self.assertEqual(record["duration_seconds"], frozen_duration)
 
     def test_large_full_hp_candidate_waits_for_all_damage_actors_to_leave_combat(self):
         model = CombatModel(run_id="boss-reset-candidate-test")
@@ -3470,6 +6212,114 @@ class CombatModelTests(unittest.TestCase):
         history = model.pop_completed_combats()
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["total_damage"], 99_296)
+
+    def test_space_transition_clears_stale_dummy_before_new_boss(self):
+        model = CombatModel(run_id="space-transition-test")
+        model.ingest_scene({"scene_id": 5_200_002})
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID],
+                "member_count": 2,
+                "authoritative": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "伤害木桩",
+                "entity_type": "Boss",
+                "template_id": 7_114_223,
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 1_000_000,
+                "max_hp": 1_000_000,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 900_000,
+                "filetime_100ns": BASE_FILETIME + 10_000,
+            }
+        )
+        self.assertEqual(model.combat_target_id, MONSTER_ID)
+
+        self.assertTrue(
+            model.ingest_scene(
+                {
+                    "scene_id": 0,
+                    "previous_scene_id": 5_200_002,
+                    "force_reset": True,
+                    "transition": True,
+                    "entity_ids": [],
+                }
+            )
+        )
+        self.assertIsNone(model.scene_id)
+        self.assertIsNone(model.combat_target_id)
+        self.assertEqual(model.monsters, {})
+
+        boss_id = MONSTER_ID + 1
+        model.ingest_profile(
+            {
+                "entity_id": boss_id,
+                "name": "小丑",
+                "entity_type": "Boss",
+                "template_id": 7_102_873,
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": boss_id,
+                "current_hp": 5_000_000,
+                "max_hp": 5_000_000,
+                "filetime_100ns": BASE_FILETIME + 30_000,
+            }
+        )
+        for sequence, actor_id in ((4, SELF_ID), (5, TEAMMATE_ID)):
+            baseline = team_stat(sequence, actor_id, 0)
+            baseline["full_snapshot"] = True
+            baseline["omitted_zero"] = True
+            model.ingest_team_stat(baseline)
+        model.ingest_monster(
+            {
+                "entity_id": boss_id,
+                "current_hp": 4_900_000,
+                "filetime_100ns": BASE_FILETIME + 60_000,
+            }
+        )
+        for sequence, actor_id, amount in (
+            (7, SELF_ID, 6_222),
+            (8, TEAMMATE_ID, 2_044_958),
+        ):
+            final = team_stat(sequence, actor_id, amount)
+            final["full_snapshot"] = True
+            model.ingest_team_stat(final)
+
+        self.assertEqual(model.combat_target_id, boss_id)
+        self.assertEqual(model.current_monster().name, "小丑")
+        self.assertEqual(model.stats[SELF_ID].damage, 6_222)
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 2_044_958)
+        self.assertEqual(
+            sum(actor.damage for actor in model.current_stats()),
+            2_051_180,
+        )
+        self.assertTrue(
+            all(
+                state.baseline_absolute == 0
+                for state in model.team_damage_states.values()
+                if state.accepted_damage > 0
+            )
+        )
 
     def test_same_scene_respawn_refresh_preserves_visible_boss(self):
         model = CombatModel(run_id="same-scene-respawn-test")

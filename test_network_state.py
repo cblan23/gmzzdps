@@ -47,6 +47,10 @@ class NetworkPacketParserTests(unittest.TestCase):
             should_decode_network_arguments("OnUpdateTeamGroupMemberProps")
         )
         self.assertTrue(should_decode_network_arguments("RetOtherRoleShapeData"))
+        self.assertTrue(should_decode_network_arguments("OnMsgReconnectOrEnter"))
+        self.assertTrue(
+            should_decode_network_arguments("OnMsgDungeonStageSettlement")
+        )
         self.assertFalse(should_decode_network_arguments("OnMsgStopSkill"))
         self.assertFalse(should_decode_network_arguments("OnMsgSyncFinalSpeed"))
 
@@ -56,6 +60,51 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(NetworkPacketParser._args(record), [])
         record["decode_delay_ms"] = 249.0
         self.assertEqual(NetworkPacketParser._args(record), [123.0])
+
+    def test_dungeon_and_stage_ids_are_retained_from_explicit_protocol_fields(self):
+        parser = NetworkPacketParser()
+        parser.process(
+            packet(
+                "OnMsgDungeonReadinessCheck",
+                [0, 5_100_054, "", 1_787_851_808, 12, 1],
+                sequence=1,
+            )
+        )
+        parser.process(
+            packet(
+                "OnMsgUpdateStageCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, 5_150_059],
+                            [1, 2],
+                            [5, {SELF_TOKEN: {"$map": [[1, PLAYER_ID]]}}],
+                        ]
+                    }
+                ],
+                sequence=2,
+            )
+        )
+        parser.process(
+            packet(
+                "OnMsgReconnectOrEnter",
+                [{"$map": [[3, 5_100_054], [8, 5_150_060], [9, 86_021_070]]}],
+                sequence=3,
+            )
+        )
+
+        context = parser.current_dungeon_context()
+        self.assertEqual(context["dungeon_id"], 5_100_054)
+        self.assertEqual(context["dungeon_stage_id"], 5_150_059)
+        self.assertEqual(context["dungeon_stage_phase"], 2)
+        self.assertEqual(
+            context["reconnect_dungeon_candidates"],
+            [5_100_054, 5_150_060],
+        )
+        self.assertEqual(
+            context["dungeon_context_filetime"],
+            packet("", [], sequence=3)["filetime_100ns"],
+        )
 
     def test_low_combat_entity_ids_are_valid_only_in_explicit_id_fields(self):
         low_boss_id = 4_530_117_319_991
@@ -134,7 +183,74 @@ class NetworkPacketParserTests(unittest.TestCase):
                 self.assertEqual(profile["name"], name)
                 self.assertEqual(parser.active_boss_entity_id, entity_id)
 
-    def test_star_guard_is_linked_and_emits_provisional_realtime_damage(self):
+    def test_first_karl_edgar_template_promotes_all_four_runtime_entities(self):
+        entity_ids = (
+            246_581_588_843_300,
+            246_581_588_843_301,
+            246_581_588_843_302,
+            246_581_588_843_303,
+        )
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7107030": {
+                    "boss_type": 0,
+                    "name": "Karl Edgar",
+                }
+            }
+        )
+
+        for sequence, entity_id in enumerate(entity_ids, start=1):
+            updates = parser.process_native_boss_type(
+                {
+                    "entity_id": entity_id,
+                    "template_id": 7_107_030,
+                    "boss_type": 0,
+                    "filetime_100ns": packet("", [], sequence=sequence)[
+                        "filetime_100ns"
+                    ],
+                }
+            )
+            profile = next(
+                value for kind, value in updates if kind == "profile"
+            )
+            self.assertEqual(profile["entity_type"], "Boss")
+            self.assertEqual(profile["boss_type"], 3)
+            self.assertEqual(profile["template_id"], 7_107_030)
+
+        self.assertTrue(set(entity_ids).issubset(parser.confirmed_boss_entities))
+
+    def test_server_level_arriving_after_boss_backfills_missing_level(self):
+        boss_id = MONSTER_ID + 4_000
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7107030": {
+                    "boss_type": 0,
+                    "name": "Karl Edgar",
+                }
+            }
+        )
+        parser.process_native_boss_type(
+            {
+                "entity_id": boss_id,
+                "template_id": 7_107_030,
+                "boss_type": 0,
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+            }
+        )
+        self.assertNotIn("level", parser.entity_profiles[boss_id])
+
+        updates = parser.process(
+            packet("RetGetServerLevelInfo", [68], sequence=2)
+        )
+        boss_profile = next(
+            value
+            for kind, value in updates
+            if kind == "profile" and value.get("entity_id") == boss_id
+        )
+        self.assertEqual(boss_profile["level"], 68)
+        self.assertEqual(parser.entity_profiles[boss_id]["level"], 68)
+
+    def test_star_guard_is_linked_without_fabricating_realtime_damage(self):
         boss_id = MONSTER_ID + 3_000
         guard_id = MONSTER_ID + 3_001
         guard_pointer = MONSTER_POINTER + 3_001
@@ -206,18 +322,7 @@ class NetworkPacketParserTests(unittest.TestCase):
                 sequence=5,
             )
         )
-        inferred = [
-            value
-            for kind, value in hp_updates
-            if kind == "event" and value["function"].endswith("/team-hit")
-        ]
-        self.assertEqual(len(inferred), 1)
-        self.assertEqual(inferred[0]["attacker_id"], PLAYER_ID)
-        self.assertEqual(inferred[0]["target_id"], guard_id)
-        self.assertEqual(inferred[0]["skill_id"], 86_051_010)
-        self.assertEqual(inferred[0]["damage"], 200)
-        self.assertEqual(inferred[0]["damage_source"], "hp_correlated")
-        self.assertTrue(inferred[0]["provisional_damage"])
+        self.assertFalse(any(kind == "event" for kind, _value in hp_updates))
         guard_hp = next(
             value for kind, value in hp_updates if kind == "monster"
         )
@@ -234,6 +339,250 @@ class NetworkPacketParserTests(unittest.TestCase):
         )
         self.assertFalse(any(kind in {"event", "monster"} for kind, _ in collision))
         self.assertEqual(parser.entity_current_hp[guard_id], 800.0)
+
+    def test_missing_astrologer_imprisonments_are_inferred_from_damage_targets(self):
+        """FB7408AA158422D3F4: unnamed targets 1/3/5 are imprisonments."""
+        boss_id = MONSTER_ID + 3_010
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7102403": {
+                    "boss_type": 3,
+                    "name": "星象仪者",
+                    "level": 62,
+                }
+            }
+        )
+        parser.process_native_boss_type(
+            {
+                "entity_id": boss_id,
+                "template_id": 7_102_403,
+                "boss_type": 3,
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+            }
+        )
+
+        imprisonment_ids = [MONSTER_ID + 3_011 + index for index in range(3)]
+        for sequence, imprisonment_id in enumerate(imprisonment_ids, start=2):
+            updates = parser.process_native_damage(
+                {
+                    "attacker_id": PLAYER_ID,
+                    "target_id": imprisonment_id,
+                    "arg4_u64": 860_510_100,
+                    "raw_damage": 10_000 + sequence,
+                    "damage": 10_000 + sequence,
+                    "local_player_id": PLAYER_ID,
+                    "filetime_100ns": packet("", [], sequence=sequence)[
+                        "filetime_100ns"
+                    ],
+                }
+            )
+            profile = next(value for kind, value in updates if kind == "profile")
+            self.assertEqual(profile["name"], "禁锢")
+            self.assertEqual(profile["template_id"], 7_102_404)
+            self.assertTrue(profile["auxiliary_inferred"])
+            self.assertTrue(
+                parser._is_active_encounter_auxiliary(imprisonment_id)
+            )
+            self.assertIn(imprisonment_id, parser.pending_exact_damage)
+
+        self.assertEqual(
+            {
+                parser.entity_template_ids[imprisonment_id]
+                for imprisonment_id in imprisonment_ids
+            },
+            {7_102_404},
+        )
+
+    def test_inferred_imprisonment_hp_drop_does_not_guess_teammate_damage(self):
+        boss_id = MONSTER_ID + 3_015
+        imprisonment_id = MONSTER_ID + 3_016
+        imprisonment_pointer = MONSTER_POINTER + 3_016
+        teammate_id = PLAYER_ID + 3_016
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7102403": {
+                    "boss_type": 3,
+                    "name": "星象仪者",
+                    "level": 62,
+                }
+            }
+        )
+        parser.process_native_boss_type(
+            {
+                "entity_id": boss_id,
+                "template_id": 7_102_403,
+                "boss_type": 3,
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+            }
+        )
+        parser.process_native_damage(
+            {
+                "attacker_id": PLAYER_ID,
+                "target_id": imprisonment_id,
+                "arg4_u64": 860_510_100,
+                "raw_damage": 10_000,
+                "damage": 10_000,
+                "local_player_id": PLAYER_ID,
+                "filetime_100ns": packet("", [], sequence=2)["filetime_100ns"],
+            }
+        )
+        parser.party_ids.add(teammate_id)
+        parser.pointer_entities[imprisonment_pointer] = imprisonment_id
+        parser.process(
+            packet(
+                "OnMsgSyncCurrentMaxHp",
+                [462_521.0, 462_521.0],
+                pointer=imprisonment_pointer,
+                sequence=3,
+            )
+        )
+        parser.process(
+            packet(
+                "OnMsgCreateLUnitSpellAgent",
+                [
+                    {
+                        "$map": [
+                            [0, teammate_id],
+                            [2, 86_051_010],
+                            [17, imprisonment_id],
+                        ]
+                    }
+                ],
+                pointer=90_016,
+                sequence=4,
+            )
+        )
+        parser.process(
+            packet(
+                "OnMsgEndureExitHit",
+                [teammate_id],
+                pointer=imprisonment_pointer,
+                sequence=5,
+            )
+        )
+        hp_updates = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [362_521.0],
+                pointer=imprisonment_pointer,
+                sequence=6,
+            )
+        )
+
+        self.assertFalse(any(kind == "event" for kind, _value in hp_updates))
+        self.assertEqual(
+            parser.entity_current_hp[imprisonment_id], 362_521.0
+        )
+
+    def test_explicit_star_guard_template_overrides_inferred_imprisonment(self):
+        boss_id = MONSTER_ID + 3_017
+        guard_id = MONSTER_ID + 3_018
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7102403": {
+                    "boss_type": 3,
+                    "name": "星象仪者",
+                    "level": 62,
+                }
+            }
+        )
+        parser.process_native_boss_type(
+            {
+                "entity_id": boss_id,
+                "template_id": 7_102_403,
+                "boss_type": 3,
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+            }
+        )
+        inferred_updates = parser.process_native_damage(
+            {
+                "attacker_id": PLAYER_ID,
+                "target_id": guard_id,
+                "arg4_u64": 860_510_100,
+                "raw_damage": 10_000,
+                "damage": 10_000,
+                "local_player_id": PLAYER_ID,
+                "filetime_100ns": packet("", [], sequence=2)["filetime_100ns"],
+            }
+        )
+        inferred_profile = next(
+            value for kind, value in inferred_updates if kind == "profile"
+        )
+        self.assertEqual(inferred_profile["name"], "禁锢")
+
+        explicit_updates = parser.process_native_boss_type(
+            {
+                "entity_id": guard_id,
+                "template_id": 7_102_405,
+                "boss_type": 1,
+                "filetime_100ns": packet("", [], sequence=3)["filetime_100ns"],
+            }
+        )
+        explicit_profile = next(
+            value for kind, value in explicit_updates if kind == "profile"
+        )
+        self.assertEqual(explicit_profile["name"], "星光守卫")
+        self.assertEqual(explicit_profile["template_id"], 7_102_405)
+        self.assertFalse(explicit_profile["auxiliary_inferred"])
+        self.assertEqual(parser.entity_template_ids[guard_id], 7_102_405)
+
+    def test_missing_auxiliary_inference_rejects_players_and_other_templates(self):
+        boss_id = MONSTER_ID + 3_030
+        party_target_id = PLAYER_ID + 3_030
+        other_monster_id = MONSTER_ID + 3_031
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7102403": {
+                    "boss_type": 3,
+                    "name": "星象仪者",
+                    "level": 62,
+                }
+            }
+        )
+        parser.process_native_boss_type(
+            {
+                "entity_id": boss_id,
+                "template_id": 7_102_403,
+                "boss_type": 3,
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+            }
+        )
+        parser.party_ids.add(party_target_id)
+        parser.entity_profiles[party_target_id] = {
+            "entity_id": party_target_id,
+            "entity_type": "Player",
+            "name": "队友",
+        }
+        parser.entity_template_ids[other_monster_id] = 7_999_999
+
+        for sequence, target_id in enumerate(
+            (party_target_id, other_monster_id), start=2
+        ):
+            updates = parser.process_native_damage(
+                {
+                    "attacker_id": PLAYER_ID,
+                    "target_id": target_id,
+                    "arg4_u64": 860_510_100,
+                    "raw_damage": 10_000,
+                    "damage": 10_000,
+                    "local_player_id": PLAYER_ID,
+                    "filetime_100ns": packet("", [], sequence=sequence)[
+                        "filetime_100ns"
+                    ],
+                }
+            )
+            self.assertFalse(
+                any(
+                    kind == "profile"
+                    and value.get("entity_id") == target_id
+                    and value.get("auxiliary_inferred")
+                    for kind, value in updates
+                )
+            )
+            self.assertFalse(parser._is_active_encounter_auxiliary(target_id))
+
+        self.assertNotIn(party_target_id, parser.entity_template_ids)
+        self.assertEqual(parser.entity_template_ids[other_monster_id], 7_999_999)
 
     def test_late_star_guard_template_revokes_player_and_party_classification(self):
         boss_id = MONSTER_ID + 3_020
@@ -430,8 +779,8 @@ class NetworkPacketParserTests(unittest.TestCase):
         )
         self.assertFalse(any(kind == "event" for kind, _value in later_drop))
 
-    def test_star_guard_death_subtracts_only_its_parent_hp_mechanic(self):
-        """FB8E738F35DCC29DFE/FB1FB02AA330C2BBB4: keep only real damage."""
+    def test_star_guard_death_and_parent_hp_drop_emit_no_guessed_damage(self):
+        """FB8E738F35DCC29DFE/FB1FB02AA330C2BBB4: HP is not per-player damage."""
         boss_id = MONSTER_ID + 3_060
         guard_id = MONSTER_ID + 3_061
         boss_pointer = MONSTER_POINTER + 3_060
@@ -491,8 +840,6 @@ class NetworkPacketParserTests(unittest.TestCase):
                 for kind, value in guard_death
             )
         )
-        self.assertIn(boss_id, parser.pending_auxiliary_parent_hp_losses)
-
         def observed_hit(actor_id: int, sequence: int) -> None:
             parser.process(
                 packet(
@@ -503,8 +850,6 @@ class NetworkPacketParserTests(unittest.TestCase):
                 )
             )
 
-        # Real damage before the mechanic-sized drop remains visible and must
-        # not consume the pending Star Guard parent-HP effect.
         observed_hit(attacker_a, 4)
         early = parser.process(
             packet(
@@ -514,11 +859,7 @@ class NetworkPacketParserTests(unittest.TestCase):
                 sequence=5,
             )
         )
-        self.assertEqual(
-            sum(value["damage"] for kind, value in early if kind == "event"),
-            3_464,
-        )
-        self.assertIn(boss_id, parser.pending_auxiliary_parent_hp_losses)
+        self.assertFalse(any(kind == "event" for kind, _value in early))
 
         observed_hit(attacker_a, 6)
         observed_hit(attacker_b, 7)
@@ -531,13 +872,9 @@ class NetworkPacketParserTests(unittest.TestCase):
                 sequence=8,
             )
         )
-        inferred = [value for kind, value in mechanism_drop if kind == "event"]
-        self.assertEqual(sum(value["damage"] for value in inferred), 31_847)
-        self.assertEqual(
-            {value["attacker_id"] for value in inferred},
-            {attacker_a, attacker_b},
+        self.assertFalse(
+            any(kind == "event" for kind, _value in mechanism_drop)
         )
-        self.assertNotIn(boss_id, parser.pending_auxiliary_parent_hp_losses)
         self.assertEqual(parser.entity_current_hp[boss_id], float(next_hp))
 
     def test_star_guard_real_damage_is_not_removed_with_parent_mechanic(self):
@@ -580,6 +917,92 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(event["target_id"], guard_id)
         self.assertEqual(event["damage"], 48_219)
         self.assertFalse(event["provisional_damage"])
+
+    def test_revived_star_guard_deaths_never_create_player_damage(self):
+        """FB3958DB48DB1D4CE8: repeated guard deaths cannot inflate a player."""
+        boss_id = MONSTER_ID + 3_080
+        guard_id = MONSTER_ID + 3_081
+        boss_pointer = MONSTER_POINTER + 3_080
+        guard_pointer = MONSTER_POINTER + 3_081
+        tank_id = PLAYER_ID + 3_080
+        boss_hp = 20_888_137
+        guard_max_hp = 1_325_792
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7102403": {"boss_type": 3, "name": "星象仪者", "level": 62}
+            }
+        )
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.party_ids.add(tank_id)
+        parser.process_native_boss_type(
+            {
+                "entity_id": boss_id,
+                "template_id": 7_102_403,
+                "boss_type": 3,
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+            }
+        )
+        parser.process_native_boss_type(
+            {
+                "entity_id": guard_id,
+                "template_id": 7_102_405,
+                "boss_type": 1,
+                "filetime_100ns": packet("", [], sequence=2)["filetime_100ns"],
+            }
+        )
+        parser.pointer_entities[boss_pointer] = boss_id
+        parser.pointer_entities[guard_pointer] = guard_id
+        parser.active_boss_pointer = boss_pointer
+        parser.entity_max_hp[boss_id] = 33_270_350.0
+        parser.entity_current_hp[boss_id] = float(boss_hp)
+        parser.entity_current_hp_time[boss_id] = packet("", [], sequence=2)[
+            "filetime_100ns"
+        ]
+        parser.entity_max_hp[guard_id] = float(guard_max_hp)
+        parser.entity_current_hp[guard_id] = 100.0
+
+        def guard_hp(value: float, sequence: int):
+            return parser.process(
+                packet(
+                    "OnMsgSyncCurrentHp",
+                    [value],
+                    pointer=guard_pointer,
+                    sequence=sequence,
+                )
+            )
+
+        def boss_hit_then_drop(sequence: int, real_damage: int):
+            parser.process(
+                packet(
+                    "OnMsgEndureExitHit",
+                    [tank_id],
+                    pointer=boss_pointer,
+                    sequence=sequence,
+                )
+            )
+            previous = int(parser.entity_current_hp[boss_id])
+            return parser.process(
+                packet(
+                    "OnMsgSyncCurrentHp",
+                    [float(previous - guard_max_hp - real_damage)],
+                    pointer=boss_pointer,
+                    sequence=sequence + 1,
+                )
+            )
+
+        guard_hp(0.0, 3)
+        first = boss_hit_then_drop(4, 10_000)
+        self.assertFalse(any(kind == "event" for kind, _value in first))
+
+        # The same entity returns to positive HP and starts a new life cycle.
+        guard_hp(float(guard_max_hp), 6)
+        guard_hp(float(guard_max_hp), 7)
+        guard_hp(0.0, 8)
+        guard_hp(0.0, 9)
+
+        second = boss_hit_then_drop(10, 20_000)
+        self.assertFalse(any(kind == "event" for kind, _value in second))
 
     def test_ice_prison_is_linked_to_langbo_without_making_langbo_multiphase(self):
         boss_id = MONSTER_ID + 3_010
@@ -1011,6 +1434,123 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(merge["to_actor_id"], transformed_id)
         self.assertTrue(event["player_attacker"])
 
+    def test_placeholder_profile_name_cannot_replace_catalog_boss_name(self):
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7109821": {
+                    "boss_type": 3,
+                    "name": "异化猎犬",
+                    "level": 62,
+                }
+            }
+        )
+        parser.process_native_boss_type(
+            {
+                "entity_id": MONSTER_ID,
+                "template_id": 7_109_821,
+                "boss_type": 3,
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+            }
+        )
+
+        parser._profile_update(
+            MONSTER_ID,
+            packet("", [], sequence=2),
+            name="首领",
+            entity_type="Boss",
+            boss_type=3,
+            boss_rank=3,
+            boss_source="hud_signal_team_target",
+        )
+
+        self.assertEqual(
+            parser.entity_profiles[MONSTER_ID]["name"], "异化猎犬"
+        )
+        self.assertNotEqual(
+            parser.runtime_entity_names.get(MONSTER_ID), "首领"
+        )
+
+    def test_placeholder_profile_recovers_when_template_arrives_later(self):
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7109821": {
+                    "boss_type": 3,
+                    "name": "异化猎犬",
+                    "level": 62,
+                }
+            }
+        )
+        provisional = parser._profile_update(
+            MONSTER_ID,
+            packet("", [], sequence=1),
+            name="未命名Boss",
+            entity_type="Boss",
+            boss_type=3,
+            boss_rank=3,
+        )
+        self.assertNotIn("name", provisional[1])
+
+        updates = parser.process_native_boss_type(
+            {
+                "entity_id": MONSTER_ID,
+                "template_id": 7_109_821,
+                "boss_type": 3,
+                "filetime_100ns": packet("", [], sequence=2)["filetime_100ns"],
+            }
+        )
+        profile = next(value for kind, value in updates if kind == "profile")
+
+        self.assertEqual(profile["name"], "异化猎犬")
+        self.assertEqual(
+            parser.entity_profiles[MONSTER_ID]["name"], "异化猎犬"
+        )
+
+    def test_all_clown_templates_activate_and_forward_first_damage(self):
+        templates = (7_102_873, 7_103_012, 7_103_309)
+        catalog = {
+            str(template_id): {"boss_type": 3, "name": "小丑"}
+            for template_id in templates
+        }
+        for index, template_id in enumerate(templates, start=1):
+            with self.subTest(template_id=template_id):
+                boss_id = MONSTER_ID + index
+                parser = NetworkPacketParser(boss_template_catalog=catalog)
+                profiles = parser.process_native_boss_type(
+                    {
+                        "entity_id": boss_id,
+                        "template_id": template_id,
+                        "boss_type": 3,
+                        "filetime_100ns": packet("", [], sequence=1)[
+                            "filetime_100ns"
+                        ],
+                    }
+                )
+                profile = next(
+                    value for kind, value in profiles if kind == "profile"
+                )
+                damage_updates = parser.process_native_damage(
+                    {
+                        "entity_id": PLAYER_ID,
+                        "attacker_id": PLAYER_ID,
+                        "target_id": boss_id,
+                        "arg4_u64": 860_210_700,
+                        "raw_damage": 12_345,
+                        "damage": 12_345,
+                        "local_player_id": PLAYER_ID,
+                        "filetime_100ns": packet("", [], sequence=2)[
+                            "filetime_100ns"
+                        ],
+                    }
+                )
+                event = next(
+                    value for kind, value in damage_updates if kind == "event"
+                )
+
+                self.assertEqual(profile["name"], "小丑")
+                self.assertEqual(parser.active_boss_entity_id, boss_id)
+                self.assertEqual(event["target_id"], boss_id)
+                self.assertEqual(event["damage"], 12_345)
+
     def test_alive_boss_lock_rejects_spawned_add_and_its_hp_pointer(self):
         boss_id = MONSTER_ID + 1_000
         add_id = MONSTER_ID + 1_001
@@ -1237,6 +1777,65 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertIsNone(parser.active_boss_entity_id)
         self.assertEqual(parser.pointer_entities, {})
 
+    def test_space_transition_clears_stale_dummy_without_full_refresh(self):
+        dummy_id = MONSTER_ID
+        boss_id = MONSTER_ID + 1
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7114223": {"boss_type": 3, "name": "伤害木桩"},
+                "7102873": {"boss_type": 3, "name": "小丑"},
+            }
+        )
+        parser.scene_id = 5_200_002
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)[
+                    "filetime_100ns"
+                ],
+                "entity_id": dummy_id,
+                "template_id": 7_114_223,
+                "boss_type": 3,
+            }
+        )
+        self.assertEqual(parser.active_boss_entity_id, dummy_id)
+
+        updates = parser.process(
+            packet("OnMsgBeforeEnterNewSpace", [], sequence=2)
+        )
+        scene = next(value for kind, value in updates if kind == "scene")
+        self.assertTrue(scene["transition"])
+        self.assertTrue(scene["force_reset"])
+        self.assertEqual(scene["previous_scene_id"], 5_200_002)
+        self.assertEqual(scene["scene_id"], 0)
+        self.assertIsNone(parser.scene_id)
+        self.assertIsNone(parser.active_boss_entity_id)
+        self.assertEqual(parser.entity_template_ids, {})
+
+        stale_updates = parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=3)[
+                    "filetime_100ns"
+                ],
+                "entity_id": dummy_id,
+                "template_id": 7_114_223,
+                "boss_type": 3,
+            }
+        )
+        self.assertEqual(stale_updates, [])
+        self.assertIsNone(parser.active_boss_entity_id)
+
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=4)[
+                    "filetime_100ns"
+                ],
+                "entity_id": boss_id,
+                "template_id": 7_102_873,
+                "boss_type": 3,
+            }
+        )
+        self.assertEqual(parser.active_boss_entity_id, boss_id)
+
     def test_numeric_refresh_overload_does_not_clear_live_scene(self):
         parser = NetworkPacketParser()
         parser.process(packet("OnMsgRefreshSceneObjects", [5_200_142, {}, {}]))
@@ -1344,6 +1943,55 @@ class NetworkPacketParserTests(unittest.TestCase):
             }
         )
         self.assertEqual(parser.active_boss_entity_id, repull_id)
+
+    def test_stale_same_template_drill_respawn_replaces_wiped_entity(self):
+        first_id = MONSTER_ID + 1_220
+        respawn_id = MONSTER_ID + 1_221
+        template_id = 7_115_080
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                str(template_id): {"boss_type": 3, "name": "“钻头”"},
+            },
+            boss_name_allowlist=("钻头",),
+        )
+        first_time = packet("", [], sequence=1)["filetime_100ns"]
+        parser.process_native_boss_type(
+            {
+                "entity_id": first_id,
+                "template_id": template_id,
+                "boss_type": 3,
+                "filetime_100ns": first_time,
+            }
+        )
+        parser.entity_current_hp[first_id] = 5_127_785.0
+        parser.entity_current_hp_time[first_id] = first_time
+        parser.active_boss_time_100ns = first_time
+        parser.active_boss_damage_epoch = first_time
+
+        # A duplicate observed during the live HP stream cannot steal the lock.
+        parser.process_native_boss_type(
+            {
+                "entity_id": respawn_id,
+                "template_id": template_id,
+                "boss_type": 3,
+                "filetime_100ns": first_time + 4 * 10_000_000,
+            }
+        )
+        self.assertEqual(parser.active_boss_entity_id, first_id)
+
+        # Local replay: after a wipe the old entity remains alive in cache, but
+        # the next pull gets a fresh entity before the local player attacks it.
+        parser.process_native_boss_type(
+            {
+                "entity_id": respawn_id,
+                "template_id": template_id,
+                "boss_type": 3,
+                "filetime_100ns": first_time + 6 * 10_000_000,
+            }
+        )
+        self.assertEqual(parser.active_boss_entity_id, respawn_id)
+        self.assertIsNone(parser.active_boss_pointer)
+        self.assertEqual(parser.pending_target_hits, {})
 
     def test_lost_control_lokin_replaces_previous_boss_but_never_merges_back(self):
         lokin_id = MONSTER_ID + 1_213
@@ -1904,6 +2552,176 @@ class NetworkPacketParserTests(unittest.TestCase):
             )
         )
 
+    def test_boss_music_and_two_explicit_attackers_recover_late_native_boss(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 2_200
+        boss_pointer = MONSTER_POINTER + 2_200
+        stale_actor = PLAYER_ID + 2_200
+        attackers = [PLAYER_ID + 2_201, PLAYER_ID + 2_202]
+        parser.party_seen = True
+        parser.party_member_count = 3
+        parser.party_ids.update({stale_actor, *attackers})
+
+        base_time = packet("", [], sequence=1)["filetime_100ns"]
+
+        def timed_packet(
+            method: str,
+            arguments: list,
+            *,
+            pointer: int,
+            milliseconds: int,
+        ) -> dict:
+            value = packet(method, arguments, pointer=pointer)
+            value["filetime_100ns"] = base_time + milliseconds * 10_000
+            return value
+
+        parser.process(
+            timed_packet(
+                "OnMsgSyncFightMode",
+                [2],
+                pointer=boss_pointer,
+                milliseconds=0,
+            )
+        )
+        parser.process(
+            timed_packet(
+                "OnMsgPostAkEvent",
+                [["Set_MUS_B_WYZY_Boss_XianZuQiShi_Stage1"]],
+                pointer=1,
+                milliseconds=80,
+            )
+        )
+        parser.process(
+            timed_packet(
+                "OnMsgActorBuffStateSync",
+                [5, 1, stale_actor],
+                pointer=boss_pointer,
+                milliseconds=400,
+            )
+        )
+        parser.process(
+            timed_packet(
+                "OnMsgSyncCurrentHp",
+                [34_898_577.0],
+                pointer=boss_pointer,
+                milliseconds=470,
+            )
+        )
+        self.assertEqual(parser.pointer_entities[boss_pointer], stale_actor)
+        self.assertEqual(parser.entity_current_hp[stale_actor], 34_898_577.0)
+
+        first_updates = parser.process(
+            timed_packet(
+                "OnMsgCreateLUnitSpellAgent",
+                [
+                    {
+                        "$map": [
+                            [0, attackers[0]],
+                            [2, 86_051_010],
+                            [17, boss_id],
+                        ]
+                    }
+                ],
+                pointer=boss_pointer + 1,
+                milliseconds=1_200,
+            )
+        )
+        self.assertIsNone(parser.active_boss_entity_id)
+        self.assertFalse(any(kind == "profile" for kind, _value in first_updates))
+
+        second_updates = parser.process(
+            timed_packet(
+                "OnMsgCreateLUnitSpellAgent",
+                [
+                    {
+                        "$map": [
+                            [0, attackers[1]],
+                            [2, 86_071_010],
+                            [17, boss_id],
+                        ]
+                    }
+                ],
+                pointer=boss_pointer + 2,
+                milliseconds=1_300,
+            )
+        )
+        profile = next(value for kind, value in second_updates if kind == "profile")
+        self.assertEqual(parser.active_boss_entity_id, boss_id)
+        self.assertEqual(profile["entity_id"], boss_id)
+        self.assertEqual(profile["boss_source"], "hud_signal_team_target")
+        self.assertNotEqual(profile.get("name"), "首领")
+
+        for index, attacker in enumerate(attackers, start=1):
+            parser.process(
+                timed_packet(
+                    "OnMsgEndureExitHit",
+                    [attacker],
+                    pointer=boss_pointer,
+                    milliseconds=1_300 + index * 10,
+                )
+            )
+        bound = parser.process(
+            timed_packet(
+                "OnMsgSyncCurrentHp",
+                [34_890_535.0],
+                pointer=boss_pointer,
+                milliseconds=1_400,
+            )
+        )
+        self.assertEqual(parser.pointer_entities[boss_pointer], boss_id)
+        self.assertEqual(parser.active_boss_pointer, boss_pointer)
+        self.assertNotIn(stale_actor, parser.entity_current_hp)
+        self.assertTrue(
+            any(
+                kind == "monster"
+                and value.get("entity_id") == boss_id
+                and value.get("current_hp") == 34_890_535.0
+                for kind, value in bound
+            )
+        )
+
+    def test_low_hp_or_one_actor_cannot_steal_player_pointer(self):
+        for index, (attackers, current_hp) in enumerate(
+            (([PLAYER_ID + 2_301], 25_000_000.0), ([PLAYER_ID + 2_302, PLAYER_ID + 2_303], 25_000.0))
+        ):
+            with self.subTest(attackers=len(attackers), current_hp=current_hp):
+                parser = NetworkPacketParser()
+                boss_id = MONSTER_ID + 2_300 + index
+                boss_pointer = MONSTER_POINTER + 2_300 + index
+                stale_actor = PLAYER_ID + 2_300 + index
+                parser.party_ids.update({stale_actor, *attackers})
+                parser.pointer_entities[boss_pointer] = stale_actor
+                parser.process_native_boss_type(
+                    {
+                        "filetime_100ns": packet("", [], sequence=1)[
+                            "filetime_100ns"
+                        ],
+                        "entity_id": boss_id,
+                        "boss_type": 3,
+                    }
+                )
+                for offset, attacker in enumerate(attackers, start=2):
+                    parser._record_entity_hit(
+                        boss_id,
+                        attacker,
+                        86_051_010 + offset,
+                        packet("", [], sequence=offset),
+                    )
+                    parser._record_target_hit(
+                        boss_pointer,
+                        attacker,
+                        packet("", [], sequence=offset),
+                    )
+                parser.process(
+                    packet(
+                        "OnMsgSyncCurrentHp",
+                        [current_hp],
+                        pointer=boss_pointer,
+                        sequence=10,
+                    )
+                )
+                self.assertEqual(parser.pointer_entities[boss_pointer], stale_actor)
+
     def test_native_boss_type_covers_all_required_dungeons(self):
         dungeons = (
             "黑荆棘",
@@ -1972,6 +2790,36 @@ class NetworkPacketParserTests(unittest.TestCase):
             )
         )
         self.assertNotEqual(parser.active_boss_entity_id, small_monster_id)
+
+    def test_confirmed_small_monster_damage_is_filtered_before_ui_queue(self):
+        parser = NetworkPacketParser()
+        small_monster_id = MONSTER_ID + 20
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": 134_321_845_085_764_050,
+                "entity_id": small_monster_id,
+                "template_id": 7_000_001,
+                "boss_type": 1,
+            }
+        )
+        updates = parser.process_native_damage(
+            {
+                "filetime_100ns": 134_321_845_085_764_054,
+                "attacker_id": PLAYER_ID,
+                "target_id": small_monster_id,
+                "arg4_u64": 8_602_107_000_396,
+                "raw_damage": 1_000,
+                "damage": 1_000,
+            }
+        )
+        event = next(value for kind, value in updates if kind == "event")
+
+        self.assertFalse(parser.should_forward_damage_event(event))
+        self.assertTrue(
+            parser.should_forward_damage_event(
+                {**event, "target_id": small_monster_id + 1}
+            )
+        )
 
     def test_exported_boss_template_is_authoritative_over_runtime_type(self):
         parser = NetworkPacketParser(
@@ -2742,6 +3590,8 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(low_actor_profile["profession_id"], 1_200_006)
         summary = next(value for kind, value in updates if kind == "stage_summary")
         self.assertEqual(summary["member_count"], 12)
+        self.assertFalse(summary["authoritative"])
+        self.assertFalse(summary["completion_confirmed"])
         self.assertEqual(
             sum(row["damage"] > 0 for row in summary["actors"]),
             10,
@@ -2756,7 +3606,7 @@ class NetworkPacketParserTests(unittest.TestCase):
             "队员12",
         )
 
-    def test_stage_bound_actor_cast_emits_provisional_realtime_damage(self):
+    def test_stage_bound_actor_cast_does_not_guess_realtime_damage(self):
         parser = NetworkPacketParser()
         gap_actor = 9_040_909_995_988
         boss_id = MONSTER_ID + 404
@@ -2842,18 +3692,8 @@ class NetworkPacketParserTests(unittest.TestCase):
                 sequence=4,
             )
         )
-        inferred = [
-            value
-            for kind, value in updates
-            if kind == "event" and value["function"].endswith("/team-hit")
-        ]
-        self.assertEqual(len(inferred), 1)
-        self.assertEqual(inferred[0]["attacker_id"], gap_actor)
-        self.assertEqual(inferred[0]["target_id"], boss_id)
-        self.assertEqual(inferred[0]["skill_id"], 86_061_110)
-        self.assertEqual(inferred[0]["damage"], 300)
-        self.assertEqual(inferred[0]["damage_source"], "hp_correlated")
-        self.assertTrue(inferred[0]["provisional_damage"])
+        self.assertFalse(any(kind == "event" for kind, _value in updates))
+        self.assertEqual(parser.entity_current_hp[boss_id], 700.0)
 
         unknown_skill_instance = 8_605_101_000_396
         parser.process(
@@ -3037,6 +3877,14 @@ class NetworkPacketParserTests(unittest.TestCase):
             [row["deaths"] for row in summary["actors"]],
             [2, 0],
         )
+        self.assertEqual(
+            summary["actors"][0]["skills"],
+            [{"skill_id": 86_073_010, "damage": 191_791, "hits": 4}],
+        )
+        self.assertEqual(
+            summary["actors"][1]["skills"],
+            [{"skill_id": 86_053_010, "damage": 211_718, "hits": 4}],
+        )
         names = {
             value["entity_id"]: value["name"]
             for kind, value in updates
@@ -3044,6 +3892,158 @@ class NetworkPacketParserTests(unittest.TestCase):
         }
         self.assertEqual(names[first_actor], "知幻")
         self.assertEqual(names[second_actor], "綠鱼")
+
+    def test_completed_stage_update_emits_authoritative_exact_result(self):
+        """Field 3=True is the game's final table even on the stage method."""
+        parser = NetworkPacketParser()
+        actor_id = PLAYER_ID + 109
+        token = "completed-stage-token"
+        updates = parser.process(
+            packet(
+                "OnMsgUpdateStageCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, 5_150_059],
+                            [1, 2],
+                            [2, "completed-stage-instance"],
+                            [3, True],
+                            [
+                                5,
+                                {
+                                    token: {
+                                        "$map": [
+                                            [0, token],
+                                            [1, actor_id],
+                                            [4, 1_200_002],
+                                            [5, "completed-stage-player"],
+                                            [6, 5_832],
+                                        ]
+                                    }
+                                },
+                            ],
+                        ]
+                    }
+                ],
+                sequence=31,
+            )
+        )
+
+        summary = next(value for kind, value in updates if kind == "stage_summary")
+        self.assertTrue(summary["authoritative"])
+        self.assertTrue(summary["completion_confirmed"])
+        self.assertTrue(summary["summary_id"].startswith("settlement|"))
+        self.assertEqual(summary["actors"][0]["damage"], 5_832)
+
+    def test_settlement_uses_confirmed_token_actor_when_row_omits_actor_id(self):
+        parser = NetworkPacketParser()
+        first_actor = PLAYER_ID + 110
+        second_actor = PLAYER_ID + 111
+        parser.token_actors.update(
+            {
+                "settlement-token-1": first_actor,
+                "settlement-token-2": second_actor,
+            }
+        )
+        parser.actor_tokens.update(
+            {
+                first_actor: "settlement-token-1",
+                second_actor: "settlement-token-2",
+            }
+        )
+        profiles = {
+            "settlement-token-1": {
+                "$map": [
+                    [0, "settlement-token-1"],
+                    [4, 1_200_007],
+                    [5, "知幻"],
+                    [6, 763_225],
+                ]
+            },
+            "settlement-token-2": {
+                "$map": [
+                    [0, "settlement-token-2"],
+                    [4, 1_200_005],
+                    [5, "綠鱼"],
+                    [6, 660_893],
+                ]
+            },
+        }
+
+        updates = parser.process(
+            packet(
+                "OnMsgSettlementCombatStatistics",
+                [
+                    None,
+                    {
+                        "$map": [
+                            [0, 5_150_002],
+                            [1, 1],
+                            [2, "settlement-missing-actor-ids"],
+                            [5, profiles],
+                        ]
+                    },
+                ],
+                sequence=32,
+            )
+        )
+
+        summary = next(value for kind, value in updates if kind == "stage_summary")
+        self.assertEqual(
+            [row["actor_id"] for row in summary["actors"]],
+            [first_actor, second_actor],
+        )
+        self.assertEqual(
+            [row["damage"] for row in summary["actors"]],
+            [763_225, 660_893],
+        )
+
+    def test_stage_keeps_provisional_token_actors_when_rows_omit_actor_ids(self):
+        parser = NetworkPacketParser()
+        tokens = ["provisional-stage-token-1", "provisional-stage-token-2"]
+        actors = [stable_team_actor_id(token) for token in tokens]
+        parser.token_actors.update(dict(zip(tokens, actors)))
+        parser.actor_tokens.update(dict(zip(actors, tokens)))
+        profiles = {
+            token: {
+                "$map": [
+                    [0, token],
+                    [4, 1_200_001 + index],
+                    [5, f"队员{index + 1}"],
+                    [6, (index + 1) * 100_000],
+                ]
+            }
+            for index, token in enumerate(tokens)
+        }
+
+        updates = parser.process(
+            packet(
+                "OnMsgUpdateStageCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, 5_150_058],
+                            [1, 2],
+                            [2, "stage-provisional-actors"],
+                            [5, profiles],
+                        ]
+                    }
+                ],
+                sequence=33,
+            )
+        )
+
+        party = next(value for kind, value in updates if kind == "party")
+        summary = next(value for kind, value in updates if kind == "stage_summary")
+        self.assertEqual(party["member_count"], 2)
+        self.assertEqual(set(party["entity_ids"]), set(actors))
+        self.assertEqual(
+            [row["actor_id"] for row in summary["actors"]], actors
+        )
+        self.assertEqual(
+            [row["damage"] for row in summary["actors"]],
+            [100_000, 200_000],
+        )
 
     def test_unique_profession_rebinds_self_token_without_local_name(self):
         parser = NetworkPacketParser()
@@ -3121,6 +4121,74 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(len(zero_stats), 1)
         self.assertEqual(zero_stats[0]["user_token"], SELF_TOKEN)
         self.assertEqual(zero_stats[0]["absolute_damage"], 0)
+
+    def test_common_team_statistics_emit_omitted_zero_baselines(self):
+        parser = NetworkPacketParser()
+        updates = parser.process(
+            packet(
+                "RetCommonCombatStatisticsByTeam",
+                [
+                    {
+                        SELF_TOKEN: {"$map": [[4, "self"]]},
+                        TEAMMATE_TOKEN: {
+                            "$map": [[4, "teammate"], [5, 250_000]]
+                        },
+                    }
+                ],
+            )
+        )
+        team_stats = {
+            value["user_token"]: value
+            for kind, value in updates
+            if kind == "team_stat"
+        }
+        self.assertEqual(team_stats[SELF_TOKEN]["absolute_damage"], 0)
+        self.assertTrue(team_stats[SELF_TOKEN]["omitted_zero"])
+        self.assertTrue(team_stats[SELF_TOKEN]["full_snapshot"])
+        self.assertEqual(
+            team_stats[TEAMMATE_TOKEN]["absolute_damage"], 250_000
+        )
+        self.assertFalse(team_stats[TEAMMATE_TOKEN]["omitted_zero"])
+        self.assertTrue(team_stats[TEAMMATE_TOKEN]["full_snapshot"])
+
+    def test_common_and_dirty_team_statistics_preserve_server_instance(self):
+        parser = NetworkPacketParser()
+        instance = 1_788_020_043
+        for sequence, method in enumerate(
+            (
+                "RetCommonCombatStatisticsByTeam",
+                "RetDirtyCommonCombatStatisticsByTeam",
+            ),
+            start=1,
+        ):
+            updates = parser.process(
+                packet(
+                    method,
+                    [
+                        {
+                            SELF_TOKEN: {
+                                "$map": [
+                                    [4, "self"],
+                                    [5, 33_786_580 + sequence],
+                                    [10, instance],
+                                ]
+                            }
+                        }
+                    ],
+                    sequence=sequence,
+                )
+            )
+            team_update = next(
+                value for kind, value in updates if kind == "team_stat"
+            )
+            self.assertEqual(
+                team_update["full_snapshot"],
+                method == "RetCommonCombatStatisticsByTeam",
+            )
+            self.assertEqual(team_update["server_time"], instance)
+            self.assertEqual(
+                team_update["absolute_damage"], 33_786_580 + sequence
+            )
 
     def test_self_leave_team_clears_current_member_list(self):
         parser = NetworkPacketParser()
@@ -3906,7 +4974,7 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertIn(new_actor, parser.party_ids)
         self.assertNotIn(old_actor, parser.party_ids)
 
-    def test_boss_hp_drop_provisionally_allocates_uncovered_observed_hits(self):
+    def test_boss_hp_drop_never_allocates_damage_to_hit_markers(self):
         parser = NetworkPacketParser()
         boss_id = MONSTER_ID + 500
         boss_pointer = MONSTER_POINTER + 500
@@ -3975,22 +5043,210 @@ class NetworkPacketParserTests(unittest.TestCase):
                 sequence=11,
             )
         )
-        inferred = [
-            value
-            for kind, value in updates
-            if kind == "event" and value["function"].endswith("/team-hit")
-        ]
-        by_actor = {}
-        for event in inferred:
-            self.assertEqual(event["damage_source"], "hp_correlated")
-            self.assertTrue(event["provisional_damage"])
-            by_actor[event["attacker_id"]] = (
-                by_actor.get(event["attacker_id"], 0) + event["damage"]
-            )
-        self.assertEqual(by_actor, {attacker_a: 200, attacker_b: 100})
-        self.assertNotIn(healer_without_hits, by_actor)
+        self.assertFalse(any(kind == "event" for kind, _value in updates))
+        self.assertEqual(parser.entity_current_hp[boss_id], 600.0)
+        self.assertNotIn(healer_without_hits, parser.combat_source_actors)
 
-    def test_first_boss_hp_drop_uses_older_full_hp_and_confirmed_hit(self):
+    def test_same_hp_drop_emits_no_damage_from_either_players_view(self):
+        boss_id = MONSTER_ID + 501
+        boss_pointer = MONSTER_POINTER + 501
+        actor_a = PLAYER_ID + 101
+        actor_b = PLAYER_ID + 102
+        skill_a = 86_051_010
+        skill_b = 86_061_020
+
+        def client_view(
+            self_actor: int,
+            remote_actor: int,
+            self_skill: int,
+            remote_skill: int,
+            exact_damage: int,
+        ) -> list[tuple[int, int]]:
+            parser = NetworkPacketParser()
+            parser.self_id = self_actor
+            parser.self_confirmed = True
+            parser.party_seen = True
+            parser.party_member_count = 2
+            parser.party_ids.add(remote_actor)
+            parser.process_native_boss_type(
+                {
+                    "filetime_100ns": packet("", [], sequence=1)[
+                        "filetime_100ns"
+                    ],
+                    "entity_id": boss_id,
+                    "boss_type": 3,
+                    "template_id": 7_102_834,
+                }
+            )
+            parser.pointer_entities[boss_pointer] = boss_id
+            parser.active_boss_pointer = boss_pointer
+            parser.entity_current_hp[boss_id] = 10_000.0
+            parser.entity_current_hp_time[boss_id] = packet(
+                "", [], sequence=1
+            )["filetime_100ns"]
+            for sequence, (actor_id, skill_id) in enumerate(
+                ((self_actor, self_skill), (remote_actor, remote_skill)),
+                start=2,
+            ):
+                parser.process(
+                    packet(
+                        "OnMsgCreateLUnitSpellAgent",
+                        [
+                            {
+                                "$map": [
+                                    [0, actor_id],
+                                    [2, skill_id],
+                                    [17, boss_id],
+                                ]
+                            }
+                        ],
+                        pointer=90_100 + sequence,
+                        sequence=sequence,
+                    )
+                )
+            parser.process(
+                packet(
+                    "OnMsgEndureExitHit",
+                    [remote_actor],
+                    pointer=boss_pointer,
+                    sequence=4,
+                )
+            )
+            parser.process_native_damage(
+                {
+                    "attacker_id": self_actor,
+                    "target_id": boss_id,
+                    "arg4_u64": self_skill * 10,
+                    "raw_damage": exact_damage,
+                    "damage": exact_damage,
+                    "local_player_id": self_actor,
+                    "filetime_100ns": packet("", [], sequence=5)[
+                        "filetime_100ns"
+                    ],
+                }
+            )
+            updates = parser.process(
+                packet(
+                    "OnMsgSyncCurrentHp",
+                    [9_000.0],
+                    pointer=boss_pointer,
+                    sequence=6,
+                )
+            )
+            return sorted(
+                (
+                    int(event["attacker_id"]),
+                    int(event["damage"]),
+                )
+                for kind, event in updates
+                if kind == "event"
+            )
+
+        from_a = client_view(actor_a, actor_b, skill_a, skill_b, 900)
+        from_b = client_view(actor_b, actor_a, skill_b, skill_a, 100)
+        self.assertEqual(from_a, from_b)
+        self.assertEqual(from_a, [])
+
+    def test_twelve_player_hp_drop_never_creates_observer_dependent_damage(self):
+        """The numbered v0.0.10 feedbacks must not produce guessed totals."""
+        boss_id = MONSTER_ID + 502
+        boss_pointer = MONSTER_POINTER + 502
+        actors = [PLAYER_ID + 200 + index for index in range(12)]
+        skills = [86_010_010 + index * 10_000 for index in range(12)]
+
+        def client_view(self_index: int) -> list[tuple[int, int]]:
+            parser = NetworkPacketParser()
+            self_actor = actors[self_index]
+            parser.self_id = self_actor
+            parser.self_confirmed = True
+            parser.party_seen = True
+            parser.party_member_count = 12
+            parser.party_ids.update(actor for actor in actors if actor != self_actor)
+            parser.process_native_boss_type(
+                {
+                    "filetime_100ns": packet("", [], sequence=1)[
+                        "filetime_100ns"
+                    ],
+                    "entity_id": boss_id,
+                    "boss_type": 3,
+                    "template_id": 7_103_401,
+                }
+            )
+            parser.pointer_entities[boss_pointer] = boss_id
+            parser.active_boss_pointer = boss_pointer
+            parser.entity_current_hp[boss_id] = 180_000.0
+            parser.entity_current_hp_time[boss_id] = packet(
+                "", [], sequence=1
+            )["filetime_100ns"]
+
+            callback_order = actors[self_index:] + actors[:self_index]
+            for sequence, actor_id in enumerate(callback_order, start=2):
+                actor_index = actors.index(actor_id)
+                parser.process(
+                    packet(
+                        "OnMsgCreateLUnitSpellAgent",
+                        [
+                            {
+                                "$map": [
+                                    [0, actor_id],
+                                    [2, skills[actor_index]],
+                                    [17, boss_id],
+                                ]
+                            }
+                        ],
+                        pointer=91_000 + sequence,
+                        sequence=sequence,
+                    )
+                )
+
+            sequence = 20
+            for actor_id in reversed(callback_order):
+                if actor_id == self_actor:
+                    continue
+                parser.process(
+                    packet(
+                        "OnMsgEndureExitHit",
+                        [actor_id],
+                        pointer=boss_pointer,
+                        sequence=sequence,
+                    )
+                )
+                sequence += 1
+
+            parser.process_native_damage(
+                {
+                    "attacker_id": self_actor,
+                    "target_id": boss_id,
+                    "arg4_u64": skills[self_index] * 10,
+                    # Each observer reports a deliberately different exact
+                    # local value, matching the shape of the submitted records.
+                    "raw_damage": 1_000 + self_index * 7_777,
+                    "damage": 1_000 + self_index * 7_777,
+                    "local_player_id": self_actor,
+                    "filetime_100ns": packet("", [], sequence=40)[
+                        "filetime_100ns"
+                    ],
+                }
+            )
+            updates = parser.process(
+                packet(
+                    "OnMsgSyncCurrentHp",
+                    [60_000.0],
+                    pointer=boss_pointer,
+                    sequence=41,
+                )
+            )
+            return sorted(
+                (int(event["attacker_id"]), int(event["damage"]))
+                for kind, event in updates
+                if kind == "event"
+            )
+
+        for self_index in range(12):
+            with self.subTest(self_actor=actors[self_index]):
+                self.assertEqual(client_view(self_index), [])
+
+    def test_first_boss_hp_drop_does_not_backfill_damage_from_full_hp(self):
         parser = NetworkPacketParser()
         boss_id = MONSTER_ID + 505
         boss_pointer = MONSTER_POINTER + 505
@@ -4049,10 +5305,7 @@ class NetworkPacketParserTests(unittest.TestCase):
 
         updates = parser.process(hp)
 
-        event = next(value for kind, value in updates if kind == "event")
-        self.assertEqual(event["attacker_id"], teammate_id)
-        self.assertEqual(event["skill_id"], skill_id)
-        self.assertEqual(event["damage"], 30_073)
+        self.assertFalse(any(kind == "event" for kind, _value in updates))
         self.assertEqual(parser.entity_current_hp[boss_id], 33_240_277.0)
 
     def test_first_hp_does_not_backfill_recent_or_midfight_max_hp(self):
@@ -4645,7 +5898,7 @@ class NetworkPacketParserTests(unittest.TestCase):
         )
         self.assertEqual(parser.party_member_count, 0)
 
-    def test_hit_callback_and_hp_drop_create_provisional_teammate_damage(self):
+    def test_hit_callback_and_hp_drop_do_not_create_teammate_damage(self):
         parser = NetworkPacketParser()
         boss_id = MONSTER_ID + 700
         boss_pointer = MONSTER_POINTER + 700
@@ -4701,13 +5954,122 @@ class NetworkPacketParserTests(unittest.TestCase):
                 sequence=7,
             )
         )
-        event = next(value for kind, value in updates if kind == "event")
-        self.assertEqual(event["attacker_id"], teammate_id)
-        self.assertEqual(event["target_id"], boss_id)
-        self.assertEqual(event["skill_id"], skill_id)
-        self.assertEqual(event["damage"], 100)
-        self.assertEqual(event["damage_source"], "hp_correlated")
-        self.assertTrue(event["provisional_damage"])
+        self.assertFalse(any(kind == "event" for kind, _value in updates))
+        self.assertEqual(parser.entity_current_hp[boss_id], 900.0)
+
+    def test_boss_hp_stream_replaces_stale_player_pointer_binding(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 750
+        boss_pointer = MONSTER_POINTER + 750
+        stale_actor = PLAYER_ID + 750
+        attackers = [PLAYER_ID + 751, PLAYER_ID + 752]
+        stale_token = "stale-pointer-player-token"
+        parser.party_seen = True
+        parser.party_member_count = 3
+        parser.party_ids.update({stale_actor, *attackers})
+        parser.token_actors[stale_token] = stale_actor
+        parser.actor_tokens[stale_actor] = stale_token
+        parser.token_max_hp[stale_token] = 13_511.0
+
+        parser.process(
+            packet(
+                "OnMsgActorBuffStateSync",
+                [5, 1, stale_actor],
+                pointer=boss_pointer,
+                sequence=1,
+            )
+        )
+        self.assertEqual(parser.pointer_entities[boss_pointer], stale_actor)
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=2)["filetime_100ns"],
+                "entity_id": boss_id,
+                "boss_type": 3,
+            }
+        )
+
+        for index, attacker in enumerate(attackers, start=3):
+            parser.process(
+                packet(
+                    "OnMsgCreateLUnitSpellAgent",
+                    [
+                        {
+                            "$map": [
+                                [0, attacker],
+                                [2, 86_051_010 + index],
+                                [17, boss_id],
+                            ]
+                        }
+                    ],
+                    pointer=boss_pointer + index,
+                    sequence=index,
+                )
+            )
+            parser.process(
+                packet(
+                    "OnMsgEndureExitHit",
+                    [attacker],
+                    pointer=boss_pointer,
+                    sequence=index + 2,
+                )
+            )
+
+        bound = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [25_946_241.0],
+                pointer=boss_pointer,
+                sequence=8,
+            )
+        )
+        self.assertEqual(parser.pointer_entities[boss_pointer], boss_id)
+        self.assertEqual(parser.active_boss_pointer, boss_pointer)
+        self.assertNotIn(stale_actor, parser.entity_current_hp)
+        self.assertTrue(
+            any(
+                kind == "monster"
+                and value.get("entity_id") == boss_id
+                and value.get("current_hp") == 25_946_241.0
+                for kind, value in bound
+            )
+        )
+
+        for index, attacker in enumerate(attackers, start=9):
+            parser.process(
+                packet(
+                    "OnMsgCreateLUnitSpellAgent",
+                    [
+                        {
+                            "$map": [
+                                [0, attacker],
+                                [2, 86_051_020 + index],
+                                [17, boss_id],
+                            ]
+                        }
+                    ],
+                    pointer=boss_pointer + index,
+                    sequence=index,
+                )
+            )
+            parser.process(
+                packet(
+                    "OnMsgEndureExitHit",
+                    [attacker],
+                    pointer=boss_pointer,
+                    sequence=index + 2,
+                )
+            )
+        damage_updates = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [24_946_241.0],
+                pointer=boss_pointer,
+                sequence=14,
+            )
+        )
+        events = [value for kind, value in damage_updates if kind == "event"]
+        self.assertEqual(events, [])
+        self.assertEqual(parser.entity_current_hp[boss_id], 24_946_241.0)
 
     def test_player_hp_and_skill_values_cannot_replace_locked_boss_hp(self):
         parser = NetworkPacketParser()

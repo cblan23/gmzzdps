@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -22,6 +22,7 @@ CHINA_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 FREE_TRIAL_END = datetime(2026, 9, 3, 23, 59, 59, tzinfo=CHINA_TIMEZONE)
 DEFAULT_SERVER_URL = "https://daodaogame.vip"
 REQUEST_TIMEOUT_SECONDS = 6.0
+UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 CLIENT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 CA_BUNDLE_PATH = Path(__file__).resolve().with_name("cacert.pem")
 
@@ -140,7 +141,12 @@ class LicensingGateway(Protocol):
 
     def check_update(self) -> UpdateInfo: ...
 
-    def download_update(self, update: UpdateInfo, destination: Path) -> Path: ...
+    def download_update(
+        self,
+        update: UpdateInfo,
+        destination: Path,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> Path: ...
 
 
 class LocalLicensingGateway:
@@ -200,8 +206,13 @@ class LocalLicensingGateway:
     def check_update(self) -> UpdateInfo:
         return UpdateInfo()
 
-    def download_update(self, update: UpdateInfo, destination: Path) -> Path:
-        del update, destination
+    def download_update(
+        self,
+        update: UpdateInfo,
+        destination: Path,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> Path:
+        del update, destination, progress
         raise LicensingConnectionError("当前模式不支持在线更新")
 
 
@@ -533,21 +544,31 @@ class ServerLicensingGateway:
             required=bool(value.get("required")),
         )
 
-    def download_update(self, update: UpdateInfo, destination: Path) -> Path:
+    def download_update(
+        self,
+        update: UpdateInfo,
+        destination: Path,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> Path:
         if not update.available or not update.download_path:
             raise LicensingConnectionError("没有可下载的更新")
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_suffix(destination.suffix + ".download")
         last_error: BaseException | None = None
+        deadline = time.monotonic() + UPDATE_DOWNLOAD_TIMEOUT_SECONDS
         for attempt in range(2):
             digest = hashlib.sha256()
             written = 0
             try:
+                if progress is not None:
+                    progress(0, update.size)
                 with self._open_get(update.download_path) as response, temporary.open(
                     "wb"
                 ) as handle:
                     while True:
+                        if time.monotonic() >= deadline:
+                            raise LicensingConnectionError("更新下载超时，请重试")
                         chunk = response.read(256 * 1024)
                         if not chunk:
                             break
@@ -556,6 +577,8 @@ class ServerLicensingGateway:
                             raise LicensingConnectionError("更新文件大小异常")
                         digest.update(chunk)
                         handle.write(chunk)
+                        if progress is not None:
+                            progress(written, update.size)
                 if written != update.size or digest.hexdigest() != update.sha256:
                     raise LicensingConnectionError(
                         "更新文件校验失败，请重新下载"
@@ -580,6 +603,8 @@ class ServerLicensingGateway:
                     except OSError:
                         pass
             if attempt == 0:
+                if time.monotonic() >= deadline:
+                    break
                 time.sleep(0.2)
         if last_error is not None:
             raise last_error
@@ -648,8 +673,15 @@ class LicensingService:
     def check_update(self) -> UpdateInfo:
         return self.gateway.check_update()
 
-    def download_update(self, update: UpdateInfo, destination: Path) -> Path:
-        return self.gateway.download_update(update, destination)
+    def download_update(
+        self,
+        update: UpdateInfo,
+        destination: Path,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> Path:
+        if progress is None:
+            return self.gateway.download_update(update, destination)
+        return self.gateway.download_update(update, destination, progress)
 
     def sign_out(self) -> None:
         self.gateway.sign_out(self.session)

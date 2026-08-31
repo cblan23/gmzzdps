@@ -28,6 +28,7 @@ if [ ! -f "$ENV_FILE" ]; then
         'GMZZ_MONITOR_PORT=8766' \
         'GMZZ_MONITOR_DB=/var/lib/gmzz-dps-monitor/sessions.sqlite3' \
         'GMZZ_MONITOR_ADMIN_USER=admin' \
+        'GMZZ_MONITOR_PARTNER_CARD=' \
         "GMZZ_MONITOR_ADMIN_PASSWORD=$admin_password" > "$ENV_FILE"
 fi
 chown root:root "$ENV_FILE"

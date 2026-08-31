@@ -30,19 +30,19 @@ ADMIN_USER = os.environ.get("GMZZ_MONITOR_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("GMZZ_MONITOR_ADMIN_PASSWORD", "")
 HEARTBEAT_INTERVAL = 30
 ONLINE_WINDOW = 75
-MAX_BODY_BYTES = 64 * 1024
+MAX_BODY_BYTES = 512 * 1024
 CLIENT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 CARD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CARD_PATTERN = re.compile(r"^GMZZ[A-HJ-NP-Z2-9]{26}$")
 CUSTOM_CARD_PATTERN = re.compile(r"^[A-Za-z0-9]{6,64}$")
-PARTNER_CARD_KEY = os.environ.get("GMZZ_MONITOR_PARTNER_CARD", "doriapig").strip()
+PARTNER_CARD_KEY = os.environ.get("GMZZ_MONITOR_PARTNER_CARD", "").strip()
 MAX_CARD_DURATION_DAYS = 3650
 MIN_CARD_DURATION_SECONDS = 60 * 60
 MAX_CARD_DURATION_SECONDS = MAX_CARD_DURATION_DAYS * 86400
 MAX_CARD_BATCH = 500
 CARD_REBIND_COOLDOWN_SECONDS = 12 * 60 * 60
 MAX_FEEDBACK_CONTENT = 2000
-MAX_FEEDBACK_DIAGNOSTICS_BYTES = 40 * 1024
+MAX_FEEDBACK_DIAGNOSTICS_BYTES = 384 * 1024
 UPDATE_METADATA_PATH = Path(
     os.environ.get(
         "GMZZ_MONITOR_UPDATE_METADATA",
@@ -111,6 +111,32 @@ def version_is_older(current: object, latest: object) -> bool:
     ) * (width - len(latest_parts))
 
 
+def build_revision_tuple(value: object) -> tuple[int, ...]:
+    _version, separator, revision = clean_text(value, 64).partition("+")
+    if not separator or not re.fullmatch(r"\d+(?:\.\d+)*", revision):
+        return ()
+    return tuple(int(part) for part in revision.split("."))
+
+
+def update_is_available(
+    current: object,
+    latest_version: object,
+    client_build: object = "",
+) -> bool:
+    if version_is_older(current, latest_version):
+        return True
+    if version_tuple(current) != version_tuple(latest_version):
+        return False
+    latest_revision = build_revision_tuple(client_build)
+    if (
+        not latest_revision
+        or version_tuple(client_build) != version_tuple(latest_version)
+    ):
+        return False
+    current_revision = build_revision_tuple(current)
+    return not current_revision or current_revision < latest_revision
+
+
 def load_update_metadata() -> tuple[dict[str, object], Path] | None:
     try:
         value = json.loads(UPDATE_METADATA_PATH.read_text(encoding="utf-8"))
@@ -119,6 +145,7 @@ def load_update_metadata() -> tuple[dict[str, object], Path] | None:
     if not isinstance(value, dict):
         return None
     latest_version = clean_text(value.get("latest_version"), 32)
+    client_build = clean_text(value.get("client_build"), 64)
     filename = Path(clean_text(value.get("filename"), 160)).name
     sha256 = clean_text(value.get("sha256"), 64).lower()
     try:
@@ -128,6 +155,13 @@ def load_update_metadata() -> tuple[dict[str, object], Path] | None:
     update_path = UPDATE_METADATA_PATH.parent / filename
     if (
         not version_tuple(latest_version)
+        or (
+            client_build
+            and (
+                not build_revision_tuple(client_build)
+                or version_tuple(client_build) != version_tuple(latest_version)
+            )
+        )
         or not filename.casefold().endswith(".exe")
         or not re.fullmatch(r"[0-9a-f]{64}", sha256)
         or size <= 0
@@ -142,6 +176,7 @@ def load_update_metadata() -> tuple[dict[str, object], Path] | None:
         return None
     metadata = {
         "latest_version": latest_version,
+        "client_build": client_build,
         "filename": filename,
         "sha256": sha256,
         "size": size,
@@ -294,8 +329,7 @@ def initialize_database() -> None:
                 category TEXT NOT NULL DEFAULT 'other',
                 content TEXT NOT NULL,
                 diagnostics_json TEXT NOT NULL DEFAULT '{}',
-                remote_ip TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'pending'
+                remote_ip TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_last_seen
                 ON sessions(last_seen DESC);
@@ -343,16 +377,6 @@ def initialize_database() -> None:
         if "remark" not in card_columns:
             connection.execute(
                 "ALTER TABLE cards ADD COLUMN remark TEXT NOT NULL DEFAULT ''"
-            )
-        feedback_columns = {
-            str(row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(feedbacks)"
-            ).fetchall()
-        }
-        if "status" not in feedback_columns:
-            connection.execute(
-                "ALTER TABLE feedbacks ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"
             )
         if PARTNER_CARD_KEY:
             partner_hash = token_digest(PARTNER_CARD_KEY)
@@ -431,8 +455,10 @@ class MonitorHandler(BaseHTTPRequestHandler):
             )
             return
         metadata, _update_path = loaded
-        available = version_is_older(
-            current_version, metadata["latest_version"]
+        available = update_is_available(
+            current_version,
+            metadata["latest_version"],
+            metadata["client_build"],
         )
         self._json(
             HTTPStatus.OK,
@@ -466,7 +492,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
         encoded_filename = quote(str(metadata["filename"]), safe="")
         self.send_header(
             "Content-Disposition",
-            "attachment; filename=\"DPS-METER-update.exe\"; "
+            "attachment; filename=\"Dps-Logs-update.exe\"; "
             f"filename*=UTF-8''{encoded_filename}",
         )
         self.send_header("Cache-Control", "no-store")
@@ -599,10 +625,6 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/dps/admin/feedback/detail":
             if self._require_admin():
                 self._admin_feedback_detail()
-            return
-        if path == "/api/v1/dps/admin/feedback/update":
-            if self._require_admin():
-                self._admin_feedback_update()
             return
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
 
@@ -759,8 +781,12 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 ),
             )
             connection.execute(
-                "UPDATE sessions SET ended_at=? WHERE client_id=? AND ended_at IS NULL",
-                (timestamp, client_id),
+                """
+                UPDATE sessions SET ended_at=?, using_app=0
+                WHERE client_id=? AND ended_at IS NULL
+                    AND COALESCE(app_version, '')<>?
+                """,
+                (timestamp, client_id, app_version),
             )
             connection.execute(
                 """
@@ -1038,18 +1064,14 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 """
                 SELECT feedback_id, created_at, updated_at, client_id,
                     card_key, character_name, app_version, category,
-                    content, remote_ip, diagnostics_json, status
+                    content, remote_ip, diagnostics_json
                 FROM feedbacks
                 ORDER BY created_at DESC
                 LIMIT 500
                 """
             ).fetchall()
             counts = connection.execute(
-                """
-                SELECT COUNT(*) AS total,
-                    SUM(CASE WHEN status='resolved' THEN 0 ELSE 1 END) AS pending
-                FROM feedbacks
-                """
+                "SELECT COUNT(*) AS total FROM feedbacks"
             ).fetchone()
         feedbacks = []
         for row in rows:
@@ -1072,11 +1094,6 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     "content_preview": content[:180],
                     "remote_ip": str(row["remote_ip"] or ""),
                     "has_diagnostics": diagnostics_json not in {"", "{}"},
-                    "status": (
-                        "resolved"
-                        if str(row["status"] or "") == "resolved"
-                        else "pending"
-                    ),
                 }
             )
         self._json(
@@ -1085,7 +1102,6 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "server_time": now_epoch(),
                 "total": int(counts["total"] or 0),
-                "pending": int(counts["pending"] or 0),
                 "feedbacks": feedbacks,
             },
         )
@@ -1126,49 +1142,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     "content": str(row["content"] or ""),
                     "diagnostics": diagnostics,
                     "remote_ip": str(row["remote_ip"] or ""),
-                    "status": (
-                        "resolved"
-                        if str(row["status"] or "") == "resolved"
-                        else "pending"
-                    ),
                 },
             },
-        )
-
-    def _admin_feedback_update(self) -> None:
-        body = self._body()
-        if body is None:
-            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
-            return
-        feedback_id = clean_text(body.get("feedback_id"), 32)
-        status = clean_text(body.get("status"), 16)
-        if not feedback_id or status not in {"pending", "resolved"}:
-            self._json(
-                HTTPStatus.BAD_REQUEST,
-                {"ok": False, "error": "bad_feedback_update"},
-            )
-            return
-        timestamp = now_epoch()
-        with database() as connection:
-            changed = connection.execute(
-                """
-                UPDATE feedbacks SET status=?, updated_at=?
-                WHERE feedback_id=? AND status<>?
-                """,
-                (status, timestamp, feedback_id, status),
-            ).rowcount
-            exists = connection.execute(
-                "SELECT 1 FROM feedbacks WHERE feedback_id=?", (feedback_id,)
-            ).fetchone()
-        if exists is None:
-            self._json(
-                HTTPStatus.NOT_FOUND,
-                {"ok": False, "error": "feedback_not_found"},
-            )
-            return
-        self._json(
-            HTTPStatus.OK,
-            {"ok": True, "changed": bool(changed), "status": status},
         )
 
     def _admin_status(self) -> None:
@@ -1213,11 +1188,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 """
             ).fetchall()
             feedback_counts = connection.execute(
-                """
-                SELECT COUNT(*) AS total,
-                    SUM(CASE WHEN status='resolved' THEN 0 ELSE 1 END) AS pending
-                FROM feedbacks
-                """
+                "SELECT COUNT(*) AS total FROM feedbacks"
             ).fetchone()
         grouped_rows: dict[str, list[sqlite3.Row]] = {}
         for row in rows:
@@ -1352,7 +1323,6 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 "active_cards": sum(card["state"] == "active" for card in cards),
                 "unused_cards": sum(card["state"] == "unused" for card in cards),
                 "feedback_total": int(feedback_counts["total"] or 0),
-                "feedback_pending": int(feedback_counts["pending"] or 0),
             },
         )
 
@@ -1597,7 +1567,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                         {
                             "ok": False,
                             "error": "protected_card",
-                            "message": "万能永久卡 doriapig 不能删除。",
+                            "message": "伙伴永久卡不能删除。",
                         },
                     )
                     return
@@ -1706,7 +1676,7 @@ LEGACY_ADMIN_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>叨叨诡秘助手 DPS METER 在线监控</title>
+<title>叨叨诡秘 Dps-Logs 在线监控</title>
 <style>
 :root{color-scheme:dark;--bg:#0b0e12;--surface:#131820;--panel:#191f28;--line:#2b3541;--text:#f3f5f7;--muted:#929eac;--green:#61d8ae;--amber:#e9b96e;--red:#e66a73}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px "Microsoft YaHei UI",system-ui,sans-serif;letter-spacing:0}
@@ -1717,7 +1687,7 @@ main{max-width:1180px;margin:0 auto;padding:22px}.metrics{display:grid;grid-temp
 </style>
 </head>
 <body>
-<header><strong>叨叨诡秘助手 DPS METER 在线监控</strong><span id="refresh">正在同步</span></header>
+<header><strong>叨叨诡秘 Dps-Logs 在线监控</strong><span id="refresh">正在同步</span></header>
 <main>
 <section class="metrics"><div class="metric"><label>当前登录</label><b id="logged">0</b></div><div class="metric using"><label>正在使用</label><b id="using">0</b></div><div class="metric"><label>近 24 小时设备</label><b id="seen">0</b></div></section>
 <section class="table-wrap"><table><thead><tr><th>客户端</th><th>角色</th><th>版本</th><th>状态</th><th>最近心跳</th><th>IP</th><th>管理</th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty" hidden>暂无在线记录</div></section>
@@ -1737,7 +1707,7 @@ ADMIN_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>叨叨诡秘助手 DPS METER 管理后台</title>
+<title>叨叨诡秘 Dps-Logs 管理后台</title>
 <style>
 :root{color-scheme:dark;--bg:#0b0e12;--surface:#131820;--panel:#191f28;--line:#2b3541;--text:#f3f5f7;--muted:#929eac;--green:#61d8ae;--amber:#e9b96e;--red:#e66a73;--blue:#73a7df}
 *{box-sizing:border-box;scrollbar-width:auto;scrollbar-color:#647384 #11161d}
@@ -1748,7 +1718,6 @@ header strong{font-size:18px}header span{margin-left:auto;color:var(--muted);fon
 nav{height:46px;background:var(--surface);border-bottom:1px solid var(--line);display:flex;padding:0 30px;gap:26px}
 nav button{height:46px;padding:0 3px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted)}
 nav button.active{color:var(--text);border-bottom-color:var(--green)}
-.nav-badge{display:inline-block;min-width:20px;margin-left:5px;padding:1px 6px;border-radius:10px;background:#74353b;color:#ffdadd;font:700 11px "Segoe UI",sans-serif}
 main{width:min(1680px,calc(100% - 40px));margin:0 auto;padding:24px 0 30px}
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}
 .metric{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px 19px}
@@ -1782,8 +1751,8 @@ textarea{width:100%;height:260px;resize:none;background:#0d1116;color:var(--text
 </style>
 </head>
 <body>
-<header><strong>叨叨诡秘助手 DPS METER 管理后台</strong><span id="refresh">正在同步</span></header>
-<nav><button id="onlineTab" class="active" type="button">在线用户</button><button id="cardsTab" type="button">卡号管理</button><button id="feedbackTab" type="button">反馈<span id="feedbackBadge" class="nav-badge" hidden>0</span></button></nav>
+<header><strong>叨叨诡秘 Dps-Logs 管理后台</strong><span id="refresh">正在同步</span></header>
+<nav><button id="onlineTab" class="active" type="button">在线用户</button><button id="cardsTab" type="button">卡号管理</button><button id="feedbackTab" type="button">反馈</button></nav>
 <main>
 <section class="metrics"><div class="metric"><label>当前登录</label><b id="logged">0</b></div><div class="metric using"><label>正在使用</label><b id="using">0</b></div><div class="metric cards"><label>有效卡号</label><b id="validCards">0</b></div><div class="metric"><label>近 24 小时设备</label><b id="seen">0</b></div></section>
 <section id="onlinePanel"><div class="panel-head"><h2>在线用户</h2></div><div class="table-wrap"><table><thead><tr><th>卡号</th><th>角色</th><th>版本</th><th>状态</th><th>最近心跳</th><th>IP</th><th>管理</th></tr></thead><tbody id="userRows"></tbody></table><div id="userEmpty" class="empty" hidden>暂无在线记录</div></div></section>
@@ -1794,12 +1763,12 @@ textarea{width:100%;height:260px;resize:none;background:#0d1116;color:var(--text
 <div id="cardTableWrap" class="table-wrap"><table id="cardTable" class="cards-table"><thead><tr><th class="check-cell"><input id="selectVisibleCards" type="checkbox" title="选择当前筛选结果"></th><th>完整卡号</th><th>类型</th><th>备注</th><th>销售</th><th>状态</th><th>总时长</th><th>剩余时间</th><th>绑定设备</th><th>改绑限制</th><th>最近使用</th><th>管理</th></tr></thead><tbody id="cardRows"></tbody></table><div id="cardEmpty" class="empty" hidden>暂无卡号</div></div>
 </section>
 <section id="feedbackPanel" hidden>
-<div class="panel-head"><h2>反馈</h2><div class="panel-tools"><input id="feedbackSearch" class="search" placeholder="搜索编号、卡号、角色或问题内容"><select id="feedbackStatusFilter"><option value="">全部状态</option><option value="pending">待处理</option><option value="resolved">已处理</option></select><span id="feedbackCount">0 条</span></div></div>
-<div class="table-wrap"><table class="feedbacks-table"><thead><tr><th>反馈编号</th><th>提交时间</th><th>状态</th><th>问题类型</th><th>卡号</th><th>角色</th><th>版本</th><th>问题描述</th><th>运行摘要</th><th>管理</th></tr></thead><tbody id="feedbackRows"></tbody></table><div id="feedbackEmpty" class="empty" hidden>暂无问题反馈</div></div>
+<div class="panel-head"><h2>反馈</h2><div class="panel-tools"><input id="feedbackSearch" class="search" placeholder="搜索编号、卡号、角色或问题内容"><span id="feedbackCount">0 条</span></div></div>
+<div class="table-wrap"><table class="feedbacks-table"><thead><tr><th>反馈编号</th><th>提交时间</th><th>问题类型</th><th>卡号</th><th>角色</th><th>版本</th><th>问题描述</th><th>运行摘要</th><th>管理</th></tr></thead><tbody id="feedbackRows"></tbody></table><div id="feedbackEmpty" class="empty" hidden>暂无问题反馈</div></div>
 </section>
 </main>
 <div id="resultModal" class="modal" hidden><div class="modal-body"><div class="modal-head"><h2>新生成的卡号</h2><button id="closeModal" type="button">关闭</button></div><textarea id="generatedCards" readonly></textarea><div class="modal-actions"><button id="copyCards" class="primary" type="button">复制全部</button></div></div></div>
-<div id="feedbackModal" class="modal" hidden><div class="modal-body feedback-modal-body"><div class="modal-head"><h2 id="feedbackModalTitle">反馈详情</h2><button id="closeFeedbackModal" type="button">关闭</button></div><div id="feedbackMeta" class="feedback-meta"></div><div class="feedback-section"><h3>问题描述</h3><pre id="feedbackFullContent" class="feedback-content"></pre></div><div class="feedback-section"><h3>运行摘要</h3><textarea id="feedbackDiagnostics" class="feedback-diagnostics" readonly></textarea></div><div class="modal-actions"><button id="toggleFeedbackStatus" class="primary" type="button">标记已处理</button><button id="closeFeedbackModalBottom" type="button">关闭</button></div></div></div>
+<div id="feedbackModal" class="modal" hidden><div class="modal-body feedback-modal-body"><div class="modal-head"><h2 id="feedbackModalTitle">反馈详情</h2><button id="closeFeedbackModal" type="button">关闭</button></div><div id="feedbackMeta" class="feedback-meta"></div><div class="feedback-section"><h3>问题描述</h3><pre id="feedbackFullContent" class="feedback-content"></pre></div><div class="feedback-section"><h3>运行摘要</h3><textarea id="feedbackDiagnostics" class="feedback-diagnostics" readonly></textarea></div><div class="modal-actions"><button id="closeFeedbackModalBottom" type="button">关闭</button></div></div></div>
 <script>
 const byId=function(id){return document.getElementById(id)};
 const esc=function(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
@@ -1811,7 +1780,6 @@ let allCards=[];
 let allFeedbacks=[];
 let visibleCardIds=[];
 let serverNow=0;
-let currentFeedbackId='';
 const CARD_PAGE_SIZE=100;
 let cardPage=1;
 const selectedCardIds=new Set();
@@ -1951,16 +1919,15 @@ function renderCards(){
 
 function renderFeedbacks(){
   const term=byId('feedbackSearch').value.trim().toLowerCase();
-  const status=byId('feedbackStatusFilter').value;
   const rows=allFeedbacks.filter(function(x){
     const haystack=(x.feedback_id+' '+x.card_key+' '+x.character_name+' '+x.category_label+' '+x.content_preview).toLowerCase();
-    return (!term||haystack.includes(term))&&(!status||x.status===status);
+    return !term||haystack.includes(term);
   });
   byId('feedbackCount').textContent=rows.length+' / '+allFeedbacks.length+' 条';
   byId('feedbackRows').innerHTML=rows.map(function(x){
     const created=new Date(x.created_at*1000).toLocaleString();
     return '<tr><td><span class="feedback-id">'+esc(x.feedback_id)+'</span></td>'
-      +'<td>'+esc(created)+'</td><td><span class="status '+(x.status==='resolved'?'active':'unused')+'"><i class="dot"></i>'+(x.status==='resolved'?'已处理':'待处理')+'</span></td><td>'+esc(x.category_label)+'</td><td>'+esc(x.card_key||'--')+'</td>'
+      +'<td>'+esc(created)+'</td><td>'+esc(x.category_label)+'</td><td>'+esc(x.card_key||'--')+'</td>'
       +'<td>'+esc(x.character_name||'--')+'</td><td>'+esc(x.app_version||'--')+'</td>'
       +'<td><span class="feedback-preview" title="'+esc(x.content_preview)+'">'+esc(x.content_preview)+'</span></td>'
       +'<td>'+(x.has_diagnostics?'已附带':'未附带')+'</td><td><button class="link" data-feedback="'+esc(x.feedback_id)+'">查看</button></td></tr>';
@@ -1977,8 +1944,6 @@ async function loadFeedback(){
     if(!r.ok)throw new Error(r.status);
     const d=await r.json();
     allFeedbacks=d.feedbacks||[];
-    byId('feedbackBadge').hidden=!d.pending;
-    byId('feedbackBadge').textContent=d.pending||0;
     renderFeedbacks();
   }catch(e){byId('feedbackCount').textContent='读取失败'}
 }
@@ -1986,15 +1951,12 @@ async function loadFeedback(){
 async function openFeedback(id){
   const d=await post('/api/v1/dps/admin/feedback/detail',{feedback_id:id});
   const x=d.feedback;
-  currentFeedbackId=x.feedback_id;
   const summary=allFeedbacks.find(function(item){return item.feedback_id===x.feedback_id})||{};
   byId('feedbackModalTitle').textContent='反馈详情 · '+x.feedback_id;
-  byId('feedbackMeta').textContent='状态：'+(x.status==='resolved'?'已处理':'待处理')+'　提交时间：'+new Date(x.created_at*1000).toLocaleString()+'　类型：'+(summary.category_label||x.category)+'　卡号：'+(x.card_key||'--')+'　角色：'+(x.character_name||'--')+'　版本：'+(x.app_version||'--')+'　IP：'+(x.remote_ip||'--');
+  byId('feedbackMeta').textContent='提交时间：'+new Date(x.created_at*1000).toLocaleString()+'　类型：'+(summary.category_label||x.category)+'　卡号：'+(x.card_key||'--')+'　角色：'+(x.character_name||'--')+'　版本：'+(x.app_version||'--')+'　IP：'+(x.remote_ip||'--');
   byId('feedbackFullContent').textContent=x.content||'';
   const diagnostics=x.diagnostics||{};
   byId('feedbackDiagnostics').value=Object.keys(diagnostics).length?JSON.stringify(diagnostics,null,2):'用户未附带运行摘要';
-  byId('toggleFeedbackStatus').dataset.status=x.status==='resolved'?'pending':'resolved';
-  byId('toggleFeedbackStatus').textContent=x.status==='resolved'?'重新打开':'标记已处理';
   byId('feedbackModal').hidden=false;
 }
 
@@ -2023,8 +1985,6 @@ async function load(){
     byId('using').textContent=d.using_now;
     byId('seen').textContent=d.seen_24h;
     byId('validCards').textContent=(d.active_cards||0)+(d.unused_cards||0);
-    byId('feedbackBadge').hidden=!d.feedback_pending;
-    byId('feedbackBadge').textContent=d.feedback_pending||0;
     byId('refresh').textContent='每 30 秒自动刷新 · '+new Date(d.server_time*1000).toLocaleTimeString();
     byId('userRows').innerHTML=d.sessions.map(function(x){
       const state=x.revoked?'已停用':x.using?'使用中':x.online?'已登录':'离线';
@@ -2088,15 +2048,7 @@ byId('copyCards').onclick=async function(){
   try{await navigator.clipboard.writeText(value);byId('copyCards').textContent='已复制';setTimeout(function(){byId('copyCards').textContent='复制全部'},1200)}catch(e){byId('generatedCards').select();document.execCommand('copy')}
 };
 byId('feedbackSearch').oninput=renderFeedbacks;
-byId('feedbackStatusFilter').onchange=renderFeedbacks;
-byId('toggleFeedbackStatus').onclick=async function(){
-  if(!currentFeedbackId)return;
-  await post('/api/v1/dps/admin/feedback/update',{feedback_id:currentFeedbackId,status:this.dataset.status});
-  await loadFeedback();
-  await openFeedback(currentFeedbackId);
-  await load();
-};
-function closeFeedbackModal(){byId('feedbackModal').hidden=true;currentFeedbackId=''}
+function closeFeedbackModal(){byId('feedbackModal').hidden=true}
 byId('closeFeedbackModal').onclick=closeFeedbackModal;
 byId('closeFeedbackModalBottom').onclick=closeFeedbackModal;
 byId('feedbackModal').onclick=function(event){if(event.target===byId('feedbackModal'))closeFeedbackModal()};

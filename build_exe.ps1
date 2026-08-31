@@ -8,12 +8,13 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python = Join-Path $ProjectDir ".venv-build310\Scripts\python.exe"
 $CapstoneDll = Join-Path $ProjectDir ".venv-build310\Lib\site-packages\capstone\lib\capstone.dll"
-$ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)$([char]0x52A9)$([char]0x624B)"
-$Description = "$ProductName$([char]0x56E2)$([char]0x961F)$([char]0x4F24)$([char]0x5BB3)$([char]0x7EDF)$([char]0x8BA1)"
+$ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)"
+$DisplayName = "$ProductName Dps-Logs"
+$Description = "$DisplayName $([char]0x56E2)$([char]0x961F)$([char]0x4F24)$([char]0x5BB3)$([char]0x7EDF)$([char]0x8BA1)"
 $OutputName = if ($OutputFilename) {
     $OutputFilename
 } else {
-    "$ProductName-DPS-METER-v0.0.8.exe"
+    "$ProductName-Dps-Logs-v0.0.13.exe"
 }
 $OutputDirectoryPath = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
     [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -54,9 +55,9 @@ try {
         --include-data-files=monster_metadata.json=monster_metadata.json `
         --include-data-files=boss_allowlist.txt=boss_allowlist.txt `
         --include-data-files=cacert.pem=cacert.pem `
-        --file-version=0.0.8.0 `
-        --product-version=0.0.8.0 `
-        --product-name="$ProductName DPS METER" `
+        --file-version=0.0.13.0 `
+        --product-version=0.0.13.0 `
+        --product-name="$DisplayName" `
         --file-description=$Description `
         --copyright=$ProductName `
         dps_meter.pyw

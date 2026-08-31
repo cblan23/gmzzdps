@@ -27,7 +27,7 @@ class RememberedCardTests(unittest.TestCase):
         self.assertEqual(unprotect_card_key(encrypted), card_key)
 
     def test_config_round_trip_contains_only_encrypted_value(self):
-        card_key = "doriapig"
+        card_key = "partner-test-key"
         config = {"server_url": "https://daodaogame.vip"}
 
         self.assertTrue(remember_card(config, card_key))
@@ -37,7 +37,7 @@ class RememberedCardTests(unittest.TestCase):
 
     def test_invalid_or_tampered_values_are_ignored(self):
         self.assertEqual(unprotect_card_key("not-base64!"), "")
-        encrypted = protect_card_key("doriapig")
+        encrypted = protect_card_key("partner-test-key")
         raw = bytearray(base64.b64decode(encrypted))
         raw[len(raw) // 2] ^= 0x01
         tampered = base64.b64encode(raw).decode("ascii")

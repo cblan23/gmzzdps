@@ -53,14 +53,93 @@ MESSAGE_PROLOGUE = bytes.fromhex(
 MESSAGE_PROLOGUE_SIGNATURE = MESSAGE_PROLOGUE + bytes.fromhex(
     "57 41 54 41 56 41 57 48 8b ec 48 81 ec 80 00 00 00"
 )
-MESSAGE_MAGIC = b"GMZZNET1"
+MESSAGE_MAGIC = b"GMZZNET2"
 MESSAGE_RECORD_SIZE = 0x100
 MESSAGE_RECORD_COUNT = 4096
 MESSAGE_RECORD_MASK = MESSAGE_RECORD_COUNT - 1
 MESSAGE_RECORDS_OFFSET = 0x100
+MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET = 0x28
+MESSAGE_ARGUMENT_SYNC_STATE_OFFSET = 0xE8
+MESSAGE_ARGUMENT_ACK_OFFSET = 0xF0
+MESSAGE_COMMIT_OFFSET = 0xF8
+# These messages own authoritative damage or low-frequency encounter-boundary
+# values. The decoded msgpack graph is stack/arena backed and can be reused as
+# soon as do_message continues, so the hook waits for the reader to finish.
+MESSAGE_ARGUMENT_SYNC_METHODS = (
+    b"RetCommonCombatStatisticsByTeam",
+    b"RetDirtyCommonCombatStatisticsByTeam",
+    b"OnMsgReconnectOrEnter",
+    b"OnMsgDungeonReadinessCheck",
+    b"OnMsgDungeonStageSettlement",
+    b"OnMsgSyncFightMode",
+    b"OnMsgSyncCurrentMaxHp",
+    b"OnMsgUpdateStageCombatStatistics",
+    b"OnMsgSettlementCombatStatistics",
+    b"OnMsgUpdateDungeonBattleStatistics",
+    b"OnMsgUpdateDungeonTeamPlayerBattleStatistics",
+    b"RetDungeonBattleStatistics",
+    b"RetMonsterBattleStatistics",
+    b"RetNpcCombatStatisticsByTeam",
+    b"RetDirtyNpcCombatStatisticsByTeam",
+)
+MESSAGE_ARGUMENT_SYNC_METHOD_NAMES = frozenset(
+    method.decode("ascii") for method in MESSAGE_ARGUMENT_SYNC_METHODS
+)
+MESSAGE_ARGUMENT_SYNC_TIMEOUT_100NS = 2_500_000  # 250 ms hard fail-open
 MESSAGE_RING_SIZE = (
     MESSAGE_RECORDS_OFFSET + MESSAGE_RECORD_COUNT * MESSAGE_RECORD_SIZE
 )
+
+
+def _emit_near_branch(code: bytearray, opcode: bytes) -> int:
+    code += opcode
+    displacement_at = len(code)
+    code += b"\x00\x00\x00\x00"
+    return displacement_at
+
+
+def _patch_near_branch(
+    code: bytearray, displacement_at: int, target: int
+) -> None:
+    struct.pack_into(
+        "<i", code, displacement_at, target - (displacement_at + 4)
+    )
+
+
+def _emit_record_method_candidate(code: bytearray, method: bytes) -> int:
+    """Branch to a shared match target when the captured method is exact."""
+    if not method or len(method) > 0x7F:
+        raise ValueError("synchronous RPC method length is unsupported")
+    mismatches: list[int] = []
+    code += b"\x49\x83\xbb\x38\x00\x00\x00" + bytes([len(method)])
+    mismatches.append(_emit_near_branch(code, b"\x0f\x85"))
+    offset = 0
+    while len(method) - offset >= 8:
+        code += b"\x48\xb8" + method[offset : offset + 8]
+        code += b"\x49\x39\x83" + struct.pack("<I", 0x40 + offset)
+        mismatches.append(_emit_near_branch(code, b"\x0f\x85"))
+        offset += 8
+    if len(method) - offset >= 4:
+        code += b"\xb8" + method[offset : offset + 4]
+        code += b"\x41\x39\x83" + struct.pack("<I", 0x40 + offset)
+        mismatches.append(_emit_near_branch(code, b"\x0f\x85"))
+        offset += 4
+    if len(method) - offset >= 2:
+        code += b"\x66\xb8" + method[offset : offset + 2]
+        code += b"\x66\x41\x39\x83" + struct.pack(
+            "<I", 0x40 + offset
+        )
+        mismatches.append(_emit_near_branch(code, b"\x0f\x85"))
+        offset += 2
+    if len(method) - offset:
+        code += b"\xb0" + method[offset : offset + 1]
+        code += b"\x41\x38\x83" + struct.pack("<I", 0x40 + offset)
+        mismatches.append(_emit_near_branch(code, b"\x0f\x85"))
+    matched = _emit_near_branch(code, b"\xe9")
+    next_candidate = len(code)
+    for displacement_at in mismatches:
+        _patch_near_branch(code, displacement_at, next_candidate)
+    return matched
 
 
 def suspend_game_threads(pid: int) -> list[int]:
@@ -90,8 +169,16 @@ def suspend_game_threads(pid: int) -> list[int]:
         raise
 
 
-def build_message_stub(ring: int, resume: int) -> bytes:
+def build_message_stub(
+    ring: int,
+    resume: int,
+    *,
+    prologue: bytes = MESSAGE_PROLOGUE,
+    return_address_stack_offset: int = 0x48,
+) -> bytes:
     """Capture do_message registers and copy its decoded RPC method name."""
+    if not 0 <= return_address_stack_offset <= 0x7F:
+        raise ValueError("return-address stack offset must fit disp8")
     code = bytearray()
     code += b"\x9c"  # pushfq
     code += b"\x50\x53\x51\x52"  # rax, rbx, rcx, rdx
@@ -104,11 +191,18 @@ def build_message_stub(ring: int, resume: int) -> bytes:
     code += b"\x48\xc1\xe0\x08"  # record size 0x100
     code += b"\x4d\x8d\x9c\x02" + struct.pack("<I", MESSAGE_RECORDS_OFFSET)
     code += b"\x49\x89\x1b"
+    code += b"\x49\xc7\x83" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_SYNC_STATE_OFFSET
+    ) + b"\x00\x00\x00\x00"
+    code += b"\x49\xc7\x83" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_ACK_OFFSET
+    ) + b"\x00\x00\x00\x00"
     code += b"\x49\x89\x4b\x10"  # ScriptEntity
     code += b"\x49\x89\x53\x18"  # decoded message context
     code += b"\x4d\x89\x43\x20"  # std::string method name
     code += b"\x4d\x89\x4b\x28"  # decoded arguments
-    code += b"\x48\x8b\x44\x24\x48\x49\x89\x43\x30"  # return address
+    code += b"\x48\x8b\x44\x24" + bytes([return_address_stack_offset])
+    code += b"\x49\x89\x43\x30"  # return address
 
     # KUSER_SHARED_DATA.SystemTime -> FILETIME.
     code += b"\x41\xba\x00\x00\xfe\x7f"
@@ -153,10 +247,83 @@ def build_message_stub(ring: int, resume: int) -> bytes:
     for jump in done_jumps:
         code[jump + 1] = (done - (jump + 2)) & 0xFF
 
+    matched_jumps = [
+        _emit_record_method_candidate(code, method)
+        for method in MESSAGE_ARGUMENT_SYNC_METHODS
+    ]
+    skip_sync_state = _emit_near_branch(code, b"\xe9")
+    matched = len(code)
+    for displacement_at in matched_jumps:
+        _patch_near_branch(code, displacement_at, matched)
+    code += b"\x49\xba" + struct.pack("<Q", ring)
+    code += b"\x49\x83\x7a" + bytes(
+        [MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET, 1]
+    )
+    sync_disabled = _emit_near_branch(code, b"\x0f\x85")
+    code += b"\x49\xc7\x83" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_SYNC_STATE_OFFSET
+    ) + b"\x01\x00\x00\x00"
+    sync_enabled = _emit_near_branch(code, b"\xe9")
+    disabled = len(code)
+    _patch_near_branch(code, sync_disabled, disabled)
+    code += b"\x49\xc7\x83" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_SYNC_STATE_OFFSET
+    ) + b"\x03\x00\x00\x00"
+    commit = len(code)
+    _patch_near_branch(code, skip_sync_state, commit)
+    _patch_near_branch(code, sync_enabled, commit)
+
     code += b"\x48\x8d\x43\x01"
-    code += b"\x49\x89\x83\xf8\x00\x00\x00"  # commit
+    code += b"\x49\x89\x83" + struct.pack("<I", MESSAGE_COMMIT_OFFSET)
+
+    # Selected authoritative/encounter-boundary messages wait. The game thread
+    # is released as soon as Python acknowledges the decoded graph, or after
+    # 250 ms if the reader has stopped/crashed. This prevents arena reuse from
+    # changing arguments halfway through a read without a permanent hang.
+    code += b"\x49\x83\xbb" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_SYNC_STATE_OFFSET
+    ) + b"\x01"
+    no_wait = _emit_near_branch(code, b"\x0f\x85")
+    code += b"\x4c\x8d\x4b\x01"  # r9 = sequence + 1 acknowledgement
+    wait_loop = len(code)
+    code += b"\x4d\x39\x8b" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_ACK_OFFSET
+    )
+    acknowledged = _emit_near_branch(code, b"\x0f\x84")
+    code += b"\xf3\x90"  # pause
+    code += b"\x41\xba\x00\x00\xfe\x7f"
+    clock_retry = len(code)
+    code += b"\x41\x8b\x42\x18"
+    code += b"\x41\x8b\x52\x14"
+    code += b"\x41\x3b\x42\x1c"
+    clock_changed = _emit_near_branch(code, b"\x0f\x85")
+    _patch_near_branch(code, clock_changed, clock_retry)
+    code += b"\x48\xc1\xe0\x20\x48\x09\xd0"
+    code += b"\x49\x2b\x43\x08"
+    code += b"\x48\x3d" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_SYNC_TIMEOUT_100NS
+    )
+    keep_waiting = _emit_near_branch(code, b"\x0f\x82")
+    _patch_near_branch(code, keep_waiting, wait_loop)
+    code += b"\x49\xc7\x83" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_SYNC_STATE_OFFSET
+    ) + b"\x03\x00\x00\x00"
+    code += b"\x49\xba" + struct.pack("<Q", ring)
+    code += b"\x49\xc7\x42" + bytes(
+        [MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET]
+    ) + b"\x00\x00\x00\x00"
+    wait_done = _emit_near_branch(code, b"\xe9")
+    acknowledged_at = len(code)
+    _patch_near_branch(code, acknowledged, acknowledged_at)
+    code += b"\x49\xc7\x83" + struct.pack(
+        "<I", MESSAGE_ARGUMENT_SYNC_STATE_OFFSET
+    ) + b"\x02\x00\x00\x00"
+    done_waiting = len(code)
+    _patch_near_branch(code, wait_done, done_waiting)
+    _patch_near_branch(code, no_wait, done_waiting)
+
     code += b"\x41\x5b\x41\x5a\x41\x59\x41\x58\x5a\x59\x5b\x58\x9d"
-    code += MESSAGE_PROLOGUE
+    code += prologue
     code += b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
     return bytes(code)
 
@@ -175,7 +342,10 @@ def parse_message_record(data: bytes, expected_sequence: int) -> dict | None:
         return_address,
         method_length,
     ) = values
-    commit = struct.unpack_from("<Q", data, 0xF8)[0]
+    argument_sync_state = struct.unpack_from(
+        "<Q", data, MESSAGE_ARGUMENT_SYNC_STATE_OFFSET
+    )[0]
+    commit = struct.unpack_from("<Q", data, MESSAGE_COMMIT_OFFSET)[0]
     if sequence != expected_sequence or commit != expected_sequence + 1:
         return None
     raw_method = data[0x40:0xC0].split(b"\x00", 1)[0]
@@ -196,6 +366,7 @@ def parse_message_record(data: bytes, expected_sequence: int) -> dict | None:
         "return_address": f"0x{return_address:016x}",
         "method_length": method_length,
         "method": method,
+        "argument_sync_state": argument_sync_state,
     }
 
 
@@ -362,11 +533,11 @@ class NetworkMessageHook:
         if not stub_head or not stub_head.startswith(prefix):
             return False
         ring = struct.unpack_from("<Q", stub_head, len(prefix))[0]
-        header = read_region(self.process, ring, 40)
+        header = read_region(self.process, ring, 48)
         if not header or header[:8] != MESSAGE_MAGIC:
             return False
-        _, write_index, capacity, record_size, target = struct.unpack(
-            "<8sQQQQ", header
+        _, write_index, capacity, record_size, target, _sync_enabled = struct.unpack(
+            "<8sQQQQQ", header
         )
         if (
             capacity != MESSAGE_RECORD_COUNT
@@ -445,12 +616,13 @@ class NetworkMessageHook:
             if not self.stub:
                 raise winerror("VirtualAllocEx(network stub)")
             header = struct.pack(
-                "<8sQQQQ",
+                "<8sQQQQQ",
                 MESSAGE_MAGIC,
                 0,
                 MESSAGE_RECORD_COUNT,
                 MESSAGE_RECORD_SIZE,
                 self.target,
+                1,
             )
             write_memory(self.process, self.ring, header)
             stub = build_message_stub(
@@ -483,30 +655,49 @@ class NetworkMessageHook:
     ) -> list[dict]:
         if not self.installed or not self.alive:
             return []
-        header = read_region(self.process, self.ring, 0x20)
+        header = read_region(self.process, self.ring, 0x30)
         if not header or header[:8] != MESSAGE_MAGIC:
             raise RuntimeError("network message ring became unreadable or corrupt")
         write_index = struct.unpack_from("<Q", header, 8)[0]
+        sync_enabled = struct.unpack_from(
+            "<Q", header, MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET
+        )[0]
+        if not sync_enabled:
+            write_memory(
+                self.process,
+                self.ring + MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET,
+                struct.pack("<Q", 1),
+            )
         if write_index - self.next_sequence > MESSAGE_RECORD_COUNT:
             self.next_sequence = write_index - MESSAGE_RECORD_COUNT
         records: list[dict] = []
         while self.next_sequence < write_index:
             slot = self.next_sequence & MESSAGE_RECORD_MASK
-            raw = read_region(
-                self.process,
+            record_address = (
                 self.ring
                 + MESSAGE_RECORDS_OFFSET
-                + slot * MESSAGE_RECORD_SIZE,
+                + slot * MESSAGE_RECORD_SIZE
+            )
+            raw = read_region(
+                self.process,
+                record_address,
                 MESSAGE_RECORD_SIZE,
             )
             record = parse_message_record(raw or b"", self.next_sequence)
             if record is None:
                 break
-            if decode_arguments and (
-                decode_method_filter is None
-                or decode_method_filter(str(record.get("method", "")))
-            ):
-                try:
+            method = str(record.get("method", ""))
+            synchronized = method in MESSAGE_ARGUMENT_SYNC_METHOD_NAMES
+            sync_state = int(record.get("argument_sync_state", 0) or 0)
+            should_decode = decode_arguments and (
+                decode_method_filter is None or decode_method_filter(method)
+            )
+            try:
+                if should_decode and synchronized and sync_state != 1:
+                    record["decode_error"] = (
+                        "synchronized argument read timed out"
+                    )
+                elif should_decode:
                     record["decoded_arguments"] = RemoteMsgpackReader(
                         self.process
                     ).decode(int(record["arguments"]))
@@ -517,8 +708,17 @@ class NetworkMessageHook:
                         0.0,
                         (decoded_at_100ns - int(record["filetime_100ns"])) / 10_000,
                     )
-                except MessageDecodeError as exc:
-                    record["decode_error"] = str(exc)
+                    if synchronized:
+                        record["arguments_synchronized"] = True
+            except MessageDecodeError as exc:
+                record["decode_error"] = str(exc)
+            finally:
+                if synchronized and sync_state == 1:
+                    write_memory(
+                        self.process,
+                        record_address + MESSAGE_ARGUMENT_ACK_OFFSET,
+                        struct.pack("<Q", int(record["sequence"]) + 1),
+                    )
             if include_snapshots:
                 for field in ("context", "arguments"):
                     address = int(record[field])
@@ -540,7 +740,13 @@ class NetworkMessageHook:
                 if suspended:
                     resume_threads(suspended)
         self.installed = False
-        if self.process and self.alive:
+        # A game thread can already be executing inside the trampoline when
+        # the entry point is restored.  Freeing its pages here races that
+        # thread after it is resumed and can crash the game.  Owned pages are
+        # therefore intentionally left unreachable; Windows reclaims them
+        # when the game exits.  Allocations from a failed pre-install attempt
+        # were never executable and remain safe to release.
+        if self.process and self.alive and not owned:
             if self.stub and not self.adopted:
                 kernel32.VirtualFreeEx(
                     self.process, ctypes.c_void_p(self.stub), 0, MEM_RELEASE

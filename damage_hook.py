@@ -92,6 +92,10 @@ LOW_COMBAT_ENTITY_ID_MAX = 7_999_999_999_999
 ENTITY_ID_MIN = 10_000_000_000_000
 ENTITY_ID_MAX = 999_999_999_999_999
 BOSS_COMPONENT_READ_SIZE = BOSS_TEMPLATE_ID_OFFSET + 4
+NAME_CACHE_ENTRY_SIZE = 0x20
+NAME_CACHE_READ_BATCH_ENTRIES = 4096
+SKILL_CACHE_ENTRY_SIZE = 0x1D8
+SKILL_CACHE_READ_BATCH_ENTRIES = 512
 
 
 class DamageHook:
@@ -151,6 +155,13 @@ class DamageHook:
         self.pending_existing_boss_targets: set[int] = set()
         self.existing_boss_scan_attempted: set[int] = set()
         self.existing_boss_component_cache: dict[int, dict] = {}
+        # The fallback walks the complete Unreal object table and is only for a
+        # Boss that already existed when the inline hooks were installed.  A
+        # previous implementation repeated that full walk for every newly hit
+        # trash entity because an ordinary entity can never enter the Boss
+        # cache.  In a dense pull that turns one compatibility fallback into an
+        # unbounded stream of millions of cross-process reads.
+        self.existing_boss_full_scan_complete = False
 
     def _read_exact(self, address: int, size: int) -> bytes:
         data = read_region(self.process, address, size)
@@ -692,6 +703,10 @@ class DamageHook:
                 self._plausible_entity_id(target_id)
                 and target_id != self.local_player_id
                 and target_id not in self.existing_boss_scan_attempted
+                and (
+                    not self.existing_boss_full_scan_complete
+                    or target_id in self.existing_boss_component_cache
+                )
             ):
                 self.pending_existing_boss_targets.add(target_id)
             records.append(record)
@@ -771,6 +786,27 @@ class DamageHook:
                     "template_id": template_id,
                     "existing_object_scan": True,
                 }
+        return [
+            dict(self.existing_boss_component_cache[entity_id])
+            for entity_id in wanted
+            if entity_id in self.existing_boss_component_cache
+        ]
+
+    def _recover_existing_boss_components_once(
+        self, target_ids: set[int]
+    ) -> list[dict]:
+        """Resolve pre-hook Boss targets with at most one global object walk."""
+        wanted = {
+            int(entity_id)
+            for entity_id in target_ids
+            if self._plausible_entity_id(int(entity_id))
+        }
+        if not wanted:
+            return []
+        if not self.existing_boss_full_scan_complete:
+            updates = self._scan_existing_boss_components(wanted)
+            self.existing_boss_full_scan_complete = True
+            return updates
         return [
             dict(self.existing_boss_component_cache[entity_id])
             for entity_id in wanted
@@ -884,7 +920,7 @@ class DamageHook:
         )
         if scan_targets:
             updates.extend(
-                self._scan_existing_boss_components(set(scan_targets))
+                self._recover_existing_boss_components_once(set(scan_targets))
             )
             self.existing_boss_scan_attempted.update(scan_targets)
             self.pending_existing_boss_targets.difference_update(scan_targets)
@@ -908,32 +944,45 @@ class DamageHook:
         if not entries or array_num > 100_000:
             return []
         updates: list[dict] = []
-        for index in range(array_num):
-            entry = read_region(self.process, entries + index * 0x20, 0x20)
-            if not entry or len(entry) != 0x20:
-                continue
-            entity_id, string_data, string_num, string_max = struct.unpack_from(
-                "<QQii", entry
+        for first_index in range(0, array_num, NAME_CACHE_READ_BATCH_ENTRIES):
+            entry_count = min(
+                NAME_CACHE_READ_BATCH_ENTRIES, array_num - first_index
             )
-            if not entity_id or not string_data or not (1 <= string_num <= string_max <= 256):
-                continue
-            raw = read_region(
-                self.process, string_data, min(string_num - 1, 64) * 2
+            batch = read_region(
+                self.process,
+                entries + first_index * NAME_CACHE_ENTRY_SIZE,
+                entry_count * NAME_CACHE_ENTRY_SIZE,
             )
-            if raw is None:
+            if not batch or len(batch) != entry_count * NAME_CACHE_ENTRY_SIZE:
                 continue
-            name = self._clean_entity_name(raw.decode("utf-16le", "replace"))
-            if not name or self.entity_names.get(entity_id) == name:
-                continue
-            self.entity_names[entity_id] = name
-            updates.append(
-                {
-                    "function": "KAPI_DataCache_CacheEntityName/cache",
-                    "manager": self.name_manager,
-                    "entity_id": entity_id,
-                    "name": name,
-                }
-            )
+            for offset in range(0, len(batch), NAME_CACHE_ENTRY_SIZE):
+                entity_id, string_data, string_num, string_max = struct.unpack_from(
+                    "<QQii", batch, offset
+                )
+                if (
+                    not entity_id
+                    or entity_id in self.entity_names
+                    or not string_data
+                    or not (1 <= string_num <= string_max <= 256)
+                ):
+                    continue
+                raw = read_region(
+                    self.process, string_data, min(string_num - 1, 64) * 2
+                )
+                if raw is None:
+                    continue
+                name = self._clean_entity_name(raw.decode("utf-16le", "replace"))
+                if not name:
+                    continue
+                self.entity_names[entity_id] = name
+                updates.append(
+                    {
+                        "function": "KAPI_DataCache_CacheEntityName/cache",
+                        "manager": self.name_manager,
+                        "entity_id": entity_id,
+                        "name": name,
+                    }
+                )
         return updates
 
     def _read_skill_name_cache(self) -> list[dict]:
@@ -946,36 +995,50 @@ class DamageHook:
         if not entries or array_max > 100_000:
             return []
         updates: list[dict] = []
-        for index in range(array_max):
-            entry = entries + index * 0x1D8
-            raw = read_region(self.process, entry, 0x20)
-            if raw is None or len(raw) != 0x20:
-                continue
-            skill_id = struct.unpack_from("<I", raw)[0]
-            string_data, string_num, string_max = struct.unpack_from("<Qii", raw, 0x10)
-            if (
-                not (10_000_000 <= skill_id <= 999_999_999)
-                or not string_data
-                or not (2 <= string_num <= string_max <= 128)
-            ):
-                continue
-            encoded = read_region(
-                self.process, string_data, min(string_num - 1, 64) * 2
+        for first_index in range(0, array_max, SKILL_CACHE_READ_BATCH_ENTRIES):
+            entry_count = min(
+                SKILL_CACHE_READ_BATCH_ENTRIES, array_max - first_index
             )
-            if encoded is None:
-                continue
-            name = self._clean_entity_name(encoded.decode("utf-16le", "replace"))
-            if not name or self.skill_names.get(skill_id) == name:
-                continue
-            self.skill_names[skill_id] = name
-            updates.append(
-                {
-                    "function": "KAPI_DataCache_CacheSkillAgentData/cache",
-                    "manager": self.name_manager,
-                    "skill_id": skill_id,
-                    "name": name,
-                }
+            batch = read_region(
+                self.process,
+                entries + first_index * SKILL_CACHE_ENTRY_SIZE,
+                entry_count * SKILL_CACHE_ENTRY_SIZE,
             )
+            if not batch or len(batch) != entry_count * SKILL_CACHE_ENTRY_SIZE:
+                continue
+            for local_index in range(entry_count):
+                offset = local_index * SKILL_CACHE_ENTRY_SIZE
+                skill_id = struct.unpack_from("<I", batch, offset)[0]
+                if skill_id in self.skill_names:
+                    continue
+                string_data, string_num, string_max = struct.unpack_from(
+                    "<Qii", batch, offset + 0x10
+                )
+                if (
+                    not (10_000_000 <= skill_id <= 999_999_999)
+                    or not string_data
+                    or not (2 <= string_num <= string_max <= 128)
+                ):
+                    continue
+                encoded = read_region(
+                    self.process, string_data, min(string_num - 1, 64) * 2
+                )
+                if encoded is None:
+                    continue
+                name = self._clean_entity_name(
+                    encoded.decode("utf-16le", "replace")
+                )
+                if not name:
+                    continue
+                self.skill_names[skill_id] = name
+                updates.append(
+                    {
+                        "function": "KAPI_DataCache_CacheSkillAgentData/cache",
+                        "manager": self.name_manager,
+                        "skill_id": skill_id,
+                        "name": name,
+                    }
+                )
         return updates
 
     def poll_names(self) -> list[dict]:
@@ -1031,6 +1094,9 @@ class DamageHook:
         owned_boss_init = (
             self.boss_init_installed and not self.boss_init_adopted
         )
+        owned_any = bool(
+            owned_damage or owned_name or owned_boss_type or owned_boss_init
+        )
         if (
             self.process
             and (
@@ -1074,7 +1140,13 @@ class DamageHook:
             and not self.boss_type_installed
             and not self.boss_init_installed
             and self.alive
+            and not owned_any
         ):
+            # Only pre-install allocations are released.  After an installed
+            # trampoline is detached, a resumed game thread may still be
+            # returning through that page.  Leaving those now-unreachable
+            # pages allocated avoids a use-after-free; the OS releases them
+            # with the game process.
             if self.boss_init_stub and not self.boss_init_adopted:
                 kernel32.VirtualFreeEx(
                     self.process,
@@ -1142,6 +1214,7 @@ class DamageHook:
         self.pending_existing_boss_targets.clear()
         self.existing_boss_scan_attempted.clear()
         self.existing_boss_component_cache.clear()
+        self.existing_boss_full_scan_complete = False
 
     def __enter__(self) -> "DamageHook":
         return self.install()

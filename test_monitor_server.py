@@ -25,6 +25,8 @@ class QuietMonitorHandler(monitor.MonitorHandler):
 class MonitorServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        self.original_partner_card_key = monitor.PARTNER_CARD_KEY
+        monitor.PARTNER_CARD_KEY = "partner-test-key"
         monitor.DATABASE_PATH = Path(self.temporary.name) / "sessions.sqlite3"
         monitor.UPDATE_METADATA_PATH = Path(self.temporary.name) / "update.json"
         monitor.ADMIN_USER = "tester"
@@ -40,6 +42,7 @@ class MonitorServerTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=3.0)
         self.temporary.cleanup()
+        monitor.PARTNER_CARD_KEY = self.original_partner_card_key
 
     def request(
         self,
@@ -128,7 +131,7 @@ class MonitorServerTests(unittest.TestCase):
                 self.assertNotIn("-", card_key)
         return value["cards"]
 
-    def test_feedback_status_migrates_existing_database(self):
+    def test_feedback_schema_does_not_add_processing_status(self):
         legacy_path = Path(self.temporary.name) / "legacy-feedback.sqlite3"
         connection = sqlite3.connect(legacy_path)
         try:
@@ -174,17 +177,13 @@ class MonitorServerTests(unittest.TestCase):
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(feedbacks)")
             }
-            status = connection.execute(
-                "SELECT status FROM feedbacks WHERE feedback_id='FB1111111111111111'"
-            ).fetchone()[0]
         finally:
             connection.close()
-        self.assertIn("status", columns)
-        self.assertEqual(status, "pending")
+        self.assertNotIn("status", columns)
 
     def test_update_metadata_version_comparison_and_download(self):
         update_bytes = b"MZ" + bytes(range(64))
-        update_name = "叨叨诡秘助手-DPS-METER-v0.0.4.exe"
+        update_name = "叨叨诡秘-Dps-Logs-v0.0.4.exe"
         update_path = monitor.UPDATE_METADATA_PATH.parent / update_name
         update_path.write_bytes(update_bytes)
         digest = hashlib.sha256(update_bytes).hexdigest()
@@ -223,10 +222,15 @@ class MonitorServerTests(unittest.TestCase):
         )
         gateway_update = gateway.check_update()
         self.assertTrue(gateway_update.available)
+        progress = []
         downloaded = gateway.download_update(
-            gateway_update, Path(self.temporary.name) / "downloaded.exe"
+            gateway_update,
+            Path(self.temporary.name) / "downloaded.exe",
+            lambda written, total: progress.append((written, total)),
         )
         self.assertEqual(downloaded.read_bytes(), update_bytes)
+        self.assertEqual(progress[0], (0, len(update_bytes)))
+        self.assertEqual(progress[-1], (len(update_bytes), len(update_bytes)))
 
         status, current = self.request(
             "/api/v1/dps/update?version=0.0.4%2B20260828.1"
@@ -243,6 +247,53 @@ class MonitorServerTests(unittest.TestCase):
         status, missing = self.request("/api/v1/dps/update?version=0.0.3")
         self.assertEqual(status, 200)
         self.assertFalse(missing["available"])
+
+    def test_update_metadata_can_replace_an_older_same_version_build(self):
+        update_bytes = b"MZ" + bytes(range(32))
+        update_name = "dps-logs-v0.0.13.exe"
+        update_path = monitor.UPDATE_METADATA_PATH.parent / update_name
+        update_path.write_bytes(update_bytes)
+        monitor.UPDATE_METADATA_PATH.write_text(
+            json.dumps(
+                {
+                    "latest_version": "0.0.13",
+                    "client_build": "0.0.13+20260831.5",
+                    "filename": update_name,
+                    "size": len(update_bytes),
+                    "sha256": hashlib.sha256(update_bytes).hexdigest(),
+                    "notes": "",
+                    "required": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        for old_build in (
+            "0.0.12+20260830.9",
+            "0.0.13",
+            "0.0.13+20260831.4",
+        ):
+            with self.subTest(old_build=old_build):
+                status, update = self.request(
+                    "/api/v1/dps/update?version=" + old_build.replace("+", "%2B")
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(update["available"])
+                self.assertEqual(update["latest_version"], "0.0.13")
+                self.assertEqual(update["notes"], "")
+
+        for current_build in (
+            "0.0.13+20260831.5",
+            "0.0.13+20260831.6",
+            "0.0.14",
+        ):
+            with self.subTest(current_build=current_build):
+                status, update = self.request(
+                    "/api/v1/dps/update?version="
+                    + current_build.replace("+", "%2B")
+                )
+                self.assertEqual(status, 200)
+                self.assertFalse(update["available"])
 
     def test_session_lifecycle_status_and_revoke(self):
         status, health = self.request("/api/v1/dps/health")
@@ -439,6 +490,44 @@ class MonitorServerTests(unittest.TestCase):
                 (first["session_id"],),
             ).fetchone()
         self.assertIsNotNone(stale["ended_at"])
+
+    def test_same_version_sessions_on_same_device_do_not_revoke_each_other(self):
+        card_key = self.create_card(duration_seconds=7200)[0]
+        client_id = "7" * 32
+        sessions = []
+        for _index in range(2):
+            status, session = self.request(
+                "/api/v1/dps/session/start",
+                method="POST",
+                body={
+                    "client_id": client_id,
+                    "card_key": card_key,
+                    "app_version": "0.0.13+20260831.5",
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(session["authorized"])
+            sessions.append(session)
+
+        for session in sessions:
+            status, heartbeat = self.request(
+                "/api/v1/dps/session/heartbeat",
+                method="POST",
+                token=session["access_token"],
+                body={"using": True},
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(heartbeat["authorized"])
+
+        with monitor.database() as connection:
+            active_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM sessions
+                WHERE client_id=? AND ended_at IS NULL
+                """,
+                (client_id,),
+            ).fetchone()[0]
+        self.assertEqual(active_count, 2)
 
     def test_new_version_takes_over_same_device_without_rebinding_card(self):
         card_key = self.create_card(duration_seconds=7200)[0]
@@ -888,11 +977,11 @@ class MonitorServerTests(unittest.TestCase):
         self.assertIn("if(!byId('cardsPanel').hidden)renderCards()", monitor.ADMIN_PAGE)
         self.assertIn('id="feedbackTab" type="button">反馈', monitor.ADMIN_PAGE)
         self.assertIn('data-feedback="\'+esc(x.feedback_id)+\'">查看</button>', monitor.ADMIN_PAGE)
-        self.assertIn('id="feedbackStatusFilter"', monitor.ADMIN_PAGE)
-        self.assertIn(".dataset.status", monitor.ADMIN_PAGE)
-        self.assertIn("/api/v1/dps/admin/feedback/update", monitor.ADMIN_PAGE)
+        self.assertNotIn('id="feedbackStatusFilter"', monitor.ADMIN_PAGE)
+        self.assertNotIn(".dataset.status", monitor.ADMIN_PAGE)
+        self.assertNotIn("/api/v1/dps/admin/feedback/update", monitor.ADMIN_PAGE)
 
-    def test_feedback_submission_admin_review_and_status_update(self):
+    def test_feedback_submission_and_admin_review_without_processing_status(self):
         card_key = self.create_card()[0]
         status, started = self.request(
             "/api/v1/dps/session/start",
@@ -926,6 +1015,7 @@ class MonitorServerTests(unittest.TestCase):
                 "app_version": "0.0.2",
                 "diagnostics": {
                     "boss_only": True,
+                    "full_combat_snapshot": "combat-data|" * 10_000,
                     "capture_pipeline": {
                         "stage": "capturing",
                         "parsed_damage_events": 0,
@@ -941,7 +1031,7 @@ class MonitorServerTests(unittest.TestCase):
         status, summary = self.request("/api/v1/dps/admin/status", admin=True)
         self.assertEqual(status, 200)
         self.assertEqual(summary["feedback_total"], 1)
-        self.assertEqual(summary["feedback_pending"], 1)
+        self.assertNotIn("feedback_pending", summary)
         self.assertNotIn("new_feedback", summary)
 
         status, listed = self.request(
@@ -949,12 +1039,12 @@ class MonitorServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(listed["total"], 1)
-        self.assertEqual(listed["pending"], 1)
+        self.assertNotIn("pending", listed)
         self.assertEqual(listed["feedbacks"][0]["feedback_id"], feedback_id)
         self.assertEqual(listed["feedbacks"][0]["card_key"], card_key)
         self.assertEqual(listed["feedbacks"][0]["character_name"], "莫雪")
         self.assertTrue(listed["feedbacks"][0]["has_diagnostics"])
-        self.assertEqual(listed["feedbacks"][0]["status"], "pending")
+        self.assertNotIn("status", listed["feedbacks"][0])
 
         status, detail = self.request(
             "/api/v1/dps/admin/feedback/detail",
@@ -966,71 +1056,24 @@ class MonitorServerTests(unittest.TestCase):
         feedback = detail["feedback"]
         self.assertIn("普通攻击", feedback["content"])
         self.assertTrue(feedback["diagnostics"]["boss_only"])
-        self.assertEqual(feedback["status"], "pending")
+        self.assertGreater(
+            len(feedback["diagnostics"]["full_combat_snapshot"]),
+            80_000,
+        )
+        self.assertNotIn("status", feedback)
         self.assertEqual(
             feedback["diagnostics"]["capture_pipeline"]["stage"],
             "capturing",
         )
 
-        status, updated = self.request(
+        status, removed_route = self.request(
             "/api/v1/dps/admin/feedback/update",
             method="POST",
             admin=True,
             body={"feedback_id": feedback_id, "status": "resolved"},
-        )
-        self.assertEqual(status, 200)
-        self.assertTrue(updated["ok"])
-        self.assertTrue(updated["changed"])
-        self.assertEqual(updated["status"], "resolved")
-
-        status, summary = self.request("/api/v1/dps/admin/status", admin=True)
-        self.assertEqual(status, 200)
-        self.assertEqual(summary["feedback_total"], 1)
-        self.assertEqual(summary["feedback_pending"], 0)
-
-        status, listed = self.request(
-            "/api/v1/dps/admin/feedback", admin=True
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(listed["pending"], 0)
-        self.assertEqual(listed["feedbacks"][0]["status"], "resolved")
-
-        status, unchanged = self.request(
-            "/api/v1/dps/admin/feedback/update",
-            method="POST",
-            admin=True,
-            body={"feedback_id": feedback_id, "status": "resolved"},
-        )
-        self.assertEqual(status, 200)
-        self.assertFalse(unchanged["changed"])
-
-        status, reopened = self.request(
-            "/api/v1/dps/admin/feedback/update",
-            method="POST",
-            admin=True,
-            body={"feedback_id": feedback_id, "status": "pending"},
-        )
-        self.assertEqual(status, 200)
-        self.assertTrue(reopened["changed"])
-        self.assertEqual(reopened["status"], "pending")
-
-        status, invalid = self.request(
-            "/api/v1/dps/admin/feedback/update",
-            method="POST",
-            admin=True,
-            body={"feedback_id": feedback_id, "status": "deleted"},
-        )
-        self.assertEqual(status, 400)
-        self.assertEqual(invalid["error"], "bad_feedback_update")
-
-        status, missing_feedback = self.request(
-            "/api/v1/dps/admin/feedback/update",
-            method="POST",
-            admin=True,
-            body={"feedback_id": "FB0000000000000000", "status": "resolved"},
         )
         self.assertEqual(status, 404)
-        self.assertEqual(missing_feedback["error"], "feedback_not_found")
+        self.assertEqual(removed_route["error"], "not_found")
 
     def test_feedback_requires_an_active_session(self):
         status, denied = self.request(
@@ -1051,15 +1094,17 @@ class MonitorServerTests(unittest.TestCase):
         self.assertFalse(denied["authorized"])
         self.assertEqual(denied["error"], "card_invalid")
 
-    def test_admin_page_contains_feedback_status_controls(self):
+    def test_admin_page_contains_feedback_review_without_status_controls(self):
         self.assertIn('id="feedbackTab"', monitor.ADMIN_PAGE)
         self.assertIn('id="feedbackPanel"', monitor.ADMIN_PAGE)
         self.assertIn('id="feedbackModal"', monitor.ADMIN_PAGE)
         self.assertIn("/api/v1/dps/admin/feedback/detail", monitor.ADMIN_PAGE)
-        self.assertIn("/api/v1/dps/admin/feedback/update", monitor.ADMIN_PAGE)
-        self.assertIn(".dataset.status", monitor.ADMIN_PAGE)
-        self.assertIn('id="feedbackStatusFilter"', monitor.ADMIN_PAGE)
-        self.assertIn('id="toggleFeedbackStatus"', monitor.ADMIN_PAGE)
+        self.assertNotIn("/api/v1/dps/admin/feedback/update", monitor.ADMIN_PAGE)
+        self.assertNotIn(".dataset.status", monitor.ADMIN_PAGE)
+        self.assertNotIn('id="feedbackStatusFilter"', monitor.ADMIN_PAGE)
+        self.assertNotIn('id="toggleFeedbackStatus"', monitor.ADMIN_PAGE)
+        self.assertNotIn("待处理", monitor.ADMIN_PAGE)
+        self.assertNotIn("已处理", monitor.ADMIN_PAGE)
 
     def test_admin_rejects_malformed_basic_auth(self):
         status, value = self.request(
@@ -1114,7 +1159,7 @@ class MonitorServerTests(unittest.TestCase):
 
     def test_partner_card_is_permanent_but_keeps_device_binding(self):
         card_key = monitor.PARTNER_CARD_KEY
-        self.assertEqual(card_key, "doriapig")
+        self.assertEqual(card_key, "partner-test-key")
         first_client = "1" * 32
         status, started = self.request(
             "/api/v1/dps/session/start",

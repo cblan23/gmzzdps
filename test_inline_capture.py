@@ -15,18 +15,203 @@ from inline_capture import (
     parse_boss_type_record,
 )
 from network_capture import (
+    MESSAGE_ARGUMENT_ACK_OFFSET,
+    MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET,
+    MESSAGE_ARGUMENT_SYNC_METHODS,
+    MESSAGE_ARGUMENT_SYNC_METHOD_NAMES,
+    MESSAGE_ARGUMENT_SYNC_STATE_OFFSET,
+    MESSAGE_COMMIT_OFFSET,
     MESSAGE_MAGIC,
     MESSAGE_PROLOGUE,
     MESSAGE_RECORD_COUNT,
+    MESSAGE_RECORDS_OFFSET,
     MESSAGE_RECORD_SIZE,
     NetworkMessageHook,
     RemoteMsgpackReader,
     build_absolute_patch,
     build_message_stub,
+    parse_message_record,
 )
 
 
 class BossTypeCaptureTests(unittest.TestCase):
+    def test_all_synchronous_methods_fit_in_the_injected_stub(self):
+        stub = build_message_stub(0x1234_0000, 0x1400_1000)
+
+        self.assertLess(len(stub), 0x1000)
+
+    def test_entity_death_is_pointer_only_and_never_blocks_game_thread(self):
+        self.assertNotIn(b"OnMsgEntityDead", MESSAGE_ARGUMENT_SYNC_METHODS)
+        self.assertNotIn("OnMsgEntityDead", MESSAGE_ARGUMENT_SYNC_METHOD_NAMES)
+        self.assertEqual(
+            MESSAGE_ARGUMENT_SYNC_METHOD_NAMES,
+            frozenset(method.decode("ascii") for method in MESSAGE_ARGUMENT_SYNC_METHODS),
+        )
+
+    def test_message_stub_can_chain_after_the_displaced_rbp_push(self):
+        secondary_prologue = bytes.fromhex(
+            "57 41 54 41 56 41 57 48 8b ec 48 81 ec 80 00 00 00"
+        )
+        resume = 0x1400_2000
+        stub = build_message_stub(
+            0x1234_0000,
+            resume,
+            prologue=secondary_prologue,
+            return_address_stack_offset=0x50,
+        )
+
+        self.assertIn(b"\x48\x8b\x44\x24\x50\x49\x89\x43\x30", stub)
+        self.assertTrue(
+            stub.endswith(
+                secondary_prologue
+                + b"\xff\x25\x00\x00\x00\x00"
+                + struct.pack("<Q", resume)
+            )
+        )
+
+    def test_only_low_frequency_encounter_edges_join_team_stat_sync(self):
+        self.assertTrue(
+            {
+                "OnMsgSyncFightMode",
+                "OnMsgSyncCurrentMaxHp",
+            }.issubset(MESSAGE_ARGUMENT_SYNC_METHOD_NAMES)
+        )
+        self.assertTrue(
+            {
+                "OnMsgBeatenSyncV2",
+                "OnMsgSyncCurrentHp",
+                "OnMsgEntityDead",
+            }.isdisjoint(MESSAGE_ARGUMENT_SYNC_METHOD_NAMES)
+        )
+
+    def test_network_record_exposes_argument_sync_state(self):
+        sequence = 9
+        raw = bytearray(MESSAGE_RECORD_SIZE)
+        struct.pack_into(
+            "<8Q",
+            raw,
+            0,
+            sequence,
+            134_321_845_085_764_054,
+            1,
+            2,
+            3,
+            4,
+            5,
+            len("RetCommonCombatStatisticsByTeam"),
+        )
+        raw[0x40 : 0x40 + 31] = b"RetCommonCombatStatisticsByTeam"
+        struct.pack_into("<Q", raw, MESSAGE_ARGUMENT_SYNC_STATE_OFFSET, 1)
+        struct.pack_into("<Q", raw, MESSAGE_COMMIT_OFFSET, sequence + 1)
+
+        record = parse_message_record(bytes(raw), sequence)
+
+        self.assertEqual(record["argument_sync_state"], 1)
+
+    def test_authoritative_team_record_is_acknowledged_after_decode(self):
+        hook = NetworkMessageHook(pid=1234)
+        hook.process = 99
+        hook.ring = 0x500000
+        hook.installed = True
+        hook.next_sequence = 0
+        method = MESSAGE_ARGUMENT_SYNC_METHODS[0]
+        record_address = hook.ring + MESSAGE_RECORDS_OFFSET
+        raw = bytearray(MESSAGE_RECORD_SIZE)
+        struct.pack_into(
+            "<8Q",
+            raw,
+            0,
+            0,
+            134_321_845_085_764_054,
+            1,
+            2,
+            3,
+            0x600000,
+            5,
+            len(method),
+        )
+        raw[0x40 : 0x40 + len(method)] = method
+        struct.pack_into("<Q", raw, MESSAGE_ARGUMENT_SYNC_STATE_OFFSET, 1)
+        struct.pack_into("<Q", raw, MESSAGE_COMMIT_OFFSET, 1)
+        writes = []
+
+        def fake_read(_process, address, size):
+            if address == hook.ring and size == 0x30:
+                return struct.pack("<8sQQQQQ", MESSAGE_MAGIC, 1, 0, 0, 0, 1)
+            if address == record_address:
+                return bytes(raw)
+            return None
+
+        with (
+            patch("network_capture.process_alive", return_value=True),
+            patch("network_capture.read_region", side_effect=fake_read),
+            patch("network_capture.RemoteMsgpackReader.decode", return_value=[]),
+            patch(
+                "network_capture.write_memory",
+                side_effect=lambda process, address, data: writes.append(
+                    (process, address, data)
+                ),
+            ),
+        ):
+            records = hook.poll(decode_arguments=True)
+
+        self.assertTrue(records[0]["arguments_synchronized"])
+        self.assertEqual(
+            writes,
+            [
+                (
+                    99,
+                    record_address + MESSAGE_ARGUMENT_ACK_OFFSET,
+                    struct.pack("<Q", 1),
+                )
+            ],
+        )
+
+    def test_timed_out_team_record_is_never_decoded(self):
+        hook = NetworkMessageHook(pid=1234)
+        hook.process = 99
+        hook.ring = 0x700000
+        hook.installed = True
+        hook.next_sequence = 0
+        method = MESSAGE_ARGUMENT_SYNC_METHODS[1]
+        record_address = hook.ring + MESSAGE_RECORDS_OFFSET
+        raw = bytearray(MESSAGE_RECORD_SIZE)
+        struct.pack_into(
+            "<8Q",
+            raw,
+            0,
+            0,
+            134_321_845_085_764_054,
+            1,
+            2,
+            3,
+            0x800000,
+            5,
+            len(method),
+        )
+        raw[0x40 : 0x40 + len(method)] = method
+        struct.pack_into("<Q", raw, MESSAGE_ARGUMENT_SYNC_STATE_OFFSET, 3)
+        struct.pack_into("<Q", raw, MESSAGE_COMMIT_OFFSET, 1)
+
+        def fake_read(_process, address, size):
+            if address == hook.ring and size == 0x30:
+                return struct.pack("<8sQQQQQ", MESSAGE_MAGIC, 1, 0, 0, 0, 1)
+            if address == record_address:
+                return bytes(raw)
+            return None
+
+        with (
+            patch("network_capture.process_alive", return_value=True),
+            patch("network_capture.read_region", side_effect=fake_read),
+            patch("network_capture.RemoteMsgpackReader.decode") as decode,
+            patch("network_capture.write_memory") as write,
+        ):
+            records = hook.poll(decode_arguments=True)
+
+        decode.assert_not_called()
+        write.assert_not_called()
+        self.assertIn("timed out", records[0]["decode_error"])
+
     def test_msgpack_array_children_are_read_in_one_bulk_operation(self):
         root_address = 0x10000
         children_address = 0x20000
@@ -77,12 +262,13 @@ class BossTypeCaptureTests(unittest.TestCase):
             ring, hook.target + len(MESSAGE_PROLOGUE)
         )
         header = struct.pack(
-            "<8sQQQQ",
+            "<8sQQQQQ",
             MESSAGE_MAGIC,
             321,
             MESSAGE_RECORD_COUNT,
             MESSAGE_RECORD_SIZE,
             hook.target,
+            1,
         )
 
         def fake_read(_process, address, size):
@@ -190,6 +376,37 @@ class BossTypeCaptureTests(unittest.TestCase):
         self.assertEqual(updates[0]["template_id"], template_id)
         self.assertEqual(updates[0]["boss_type"], 3)
         self.assertTrue(updates[0]["existing_object_scan"])
+
+    def test_existing_component_fallback_walks_global_objects_only_once(self):
+        hook = DamageHook(pid=1234)
+        first_target = 4_642_860_057_279
+        second_target = first_target + 1
+        recovered_boss = second_target
+
+        def scan(target_ids):
+            hook.existing_boss_component_cache[recovered_boss] = {
+                "entity_id": recovered_boss,
+                "boss_type": 3,
+                "template_id": 7_102_403,
+            }
+            return [
+                dict(hook.existing_boss_component_cache[entity_id])
+                for entity_id in target_ids
+                if entity_id in hook.existing_boss_component_cache
+            ]
+
+        with patch.object(
+            hook, "_scan_existing_boss_components", side_effect=scan
+        ) as full_scan:
+            self.assertEqual(
+                hook._recover_existing_boss_components_once({first_target}), []
+            )
+            updates = hook._recover_existing_boss_components_once(
+                {second_target}
+            )
+
+        full_scan.assert_called_once_with({first_target})
+        self.assertEqual(updates[0]["entity_id"], recovered_boss)
 
     def test_local_controlled_entity_refreshes_after_transformation(self):
         hook = DamageHook(pid=1234)

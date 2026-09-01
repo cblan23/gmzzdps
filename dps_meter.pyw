@@ -49,7 +49,11 @@ from capture_process import (
     normalize_team_stats_mode,
     team_stats_mode_name,
 )
-from combat_history import CombatHistoryStore, HISTORY_SCHEMA_VERSION
+from combat_history import (
+    CombatHistoryStore,
+    HISTORY_SCHEMA_VERSION,
+    authoritative_team_combat_seconds,
+)
 from device_identity import resolve_client_id
 from licensing import (
     CombatClockResult,
@@ -171,8 +175,8 @@ MONSTER_NAME_CACHE_PATH = DATA_DIR / "monster_name_cache.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
-APP_VERSION = "0.1.0"
-CLIENT_BUILD = "0.1.0+20260901.1"
+APP_VERSION = "0.1.1"
+CLIENT_BUILD = "0.1.1+20260901.1"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
 UI_BRAND = APP_NAME
 BG = "#08090b"
@@ -232,6 +236,7 @@ COMBAT_CLOCK_ACTIVE_INTERVAL_SECONDS = 1.0
 COMBAT_CLOCK_RETRY_INTERVAL_SECONDS = 2.0
 COMBAT_CLOCK_HISTORY_WAIT_SECONDS = 3.0
 COMBAT_CLOCK_MAX_SECONDS = 24 * 60 * 60
+COMBAT_DURATION_MAX_LOCAL_DIFFERENCE_SECONDS = 5.0
 UNVERIFIED_MEMBER_EVENT_WINDOW_SECONDS = 90.0
 UNKNOWN_TARGET_EVENT_WINDOW_SECONDS = 3.0
 UNKNOWN_TARGET_EVENT_LIMIT_PER_TARGET = 128
@@ -451,6 +456,48 @@ def dps_duration_seconds(seconds: object) -> float:
     return float(max(1, int(value)))
 
 
+def combat_duration_matches_local(
+    fallback_duration: object, local_duration: object
+) -> bool:
+    """Validate a fallback shared clock against captured damage edges.
+
+    This five-second comparison is deliberately not part of accepting the
+    game's final settlement clock.  It is used only after that authoritative
+    path is unavailable or cannot be matched to the current encounter.
+    """
+    try:
+        fallback_value = float(fallback_duration)
+        local_value = float(local_duration)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if (
+        not math.isfinite(fallback_value)
+        or not math.isfinite(local_value)
+        or fallback_value <= 0
+        or local_value <= 0
+    ):
+        return False
+    return (
+        abs(fallback_value - local_value)
+        <= COMBAT_DURATION_MAX_LOCAL_DIFFERENCE_SECONDS
+    )
+
+
+def record_local_combat_duration(record: dict) -> float:
+    try:
+        started_at = float(record.get("started_at_epoch", 0.0) or 0.0)
+        ended_at = float(record.get("ended_at_epoch", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        started_at = ended_at = 0.0
+    if started_at > 0 and ended_at >= started_at:
+        return max(1.0, ended_at - started_at)
+    try:
+        duration = float(record.get("duration_seconds", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return duration if math.isfinite(duration) and duration > 0 else 0.0
+
+
 def combat_clock_digest(scope: str, values: object) -> str:
     material = "|".join(str(value) for value in values)
     payload = f"daodao-dps-clock-v1|{scope}|{material}".encode("utf-8")
@@ -462,6 +509,8 @@ def apply_combat_clock_to_record(
 ) -> dict:
     updated = dict(record)
     updated.pop("_shared_clock_request", None)
+    if str(updated.get("duration_source", "")) == "game_server_team_clock":
+        return updated
     if not result.synchronized or not result.final:
         return updated
     try:
@@ -469,6 +518,17 @@ def apply_combat_clock_to_record(
     except (TypeError, ValueError, OverflowError):
         return updated
     if not math.isfinite(duration) or not 1.0 <= duration <= COMBAT_CLOCK_MAX_SECONDS:
+        return updated
+    local_duration = record_local_combat_duration(updated)
+    if not combat_duration_matches_local(duration, local_duration):
+        updated["shared_clock_rejected"] = {
+            "clock_id": result.clock_id,
+            "server_duration_seconds": duration,
+            "local_duration_seconds": local_duration,
+            "difference_seconds": abs(duration - local_duration),
+            "tolerance_seconds": COMBAT_DURATION_MAX_LOCAL_DIFFERENCE_SECONDS,
+            "reason": "outside_local_event_interval_tolerance",
+        }
         return updated
     divisor = dps_duration_seconds(duration)
     if not divisor:
@@ -1328,6 +1388,13 @@ class CombatModel:
         self.encounter_gap = 60.0
         self.session_number = 0
         self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
+        self.game_server_duration_seconds = 0.0
+        self.game_server_duration_summary_id = ""
+        self.game_server_duration_policy = ""
+        self.game_server_duration_member_seconds: list[int] = []
+        self.game_server_duration_local_seconds = 0.0
+        self.game_server_duration_difference_seconds = 0.0
+        self.game_server_duration_rejection: dict[str, object] = {}
         self.shared_clock_id = ""
         self.shared_clock_duration_seconds = 0.0
         self.shared_clock_started_at = 0.0
@@ -1499,6 +1566,13 @@ class CombatModel:
         self.combat_end_reason = ""
         self.session_number += 1
         self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
+        self.game_server_duration_seconds = 0.0
+        self.game_server_duration_summary_id = ""
+        self.game_server_duration_policy = ""
+        self.game_server_duration_member_seconds = []
+        self.game_server_duration_local_seconds = 0.0
+        self.game_server_duration_difference_seconds = 0.0
+        self.game_server_duration_rejection = {}
         self.shared_clock_id = ""
         self.shared_clock_duration_seconds = 0.0
         self.shared_clock_started_at = 0.0
@@ -3539,6 +3613,10 @@ class CombatModel:
             round(self.first_damage_time, 3),
             round(self.last_damage_time, 3),
             round(self.combat_end_time, 3),
+            self.game_server_duration_summary_id,
+            round(self.game_server_duration_seconds, 3),
+            tuple(self.game_server_duration_member_seconds),
+            tuple(sorted(self.game_server_duration_rejection.items())),
             self.shared_clock_id,
             round(self.shared_clock_duration_seconds, 3),
             self.shared_clock_final,
@@ -3565,6 +3643,17 @@ class CombatModel:
         if damage_context:
             started_at = self.first_damage_time
             ended_at = self.combat_end_time or self.last_damage_time
+            local_event_duration = max(1.0, ended_at - started_at)
+            game_server_clock_accepted = bool(
+                self.game_server_duration_seconds
+            )
+            shared_clock_accepted = bool(
+                not game_server_clock_accepted
+                and self.shared_clock_final
+                and combat_duration_matches_local(
+                    self.shared_clock_duration_seconds, local_event_duration
+                )
+            )
             duration = self.duration()
             if not duration:
                 duration = max(1.0, ended_at - started_at)
@@ -3576,6 +3665,9 @@ class CombatModel:
             if not started_at or not ended_at:
                 return None
             duration = max(1.0, ended_at - started_at)
+            local_event_duration = duration
+            game_server_clock_accepted = False
+            shared_clock_accepted = False
             # A treatment-dummy record has no DPS denominator.  HPS still uses
             # the same whole-second divisor shown in the HPS UI.
             dps_duration = 0.0
@@ -3889,9 +3981,17 @@ class CombatModel:
             ),
             "healing_ended_at_epoch": ended_at,
             "duration_source": (
-                "server_shared_clock"
-                if self.shared_clock_final and damage_context
-                else ("local_healing_events" if pure_healing_context else "local_network_events")
+                "game_server_team_clock"
+                if game_server_clock_accepted and damage_context
+                else (
+                    "server_shared_clock"
+                    if shared_clock_accepted and damage_context
+                    else (
+                        "local_healing_events"
+                        if pure_healing_context
+                        else "local_network_events"
+                    )
+                )
             ),
             "total_damage": total_damage,
             "team_dps": total_damage / dps_duration if dps_duration else 0.0,
@@ -3951,8 +4051,33 @@ class CombatModel:
             "participants": participants,
             "damage_accounting": damage_accounting,
         }
+        if game_server_clock_accepted:
+            record["game_server_team_clock"] = {
+                "summary_id": self.game_server_duration_summary_id,
+                "duration_seconds": self.game_server_duration_seconds,
+                "policy": self.game_server_duration_policy,
+                "member_seconds": list(
+                    self.game_server_duration_member_seconds
+                ),
+                "local_event_duration_seconds": (
+                    self.game_server_duration_local_seconds
+                ),
+                "difference_seconds": (
+                    self.game_server_duration_difference_seconds
+                ),
+                "local_comparison_used_for_acceptance": False,
+                "accepted": True,
+            }
+        elif self.game_server_duration_rejection:
+            record["game_server_team_clock_rejected"] = dict(
+                self.game_server_duration_rejection
+            )
         clock_request = self.combat_clock_snapshot(now, ended=True)
-        if clock_request is not None and not self.shared_clock_final:
+        if (
+            clock_request is not None
+            and not game_server_clock_accepted
+            and not shared_clock_accepted
+        ):
             record["_shared_clock_request"] = clock_request
         if self.shared_clock_final:
             record["shared_clock"] = {
@@ -3961,6 +4086,14 @@ class CombatModel:
                 "ended_at_epoch": self.shared_clock_ended_at,
                 "server_time": self.shared_clock_server_time,
                 "final": True,
+                "accepted": shared_clock_accepted,
+                "local_event_duration_seconds": local_event_duration,
+                "difference_seconds": abs(
+                    self.shared_clock_duration_seconds - local_event_duration
+                ),
+                "tolerance_seconds": (
+                    COMBAT_DURATION_MAX_LOCAL_DIFFERENCE_SECONDS
+                ),
             }
         return record
 
@@ -5033,6 +5166,85 @@ class CombatModel:
             self.rejected_stage_summary_ids.add(summary_id)
             self._queue_current_record_refresh()
             return False
+
+        team_duration, team_duration_policy, member_seconds = (
+            authoritative_team_combat_seconds(raw_summary_actors)
+        )
+        local_event_duration = (
+            max(1.0, self.last_damage_time - self.first_damage_time)
+            if damage_context
+            else 0.0
+        )
+        clock_damage_tolerance = max(
+            STAGE_SUMMARY_TOTAL_TOLERANCE_ABSOLUTE,
+            round(max(summary_total, observed_total) * 0.01),
+        )
+        clock_matches_encounter = bool(
+            authoritative
+            and completion_confirmed
+            and damage_context
+            and end_snapshot
+            and summary_covers_observed
+            and self_plausible
+            and actor_overlap
+            and abs(summary_total - observed_total) <= clock_damage_tolerance
+        )
+        # The game's final settlement is the primary clock.  The local event
+        # span is retained for audit only: different party members can enter,
+        # die, or emit their first captured damage at different moments, so a
+        # five-second edge comparison must never veto a correctly matched
+        # settlement table.
+        local_comparison_within_fallback_tolerance = bool(
+            team_duration
+            and combat_duration_matches_local(
+                team_duration, local_event_duration
+            )
+        )
+        clock_accepted = bool(clock_matches_encounter and team_duration)
+        clock_audit = {
+            "duration_seconds": team_duration,
+            "policy": team_duration_policy,
+            "member_seconds": sorted(member_seconds, reverse=True),
+            "local_event_duration_seconds": local_event_duration,
+            "difference_seconds": (
+                abs(team_duration - local_event_duration)
+                if team_duration and local_event_duration
+                else None
+            ),
+            "damage_tolerance": clock_damage_tolerance,
+            "matches_encounter": clock_matches_encounter,
+            "local_comparison_within_fallback_tolerance": (
+                local_comparison_within_fallback_tolerance
+            ),
+            "local_comparison_used_for_acceptance": False,
+            "accepted": clock_accepted,
+        }
+        validation_update["validation"]["game_server_team_clock"] = clock_audit
+        if clock_accepted:
+            self.game_server_duration_seconds = team_duration
+            self.game_server_duration_summary_id = summary_id
+            self.game_server_duration_policy = team_duration_policy
+            self.game_server_duration_member_seconds = sorted(
+                member_seconds, reverse=True
+            )
+            self.game_server_duration_local_seconds = local_event_duration
+            self.game_server_duration_difference_seconds = abs(
+                team_duration - local_event_duration
+            )
+            self.game_server_duration_rejection = {}
+        elif authoritative and completion_confirmed and damage_context:
+            self.game_server_duration_rejection = {
+                "summary_id": summary_id,
+                **clock_audit,
+                "reason": (
+                    "missing_team_combat_seconds"
+                    if clock_matches_encounter and not team_duration
+                    else "settlement_not_matched_to_current_encounter"
+                ),
+                "fallback_local_tolerance_seconds": (
+                    COMBAT_DURATION_MAX_LOCAL_DIFFERENCE_SECONDS
+                ),
+            }
 
         skill_snapshots_changed = False
         applied_skill_actor_ids: list[int] = []
@@ -6321,8 +6533,18 @@ class CombatModel:
         )
         if omitted_zero and state.has_snapshot and state.last_absolute > 0:
             # A full Common row can omit an unchanged positive counter during
-            # teardown. It must not look like an explicit counter reset.
-            return False
+            # teardown.  Preserve it while the member's server epoch is the
+            # same.  At the start of a new pull, however, the game first sends
+            # an all-zero table with a new non-zero epoch.  Ignoring that row
+            # leaves stale counters in place; the first real positive table
+            # then looks like a mid-fight decrease and splits one encounter.
+            starts_new_server_epoch = bool(
+                full_snapshot
+                and server_time
+                and server_time != state.server_time
+            )
+            if not starts_new_server_epoch:
+                return False
         if server_time:
             # Common field 10 changes independently for each member during a
             # single pull. It is useful for rejecting an older snapshot of the
@@ -6730,7 +6952,7 @@ class CombatModel:
 
     def duration(self, now: float | None = None) -> float:
         local_duration = self._local_duration(now)
-        if not local_duration or not self.shared_clock_duration_seconds:
+        if not local_duration:
             return local_duration
         now = time.time() if now is None else float(now)
         locally_finished = bool(
@@ -6738,18 +6960,32 @@ class CombatModel:
             or self._result_frozen_by_target_death()
             or now - self.last_damage_time >= self._encounter_idle_timeout()
         )
+        if self.game_server_duration_seconds and locally_finished:
+            return self.game_server_duration_seconds
+        if not self.shared_clock_duration_seconds:
+            return local_duration
         if self.shared_clock_final:
             return (
                 self.shared_clock_duration_seconds
                 if locally_finished
+                and combat_duration_matches_local(
+                    self.shared_clock_duration_seconds, local_duration
+                )
                 else local_duration
             )
         if locally_finished:
             return local_duration
         elapsed_since_sync = max(0.0, now - self.shared_clock_received_at)
-        return max(
+        synchronized_duration = max(
             1.0,
             self.shared_clock_duration_seconds + elapsed_since_sync,
+        )
+        return (
+            synchronized_duration
+            if combat_duration_matches_local(
+                synchronized_duration, local_duration
+            )
+            else local_duration
         )
 
     def healing_duration(self, now: float | None = None) -> float:
@@ -12281,6 +12517,12 @@ class DpsWindow:
         for record in records:
             encounter_id = str(record.get("encounter_id", "")).strip()
             clock_request = record.get("_shared_clock_request")
+            if encounter_id and not isinstance(clock_request, dict):
+                superseded = self.pending_clock_records.pop(
+                    encounter_id, None
+                )
+                if superseded is not None and worker is not None:
+                    worker.cancel(encounter_id)
             can_wait_for_clock = bool(
                 not force
                 and encounter_id
@@ -12359,6 +12601,11 @@ class DpsWindow:
         for record in self.history_store.load_recent(limit):
             restored = CombatHistoryStore.restore_exact_stage_skills_for_display(
                 record
+            )
+            restored = (
+                CombatHistoryStore.restore_game_server_team_clock_for_display(
+                    restored
+                )
             )
             restored = CombatHistoryStore.normalize_healing_for_display(restored)
             restored = restore_history_boss_names(restored, catalog)

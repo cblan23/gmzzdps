@@ -11,9 +11,21 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+from dpi_support import (
+    configure_tk_dpi_scaling,
+    enable_windows_dpi_awareness,
+    get_window_dpi,
+    tk_font_spec,
+)
+
+# Initialize DPI awareness before Tk creates the first HWND.  Otherwise
+# Windows bitmap-scales this standalone tool on 125% displays as well.
+enable_windows_dpi_awareness()
+
 import tkinter as tk
 
-from capture_process import CaptureProcessClient
+from capture_process import CaptureProcessClient, TEAM_STATS_MODE_UNKNOWN
 from device_identity import resolve_client_id
 from diagnostic_report import (
     DiagnosticAnalyzer,
@@ -55,6 +67,7 @@ CA_BUNDLE_PATH = BUNDLE_DIR / "cacert.pem"
 APP_ICON_PATH = BUNDLE_DIR / "assets" / "app_icon.ico"
 CAPTURE_SECONDS = 45.0
 CONNECT_TIMEOUT_SECONDS = 20.0
+CAPTURE_SHUTDOWN_TIMEOUT_SECONDS = 8.0
 
 BG = "#0b0d10"
 SURFACE = "#111419"
@@ -128,6 +141,8 @@ class DiagnosticWindow:
         self.root.configure(bg=BG)
         self.root.geometry("560x500")
         self.root.resizable(False, False)
+        self.root.update_idletasks()
+        self.window_dpi = configure_tk_dpi_scaling(self.root)
         if APP_ICON_PATH.is_file():
             try:
                 self.root.iconbitmap(str(APP_ICON_PATH))
@@ -146,8 +161,25 @@ class DiagnosticWindow:
             "ok" if self.elevated else "error",
         )
         self._configure_primary_for_environment()
+        self.root.after(0, self._refresh_window_dpi)
         self.root.after(80, self._drain_ui_messages)
         self.root.after(150, self._poll_game)
+
+    def _refresh_window_dpi(self) -> None:
+        if not self.root.winfo_exists():
+            return
+        try:
+            dpi = get_window_dpi(self.root)
+            if dpi != getattr(self, "window_dpi", 0):
+                self.window_dpi = dpi
+                configure_tk_dpi_scaling(self.root)
+                self.root.update_idletasks()
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            pass
+        try:
+            self.root.after(250, self._refresh_window_dpi)
+        except tk.TclError:
+            return
 
     def _build_ui(self) -> None:
         header = tk.Frame(self.root, bg=SURFACE, height=78)
@@ -158,7 +190,7 @@ class DiagnosticWindow:
             text=TOOL_NAME,
             bg=SURFACE,
             fg=TEXT,
-            font=("Microsoft YaHei UI", 17, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 17, "bold"),
             anchor="w",
         ).pack(fill="x", padx=28, pady=(15, 0))
         tk.Label(
@@ -166,7 +198,7 @@ class DiagnosticWindow:
             text=f"v{TOOL_VERSION.split('+', 1)[0]}  ·  匿名诊断",
             bg=SURFACE,
             fg=MUTED,
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
             anchor="w",
         ).pack(fill="x", padx=29, pady=(2, 12))
 
@@ -188,7 +220,7 @@ class DiagnosticWindow:
             textvariable=self.status_var,
             bg=BG,
             fg=TEXT,
-            font=("Microsoft YaHei UI", 11, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 11, "bold"),
             anchor="w",
         ).pack(side="left", fill="x", expand=True, padx=(6, 0))
 
@@ -215,7 +247,7 @@ class DiagnosticWindow:
                 text=title,
                 bg=BG,
                 fg=TEXT,
-                font=("Microsoft YaHei UI", 10),
+                font=tk_font_spec("Microsoft YaHei UI", 10),
                 anchor="w",
             )
             title_label.pack(side="left", fill="both", expand=True)
@@ -224,7 +256,7 @@ class DiagnosticWindow:
                 text="等待",
                 bg=BG,
                 fg=MUTED,
-                font=("Microsoft YaHei UI", 10),
+                font=tk_font_spec("Microsoft YaHei UI", 10),
                 anchor="e",
             )
             value_label.pack(side="right")
@@ -239,7 +271,7 @@ class DiagnosticWindow:
             text="诊断编号",
             bg=BG,
             fg=MUTED,
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
         )
         self.report_label.pack(side="left")
         self.report_entry = tk.Entry(
@@ -249,7 +281,7 @@ class DiagnosticWindow:
             readonlybackground=PANEL,
             fg=TEXT,
             relief="flat",
-            font=("Consolas", 11, "bold"),
+            font=tk_font_spec("Consolas", 11, "bold"),
             justify="center",
         )
         self.report_entry.pack(side="left", fill="x", expand=True, padx=12, ipady=7)
@@ -266,7 +298,7 @@ class DiagnosticWindow:
             padx=14,
             pady=7,
             cursor="hand2",
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
         )
         self.copy_button.pack(side="right")
 
@@ -283,7 +315,7 @@ class DiagnosticWindow:
             bd=0,
             pady=11,
             cursor="hand2",
-            font=("Microsoft YaHei UI", 10, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 10, "bold"),
         )
         self.primary_button.pack(fill="x", side="bottom")
 
@@ -362,7 +394,7 @@ class DiagnosticWindow:
                     )
                 else:
                     self._set_step("network", "等待", "normal")
-                    self._set_status("可以开始检测", "normal")
+                    self._set_status("进入木桩场景，准备好后开始检测", "normal")
                     self._set_primary("开始检测", self._start_detection)
             else:
                 self._set_step("game", "未找到", "warn")
@@ -449,7 +481,14 @@ class DiagnosticWindow:
             load_monster_metadata(MONSTER_METADATA_PATH),
             load_boss_allowlist(BOSS_ALLOWLIST_PATH),
         )
-        capture = CaptureProcessClient(parent_pid=os.getpid())
+        # Exercise the same exact target-to-CommonComponent compatibility
+        # route as the main-program switch.  Keep the unrelated active team
+        # statistics request disabled so this report isolates target identity.
+        capture = CaptureProcessClient(
+            parent_pid=os.getpid(),
+            target_boss_lookup_enabled=True,
+            team_stats_mode=TEAM_STATS_MODE_UNKNOWN,
+        )
         self.capture_client = capture
         connected_at: float | None = None
         started_at = time.monotonic()
@@ -512,21 +551,36 @@ class DiagnosticWindow:
             if capture.is_alive():
                 capture.request_stop()
                 self._post("cleanup")
-                while capture.is_alive():
+                deadline = time.monotonic() + CAPTURE_SHUTDOWN_TIMEOUT_SECONDS
+                while capture.is_alive() and time.monotonic() < deadline:
+                    remaining = max(
+                        0.05,
+                        min(0.2, deadline - time.monotonic()),
+                    )
                     try:
-                        kind, payload = capture.get(timeout=0.2)
+                        kind, payload = capture.get(timeout=remaining)
                     except queue.Empty:
                         continue
                     analyzer.handle(kind, payload)
                     self._post("capture_event", (kind, payload))
-            capture.join(1.0)
-            if not capture.is_alive():
-                try:
-                    capture.close(wait_for_queue=False)
-                except Exception as exc:
-                    # Cleanup must never prevent an already collected report
-                    # from reaching the upload step.
-                    analyzer.handle("cleanup_error", {"details": str(exc)})
+                if capture.is_alive():
+                    # This is the isolated diagnostic child, never the game
+                    # process. A hard stop keeps report generation finite if a
+                    # native cleanup call is stuck in an old client build.
+                    capture.terminate()
+                    capture.join(2.0)
+                    analyzer.handle(
+                        "cleanup_error",
+                        {"details": "diagnostic capture child shutdown timeout"},
+                    )
+            else:
+                capture.join(0)
+            try:
+                capture.close(wait_for_queue=False)
+            except Exception as exc:
+                # Cleanup must never prevent an already collected report from
+                # reaching the upload step.
+                analyzer.handle("cleanup_error", {"details": str(exc)})
             self.capture_client = None
 
         try:
@@ -540,6 +594,7 @@ class DiagnosticWindow:
             )
             return
         self.pending_report = report
+        self.uploading = True
         self._post("uploading", report["assessment"])
         self._upload_report(report)
 
@@ -590,7 +645,7 @@ class DiagnosticWindow:
                 "检测中 · 原生" if source == "native" else "检测中 · 网络",
                 "normal",
             )
-            self._set_status("请进入战斗并持续攻击 Boss 或木桩", "running")
+            self._set_status("请持续攻击同一个伤害木桩，不要切换目标", "running")
             self._set_primary("结束并上传", self._finish_early)
         elif kind == "capture_error":
             self._set_step("network", "连接异常", "error")
@@ -615,7 +670,7 @@ class DiagnosticWindow:
                     "damage", f"伤害 {damage}", "ok" if damage else "normal"
                 )
                 self._set_status(
-                    f"请持续攻击 Boss 或木桩 · 剩余 {remaining} 秒", "running"
+                    f"持续攻击同一个伤害木桩 · 剩余 {remaining} 秒", "running"
                 )
             elif kind == "cleanup":
                 self._set_status("正在安全恢复游戏采集函数", "running")
@@ -644,7 +699,11 @@ class DiagnosticWindow:
                     assessment = {}
                 code = str(assessment.get("code", ""))
                 summary = str(assessment.get("summary", "检测完成"))
-                damage_state = "ok" if code == "capture_pipeline_ok" else "warn"
+                damage_state = (
+                    "ok"
+                    if code in {"capture_pipeline_ok", "damage_dummy_pipeline_ok"}
+                    else "warn"
+                )
                 if code in {
                     "native_hook_silent_network_fallback_blocked",
                     "network_hook_silent",

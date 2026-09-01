@@ -443,6 +443,10 @@ class BossTypeCaptureTests(unittest.TestCase):
         with patch("damage_hook.read_region", return_value=bytes(raw)):
             self.assertEqual(hook._resolve_target_boss_lookups(), [])
         self.assertIn(target_id, hook.pending_target_boss_lookups)
+        self.assertEqual(
+            hook.diagnostic_snapshot()["target_lookup_component_template_zero"],
+            1,
+        )
 
         struct.pack_into("<I", raw, BOSS_TEMPLATE_ID_OFFSET, 7_107_030)
         hook._last_target_boss_lookup_poll = 0.0
@@ -516,8 +520,9 @@ class BossTypeCaptureTests(unittest.TestCase):
         }
         object_walks = 0
 
-        def iter_objects():
+        def iter_objects(*, track_target_lookup=False):
             nonlocal object_walks
+            self.assertTrue(track_target_lookup)
             object_walks += 1
             return iter((indexed_component,))
 
@@ -541,6 +546,13 @@ class BossTypeCaptureTests(unittest.TestCase):
         self.assertEqual(updates[0]["entity_id"], first_target)
         self.assertEqual(object_walks, 1)
         self.assertEqual(hook.target_boss_object_scan_count, 1)
+        diagnostics = hook.diagnostic_snapshot()
+        self.assertEqual(
+            diagnostics["target_lookup_object_exact_entity_matches"], 1
+        )
+        self.assertEqual(
+            diagnostics["target_lookup_object_exact_template_nonzero"], 1
+        )
 
     def test_local_controlled_entity_refreshes_after_transformation(self):
         hook = DamageHook(pid=1234)

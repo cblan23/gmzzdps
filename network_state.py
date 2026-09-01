@@ -27,6 +27,42 @@ GUILD_HIT_DUMMY_LEVEL = 62
 GUILD_HIT_DUMMY_NAME = "公会伤害木桩"
 GUILD_HIT_DUMMY_BOSS_TYPE = 3
 HUD_BOSS_TYPE = 3
+# These are the exact training-dummy templates observed in HealSyncV2
+# captures.  They are deliberately kept separate from the Boss catalog: a
+# healing dummy is a valid HPS target, but must never become a DPS target.
+HEALING_TARGET_TEMPLATE_IDS = frozenset(
+    {
+        7_101_006,
+        7_114_224,
+        7_114_226,
+        7_114_228,
+    }
+)
+HEALING_TARGET_NAME = "治疗木桩"
+HEALING_TARGET_LEVEL = 25
+# Exact damage-dummy templates observed in the captured scene metadata.  These
+# IDs are intentionally explicit: a generic name match is not sufficient to
+# disable the team-stat request path because ordinary encounter entities can
+# carry localized names that contain the same marker.
+DAMAGE_TARGET_TEMPLATE_IDS = frozenset(
+    {
+        7_100_632,
+        7_101_004,
+        7_101_017,
+        7_101_025,
+        7_101_029,
+        7_101_030,
+        7_106_050,
+        7_114_223,
+        7_114_225,
+        7_114_227,
+        7_114_233,
+        7_107_304,
+    }
+)
+TRAINING_DUMMY_TEMPLATE_IDS = frozenset(
+    set(DAMAGE_TARGET_TEMPLATE_IDS) | set(HEALING_TARGET_TEMPLATE_IDS)
+)
 HUD_BOSS_TEMPLATE_RE = re.compile(r"(?:^|[._])Boss(?:$|[._])", re.I)
 ENCOUNTER_AUXILIARY_TEMPLATES: dict[int, dict[str, object]] = {
     7_102_401: {
@@ -249,8 +285,46 @@ def normalize_boss_name(value: object) -> str:
     return "".join(char.casefold() for char in str(value or "") if char.isalnum())
 
 
+TRAINING_DUMMY_NAME_MARKERS = frozenset(
+    normalize_boss_name(value)
+    for value in ("木桩", "伤害木桩", "治疗木桩", GUILD_HIT_DUMMY_NAME)
+)
+
+
+def is_training_dummy_template_id(value: object) -> bool:
+    """Return true only for a template observed in the dummy captures."""
+    try:
+        template_id = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return template_id in TRAINING_DUMMY_TEMPLATE_IDS
+
+
+def is_training_dummy_name(value: object) -> bool:
+    """Use names only as a secondary hint after an exact target is observed."""
+    normalized = normalize_boss_name(value)
+    return bool(
+        normalized
+        and any(marker and marker in normalized for marker in TRAINING_DUMMY_NAME_MARKERS)
+    )
+
+
+# Names emitted by the native component while a target's localized profile is
+# still pending.  They are identity placeholders, never authoritative display
+# names.  Keeping these in one predicate lets both live and archived paths
+# recover the catalog name without treating an unknown label as a real Boss.
 BOSS_PLACEHOLDER_NAMES = frozenset(
-    normalize_boss_name(value) for value in ("Boss", "首领", "未命名Boss")
+    normalize_boss_name(value)
+    for value in (
+        "Boss",
+        "首领",
+        "未命名Boss",
+        "未命名Boss/精英",
+        "Boss/精英",
+        "未知目标",
+        "未分配目标",
+        "未命名目标",
+    )
 )
 
 
@@ -495,6 +569,9 @@ class NetworkPacketParser:
         self.confirmed_boss_entities: set[int] = set()
         self.entity_template_ids: dict[int, int] = {}
         self.entity_boss_types: dict[int, int] = {}
+        self.training_dummy_entities: set[int] = set()
+        self.last_training_dummy_entity_id: int | None = None
+        self.last_training_dummy_time_100ns = 0
         self.encounter_auxiliary_entities: dict[int, tuple[int, ...]] = {}
         self.defeated_boss_entities: set[int] = set()
         self.scene_retired_boss_entities: set[int] = set()
@@ -511,6 +588,7 @@ class NetworkPacketParser:
         )
         self.boss_template_catalog_enabled = boss_template_catalog is not None
         self.boss_template_catalog: dict[str, dict] = {}
+        self.healing_target_catalog: dict[str, dict] = {}
         self.boss_name_allowlist = tuple(
             dict.fromkeys(
                 normalized
@@ -527,6 +605,11 @@ class NetworkPacketParser:
                     boss_type = int(raw_metadata.get("boss_type", 0) or 0)
                 except (TypeError, ValueError, OverflowError):
                     continue
+                if (
+                    template_id > 0
+                    and template_id in HEALING_TARGET_TEMPLATE_IDS
+                ):
+                    self.healing_target_catalog[str(template_id)] = dict(raw_metadata)
                 if (
                     template_id > 0
                     and template_id not in HARD_EXCLUDED_BOSS_TEMPLATE_IDS
@@ -976,6 +1059,81 @@ class NetworkPacketParser:
             "reconnect_dungeon_candidates": list(
                 self.reconnect_dungeon_candidates
             ),
+        }
+
+    def current_capture_context(self) -> dict[str, object]:
+        """Expose deterministic scene evidence used by the capture gate.
+
+        This is intentionally an observation-only view.  It does not promote
+        entities, synthesize damage, or alter any combat-model state.  Exact
+        dummy template IDs take precedence over their catalog Boss enum (some
+        damage dummies report ``boss_type=3``).
+        """
+        dummy_entities = set(self.training_dummy_entities)
+        for entity_id, template_id in self.entity_template_ids.items():
+            if is_training_dummy_template_id(template_id):
+                dummy_entities.add(int(entity_id))
+        active_id = int(self.active_boss_entity_id or 0)
+        active_template_id = int(
+            self.entity_template_ids.get(active_id, 0) or 0
+        )
+        active_profile = self.entity_profiles.get(active_id, {})
+        if not active_template_id and isinstance(active_profile, dict):
+            try:
+                active_template_id = int(
+                    active_profile.get("template_id", 0) or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                active_template_id = 0
+        active_is_dummy = bool(
+            active_id
+            and (
+                active_id in dummy_entities
+                or is_training_dummy_template_id(active_template_id)
+                or (
+                    isinstance(active_profile, dict)
+                    and active_profile.get("healing_target") is True
+                )
+            )
+        )
+
+        target_id = active_id
+        if not target_id:
+            recent_id = int(self.recent_target_id or 0)
+            if recent_id and recent_id in dummy_entities:
+                target_id = recent_id
+            elif self.last_training_dummy_entity_id:
+                target_id = int(self.last_training_dummy_entity_id)
+        target_template_id = int(
+            self.entity_template_ids.get(target_id, 0) or 0
+        )
+        target_is_dummy = bool(
+            target_id
+            and (
+                target_id in dummy_entities
+                or is_training_dummy_template_id(target_template_id)
+            )
+        )
+        non_dummy_boss_entities = {
+            int(entity_id)
+            for entity_id in self.confirmed_boss_entities
+            if int(entity_id) not in dummy_entities
+        }
+        if active_id and not active_is_dummy:
+            non_dummy_boss_entities.add(active_id)
+        return {
+            "active_target_id": active_id,
+            "active_target_template_id": active_template_id,
+            "active_target_is_training_dummy": active_is_dummy,
+            "target_id": target_id,
+            "target_template_id": target_template_id,
+            "target_is_training_dummy": target_is_dummy,
+            "training_dummy_entity_ids": sorted(dummy_entities),
+            "has_non_dummy_boss": bool(non_dummy_boss_entities),
+            "party_member_count": int(self.party_member_count or 0),
+            "party_seen": bool(self.party_seen),
+            "dungeon_id": int(self.dungeon_id or 0),
+            "dungeon_stage_id": int(self.dungeon_stage_id or 0),
         }
 
     def _record_dungeon_context(self, record: dict, args: list) -> None:
@@ -2176,6 +2334,9 @@ class NetworkPacketParser:
         self.confirmed_boss_entities.clear()
         self.entity_template_ids.clear()
         self.entity_boss_types.clear()
+        self.training_dummy_entities.clear()
+        self.last_training_dummy_entity_id = None
+        self.last_training_dummy_time_100ns = 0
         self.encounter_auxiliary_entities.clear()
         self.defeated_boss_entities.clear()
         self.active_boss_entity_id = None
@@ -3187,6 +3348,12 @@ class NetworkPacketParser:
         if self.boss_template_catalog_enabled and template_profile is None:
             return []
         template_profile = template_profile or {}
+        self.training_dummy_entities.add(target_id)
+        self.last_training_dummy_entity_id = target_id
+        self.last_training_dummy_time_100ns = max(
+            self.last_training_dummy_time_100ns,
+            int(record.get("filetime_100ns", 0) or 0),
+        )
         self._activate_boss(target_id, record)
         update = self._profile_update(
             target_id,
@@ -3290,8 +3457,60 @@ class NetworkPacketParser:
             template_id = 0
         if entity_id and template_id:
             self.entity_template_ids[entity_id] = template_id
+            if is_training_dummy_template_id(template_id):
+                self.training_dummy_entities.add(entity_id)
+                self.last_training_dummy_entity_id = entity_id
+                self.last_training_dummy_time_100ns = max(
+                    self.last_training_dummy_time_100ns,
+                    int(record.get("filetime_100ns", 0) or 0),
+                )
         if entity_id and boss_type >= 0:
             self.entity_boss_types[entity_id] = boss_type
+        # Healing dummies report boss_type=0, so they cannot go through the
+        # normal Boss promotion path.  Keep this exact template-scoped branch
+        # ahead of the catalog check; it supplies identity for HealSyncV2
+        # while explicitly keeping the target out of DPS accounting.
+        if (
+            entity_id
+            and template_id in HEALING_TARGET_TEMPLATE_IDS
+            and entity_id not in self.party_ids
+            and entity_id != self.self_id
+            and entity_id not in self.actor_tokens
+        ):
+            metadata = self.healing_target_catalog.get(str(template_id), {})
+            try:
+                level = int(metadata.get("level", HEALING_TARGET_LEVEL) or 0)
+            except (TypeError, ValueError, OverflowError):
+                level = HEALING_TARGET_LEVEL
+            if not 1 <= level <= 999:
+                level = HEALING_TARGET_LEVEL
+            values: dict[str, object] = {
+                "name": HEALING_TARGET_NAME,
+                "entity_type": "TrainingDummy",
+                "template_id": template_id,
+                "level": level,
+                "boss_type": boss_type if boss_type >= 0 else 0,
+                "boss_rank": 0,
+                "healing_target": True,
+                "target_source": "healing_dummy_template",
+            }
+            self.entity_template_ids[entity_id] = template_id
+            updates: list[tuple[str, dict]] = []
+            profile = self._profile_update(entity_id, record, **values)
+            if profile:
+                updates.append(profile)
+            updates.extend(self._bind_candidate_pointers(entity_id, record))
+            monster_values: dict[str, object] = {}
+            if entity_id in self.entity_current_hp:
+                monster_values["current_hp"] = self.entity_current_hp[entity_id]
+            if entity_id in self.entity_max_hp:
+                monster_values["max_hp"] = self.entity_max_hp[entity_id]
+            if monster_values:
+                monster_update = self._base_update(record)
+                monster_update["entity_id"] = entity_id
+                monster_update.update(monster_values)
+                updates.append(("monster", monster_update))
+            return updates
         if template_id in HARD_EXCLUDED_BOSS_TEMPLATE_IDS:
             if entity_id:
                 self.confirmed_boss_entities.discard(entity_id)
@@ -4027,7 +4246,20 @@ class NetworkPacketParser:
         if not attacker_id or not target_id or damage <= 0:
             return []
         pointer = int(record.get("script_entity", 0) or 0)
-        if pointer:
+        confirmed_local_pointer = bool(
+            pointer
+            and self.self_confirmed
+            and self.self_id is not None
+            and self.pointer_entities.get(pointer) == self.self_id
+        )
+        if pointer and not confirmed_local_pointer:
+            # DamageSync is commonly dispatched through a shared Root
+            # ScriptEntity, so unknown pointers must remain excluded from HP
+            # ownership.  Captures also prove that the already-confirmed local
+            # player ScriptEntity carries this callback before continuing its
+            # own HP stream.  Clearing that one strong binding drops local HP
+            # samples and prevents remote healers from receiving response-time
+            # samples when they heal the local player.
             self.root_pointers.add(pointer)
             self.pointer_candidates.pop(pointer, None)
             self.pointer_entities.pop(pointer, None)
@@ -4456,6 +4688,53 @@ class NetworkPacketParser:
                     except (TypeError, ValueError, OverflowError):
                         attempted_healing = -1
                         effective_healing = -1
+                    target_template_id = int(
+                        self.entity_template_ids.get(target_id or 0, 0) or 0
+                    )
+                    target_profile = self.entity_profiles.get(target_id or 0, {})
+                    target_is_healing_dummy = bool(
+                        target_template_id in HEALING_TARGET_TEMPLATE_IDS
+                        or target_profile.get("healing_target") is True
+                    )
+                    if target_id and target_is_healing_dummy:
+                        self.training_dummy_entities.add(target_id)
+                        self.last_training_dummy_entity_id = target_id
+                        self.last_training_dummy_time_100ns = max(
+                            self.last_training_dummy_time_100ns,
+                            int(record.get("filetime_100ns", 0) or 0),
+                        )
+                    if target_id and target_is_healing_dummy:
+                        # A HealSync can be the first packet seen after the
+                        # native metadata poll. Re-emit the exact known target
+                        # profile here so the model can accept this special HPS
+                        # encounter without guessing from amounts or names.
+                        profile_values: dict[str, object] = {
+                            "name": HEALING_TARGET_NAME,
+                            "entity_type": "TrainingDummy",
+                            "healing_target": True,
+                            "boss_rank": 0,
+                        }
+                        if target_template_id:
+                            profile_values["template_id"] = target_template_id
+                        target_metadata = self.healing_target_catalog.get(
+                            str(target_template_id), {}
+                        )
+                        try:
+                            target_level = int(
+                                target_metadata.get(
+                                    "level", HEALING_TARGET_LEVEL
+                                )
+                                or 0
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            target_level = HEALING_TARGET_LEVEL
+                        if 1 <= target_level <= 999:
+                            profile_values["level"] = target_level
+                        profile = self._profile_update(
+                            target_id, record, **profile_values
+                        )
+                        if profile:
+                            updates.append(profile)
                     if (
                         target_id
                         and is_player_skill(skill_id)
@@ -4477,6 +4756,12 @@ class NetworkPacketParser:
                                         attempted_healing - effective_healing
                                     ),
                                     "healing_source": "network_exact",
+                                    "healing_target": target_is_healing_dummy,
+                                    "target_template_id": (
+                                        target_template_id
+                                        if target_is_healing_dummy
+                                        else 0
+                                    ),
                                 },
                             )
                         )

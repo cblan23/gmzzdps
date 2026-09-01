@@ -183,6 +183,99 @@ class DamageHook:
         self.target_boss_object_index_complete = False
         self.target_boss_object_scan_count = 0
         self._last_target_boss_lookup_poll = 0.0
+        # Export only anonymous stage counters to the diagnostic tool. These
+        # values never contain addresses, entity IDs, or raw payloads.
+        self.diagnostic_counters: dict[str, int] = {
+            "damage_ring_header_reads": 0,
+            "damage_ring_header_failures": 0,
+            "damage_ring_records_polled": 0,
+            "damage_ring_parse_failures": 0,
+            "damage_ring_overruns": 0,
+            "boss_ring_header_reads": 0,
+            "boss_ring_header_failures": 0,
+            "boss_ring_records_polled": 0,
+            "boss_ring_parse_failures": 0,
+            "boss_ring_overruns": 0,
+            "target_lookup_candidates": 0,
+            "target_lookup_evictions": 0,
+            "target_lookup_resolved": 0,
+            "target_lookup_timeouts": 0,
+            "target_lookup_component_observations": 0,
+            "target_lookup_class_reads": 0,
+            "target_lookup_class_matches": 0,
+            "target_lookup_component_reads": 0,
+            "target_lookup_component_matches": 0,
+            "target_lookup_component_read_failures": 0,
+            "target_lookup_component_class_rejections": 0,
+            "target_lookup_component_entity_mismatches": 0,
+            "target_lookup_component_template_zero": 0,
+            "target_lookup_observed_target_matches": 0,
+            "target_lookup_observed_target_template_zero": 0,
+            "target_lookup_observed_target_template_nonzero": 0,
+            "target_lookup_object_scans": 0,
+            "target_lookup_object_candidates": 0,
+            "target_lookup_object_table_reads": 0,
+            "target_lookup_object_table_failures": 0,
+            "target_lookup_object_slots_scanned": 0,
+            "target_lookup_object_pointers": 0,
+            "target_lookup_object_class_reads": 0,
+            "target_lookup_object_class_read_failures": 0,
+            "target_lookup_object_class_candidates": 0,
+            "target_lookup_object_component_read_failures": 0,
+            "target_lookup_object_entity_candidates": 0,
+            "target_lookup_object_exact_entity_matches": 0,
+            "target_lookup_object_exact_template_zero": 0,
+            "target_lookup_object_exact_template_nonzero": 0,
+            "existing_boss_scan_attempts": 0,
+            "existing_boss_scan_matches": 0,
+            "late_boss_component_resolved": 0,
+        }
+
+    def _diagnostic_add(self, key: str, amount: int = 1) -> None:
+        try:
+            value = int(amount)
+        except (TypeError, ValueError, OverflowError):
+            return
+        self.diagnostic_counters[key] = max(
+            0, int(self.diagnostic_counters.get(key, 0) or 0) + value
+        )
+
+    def diagnostic_snapshot(self) -> dict[str, object]:
+        """Return anonymous hook/lookup state for troubleshooting reports."""
+
+        return {
+            **{
+                key: max(0, int(value or 0))
+                for key, value in self.diagnostic_counters.items()
+            },
+            "damage_hook_installed": bool(self.installed),
+            "damage_hook_adopted": bool(self.adopted),
+            "name_hook_installed": bool(self.name_installed),
+            "boss_type_hook_installed": bool(self.boss_type_installed),
+            "boss_init_hook_installed": bool(self.boss_init_installed),
+            "target_boss_lookup_enabled": bool(self.target_boss_lookup_enabled),
+            "target_lookup_pending": len(self.pending_target_boss_lookups),
+            "target_lookup_attempted": len(self.target_boss_lookup_attempted),
+            "target_lookup_emitted": len(self.target_boss_lookup_emitted),
+            "target_lookup_observed_components": len(
+                self.observed_common_components
+            ),
+            "target_lookup_trusted_classes": len(
+                self.trusted_common_component_classes
+            ),
+            "target_lookup_object_index_complete": bool(
+                self.target_boss_object_index_complete
+            ),
+            "target_lookup_object_scan_count": max(
+                0, int(self.target_boss_object_scan_count or 0)
+            ),
+            "existing_boss_scan_attempted": len(
+                self.existing_boss_scan_attempted
+            ),
+            "existing_boss_full_scan_complete": bool(
+                self.existing_boss_full_scan_complete
+            ),
+        }
 
     def _read_exact(self, address: int, size: int) -> bytes:
         data = read_region(self.process, address, size)
@@ -705,14 +798,21 @@ class DamageHook:
     def poll(self) -> list[dict]:
         if not self.installed or not self.alive:
             return []
+        self._diagnostic_add("damage_ring_header_reads")
         header = read_region(self.process, self.ring, 0x20)
         if not header or header[:8] != MAGIC:
+            self._diagnostic_add("damage_ring_header_failures")
             raise RuntimeError("damage ring buffer became unreadable or corrupt")
         write_index = struct.unpack_from("<Q", header, 8)[0]
         if write_index - self.next_sequence > RECORD_COUNT:
+            self._diagnostic_add(
+                "damage_ring_overruns",
+                write_index - self.next_sequence - RECORD_COUNT,
+            )
             self.next_sequence = write_index - RECORD_COUNT
         records: list[dict] = []
         while self.next_sequence < write_index:
+            self._diagnostic_add("damage_ring_records_polled")
             slot = self.next_sequence & RECORD_MASK
             raw = read_region(
                 self.process,
@@ -721,6 +821,7 @@ class DamageHook:
             )
             record = parse_record(raw or b"", self.next_sequence)
             if record is None:
+                self._diagnostic_add("damage_ring_parse_failures")
                 break
             damage_manager = int(record["damage_manager"])
             if not self.name_manager:
@@ -751,9 +852,9 @@ class DamageHook:
                 and target_id not in self.target_boss_lookup_attempted
                 and target_id not in self.target_boss_lookup_emitted
             ):
-                self.pending_target_boss_lookups.setdefault(
-                    target_id, time.monotonic()
-                )
+                if target_id not in self.pending_target_boss_lookups:
+                    self.pending_target_boss_lookups[target_id] = time.monotonic()
+                    self._diagnostic_add("target_lookup_candidates")
                 while (
                     len(self.pending_target_boss_lookups)
                     > TARGET_BOSS_LOOKUP_MAX_PENDING
@@ -761,6 +862,7 @@ class DamageHook:
                     oldest = next(iter(self.pending_target_boss_lookups))
                     self.pending_target_boss_lookups.pop(oldest, None)
                     self.target_boss_lookup_attempted.add(oldest)
+                    self._diagnostic_add("target_lookup_evictions")
             records.append(record)
             self.next_sequence += 1
         return records
@@ -781,6 +883,7 @@ class DamageHook:
         component = int(record.get("component", 0) or 0)
         if not self._plausible_pointer(component):
             return
+        self._diagnostic_add("target_lookup_component_observations")
         previous = self.observed_common_components.pop(component, None)
         if previous is not None:
             previous_entity = int(previous.get("entity_id", 0) or 0)
@@ -792,6 +895,19 @@ class DamageHook:
         saved = dict(record)
         self.observed_common_components[component] = saved
         entity_id = int(saved.get("entity_id", 0) or 0)
+        if (
+            entity_id in self.pending_target_boss_lookups
+            and not saved.get("target_id_index")
+        ):
+            self._diagnostic_add("target_lookup_observed_target_matches")
+            if int(saved.get("template_id", 0) or 0):
+                self._diagnostic_add(
+                    "target_lookup_observed_target_template_nonzero"
+                )
+            else:
+                self._diagnostic_add(
+                    "target_lookup_observed_target_template_zero"
+                )
         if self._plausible_entity_id(entity_id):
             self.common_components_by_entity.setdefault(entity_id, set()).add(
                 component
@@ -810,6 +926,7 @@ class DamageHook:
                     self.common_components_by_entity.pop(stale_entity, None)
 
     def _remember_common_component_class(self, component: int) -> bool:
+        self._diagnostic_add("target_lookup_class_reads")
         try:
             class_pointer = self._u64(
                 component + UOBJECT_CLASS_PRIVATE_OFFSET
@@ -819,6 +936,7 @@ class DamageHook:
         if not self._plausible_pointer(class_pointer):
             return False
         self.trusted_common_component_classes.add(class_pointer)
+        self._diagnostic_add("target_lookup_class_matches")
         return True
 
     def _prime_common_component_classes(self) -> None:
@@ -830,25 +948,33 @@ class DamageHook:
     def _read_target_common_component(
         self, component: int, target_id: int
     ) -> dict | None:
+        self._diagnostic_add("target_lookup_component_reads")
         raw = read_region(self.process, component, BOSS_COMPONENT_READ_SIZE)
         if not raw or len(raw) < BOSS_COMPONENT_READ_SIZE:
+            self._diagnostic_add("target_lookup_component_read_failures")
             return None
         if component not in self.observed_common_components:
             class_pointer = struct.unpack_from(
                 "<Q", raw, UOBJECT_CLASS_PRIVATE_OFFSET
             )[0]
             if class_pointer not in self.trusted_common_component_classes:
+                self._diagnostic_add(
+                    "target_lookup_component_class_rejections"
+                )
                 return None
         entity_id = struct.unpack_from(
             "<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET
         )[0]
         if entity_id != target_id:
+            self._diagnostic_add("target_lookup_component_entity_mismatches")
             return None
         template_id = struct.unpack_from(
             "<I", raw, BOSS_TEMPLATE_ID_OFFSET
         )[0]
         if not template_id:
+            self._diagnostic_add("target_lookup_component_template_zero")
             return None
+        self._diagnostic_add("target_lookup_component_matches")
         return {
             "filetime_100ns": (
                 time.time_ns() // 100 + FILETIME_UNIX_EPOCH_100NS
@@ -871,23 +997,52 @@ class DamageHook:
         if not self.trusted_common_component_classes:
             return
         self.target_boss_object_scan_count += 1
-        for component in self._iter_live_object_pointers():
+        self._diagnostic_add("target_lookup_object_scans")
+        pending_targets = set(self.pending_target_boss_lookups)
+        for component in self._iter_live_object_pointers(
+            track_target_lookup=True
+        ):
+            self._diagnostic_add("target_lookup_object_class_reads")
             try:
                 class_pointer = self._u64(
                     component + UOBJECT_CLASS_PRIVATE_OFFSET
                 )
             except (OSError, RuntimeError, struct.error):
+                self._diagnostic_add(
+                    "target_lookup_object_class_read_failures"
+                )
                 continue
             if class_pointer not in self.trusted_common_component_classes:
                 continue
+            self._diagnostic_add("target_lookup_object_class_candidates")
             raw = read_region(self.process, component, BOSS_COMPONENT_READ_SIZE)
             if not raw or len(raw) < BOSS_COMPONENT_READ_SIZE:
+                self._diagnostic_add(
+                    "target_lookup_object_component_read_failures"
+                )
                 continue
             entity_id = struct.unpack_from(
                 "<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET
             )[0]
             if not self._plausible_entity_id(entity_id):
                 continue
+            self._diagnostic_add("target_lookup_object_entity_candidates")
+            self._diagnostic_add("target_lookup_object_candidates")
+            template_id = struct.unpack_from(
+                "<I", raw, BOSS_TEMPLATE_ID_OFFSET
+            )[0]
+            if entity_id in pending_targets:
+                self._diagnostic_add(
+                    "target_lookup_object_exact_entity_matches"
+                )
+                if template_id:
+                    self._diagnostic_add(
+                        "target_lookup_object_exact_template_nonzero"
+                    )
+                else:
+                    self._diagnostic_add(
+                        "target_lookup_object_exact_template_zero"
+                    )
             self._remember_common_component_record(
                 {
                     "filetime_100ns": (
@@ -898,9 +1053,7 @@ class DamageHook:
                     "component": component,
                     "entity_id": entity_id,
                     "boss_type": int(raw[BOSS_TYPE_FIELD_OFFSET]),
-                    "template_id": struct.unpack_from(
-                        "<I", raw, BOSS_TEMPLATE_ID_OFFSET
-                    )[0],
+                    "template_id": template_id,
                     "target_id_index": True,
                 }
             )
@@ -938,21 +1091,35 @@ class DamageHook:
                     break
             if update is not None:
                 resolved.append(update)
+                self._diagnostic_add("target_lookup_resolved")
                 self.target_boss_lookup_emitted.add(target_id)
                 self.target_boss_lookup_attempted.add(target_id)
                 self.pending_target_boss_lookups.pop(target_id, None)
             elif now - first_seen >= TARGET_BOSS_LOOKUP_MAX_WAIT_SECONDS:
+                self._diagnostic_add("target_lookup_timeouts")
                 self.target_boss_lookup_attempted.add(target_id)
                 self.pending_target_boss_lookups.pop(target_id, None)
         return resolved
 
-    def _iter_live_object_pointers(self):
+    def _iter_live_object_pointers(
+        self, *, track_target_lookup: bool = False
+    ):
+        if track_target_lookup:
+            self._diagnostic_add("target_lookup_object_table_reads")
         try:
             object_count = self._u32(self.base + GOBJECT_COUNT_RVA)
             chunks = self._u64(self.base + GOBJECT_CHUNKS_RVA)
         except (OSError, RuntimeError, struct.error):
+            if track_target_lookup:
+                self._diagnostic_add(
+                    "target_lookup_object_table_failures"
+                )
             return
         if not chunks or not (0 < object_count <= 5_000_000):
+            if track_target_lookup:
+                self._diagnostic_add(
+                    "target_lookup_object_table_failures"
+                )
             return
         for chunk_index in range((object_count + 65_535) // 65_536):
             try:
@@ -965,9 +1132,17 @@ class DamageHook:
             raw = read_region(self.process, chunk, slot_count * 24)
             if not raw:
                 continue
+            if track_target_lookup:
+                self._diagnostic_add(
+                    "target_lookup_object_slots_scanned", len(raw) // 24
+                )
             for offset in range(0, len(raw) - 23, 24):
                 object_pointer = struct.unpack_from("<Q", raw, offset + 8)[0]
                 if object_pointer:
+                    if track_target_lookup:
+                        self._diagnostic_add(
+                            "target_lookup_object_pointers"
+                        )
                     yield object_pointer
 
     def _scan_existing_boss_components(
@@ -983,6 +1158,7 @@ class DamageHook:
             return []
         missing = wanted - self.existing_boss_component_cache.keys()
         if missing:
+            self._diagnostic_add("existing_boss_scan_attempts")
             filetime_100ns = (
                 time.time_ns() // 100 + FILETIME_UNIX_EPOCH_100NS
             )
@@ -1012,6 +1188,7 @@ class DamageHook:
                     "template_id": template_id,
                     "existing_object_scan": True,
                 }
+                self._diagnostic_add("existing_boss_scan_matches")
         return [
             dict(self.existing_boss_component_cache[entity_id])
             for entity_id in wanted
@@ -1059,6 +1236,7 @@ class DamageHook:
             update["function"] = f"{record.get('function', 'BossType')}/resolved"
             update["resolved_late"] = True
             resolved.append(update)
+            self._diagnostic_add("late_boss_component_resolved")
             self.pending_boss_components.pop(component, None)
         return resolved
 
@@ -1069,14 +1247,21 @@ class DamageHook:
         magic: bytes,
         function: str,
     ) -> tuple[list[dict], int]:
+        self._diagnostic_add("boss_ring_header_reads")
         header = read_region(self.process, ring, 0x20)
         if not header or header[:8] != magic:
+            self._diagnostic_add("boss_ring_header_failures")
             raise RuntimeError(f"{function} ring buffer became unreadable or corrupt")
         write_index = struct.unpack_from("<Q", header, 8)[0]
         if write_index - next_sequence > BOSS_TYPE_RECORD_COUNT:
+            self._diagnostic_add(
+                "boss_ring_overruns",
+                write_index - next_sequence - BOSS_TYPE_RECORD_COUNT,
+            )
             next_sequence = write_index - BOSS_TYPE_RECORD_COUNT
         updates: list[dict] = []
         while next_sequence < write_index:
+            self._diagnostic_add("boss_ring_records_polled")
             slot = next_sequence & BOSS_TYPE_RECORD_MASK
             raw = read_region(
                 self.process,
@@ -1089,6 +1274,7 @@ class DamageHook:
                 raw or b"", next_sequence, function
             )
             if record is None:
+                self._diagnostic_add("boss_ring_parse_failures")
                 break
             next_sequence += 1
             updates.append(record)

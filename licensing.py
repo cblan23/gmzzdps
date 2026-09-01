@@ -31,6 +31,8 @@ SERVER_ERROR_MESSAGES = {
     "card_invalid": "卡号不存在或格式不正确。",
     "card_expired": "卡号使用时间已结束。",
     "card_revoked": "卡号已被停用。",
+    "partner_device_changed": "莫雪的小伙伴卡检测到更换设备，卡号已永久失效。",
+    "card_device_locked": "当前暂不支持更换电脑，卡号仍绑定原设备。",
     "card_bound": "卡号已绑定其他设备。",
     "card_in_use": "该卡号已在其他客户端登录。",
     "card_rebind_cooldown": "卡号正在设备改绑冷却中。",

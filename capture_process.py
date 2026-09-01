@@ -30,6 +30,61 @@ CAPTURE_RETRY_WAIT_SECONDS = 0.5
 GAME_SEARCH_WAIT_SECONDS = 1.0
 TEAM_STATUS_INTERVAL_SECONDS = 1.0
 
+# Team snapshots are the one capture component that actively calls back into
+# the game.  Keep its lifecycle behind an explicit parent-controlled mode so
+# a training dummy never needs the extra RPC at all.  The numeric values are
+# stored in a multiprocessing.Value because Event only gives us two states.
+TEAM_STATS_MODE_UNKNOWN = 0
+TEAM_STATS_MODE_DUMMY = 1
+TEAM_STATS_MODE_TEAM = 2
+TEAM_STATS_MODE_NAMES = {
+    TEAM_STATS_MODE_UNKNOWN: "unknown",
+    TEAM_STATS_MODE_DUMMY: "dummy",
+    TEAM_STATS_MODE_TEAM: "team",
+}
+TEAM_STATS_MODE_CODES = {
+    name: code for code, name in TEAM_STATS_MODE_NAMES.items()
+}
+
+
+def normalize_team_stats_mode(
+    value: object,
+    *,
+    default: int = TEAM_STATS_MODE_TEAM,
+) -> int:
+    """Normalize a parent/child team-stat mode without raising in cleanup."""
+    if isinstance(value, str):
+        code = TEAM_STATS_MODE_CODES.get(value.strip().casefold())
+        return int(default if code is None else code)
+    try:
+        code = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+    return code if code in TEAM_STATS_MODE_NAMES else int(default)
+
+
+def team_stats_mode_name(value: object) -> str:
+    """Return the stable wire/diagnostic name for a mode value."""
+    return TEAM_STATS_MODE_NAMES.get(
+        normalize_team_stats_mode(value),
+        TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_TEAM],
+    )
+
+
+def read_team_stats_mode(
+    shared_value: object,
+    *,
+    default: int = TEAM_STATS_MODE_TEAM,
+) -> int:
+    """Read a multiprocessing.Value, retaining compatibility with old callers."""
+    if shared_value is None:
+        return int(default)
+    try:
+        value = shared_value.value
+    except (AttributeError, OSError, ValueError):
+        value = shared_value
+    return normalize_team_stats_mode(value, default=default)
+
 if sys.platform == "win32":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _kernel32.GetCurrentProcess.restype = ctypes.c_void_p
@@ -227,6 +282,108 @@ class NetworkPoller(threading.Thread):
         return not self.is_alive()
 
 
+_NATIVE_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "damage_ring_header_reads",
+        "damage_ring_header_failures",
+        "damage_ring_records_polled",
+        "damage_ring_parse_failures",
+        "damage_ring_overruns",
+        "boss_ring_header_reads",
+        "boss_ring_header_failures",
+        "boss_ring_records_polled",
+        "boss_ring_parse_failures",
+        "boss_ring_overruns",
+        "target_lookup_candidates",
+        "target_lookup_evictions",
+        "target_lookup_resolved",
+        "target_lookup_timeouts",
+        "target_lookup_component_observations",
+        "target_lookup_class_reads",
+        "target_lookup_class_matches",
+        "target_lookup_component_reads",
+        "target_lookup_component_matches",
+        "target_lookup_component_read_failures",
+        "target_lookup_component_class_rejections",
+        "target_lookup_component_entity_mismatches",
+        "target_lookup_component_template_zero",
+        "target_lookup_observed_target_matches",
+        "target_lookup_observed_target_template_zero",
+        "target_lookup_observed_target_template_nonzero",
+        "target_lookup_object_scans",
+        "target_lookup_object_candidates",
+        "target_lookup_object_table_reads",
+        "target_lookup_object_table_failures",
+        "target_lookup_object_slots_scanned",
+        "target_lookup_object_pointers",
+        "target_lookup_object_class_reads",
+        "target_lookup_object_class_read_failures",
+        "target_lookup_object_class_candidates",
+        "target_lookup_object_component_read_failures",
+        "target_lookup_object_entity_candidates",
+        "target_lookup_object_exact_entity_matches",
+        "target_lookup_object_exact_template_zero",
+        "target_lookup_object_exact_template_nonzero",
+        "existing_boss_scan_attempts",
+        "existing_boss_scan_matches",
+        "late_boss_component_resolved",
+        "damage_hook_installed",
+        "damage_hook_adopted",
+        "name_hook_installed",
+        "boss_type_hook_installed",
+        "boss_init_hook_installed",
+        "target_boss_lookup_enabled",
+        "target_lookup_pending",
+        "target_lookup_attempted",
+        "target_lookup_emitted",
+        "target_lookup_observed_components",
+        "target_lookup_trusted_classes",
+        "target_lookup_object_index_complete",
+        "target_lookup_object_scan_count",
+        "existing_boss_scan_attempted",
+        "existing_boss_full_scan_complete",
+    }
+)
+
+
+def _sanitize_native_diagnostic(value: object) -> dict[str, object]:
+    """Keep native troubleshooting snapshots anonymous and bounded."""
+
+    if not isinstance(value, dict):
+        return {}
+    sanitized: dict[str, object] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key or "").strip()
+        if key not in _NATIVE_DIAGNOSTIC_KEYS:
+            continue
+        if isinstance(raw_value, bool):
+            sanitized[key] = bool(raw_value)
+            continue
+        if isinstance(raw_value, int):
+            sanitized[key] = max(0, min(2_000_000_000, int(raw_value)))
+            continue
+        if isinstance(raw_value, float):
+            if raw_value == raw_value and abs(raw_value) != float("inf"):
+                sanitized[key] = max(0.0, min(2_000_000_000.0, raw_value))
+    return sanitized
+
+
+def native_diagnostic_snapshot(native_hook) -> dict[str, object]:
+    """Read the hook's privacy-safe stage counters when supported."""
+
+    if native_hook is None:
+        return {}
+    snapshot = getattr(native_hook, "diagnostic_snapshot", None)
+    if not callable(snapshot):
+        return {}
+    try:
+        return _sanitize_native_diagnostic(snapshot())
+    except Exception:
+        # A diagnostics-only helper must never turn a working capture into a
+        # failure.  The poll error path remains the source of truth.
+        return {}
+
+
 def collect_native_records(native_hook) -> tuple[dict[str, list[dict]], str]:
     """Poll native rings in exactly the same order as the former worker."""
     captured: dict[str, list[dict]] = {
@@ -245,6 +402,15 @@ def collect_native_records(native_hook) -> tuple[dict[str, list[dict]], str]:
     except Exception:
         return captured, traceback.format_exc()
     return captured, ""
+
+
+def collect_native_records_with_diagnostic(
+    native_hook,
+) -> tuple[dict[str, list[dict]], str, dict[str, object]]:
+    """Compatibility wrapper returning records plus an anonymous snapshot."""
+
+    captured, error = collect_native_records(native_hook)
+    return captured, error, native_diagnostic_snapshot(native_hook)
 
 
 def _close_hook(output_queue, component: str, hook) -> None:
@@ -270,13 +436,21 @@ def _emit_batch(
     native_records: dict[str, list[dict]],
     native_damage_hook_installed: bool,
     team_status: dict | None = None,
+    team_stats_mode: object = TEAM_STATS_MODE_TEAM,
     sequence_gaps: list[dict] | None = None,
+    native_diagnostic: dict[str, object] | None = None,
+    force_diagnostic: bool = False,
 ) -> bool:
     has_records = bool(
         network_records
         or any(native_records.get(key) for key in native_records)
     )
-    if not has_records and team_status is None and not sequence_gaps:
+    if (
+        not has_records
+        and team_status is None
+        and not sequence_gaps
+        and not (force_diagnostic and native_diagnostic)
+    ):
         return False
     _put(
         output_queue,
@@ -292,7 +466,9 @@ def _emit_batch(
                 native_damage_hook_installed
             ),
             "team_status": team_status,
+            "team_stats_mode": team_stats_mode_name(team_stats_mode),
             "sequence_gaps": sequence_gaps or [],
+            "native_diagnostic": dict(native_diagnostic or {}),
         },
     )
     return True
@@ -303,6 +479,7 @@ def _capture_forever(
     output_queue,
     watchdog: ParentProcessWatchdog,
     target_boss_lookup_event,
+    team_stats_mode=None,
 ) -> None:
     session_id = 0
     while not _should_stop(stop_event, watchdog):
@@ -315,6 +492,9 @@ def _capture_forever(
                 "network_hook_installed": False,
                 "native_damage_hook_installed": False,
                 "team_stats_hook_installed": False,
+                "team_stats_mode": team_stats_mode_name(
+                    read_team_stats_mode(team_stats_mode)
+                ),
                 "damage_source": "none",
                 "game_pid": 0,
             },
@@ -364,23 +544,37 @@ def _capture_forever(
         session_reason = "capture_failed"
         connected = False
         next_team_status_at = 0.0
+        next_team_install_at = 0.0
+        current_team_stats_mode = read_team_stats_mode(team_stats_mode)
         network_poller.start()
         try:
-            try:
-                team_hook = TeamStatsRequestHook(
-                    pid=game_pid,
-                    interval=1.0,
-                ).install()
-            except Exception:
-                team_hook = None
-                _put(
-                    output_queue,
-                    "diagnostic",
-                    {
-                        "component": "team_install",
-                        "details": traceback.format_exc(),
-                    },
-                )
+            def try_install_team_hook() -> None:
+                """Install only after the parent has classified a team scene."""
+                nonlocal team_hook, next_team_install_at
+                if team_hook is not None:
+                    return
+                now = time.monotonic()
+                if now < next_team_install_at:
+                    return
+                next_team_install_at = now + 2.0
+                try:
+                    team_hook = TeamStatsRequestHook(
+                        pid=game_pid,
+                        interval=1.0,
+                    ).install()
+                except Exception:
+                    team_hook = None
+                    _put(
+                        output_queue,
+                        "diagnostic",
+                        {
+                            "component": "team_install",
+                            "details": traceback.format_exc(),
+                        },
+                    )
+
+            if current_team_stats_mode == TEAM_STATS_MODE_TEAM:
+                try_install_team_hook()
             try:
                 native_hook = DamageHook(
                     pid=game_pid,
@@ -438,6 +632,9 @@ def _capture_forever(
                         and getattr(native_hook, "boss_init_installed", False)
                     ),
                     "team_stats_hook_installed": team_hook is not None,
+                    "team_stats_mode": team_stats_mode_name(
+                        current_team_stats_mode
+                    ),
                     "damage_source": (
                         "native" if native_hook is not None else "script"
                     ),
@@ -450,13 +647,64 @@ def _capture_forever(
                 and network_hook.alive
                 and network_poller.is_alive()
             ):
+                if team_hook is not None:
+                    try:
+                        team_hook_alive = bool(team_hook.alive)
+                    except Exception:
+                        team_hook_alive = False
+                    if not team_hook_alive:
+                        _close_hook(output_queue, "team", team_hook)
+                        team_hook = None
+                requested_team_stats_mode = read_team_stats_mode(
+                    team_stats_mode
+                )
+                if requested_team_stats_mode != current_team_stats_mode:
+                    current_team_stats_mode = requested_team_stats_mode
+                    if current_team_stats_mode == TEAM_STATS_MODE_TEAM:
+                        if team_hook is not None:
+                            try:
+                                team_hook.set_enabled(True)
+                            except Exception:
+                                _put(
+                                    output_queue,
+                                    "diagnostic",
+                                    {
+                                        "component": "team_enable",
+                                        "details": traceback.format_exc(),
+                                    },
+                                )
+                        else:
+                            try_install_team_hook()
+                    elif team_hook is not None:
+                        # Keep the existing trampoline available for a later
+                        # team scene, but stop issuing requests immediately.
+                        try:
+                            team_hook.set_enabled(False)
+                        except Exception:
+                            _put(
+                                output_queue,
+                                "diagnostic",
+                                {
+                                    "component": "team_disable",
+                                    "details": traceback.format_exc(),
+                                },
+                            )
+                if (
+                    current_team_stats_mode == TEAM_STATS_MODE_TEAM
+                    and team_hook is None
+                ):
+                    try_install_team_hook()
                 if native_hook is not None:
                     native_hook.set_target_boss_lookup_enabled(
                         target_boss_lookup_event.is_set()
                     )
                 network_records = network_poller.drain_records()
                 sequence_gaps = network_poller.drain_sequence_gaps()
-                native_records, native_error = collect_native_records(native_hook)
+                (
+                    native_records,
+                    native_error,
+                    native_diagnostic,
+                ) = collect_native_records_with_diagnostic(native_hook)
                 native_installed = native_hook is not None
                 if native_error:
                     _put(
@@ -491,7 +739,18 @@ def _capture_forever(
                     native_records=native_records,
                     native_damage_hook_installed=native_installed,
                     team_status=team_status,
+                    team_stats_mode=current_team_stats_mode,
                     sequence_gaps=sequence_gaps,
+                    native_diagnostic=(
+                        native_diagnostic
+                        if (
+                            network_records
+                            or any(native_records.values())
+                            or team_status is not None
+                            or sequence_gaps
+                        )
+                        else None
+                    ),
                 ):
                     batch_id += 1
 
@@ -544,7 +803,11 @@ def _capture_forever(
                 native_hook.set_target_boss_lookup_enabled(
                     target_boss_lookup_event.is_set()
                 )
-            native_records, native_error = collect_native_records(native_hook)
+            (
+                native_records,
+                native_error,
+                native_diagnostic,
+            ) = collect_native_records_with_diagnostic(native_hook)
             native_installed_during_final_poll = native_hook is not None
             if native_error:
                 _put(
@@ -564,7 +827,10 @@ def _capture_forever(
                 native_records=native_records,
                 native_damage_hook_installed=native_installed_during_final_poll,
                 team_status=final_team_status,
+                team_stats_mode=current_team_stats_mode,
                 sequence_gaps=sequence_gaps,
+                native_diagnostic=native_diagnostic,
+                force_diagnostic=True,
             ):
                 batch_id += 1
 
@@ -588,6 +854,7 @@ def _capture_forever(
                     "native_skill_name_records": [],
                 },
                 native_damage_hook_installed=native_installed_during_final_poll,
+                team_stats_mode=current_team_stats_mode,
                 sequence_gaps=trailing_gaps,
             ):
                 batch_id += 1
@@ -602,6 +869,9 @@ def _capture_forever(
                     "network_hook_installed": False,
                     "native_damage_hook_installed": False,
                     "team_stats_hook_installed": False,
+                    "team_stats_mode": team_stats_mode_name(
+                        current_team_stats_mode
+                    ),
                     "damage_source": "none",
                 },
             )
@@ -619,6 +889,7 @@ def capture_process_main(
     stop_event,
     output_queue,
     target_boss_lookup_event,
+    team_stats_mode=None,
 ) -> None:
     """Multiprocessing spawn target. This module deliberately imports no UI."""
     watchdog = ParentProcessWatchdog(parent_pid)
@@ -635,6 +906,7 @@ def capture_process_main(
             output_queue,
             watchdog,
             target_boss_lookup_event,
+            team_stats_mode,
         )
     except BaseException:
         _put(output_queue, "fatal", traceback.format_exc())
@@ -666,12 +938,16 @@ class CaptureProcessClient:
         *,
         parent_pid: int | None = None,
         target_boss_lookup_enabled: bool = False,
+        team_stats_mode: object = TEAM_STATS_MODE_TEAM,
     ):
         self.context = multiprocessing.get_context("spawn")
         self.stop_event = self.context.Event()
         self.target_boss_lookup_event = self.context.Event()
         if target_boss_lookup_enabled:
             self.target_boss_lookup_event.set()
+        self.team_stats_mode_value = self.context.Value(
+            "b", normalize_team_stats_mode(team_stats_mode)
+        )
         self.output_queue = self.context.Queue(maxsize=0)
         self.process = self.context.Process(
             name="GMZZCapture",
@@ -681,16 +957,24 @@ class CaptureProcessClient:
                 self.stop_event,
                 self.output_queue,
                 self.target_boss_lookup_event,
+                self.team_stats_mode_value,
             ),
             daemon=False,
         )
+        self._started = False
+        self._closed = False
 
     @property
     def pid(self) -> int:
         return int(self.process.pid or 0)
 
     def start(self) -> None:
+        if getattr(self, "_started", False):
+            raise RuntimeError("capture process has already been started")
+        if getattr(self, "_closed", False):
+            raise RuntimeError("capture process has already been closed")
         self.process.start()
+        self._started = True
 
     def get(self, timeout: float | None = None):
         return self.output_queue.get(timeout=timeout)
@@ -701,18 +985,44 @@ class CaptureProcessClient:
         else:
             self.target_boss_lookup_event.clear()
 
+    def set_team_stats_mode(self, mode: object) -> str:
+        """Switch the child-side team request gate without touching game data."""
+        normalized = normalize_team_stats_mode(mode, default=TEAM_STATS_MODE_UNKNOWN)
+        self.team_stats_mode_value.value = normalized
+        return team_stats_mode_name(normalized)
+
+    def get_team_stats_mode(self) -> str:
+        return team_stats_mode_name(self.team_stats_mode_value.value)
+
     def request_stop(self) -> None:
         self.stop_event.set()
 
     def is_alive(self) -> bool:
-        return self.process.is_alive()
+        if not getattr(self, "_started", False) or getattr(
+            self, "_closed", False
+        ):
+            return False
+        try:
+            return self.process.is_alive()
+        except (AssertionError, ValueError):
+            return False
 
     def join(self, timeout: float | None = None) -> None:
-        self.process.join(timeout)
+        if not getattr(self, "_started", False) or getattr(
+            self, "_closed", False
+        ):
+            return
+        try:
+            self.process.join(timeout)
+        except (AssertionError, ValueError):
+            return
 
     def terminate(self) -> None:
-        if self.process.is_alive():
-            self.process.terminate()
+        if self.is_alive():
+            try:
+                self.process.terminate()
+            except (AssertionError, ValueError):
+                return
 
     def close(self, *, wait_for_queue: bool = True) -> None:
         """Release parent-side IPC resources after the child has exited.
@@ -723,6 +1033,8 @@ class CaptureProcessClient:
         multiprocessing's feeder finalizer can otherwise stall the transition
         from capture cleanup to report upload on some Windows systems.
         """
+        if getattr(self, "_closed", False):
+            return
         try:
             if not wait_for_queue:
                 cancel_join = getattr(self.output_queue, "cancel_join_thread", None)
@@ -733,5 +1045,9 @@ class CaptureProcessClient:
                 self.output_queue.join_thread()
         finally:
             close_process = getattr(self.process, "close", None)
-            if callable(close_process) and not self.process.is_alive():
-                close_process()
+            if callable(close_process) and not self.is_alive():
+                try:
+                    close_process()
+                except (AssertionError, ValueError):
+                    pass
+            self._closed = True

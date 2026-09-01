@@ -18,12 +18,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from network_state import NetworkPacketParser
+from network_state import DAMAGE_TARGET_TEMPLATE_IDS, NetworkPacketParser
 
 
 TOOL_NAME = "叨叨诡秘问题检测工具"
-TOOL_VERSION = "1.0.2+20260831.3"
-DIAGNOSTIC_SCHEMA_VERSION = 2
+TOOL_VERSION = "1.0.3+20260901.2"
+DIAGNOSTIC_SCHEMA_VERSION = 3
 MAX_REPORTED_METHODS = 80
 MAX_REPORTED_ERRORS = 20
 MAX_REPORTED_BOSSES = 24
@@ -32,6 +32,85 @@ MAX_REPORTED_NATIVE_TEMPLATES = 32
 MAX_TRACKED_DAMAGE_TARGETS = 64
 MAX_TRACKED_NATIVE_ENTITIES = 4096
 MAX_UPLOAD_BYTES = 224 * 1024
+
+# Keep this list in sync with capture_process.py.  The analyzer is also used
+# directly by tests and by older diagnostic payloads, so it must enforce the
+# privacy boundary even when the child-process sanitizer was bypassed.
+_NATIVE_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "damage_ring_header_reads",
+        "damage_ring_header_failures",
+        "damage_ring_records_polled",
+        "damage_ring_parse_failures",
+        "damage_ring_overruns",
+        "boss_ring_header_reads",
+        "boss_ring_header_failures",
+        "boss_ring_records_polled",
+        "boss_ring_parse_failures",
+        "boss_ring_overruns",
+        "target_lookup_candidates",
+        "target_lookup_evictions",
+        "target_lookup_resolved",
+        "target_lookup_timeouts",
+        "target_lookup_component_observations",
+        "target_lookup_class_reads",
+        "target_lookup_class_matches",
+        "target_lookup_component_reads",
+        "target_lookup_component_matches",
+        "target_lookup_component_read_failures",
+        "target_lookup_component_class_rejections",
+        "target_lookup_component_entity_mismatches",
+        "target_lookup_component_template_zero",
+        "target_lookup_observed_target_matches",
+        "target_lookup_observed_target_template_zero",
+        "target_lookup_observed_target_template_nonzero",
+        "target_lookup_object_scans",
+        "target_lookup_object_candidates",
+        "target_lookup_object_table_reads",
+        "target_lookup_object_table_failures",
+        "target_lookup_object_slots_scanned",
+        "target_lookup_object_pointers",
+        "target_lookup_object_class_reads",
+        "target_lookup_object_class_read_failures",
+        "target_lookup_object_class_candidates",
+        "target_lookup_object_component_read_failures",
+        "target_lookup_object_entity_candidates",
+        "target_lookup_object_exact_entity_matches",
+        "target_lookup_object_exact_template_zero",
+        "target_lookup_object_exact_template_nonzero",
+        "existing_boss_scan_attempts",
+        "existing_boss_scan_matches",
+        "late_boss_component_resolved",
+        "damage_hook_installed",
+        "damage_hook_adopted",
+        "name_hook_installed",
+        "boss_type_hook_installed",
+        "boss_init_hook_installed",
+        "target_boss_lookup_enabled",
+        "target_lookup_pending",
+        "target_lookup_attempted",
+        "target_lookup_emitted",
+        "target_lookup_observed_components",
+        "target_lookup_trusted_classes",
+        "target_lookup_object_index_complete",
+        "target_lookup_object_scan_count",
+        "existing_boss_scan_attempted",
+        "existing_boss_full_scan_complete",
+    }
+)
+
+
+def _sorted_counter(counter: Counter[str]) -> dict[str, int]:
+    """Serialize anonymous counters in a stable order for reports/tests."""
+    result: dict[str, int] = {}
+    for key, value in sorted(counter.items(), key=lambda item: str(item[0])):
+        try:
+            numeric = int(value or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if numeric > 0:
+            result[str(key)] = numeric
+    return result
 
 
 class DiagnosticUploadError(RuntimeError):
@@ -52,8 +131,10 @@ def _last_error_line(value: object) -> str:
 
 
 def _safe_int(value: object, default: int = 0) -> int:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
     try:
-        return int(value or 0)
+        return int(value)
     except (TypeError, ValueError, OverflowError):
         return default
 
@@ -105,6 +186,14 @@ class DiagnosticAnalyzer:
         self.native_template_counts: Counter[tuple[int, int]] = Counter()
         self.native_template_stats: Counter[str] = Counter()
         self.damage_targets: dict[int, dict[str, object]] = {}
+        self.native_diagnostic: dict[str, object] = {}
+        self.native_diagnostic_snapshots = 0
+        self.native_diagnostic_resets = 0
+        # These counters describe where a captured damage candidate stopped.
+        # They are deliberately kept separate from the production parser and
+        # contain no entity IDs, names, packets, or memory addresses.
+        self.damage_stage_counts: Counter[str] = Counter()
+        self.damage_gate_reasons: Counter[str] = Counter()
 
     def _stage(self, value: object) -> None:
         stage = str(value or "").strip()[:64]
@@ -144,6 +233,155 @@ class DiagnosticAnalyzer:
     def _catalog_metadata(self, template_id: int) -> dict:
         metadata = self.catalog.get(str(template_id), {})
         return metadata if isinstance(metadata, dict) else {}
+
+    def _merge_native_diagnostic(self, value: object) -> None:
+        """Merge cumulative hook counters without trusting unbounded input."""
+
+        if not isinstance(value, dict):
+            return
+        self.native_diagnostic_snapshots += 1
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()[:80]
+            if not key or key not in _NATIVE_DIAGNOSTIC_KEYS:
+                continue
+            if isinstance(raw_value, bool):
+                self.native_diagnostic[key] = bool(raw_value)
+                continue
+            if not isinstance(raw_value, (int, float)):
+                continue
+            try:
+                numeric = float(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if numeric != numeric or abs(numeric) == float("inf"):
+                continue
+            numeric = max(0.0, min(2_000_000_000.0, numeric))
+            previous = self.native_diagnostic.get(key)
+            if isinstance(previous, (int, float)) and not isinstance(previous, bool):
+                if numeric < float(previous):
+                    # A child hook can be reinstalled after a recoverable
+                    # capture error. Keep the latest value while recording the
+                    # reset so an analyst does not mistake it for zero events.
+                    self.native_diagnostic_resets += 1
+                numeric = max(float(previous), numeric)
+            self.native_diagnostic[key] = int(numeric)
+
+    @staticmethod
+    def _network_damage_shape(record: dict) -> tuple[str, int, int, int]:
+        """Return (shape, attacker, target, damage) for a network candidate."""
+
+        args = NetworkPacketParser._args(record)
+        if len(args) < 9:
+            return "decode_failed", 0, 0, 0
+        try:
+            attacker = int(args[0])
+            target = int(args[1])
+            damage = int(args[7])
+        except (TypeError, ValueError, OverflowError):
+            return "decode_failed", 0, 0, 0
+        if attacker <= 0 or target <= 0:
+            return "identity_incomplete", max(0, attacker), max(0, target), max(0, damage)
+        if damage <= 0:
+            return "non_positive", attacker, target, damage
+        return "valid", attacker, target, damage
+
+    @staticmethod
+    def _native_damage_shape(record: dict) -> tuple[str, int, int, int]:
+        """Return (shape, attacker, target, damage) for a native candidate."""
+
+        try:
+            attacker = int(record["attacker_id"])
+            target = int(record["target_id"])
+            damage = int(record.get("damage", record.get("arg9_i32", 0)))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return "decode_failed", 0, 0, 0
+        if attacker <= 0 or target <= 0:
+            return "identity_incomplete", max(0, attacker), max(0, target), max(0, damage)
+        if damage <= 0:
+            return "non_positive", attacker, target, damage
+        return "valid", attacker, target, damage
+
+    def _record_target_gate_reason(self, target_id: int, *, forwarded: bool | None) -> None:
+        """Classify one valid target after the normal parser has seen it."""
+
+        target_id = int(target_id or 0)
+        if target_id <= 0:
+            reason = "target_id_missing"
+        elif (
+            target_id in self.parser.confirmed_boss_entities
+            or target_id == self.parser.active_boss_entity_id
+            or target_id in self.parser.encounter_auxiliary_entities
+        ):
+            reason = "boss_confirmed"
+        elif (
+            target_id in self.parser.training_dummy_entities
+            and _safe_int(self.parser.entity_template_ids.get(target_id, 0))
+            in DAMAGE_TARGET_TEMPLATE_IDS
+        ):
+            reason = "damage_dummy_confirmed"
+        elif target_id == self.parser.self_id or target_id in self.parser.party_ids:
+            reason = "target_is_party_or_self"
+        else:
+            template_id = _safe_int(
+                self.parser.entity_template_ids.get(target_id, 0)
+            )
+            boss_type = _safe_int(
+                self.parser.entity_boss_types.get(target_id, -1), -1
+            )
+            profile = self.parser.entity_profiles.get(target_id, {})
+            if not isinstance(profile, dict):
+                profile = {}
+            entity_type = str(profile.get("entity_type", "")).strip()
+            if not template_id and boss_type < 0 and not entity_type:
+                reason = "target_identity_unknown"
+            elif not template_id:
+                reason = "target_template_missing"
+            elif str(template_id) not in self.parser.boss_template_catalog:
+                reason = "target_template_not_in_boss_catalog"
+            elif boss_type == 3:
+                # A catalog match is strong evidence, but if the normal parser
+                # did not activate it we need to preserve that distinction.
+                reason = "target_catalog_match_not_activated"
+            else:
+                reason = "target_runtime_type_not_boss"
+        self.damage_gate_reasons[reason] += 1
+        if forwarded is False:
+            self.damage_gate_reasons["filtered_by_known_target"] += 1
+
+    def _record_damage_shape(
+        self,
+        source: str,
+        shape: str,
+        target_id: int = 0,
+        *,
+        forwarded: bool | None = None,
+        event_emitted: bool = False,
+        suppressed_by_native: bool = False,
+    ) -> None:
+        prefix = "network" if source == "network" else "native"
+        self.damage_stage_counts[f"{prefix}_damage_captured"] += 1
+        if shape == "decode_failed":
+            self.damage_stage_counts[f"{prefix}_damage_decode_failed"] += 1
+            return
+        self.damage_stage_counts[f"{prefix}_damage_decoded"] += 1
+        if shape == "identity_incomplete":
+            self.damage_stage_counts[f"{prefix}_damage_identity_incomplete"] += 1
+            return
+        if shape == "non_positive":
+            self.damage_stage_counts[f"{prefix}_damage_non_positive"] += 1
+            return
+        self.damage_stage_counts[f"{prefix}_damage_positive"] += 1
+        if suppressed_by_native:
+            self.damage_stage_counts[
+                f"{prefix}_damage_suppressed_by_native"
+            ] += 1
+            self._record_target_gate_reason(target_id, forwarded=None)
+            return
+        if event_emitted:
+            self.damage_stage_counts[f"{prefix}_damage_event_emitted"] += 1
+        else:
+            self.damage_stage_counts[f"{prefix}_damage_event_rejected"] += 1
+        self._record_target_gate_reason(target_id, forwarded=forwarded)
 
     def _remember_native_template(self, record: dict) -> None:
         entity_id = _safe_int(record.get("entity_id"))
@@ -185,8 +423,14 @@ class DiagnosticAnalyzer:
         active_boss = target_id == int(self.parser.active_boss_entity_id or 0)
         confirmed_boss = target_id in self.parser.confirmed_boss_entities
         encounter_auxiliary = target_id in self.parser.encounter_auxiliary_entities
+        damage_dummy = bool(
+            target_id in self.parser.training_dummy_entities
+            and _safe_int(self.parser.entity_template_ids.get(target_id, 0))
+            in DAMAGE_TARGET_TEMPLATE_IDS
+        )
         boss_mode_confirmed = bool(
             confirmed_boss
+            or damage_dummy
             or (encounter_auxiliary and self.parser.active_boss_entity_id is not None)
         )
         existing = self.damage_targets.pop(target_id, None) or {
@@ -266,6 +510,7 @@ class DiagnosticAnalyzer:
 
     def _handle_batch(self, payload: dict) -> None:
         self.capture_batches += 1
+        self._merge_native_diagnostic(payload.get("native_diagnostic"))
         records = [item for item in payload.get("records", []) if isinstance(item, dict)]
         native_records = [
             item for item in payload.get("native_records", []) if isinstance(item, dict)
@@ -296,11 +541,25 @@ class DiagnosticAnalyzer:
         for record in native_boss_records:
             try:
                 self._remember_native_template(record)
-                self._consume_updates(
-                    self.parser.process_native_boss_type(
-                        self._enrich_native_boss(record)
-                    )
-                )
+                enriched = self._enrich_native_boss(record)
+                entity_id = _safe_int(enriched.get("entity_id"))
+                template_id = _safe_int(enriched.get("template_id"))
+                boss_type = _safe_int(enriched.get("boss_type"), -1)
+                self.damage_stage_counts["native_boss_records_captured"] += 1
+                if entity_id:
+                    self.damage_stage_counts[
+                        "native_boss_records_with_entity_id"
+                    ] += 1
+                if template_id:
+                    self.damage_stage_counts[
+                        "native_boss_records_with_template_id"
+                    ] += 1
+                if template_id and str(template_id) in self.parser.boss_template_catalog:
+                    self.damage_stage_counts["native_boss_catalog_matches"] += 1
+                if boss_type == 3:
+                    self.damage_stage_counts["native_boss_runtime_type3"] += 1
+                updates = self.parser.process_native_boss_type(enriched)
+                self._consume_updates(updates)
             except Exception as exc:
                 self._error("native_boss_parser", exc)
         for record in native_name_records:
@@ -311,11 +570,33 @@ class DiagnosticAnalyzer:
             except Exception as exc:
                 self._error("native_name_parser", exc)
         for record in native_records:
-            if _safe_int(record.get("damage", record.get("arg9_i32", 0))) > 0:
+            shape, _attacker, target_id, _damage = self._native_damage_shape(record)
+            if shape == "valid":
                 self.native_positive_damage_records += 1
             try:
-                self._consume_updates(self.parser.process_native_damage(record))
+                updates = self.parser.process_native_damage(record)
+                event_emitted = any(kind == "event" for kind, _item in updates)
+                event_payload = next(
+                    (item for kind, item in updates if kind == "event"),
+                    None,
+                )
+                self._record_damage_shape(
+                    "native",
+                    shape,
+                    target_id,
+                    forwarded=(
+                        self.parser.should_forward_damage_event(
+                            event_payload
+                        )
+                        if isinstance(event_payload, dict)
+                        else None
+                    ),
+                    event_emitted=isinstance(event_payload, dict),
+                )
+                self._consume_updates(updates)
             except Exception as exc:
+                if shape == "valid":
+                    self.damage_stage_counts["native_damage_parser_errors"] += 1
                 self._error("native_damage_parser", exc)
 
         for record in records:
@@ -331,10 +612,40 @@ class DiagnosticAnalyzer:
                 if native_active:
                     self.network_damage_suppressed_by_native += 1
             try:
-                self._consume_updates(
-                    self.parser.process(record, include_damage=not native_active)
+                if method == "OnMsgDamageSyncV2":
+                    shape, _attacker, target_id, _damage = self._network_damage_shape(
+                        record
+                    )
+                else:
+                    shape, target_id = "non_damage", 0
+                updates = self.parser.process(
+                    record, include_damage=not native_active
                 )
+                if method == "OnMsgDamageSyncV2":
+                    event_payload = next(
+                        (item for kind, item in updates if kind == "event"),
+                        None,
+                    )
+                    self._record_damage_shape(
+                        "network",
+                        shape,
+                        target_id,
+                        forwarded=(
+                            self.parser.should_forward_damage_event(event_payload)
+                            if isinstance(event_payload, dict)
+                            else None
+                        ),
+                        event_emitted=isinstance(event_payload, dict),
+                        suppressed_by_native=(
+                            native_active
+                            and shape == "valid"
+                            and not isinstance(event_payload, dict)
+                        ),
+                    )
+                self._consume_updates(updates)
             except Exception as exc:
+                if method == "OnMsgDamageSyncV2" and shape == "valid":
+                    self.damage_stage_counts["network_damage_parser_errors"] += 1
                 self._error("network_parser", exc)
 
         team_status = payload.get("team_status")
@@ -377,11 +688,12 @@ class DiagnosticAnalyzer:
             )
             confirmed_boss = target_id in self.parser.confirmed_boss_entities
             encounter_auxiliary = target_id in self.parser.encounter_auxiliary_entities
+            damage_dummy = bool(template_id in DAMAGE_TARGET_TEMPLATE_IDS)
             records = max(0, _safe_int(observed.get("records")))
             boss_mode_events = max(
                 0, _safe_int(observed.get("boss_mode_confirmed_records"))
             )
-            if confirmed_boss:
+            if confirmed_boss or damage_dummy:
                 boss_mode_events = records
             summaries.append(
                 {
@@ -407,10 +719,12 @@ class DiagnosticAnalyzer:
                         or target_id in self.parser.entity_profiles
                     ),
                     "confirmed_boss": confirmed_boss,
+                    "damage_dummy": damage_dummy,
                     "encounter_auxiliary": encounter_auxiliary,
                     "active_boss_seen": bool(observed.get("active_boss_seen")),
                     "boss_mode_events": boss_mode_events,
                     "boss_mode_displayable": boss_mode_events > 0,
+                    "target_mode_displayable": boss_mode_events > 0,
                 }
             )
         return summaries
@@ -448,6 +762,172 @@ class DiagnosticAnalyzer:
             for target in self._damage_target_summaries()
         )
 
+    def _damage_dummy_events(self) -> int:
+        return sum(
+            max(0, _safe_int(target.get("records")))
+            for target in self._damage_target_summaries()
+            if bool(target.get("damage_dummy"))
+        )
+
+    def _confirmed_boss_events(self) -> int:
+        return sum(
+            max(0, _safe_int(target.get("records")))
+            for target in self._damage_target_summaries()
+            if bool(target.get("confirmed_boss"))
+        )
+
+    def _target_identity_links(self) -> dict[str, int]:
+        """Summarize exact target/identity joins without exporting either ID."""
+
+        target_ids = set(self.damage_targets)
+        native_matches = target_ids.intersection(self.native_entity_templates)
+        return {
+            "damage_targets": len(target_ids),
+            "native_entity_exact_matches": len(native_matches),
+            "native_template_exact_matches": sum(
+                bool(
+                    _safe_int(
+                        self.native_entity_templates[target_id].get(
+                            "template_id"
+                        )
+                    )
+                )
+                for target_id in native_matches
+            ),
+            "native_runtime_boss_exact_matches": sum(
+                _safe_int(
+                    self.native_entity_templates[target_id].get(
+                        "runtime_boss_type", -1
+                    ),
+                    -1,
+                )
+                == 3
+                for target_id in native_matches
+            ),
+            "native_catalog_exact_matches": sum(
+                bool(
+                    self.native_entity_templates[target_id].get(
+                        "catalog_match"
+                    )
+                )
+                for target_id in native_matches
+            ),
+            "parser_profile_exact_matches": sum(
+                target_id in self.parser.entity_profiles
+                for target_id in target_ids
+            ),
+            "confirmed_boss_exact_matches": sum(
+                target_id in self.parser.confirmed_boss_entities
+                for target_id in target_ids
+            ),
+            "damage_dummy_exact_matches": sum(
+                _safe_int(self.parser.entity_template_ids.get(target_id, 0))
+                in DAMAGE_TARGET_TEMPLATE_IDS
+                for target_id in target_ids
+            ),
+        }
+
+    def _native_diagnostic_int(self, key: str) -> int:
+        return max(0, _safe_int(self.native_diagnostic.get(key)))
+
+    def _target_lookup_failure_assessment(self) -> dict[str, str] | None:
+        """Explain the exact target lookup stage when its switch was active."""
+
+        if not bool(self.native_diagnostic.get("target_boss_lookup_enabled")):
+            return None
+        candidates = self._native_diagnostic_int("target_lookup_candidates")
+        scans = self._native_diagnostic_int("target_lookup_object_scans")
+        resolved = self._native_diagnostic_int("target_lookup_resolved")
+        timeouts = self._native_diagnostic_int("target_lookup_timeouts")
+        trusted_classes = self._native_diagnostic_int(
+            "target_lookup_trusted_classes"
+        )
+        table_failures = self._native_diagnostic_int(
+            "target_lookup_object_table_failures"
+        )
+        slots_scanned = self._native_diagnostic_int(
+            "target_lookup_object_slots_scanned"
+        )
+        class_candidates = self._native_diagnostic_int(
+            "target_lookup_object_class_candidates"
+        )
+        exact_entities = self._native_diagnostic_int(
+            "target_lookup_object_exact_entity_matches"
+        )
+        exact_template_zero = self._native_diagnostic_int(
+            "target_lookup_object_exact_template_zero"
+        ) + self._native_diagnostic_int(
+            "target_lookup_observed_target_template_zero"
+        )
+        exact_template_nonzero = self._native_diagnostic_int(
+            "target_lookup_object_exact_template_nonzero"
+        ) + self._native_diagnostic_int(
+            "target_lookup_observed_target_template_nonzero"
+        )
+
+        if candidates <= 0:
+            return {
+                "code": "target_lookup_not_triggered",
+                "confidence": "high",
+                "stage": "target_lookup_candidate",
+                "summary": "目标反查已开启，但伤害目标没有进入精确反查候选队列。",
+            }
+        if scans <= 0 and trusted_classes <= 0:
+            return {
+                "code": "target_lookup_no_common_component_class",
+                "confidence": "high",
+                "stage": "target_lookup_component_class",
+                "summary": "目标反查已触发，但没有取得可验证的 CommonComponent 类型。",
+            }
+        if table_failures > 0 and slots_scanned <= 0:
+            return {
+                "code": "target_lookup_object_table_unreadable",
+                "confidence": "high",
+                "stage": "target_lookup_object_table",
+                "summary": "目标反查已触发，但该客户端的游戏对象表无法按当前布局读取。",
+            }
+        if scans > 0 and slots_scanned > 0 and class_candidates <= 0:
+            return {
+                "code": "target_lookup_common_component_not_indexed",
+                "confidence": "high",
+                "stage": "target_lookup_class_filter",
+                "summary": "游戏对象表可以读取，但其中没有匹配已验证类型的 CommonComponent。",
+            }
+        if exact_template_zero > 0 and exact_template_nonzero <= 0:
+            return {
+                "code": "target_lookup_exact_component_template_zero",
+                "confidence": "high",
+                "stage": "target_lookup_template",
+                "summary": "已精确找到伤害目标对应组件，但该组件中的模板编号仍为 0。",
+            }
+        if exact_entities <= 0 and timeouts > 0:
+            return {
+                "code": "target_lookup_exact_component_not_found",
+                "confidence": "high",
+                "stage": "target_lookup_entity_join",
+                "summary": "对象表和组件类型均可读取，但没有组件实体 ID 与伤害 target_id 精确相等。",
+            }
+        if exact_template_nonzero > 0 and resolved <= 0:
+            return {
+                "code": "target_lookup_exact_template_not_emitted",
+                "confidence": "high",
+                "stage": "target_lookup_emit",
+                "summary": "已精确读到非零模板编号，但反查结果没有进入解析器。",
+            }
+        if resolved > 0:
+            return {
+                "code": "target_lookup_resolved_but_boss_rejected",
+                "confidence": "high",
+                "stage": "boss_catalog_gate",
+                "summary": "目标反查已成功读取模板，但该模板仍未通过主程序 Boss 目录门槛。",
+            }
+        return {
+            "code": "target_lookup_unresolved",
+            "confidence": "medium",
+            "stage": "target_lookup",
+            "summary": "目标反查已执行，但本次报告尚未形成可用的精确目标模板。",
+        }
+
     def handle(self, kind: str, payload: object = None) -> None:
         kind = str(kind or "")
         if kind == "process_started" and isinstance(payload, dict):
@@ -472,6 +952,7 @@ class DiagnosticAnalyzer:
                 "native_boss_type_hook_installed",
                 "native_boss_init_hook_installed",
                 "team_stats_hook_installed",
+                "team_stats_mode",
                 "damage_source",
             )
             self.connected_payload = {key: payload.get(key) for key in keys}
@@ -505,6 +986,7 @@ class DiagnosticAnalyzer:
             return {
                 "code": code,
                 "confidence": "high" if self.errors else "medium",
+                "stage": "connection",
                 "summary": "未建立游戏采集连接，请查看钩子错误。",
             }
         if (
@@ -516,41 +998,60 @@ class DiagnosticAnalyzer:
             return {
                 "code": "native_hook_silent_network_fallback_blocked",
                 "confidence": "high",
+                "stage": "native_damage_capture",
                 "summary": "原生伤害入口已安装但没有产出，网络伤害回退同时被抑制。",
             }
-        if self._boss_confirmed_damage_events() > 0:
+        damage_dummy_events = self._damage_dummy_events()
+        confirmed_boss_events = self._confirmed_boss_events()
+        if damage_dummy_events > 0:
+            return {
+                "code": "damage_dummy_pipeline_ok",
+                "confidence": "high",
+                "stage": "damage_dummy_gate_passed",
+                "summary": "伤害木桩的采集、目标关联与显示门槛均正常；本次结果仅验证公共读取链路，不等同于已验证具体 Boss 模板。",
+            }
+        if confirmed_boss_events > 0:
             return {
                 "code": "capture_pipeline_ok",
                 "confidence": "high",
+                "stage": "target_gate_passed",
                 "summary": "采集、解析与主程序 Boss 门槛均产生了可显示伤害。",
             }
         if self.parsed_damage_events > 0 and not self.parser.boss_template_catalog:
             return {
                 "code": "boss_catalog_unavailable",
                 "confidence": "high",
+                "stage": "boss_catalog",
                 "summary": "已解析到伤害，但检测工具未加载到 Boss 模板目录。",
             }
         if self.parsed_damage_events > 0:
+            target_lookup_assessment = self._target_lookup_failure_assessment()
+            if target_lookup_assessment is not None:
+                return target_lookup_assessment
             return {
                 "code": "damage_target_not_confirmed",
                 "confidence": "high",
+                "stage": "boss_gate",
                 "summary": "已解析到伤害，但没有受击目标通过主程序 Boss 门槛。",
             }
         if self.network_damage_messages > 0 or self.native_damage_records > 0:
             return {
                 "code": "damage_decode_or_identity_failed",
                 "confidence": "medium",
+                "stage": "damage_decode_or_identity",
                 "summary": "捕获到伤害入口，但没有形成可显示的伤害事件。",
             }
         if self.network_records > 0:
             return {
                 "code": "no_damage_observed",
                 "confidence": "medium",
+                "stage": "damage_message",
                 "summary": "网络采集正常，但检测期间没有观察到伤害消息。",
             }
         return {
             "code": "network_hook_silent",
             "confidence": "high",
+            "stage": "network_capture",
             "summary": "采集连接已建立，但没有收到任何可用网络消息。",
         }
 
@@ -608,6 +1109,12 @@ class DiagnosticAnalyzer:
                     for key, value in sorted(self.native_template_stats.items())
                 },
                 "native_template_candidates": self._native_template_summaries(),
+                "native_diagnostic": dict(self.native_diagnostic),
+                "native_diagnostic_snapshots": self.native_diagnostic_snapshots,
+                "native_diagnostic_resets": self.native_diagnostic_resets,
+                "target_identity_links": self._target_identity_links(),
+                "damage_stage_counts": _sorted_counter(self.damage_stage_counts),
+                "damage_gate_reasons": _sorted_counter(self.damage_gate_reasons),
                 "sequence_gaps": self.sequence_gaps,
                 "parser_updates": dict(self.parser_update_counts),
                 "parsed_damage_events": self.parsed_damage_events,
@@ -616,6 +1123,16 @@ class DiagnosticAnalyzer:
                 "boss_confirmed_damage_events": sum(
                     max(0, _safe_int(target.get("boss_mode_events")))
                     for target in damage_targets
+                ),
+                "confirmed_boss_damage_events": sum(
+                    max(0, _safe_int(target.get("records")))
+                    for target in damage_targets
+                    if bool(target.get("confirmed_boss"))
+                ),
+                "damage_dummy_damage_events": sum(
+                    max(0, _safe_int(target.get("records")))
+                    for target in damage_targets
+                    if bool(target.get("damage_dummy"))
                 ),
                 "damage_targets": damage_targets,
                 "team_stat_updates": self.team_stat_updates,

@@ -86,11 +86,112 @@ class CombatHistoryStoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.load_recent(), [])
 
+    def test_pure_healing_record_round_trips_and_invalid_shapes_are_safe(self):
+        pure_healing = {
+            "schema_version": HISTORY_SCHEMA_VERSION,
+            "encounter_id": "healing-dummy-history",
+            "target_filter": "healing_dummy",
+            "total_damage": 0,
+            "team_effective_healing": 900,
+            "hps_duration_seconds": 12.0,
+            "participants": [],
+            "healers": [
+                {
+                    "actor_id": 11,
+                    "effective_healing": 900,
+                    "hps": 75.0,
+                    "skills": [],
+                }
+            ],
+        }
+        path = self.store.save(pure_healing)
+        self.assertTrue(path.is_file())
+        loaded = self.store.load_recent()[0]
+        self.assertEqual(loaded["target_filter"], "healing_dummy")
+        self.assertEqual(loaded["total_damage"], 0)
+        self.assertEqual(loaded["team_effective_healing"], 900)
+
+        malformed = dict(pure_healing)
+        malformed["encounter_id"] = "healing-malformed"
+        malformed["healers"] = None
+        self.assertFalse(self.store._valid_record(malformed))
+
+        # A legacy damage record may carry a malformed optional healing field;
+        # preserve its existing DPS history instead of rejecting the record.
+        legacy_damage = dict(pure_healing)
+        legacy_damage["encounter_id"] = "legacy-damage-with-null-healers"
+        legacy_damage["total_damage"] = 1
+        legacy_damage["target_filter"] = "boss"
+        legacy_damage["healers"] = None
+        self.assertTrue(self.store._valid_record(legacy_damage))
+
+        # Settlement attachment must also tolerate a legacy record whose
+        # optional healing collections were cleared or encoded as null.
+        legacy = dict(pure_healing)
+        legacy["healers"] = None
+        summary = {
+            "summary_id": "healing-legacy-summary",
+            "authoritative": True,
+            "completion_confirmed": True,
+            "actors": [
+                {
+                    "actor_id": 11,
+                    "damage": 0,
+                    "effective_healing": 1_000,
+                    "healing_skills": [],
+                }
+            ],
+        }
+        updated, actor_ids = self.store._apply_exact_stage_healing(
+            legacy, summary, "healing-legacy-summary"
+        )
+        self.assertIsInstance(updated, dict)
+        self.assertEqual(actor_ids, [11])
+        self.assertEqual(updated["healers"][0]["effective_healing"], 1_000)
+
     def test_unsafe_encounter_id_cannot_escape_directory(self):
         path = self.store.save(record("../../outside"))
         self.assertEqual(path.parent, self.directory)
         self.assertTrue(path.is_file())
         self.assertFalse((self.directory.parent / "outside.json").exists())
+
+    def test_healing_display_filters_known_non_healers_and_removes_average(self):
+        source = record("healing-display-normalization")
+        source["duration_seconds"] = 10.0
+        source["participants"] = [
+            {"actor_id": 11, "profession_id": 1_200_002, "damage": 100},
+            {"actor_id": 22, "profession_id": 1_200_003, "damage": 200},
+        ]
+        source["healers"] = [
+            {
+                "actor_id": 11,
+                "profession_id": 1_200_002,
+                "effective_healing": 800,
+                "total_healing": 1_000,
+                "response": {
+                    "average_ms": 600,
+                    "fastest_ms": 400,
+                    "slowest_ms": 800,
+                    "samples": 2,
+                },
+            },
+            {
+                "actor_id": 22,
+                "profession_id": 1_200_003,
+                "effective_healing": 300,
+                "total_healing": 400,
+            },
+        ]
+        source["team_effective_healing"] = 1_100
+        source["team_total_healing"] = 1_400
+
+        normalized = self.store.normalize_healing_for_display(source)
+
+        self.assertEqual([row["actor_id"] for row in normalized["healers"]], [11])
+        self.assertNotIn("average_ms", normalized["healers"][0]["response"])
+        self.assertEqual(normalized["team_effective_healing"], 800)
+        self.assertEqual(normalized["team_total_healing"], 1_000)
+        self.assertEqual(normalized["team_hps"], 80.0)
 
     def test_late_completion_attaches_validation_without_rewriting_damage(self):
         finished = record("late-table", 1_788_058_851.0124204)
@@ -257,6 +358,151 @@ class CombatHistoryStoreTests(unittest.TestCase):
             [11],
         )
 
+    def test_display_restore_uses_embedded_exact_stage_skills_without_resave(self):
+        finished = record("display-restore")
+        finished["total_damage"] = 1_250
+        finished["participants"] = [
+            {
+                "actor_id": 11,
+                "name": "队友",
+                "damage": 1_250,
+                "is_self": False,
+                "skills": [],
+            }
+        ]
+        finished["damage_accounting"] = {
+            "stage_summary_validations": [
+                {
+                    "summary_id": "settlement|display|exact",
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": 11,
+                            "damage": 1_250,
+                            "skills": [
+                                {"skill_id": 101, "damage": 1_000, "hits": 4},
+                                {"skill_id": 102, "damage": 200, "hits": 1},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        restored = self.store.restore_exact_stage_skills_for_display(finished)
+
+        self.assertEqual(finished["participants"][0]["skills"], [])
+        self.assertEqual(restored["total_damage"], 1_250)
+        self.assertEqual(restored["participants"][0]["damage"], 1_250)
+        self.assertEqual(
+            [
+                (skill["skill_id"], skill["damage"])
+                for skill in restored["participants"][0]["skills"]
+            ],
+            [(101, 1_000), (102, 200), (0, 50)],
+        )
+        self.assertEqual(
+            restored["participants"][0]["skill_source"],
+            "server_stage_summary",
+        )
+        self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_display_restore_rejects_mismatch_oversum_and_untrusted_tables(self):
+        finished = record("display-restore-rejected")
+        finished["total_damage"] = 1_550
+        finished["participants"] = [
+            {
+                "actor_id": 11,
+                "damage": 1_250,
+                "is_self": False,
+                "skills": [],
+            },
+            {
+                "actor_id": 22,
+                "damage": 100,
+                "is_self": False,
+                "skills": [],
+            },
+            {
+                "actor_id": 33,
+                "damage": 100,
+                "is_self": False,
+                "skills": [],
+            },
+            {
+                "actor_id": 44,
+                "damage": 100,
+                "is_self": False,
+                "skills": [
+                    {
+                        "skill_id": 401,
+                        "name": "已有精确技能",
+                        "damage": 100,
+                        "max_hit": 100,
+                    }
+                ],
+            },
+        ]
+        finished["damage_accounting"] = {
+            "stage_summary_validations": [
+                {
+                    "summary_id": "settlement|display|rejected",
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": 11,
+                            "damage": 1_300,
+                            "skills": [{"skill_id": 101, "damage": 1_300}],
+                        },
+                        {
+                            "actor_id": 22,
+                            "damage": 100,
+                            "skills": [{"skill_id": 201, "damage": 101}],
+                        },
+                        {
+                            "actor_id": 44,
+                            "damage": 100,
+                            "skills": [{"skill_id": 402, "damage": 100}],
+                        },
+                    ],
+                },
+                {
+                    "summary_id": "settlement|display|untrusted",
+                    "authoritative": False,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": 33,
+                            "damage": 100,
+                            "skills": [{"skill_id": 301, "damage": 100}],
+                        }
+                    ],
+                },
+            ]
+        }
+
+        restored = self.store.restore_exact_stage_skills_for_display(finished)
+
+        self.assertIs(restored, finished)
+        self.assertEqual(
+            [participant["skills"] for participant in restored["participants"]],
+            [
+                [],
+                [],
+                [],
+                [
+                    {
+                        "skill_id": 401,
+                        "name": "已有精确技能",
+                        "damage": 100,
+                        "max_hit": 100,
+                    }
+                ],
+            ],
+        )
+
     def test_late_healing_settlement_keeps_partial_callback_detail_unscaled(self):
         finished = record("late-healing", 1_788_058_851.0)
         finished["duration_seconds"] = 10.0
@@ -332,6 +578,8 @@ class CombatHistoryStoreTests(unittest.TestCase):
         self.assertEqual(healer["hps"], 192.8)
         self.assertIsNone(healer["total_healing"])
         self.assertIsNone(healer["overhealing"])
+        self.assertEqual(healer["overheal_rate"], 0.29)
+        self.assertTrue(healer["overheal_rate_partial"])
         self.assertIsNone(healer["peak_hps"])
         self.assertEqual(healer["observed_effective_healing"], 71)
         self.assertEqual(healer["targets"][0]["effective_healing"], 71)

@@ -17,6 +17,7 @@ MODULE = runpy.run_path(str(Path(__file__).with_name("dps_meter.pyw")))
 CombatModel = MODULE["CombatModel"]
 DpsWindow = MODULE["DpsWindow"]
 ActorStats = MODULE["ActorStats"]
+MonsterStats = MODULE["MonsterStats"]
 IconFactory = MODULE["IconFactory"]
 HookWorker = MODULE["HookWorker"]
 NetworkPacketParser = MODULE["NetworkPacketParser"]
@@ -29,18 +30,26 @@ PROFESSION_COLORS = MODULE["PROFESSION_COLORS"]
 boss_name_is_allowed = MODULE["boss_name_is_allowed"]
 load_boss_name_allowlist = MODULE["load_boss_name_allowlist"]
 load_monster_catalog = MODULE["load_monster_catalog"]
+load_target_identity_catalog = MODULE["load_target_identity_catalog"]
 load_skill_catalog = MODULE["load_skill_catalog"]
 load_skill_metadata = MODULE["load_skill_metadata"]
 restore_history_boss_names = MODULE["restore_history_boss_names"]
+restore_history_skill_names = MODULE["restore_history_skill_names"]
 resolve_program_path = MODULE["resolve_program_path"]
+update_install_paths = MODULE["update_install_paths"]
 window_exstyle_for_lock = MODULE["window_exstyle_for_lock"]
+window_style_for_child = MODULE["window_style_for_child"]
 membership_label_for_card_tier = MODULE["membership_label_for_card_tier"]
 format_duration = MODULE["format_duration"]
 format_response_time = MODULE["format_response_time"]
+format_overheal_rate = MODULE["format_overheal_rate"]
+format_team_health_number = MODULE["format_team_health_number"]
+format_team_health_percent = MODULE["format_team_health_percent"]
 healing_coverage_label = MODULE["healing_coverage_label"]
 dps_duration_seconds = MODULE["dps_duration_seconds"]
 relative_damage_bar_ratio = MODULE["relative_damage_bar_ratio"]
 compact_width_for_visible_metrics = MODULE["compact_width_for_visible_metrics"]
+HEALING_TARGET_TEMPLATE_IDS = MODULE["HEALING_TARGET_TEMPLATE_IDS"]
 main = MODULE["main"]
 
 SELF_ID = 57_266_949_828_970
@@ -50,6 +59,7 @@ NEARBY_ID = 57_266_949_828_999
 MONSTER_ID = 57_236_882_400_409
 SECOND_MONSTER_ID = 57_236_882_400_410
 THIRD_MONSTER_ID = 57_236_882_400_411
+HEALING_DUMMY_ID = 57_236_882_400_412
 BASE_FILETIME = 134_321_845_000_000_000
 
 
@@ -179,6 +189,166 @@ class CombatModelTests(unittest.TestCase):
             {actor_id: row.damage for actor_id, row in model.stats.items()},
         )
 
+    def test_real_boss_hps_uses_the_same_local_and_server_clock_as_dps(self):
+        model = CombatModel(run_id="clock-hps-parity")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 1_000))
+        damage_start = model.first_damage_time
+        damage_end = model.last_damage_time
+        model.ingest_heal(
+            healing(
+                BASE_FILETIME + 3 * 10_000_000,
+                SELF_ID,
+                TEAMMATE_ID,
+                total=600,
+                effective=500,
+            )
+        )
+        model.combat_end_time = damage_end + 20.0
+
+        # Before server synchronization both metrics must use the exact same
+        # local interval, even though the first heal arrived later.
+        self.assertEqual(model.healing_duration(damage_end + 2.0), model.duration(damage_end + 2.0))
+        self.assertEqual(model.healing_active(damage_end + 2.0), model.active(damage_end + 2.0))
+        self.assertEqual(model.first_damage_time, damage_start)
+        self.assertEqual(model.last_damage_time, damage_end)
+
+        final = CombatClockResult(
+            synchronized=True,
+            encounter_id=model.encounter_id,
+            clock_id="c" * 32,
+            started_at=111.0,
+            ended_at=131.9,
+            duration_seconds=20.9,
+            final=True,
+            server_time=132.0,
+        )
+        before_damage = {
+            actor_id: actor.damage for actor_id, actor in model.stats.items()
+        }
+        self.assertTrue(model.apply_combat_clock(final, received_at=132.0))
+        self.assertEqual(model.duration(9_999.0), 20.9)
+        self.assertEqual(model.healing_duration(9_999.0), 20.9)
+        self.assertFalse(model.active(9_999.0))
+        self.assertFalse(model.healing_active(9_999.0))
+        self.assertEqual(
+            before_damage,
+            {actor_id: actor.damage for actor_id, actor in model.stats.items()},
+        )
+
+        record = model.build_combat_record("target_defeated")
+        self.assertIsNotNone(record)
+        self.assertEqual(
+            record["started_at_epoch"], record["healing_started_at_epoch"]
+        )
+        self.assertEqual(record["ended_at_epoch"], record["healing_ended_at_epoch"])
+        self.assertEqual(record["dps_duration_seconds"], record["hps_duration_seconds"])
+        corrected = apply_combat_clock_to_record(record, final)
+        self.assertEqual(
+            corrected["started_at_epoch"], corrected["healing_started_at_epoch"]
+        )
+        self.assertEqual(corrected["ended_at_epoch"], corrected["healing_ended_at_epoch"])
+        self.assertEqual(
+            corrected["dps_duration_seconds"], corrected["hps_duration_seconds"]
+        )
+
+    def test_treatment_dummy_hps_is_independent_without_starting_dps(self):
+        model = CombatModel(run_id="healing-dummy-only")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        template_id = next(iter(HEALING_TARGET_TEMPLATE_IDS))
+        self.assertTrue(
+            model.ingest_profile(
+                {
+                    "entity_id": HEALING_DUMMY_ID,
+                    "template_id": template_id,
+                    "entity_type": "TrainingDummy",
+                    "healing_target": True,
+                    "level": 25,
+                }
+            )
+        )
+        self.assertTrue(
+            model.ingest_heal(
+                {
+                    **healing(
+                        BASE_FILETIME + 5 * 10_000_000,
+                        SELF_ID,
+                        HEALING_DUMMY_ID,
+                        total=1_000,
+                        effective=900,
+                    ),
+                    "target_template_id": template_id,
+                }
+            )
+        )
+        self.assertEqual(model.first_damage_time, 0.0)
+        self.assertIsNone(model.combat_target_id)
+        self.assertEqual(model.current_stats(), [])
+        self.assertEqual(model.healing_duration(model.last_healing_time + 11.0), 1.0)
+
+        self.assertTrue(model.finalize_if_idle(model.last_healing_time + 11.0))
+        record = model.pop_completed_combats()[0]
+        self.assertEqual(record["target_filter"], "healing_dummy")
+        self.assertEqual(record["total_damage"], 0)
+        self.assertEqual(record["team_dps"], 0.0)
+        self.assertGreater(record["team_effective_healing"], 0)
+        self.assertEqual(record["dps_duration_seconds"], 0.0)
+        self.assertEqual(record["hps_duration_seconds"], 1.0)
+        self.assertEqual(record["targets"][0]["template_id"], template_id)
+
+    def test_treatment_dummy_generic_profile_cannot_promote_it_to_boss(self):
+        model = CombatModel(run_id="healing-dummy-profile-guard")
+        template_id = next(iter(HEALING_TARGET_TEMPLATE_IDS))
+        model.ingest_profile(
+            {
+                "entity_id": HEALING_DUMMY_ID,
+                "template_id": template_id,
+                "entity_type": "TrainingDummy",
+                "healing_target": True,
+                "level": 25,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": HEALING_DUMMY_ID,
+                "template_id": 999_999,
+                "entity_type": "Boss",
+                "boss_type": 3,
+                "boss_rank": 3,
+                "level": 99,
+                "name": "stale profile",
+            }
+        )
+        monster = model.monsters[HEALING_DUMMY_ID]
+        self.assertTrue(monster.healing_target)
+        self.assertEqual(monster.template_id, template_id)
+        self.assertEqual(monster.entity_type, "TrainingDummy")
+        self.assertEqual(monster.boss_type, 0)
+        self.assertEqual(monster.boss_rank, 0)
+        self.assertEqual(monster.level, 25)
+        self.assertFalse(model._is_priority_target(HEALING_DUMMY_ID))
+
+    def test_unknown_target_healing_is_rejected_without_exact_dummy_identity(self):
+        model = CombatModel(run_id="healing-target-guard")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        event = healing(
+            BASE_FILETIME + 2 * 10_000_000,
+            SELF_ID,
+            HEALING_DUMMY_ID,
+            total=500,
+            effective=500,
+        )
+        event["target_template_id"] = 123456
+        self.assertFalse(model.ingest_heal(event))
+        self.assertEqual(model.healing_events, [])
+        self.assertEqual(model.first_healing_time, 0.0)
+
     def test_final_combat_clock_recalculates_history_dps_and_hps_only(self):
         record = {
             "encounter_id": "clock-history-000001",
@@ -292,6 +462,33 @@ class CombatModelTests(unittest.TestCase):
             all(image.getchannel("A").getbbox() is not None for image in rendered.values())
         )
         self.assertNotEqual(rendered["lock"].tobytes(), rendered["unlock"].tobytes())
+
+    def test_clear_icon_is_a_distinct_non_refresh_action(self):
+        trash = IconFactory._draw_toolbar_icon("trash", 20, "#f4f6f8")
+        reset = IconFactory._draw_toolbar_icon("reset", 20, "#f4f6f8")
+        self.assertIsNotNone(trash.getchannel("A").getbbox())
+        self.assertNotEqual(trash.tobytes(), reset.tobytes())
+
+    def test_unknown_skill_icon_is_transparent_placeholder(self):
+        # The fallback renderer remains available for app/profession badges,
+        # but the skill path must no longer use it for unknown IDs.
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        skill_source = source[
+            source.index("    def skill(\n") : source.index(
+                "    def _profession_info", source.index("    def skill(\n")
+            )
+        ]
+        self.assertIn("Image.new(\"RGBA\", (size, size), (0, 0, 0, 0))", skill_source)
+        self.assertNotIn("or self._draw_badge(", skill_source)
+
+    def test_child_overlay_style_replaces_popup_without_losing_other_bits(self):
+        popup = 0x96000008
+        child = window_style_for_child(popup)
+        self.assertEqual(child & 0x80000000, 0)
+        self.assertEqual(child & 0x40000000, 0x40000000)
+        self.assertEqual(child & 0x16000008, popup & 0x16000008)
 
     def test_dps_is_continuous_across_minute_boundaries(self):
         """FB985AA2E794890AB5: 00:59/01:00 cannot reset elapsed time."""
@@ -492,6 +689,82 @@ class CombatModelTests(unittest.TestCase):
             r"C:\Users\tester\AppData\Local\Temp\onefile\dps_meter.pyw",
         )
         self.assertEqual(resolved, Path(r"D:\Apps\DpsMeter\meter.exe"))
+
+    def test_update_install_paths_stage_and_target_latest_filename(self):
+        staging, target = update_install_paths(
+            Path(r"D:\Apps\DpsMeter"),
+            Path(r"D:\Apps\DpsMeter\叨叨诡秘-Dps-Logs-v0.0.14.exe"),
+            "叨叨诡秘-Dps-Logs-v0.1.0.exe",
+        )
+        self.assertEqual(
+            target,
+            Path(r"D:\Apps\DpsMeter\叨叨诡秘-Dps-Logs-v0.1.0.exe"),
+        )
+        self.assertEqual(
+            staging,
+            Path(r"D:\Apps\DpsMeter\叨叨诡秘-Dps-Logs-v0.1.0.update.exe"),
+        )
+
+        _staging, fallback_target = update_install_paths(
+            Path(r"D:\Apps\DpsMeter"),
+            Path(r"D:\Apps\DpsMeter\current.exe"),
+            "..\\bad-name.txt",
+        )
+        self.assertEqual(
+            fallback_target,
+            Path(r"D:\Apps\DpsMeter\Dps-Logs-update.exe"),
+        )
+
+    def test_build_scripts_derive_artifact_names_from_source_versions(self):
+        root = Path(__file__).parent
+        main_build = (root / "build_exe.ps1").read_text(encoding="utf-8")
+        diagnostic_build = (root / "build_diagnostic_tool.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("$SourcePath = Join-Path $ProjectDir \"dps_meter.pyw\"", main_build)
+        self.assertIn("$AppVersion", main_build)
+        self.assertIn("$SourcePath = Join-Path $ProjectDir \"diagnostic_report.py\"", diagnostic_build)
+        self.assertIn("$ToolVersion", diagnostic_build)
+        self.assertNotIn("v0.1.0.exe", main_build)
+        self.assertNotIn("$ProductName.exe", diagnostic_build)
+
+    def test_update_replacer_launches_latest_target_and_keeps_legacy_alias(self):
+        window = object.__new__(DpsWindow)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "latest.update.exe"
+            source.write_bytes(b"MZ")
+            target = directory / "叨叨诡秘-Dps-Logs-v0.1.0.exe"
+            legacy = directory / "叨叨诡秘-Dps-Logs-v0.0.14.exe"
+            calls = []
+            function_globals = window._launch_update_replacer.__globals__
+            original_update_dir = function_globals["UPDATE_DIR"]
+            original_popen = function_globals["subprocess"].Popen
+            function_globals["UPDATE_DIR"] = directory
+            function_globals["subprocess"].Popen = lambda *args, **kwargs: calls.append(
+                (args, kwargs)
+            )
+            try:
+                window._launch_update_replacer(
+                    source,
+                    target_path=target,
+                    legacy_target_path=legacy,
+                )
+            finally:
+                function_globals["UPDATE_DIR"] = original_update_dir
+                function_globals["subprocess"].Popen = original_popen
+
+            script = (directory / "apply-update.ps1").read_text(
+                encoding="utf-8-sig"
+            )
+            self.assertEqual(len(calls), 1)
+            command = list(calls[0][0][0])
+            self.assertIn("-LegacyTarget", command)
+            self.assertEqual(command[command.index("-Target") + 1], str(target))
+            self.assertEqual(
+                command[command.index("-LegacyTarget") + 1], str(legacy)
+            )
+            self.assertIn("Copy-Item -LiteralPath $Source -Destination $LegacyTarget", script)
 
     def test_known_solo_roster_does_not_hide_a_confirmed_boss_damage_actor(self):
         model = CombatModel(run_id="damage-participant-test")
@@ -1119,6 +1392,51 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.entity_names[MONSTER_ID], "异化猎犬")
         self.assertEqual(model.monsters[MONSTER_ID].name, "异化猎犬")
 
+    def test_exact_template_restores_live_dps_target_name_and_level(self):
+        model = CombatModel(
+            run_id="target-template-display-test",
+            target_catalog={
+                "7109821": {
+                    "boss_type": 3,
+                    "name": "异化猎犬",
+                    "level": 27,
+                }
+            },
+        )
+        model.ingest_identity({"entity_id": SELF_ID})
+        self.assertTrue(
+            model.ingest_profile(
+                {
+                    "entity_id": MONSTER_ID,
+                    "name": "未知目标",
+                    "entity_type": "Boss",
+                    "template_id": 7_109_821,
+                    "boss_type": 3,
+                    "boss_rank": 3,
+                }
+            )
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 500))
+
+        self.assertEqual(model.display_target_name(MONSTER_ID), "异化猎犬")
+        self.assertEqual(model.monsters[MONSTER_ID].level, 27)
+        self.assertEqual(model.actor_target_rows(SELF_ID)[0]["name"], "异化猎犬")
+
+    def test_display_identity_catalog_keeps_non_boss_exact_templates(self):
+        full_catalog = load_target_identity_catalog()
+        filtered_catalog = load_monster_catalog()
+        non_boss_with_name = next(
+            (
+                template_id
+                for template_id, metadata in full_catalog.items()
+                if template_id not in filtered_catalog
+                and isinstance(metadata, dict)
+                and str(metadata.get("name", "")).strip()
+            ),
+            None,
+        )
+        self.assertIsNotNone(non_boss_with_name)
+
     def test_history_placeholder_boss_names_are_restored_from_template(self):
         record = {
             "monster": {
@@ -1160,13 +1478,16 @@ class CombatModelTests(unittest.TestCase):
                 "7109821": {
                     "boss_type": 3,
                     "name": "异化猎犬",
+                    "level": 27,
                 }
             },
         )
 
         self.assertEqual(record["monster"]["name"], "首领")
         self.assertEqual(restored["monster"]["name"], "异化猎犬")
+        self.assertEqual(restored["monster"]["level"], 27)
         self.assertEqual(restored["targets"][0]["name"], "异化猎犬")
+        self.assertEqual(restored["targets"][0]["level"], 27)
         self.assertEqual(
             restored["participants"][0]["targets"][0]["name"],
             "异化猎犬",
@@ -1175,6 +1496,75 @@ class CombatModelTests(unittest.TestCase):
             restored["participants"][0]["targets"][1]["name"],
             "未分配目标",
         )
+
+    def test_history_placeholder_skill_names_use_verified_current_catalog(self):
+        record = {
+            "participants": [
+                {
+                    "actor_id": TEAMMATE_ID,
+                    "skills": [
+                        {
+                            "skill_id": 83_310_390,
+                            "name": "技能 83310390",
+                            "damage": 900,
+                        },
+                        {
+                            "skill_id": 123,
+                            "name": "历史有效名称",
+                            "damage": 100,
+                        },
+                    ],
+                }
+            ],
+            "healers": [
+                {
+                    "actor_id": TEAMMATE_ID,
+                    "skills": [
+                        {
+                            "skill_id": 86_011_050,
+                            "name": "未知技能",
+                            "effective_healing": 500,
+                        }
+                    ],
+                }
+            ],
+        }
+
+        restored = restore_history_skill_names(
+            record,
+            {
+                "83310390": "荣耀之证",
+                "86011050": "圣光净化",
+                "123": "不应覆盖历史有效名称",
+            },
+        )
+
+        self.assertEqual(
+            record["participants"][0]["skills"][0]["name"],
+            "技能 83310390",
+        )
+        self.assertEqual(
+            restored["participants"][0]["skills"][0]["name"],
+            "荣耀之证",
+        )
+        self.assertEqual(
+            restored["participants"][0]["skills"][1]["name"],
+            "历史有效名称",
+        )
+        self.assertEqual(
+            restored["healers"][0]["skills"][0]["name"],
+            "圣光净化",
+        )
+
+    def test_verified_skill_catalog_contains_restored_settlement_ids(self):
+        catalog = load_skill_catalog()
+
+        self.assertEqual(catalog["80001180"], "飓风之斧")
+        self.assertEqual(catalog["800011802"], "飓风之斧")
+        self.assertEqual(catalog["83310390"], "荣耀之证")
+        self.assertEqual(catalog["833103901"], "荣耀之证")
+        self.assertEqual(catalog["814010009"], "粉碎灵魂")
+        self.assertEqual(catalog["86011050"], "圣光净化")
 
     def test_boss_profile_timestamp_makes_target_immediately_visible(self):
         model = CombatModel(run_id="boss-profile-activity-test")
@@ -1910,12 +2300,12 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.encounter_id, encounter_id)
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
-    def test_v011_keeps_feedback_update_lock_and_fixed_target_scope(self):
+    def test_v010_keeps_feedback_update_lock_and_fixed_target_scope(self):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(APP_VERSION, "0.0.15")
-        self.assertEqual(CLIENT_BUILD, "0.0.15+20260901.1")
+        self.assertEqual(APP_VERSION, "0.1.0")
+        self.assertEqual(CLIENT_BUILD, "0.1.0+20260901.1")
         self.assertIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
@@ -1960,12 +2350,27 @@ class CombatModelTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "draw_empty_state=False",
+            "draw_empty_state=True",
+            source,
+        )
+        self.assertIn(
+            "opaque_background=True",
             source,
         )
         self.assertIn('"dps": "秒伤"', source)
         self.assertIn('("显示秒伤", self.settings_show_dps_var, False)', source)
         self.assertIn('self.config["show_dps"] = self.show_dps', source)
+        self.assertIn('("hps", "HPS 设置")', source)
+        self.assertIn(
+            '("显示有效治疗", self.settings_show_effective_healing_var)',
+            source,
+        )
+        self.assertIn('("显示 HPS", self.settings_show_hps_var)', source)
+        self.assertIn(
+            '("显示过量率", self.settings_show_overheal_rate_var)', source
+        )
+        self.assertNotIn("settings_show_healing_response_var", source)
+        self.assertNotIn('self.config["show_healing_response"] =', source)
         self.assertIn('self.config["layout_version"] = 15', source)
         self.assertIn("class ModernSlider(tk.Canvas):", source)
         self.assertIn('text="主窗口透明度"', source)
@@ -2166,10 +2571,39 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn("share", dps_only)
         self.assertNotIn("critical", dps_only)
 
-    def test_transparency_overlay_does_not_duplicate_empty_damage_message(self):
+    def test_hps_columns_follow_independent_visibility_settings(self):
+        window = object.__new__(DpsWindow)
+        window.compact_mode = False
+        window.main_meter_mode = "hps"
+        window.history_meter_mode = "hps"
+        window.show_effective_healing = True
+        window.show_hps = True
+        window.show_overheal_rate = True
+
+        columns = window._main_columns(620)
+        self.assertLess(columns["effective"], columns["hps"])
+        self.assertLess(columns["hps"], columns["overheal"])
+        self.assertNotIn("response", columns)
+
+        window.show_effective_healing = False
+        window.show_overheal_rate = False
+        main_reduced = window._main_columns(620)
+        history_reduced = window._history_participant_columns(720)
+        for reduced in (main_reduced, history_reduced):
+            self.assertNotIn("effective", reduced)
+            self.assertIn("hps", reduced)
+            self.assertNotIn("overheal", reduced)
+            self.assertNotIn("response", reduced)
+
+        window.show_hps = False
+        self.assertEqual(window._enabled_healing_metrics(), ())
+        self.assertEqual(set(window._main_columns(620)), {"name_limit"})
+
+    def test_transparency_overlay_masks_and_redraws_empty_damage_message(self):
         class Canvas:
             def __init__(self):
                 self.texts = []
+                self.rectangles = []
 
             @staticmethod
             def delete(*_args):
@@ -2185,6 +2619,9 @@ class CombatModelTests(unittest.TestCase):
 
             def create_text(self, *args, **kwargs):
                 self.texts.append((args, kwargs))
+
+            def create_rectangle(self, *args, **kwargs):
+                self.rectangles.append((args, kwargs))
 
             @staticmethod
             def configure(**_kwargs):
@@ -2218,14 +2655,91 @@ class CombatModelTests(unittest.TestCase):
         window._draw_main_rows_on_canvas(
             overlay_canvas,
             update_scroll_state=False,
-            draw_empty_state=False,
+            draw_empty_state=True,
+            opaque_background=True,
         )
 
         self.assertEqual(
             [options["text"] for _args, options in main_canvas.texts],
             ["暂无伤害记录"],
         )
-        self.assertEqual(overlay_canvas.texts, [])
+        self.assertEqual(
+            [options["text"] for _args, options in overlay_canvas.texts],
+            [options["text"] for _args, options in main_canvas.texts],
+        )
+        self.assertEqual(len(overlay_canvas.rectangles), 1)
+
+    def test_transparent_main_overlay_masks_backing_rows_on_every_sync(self):
+        class Root:
+            @staticmethod
+            def winfo_exists():
+                return True
+
+            @staticmethod
+            def update_idletasks():
+                return None
+
+            @staticmethod
+            def winfo_rootx():
+                return 40
+
+            @staticmethod
+            def winfo_rooty():
+                return 60
+
+            @staticmethod
+            def winfo_width():
+                return 500
+
+            @staticmethod
+            def winfo_height():
+                return 300
+
+            @staticmethod
+            def state():
+                return "normal"
+
+        class OverlayWindow:
+            @staticmethod
+            def state():
+                return "normal"
+
+            @staticmethod
+            def update_idletasks():
+                return None
+
+            @staticmethod
+            def winfo_exists():
+                return True
+
+        calls = []
+        window = object.__new__(DpsWindow)
+        window.main_content_overlay_sync_after_id = "pending"
+        window.closing = False
+        window.root = Root()
+        window.window_alpha = 0.8
+        window.main_content_overlay_window = OverlayWindow()
+        window.main_content_overlay_rows = object()
+        window.main_content_overlay_dps = object()
+        window.rows_canvas = object()
+        window.main_content_overlay_child = True
+        window.main_content_overlay_root_geometry = None
+        window.compact_mode = False
+        window.dps_value = object()
+        window._ensure_main_content_overlay = lambda: True
+        window._set_main_content_overlay_bounds = lambda *_args: None
+        window._place_overlay_canvas = lambda *_args: True
+        window._draw_main_rows_on_canvas = (
+            lambda canvas, **options: calls.append((canvas, options))
+        )
+        window._draw_main_content_overlay_dps = lambda: None
+
+        window._sync_main_content_overlay()
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0][1]["update_scroll_state"])
+        self.assertTrue(calls[0][1]["draw_empty_state"])
+        self.assertTrue(calls[0][1]["opaque_background"])
 
     def test_main_wheel_scrolls_normal_and_compact_dps_lists(self):
         class Canvas:
@@ -2351,7 +2865,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(second_rect[0][3] - second_rect[0][1], 32)
         self.assertEqual(window.rows_canvas.options["yscrollincrement"], 1)
 
-    def test_hps_main_rows_show_effective_hps_overheal_and_response(self):
+    def test_hps_main_rows_show_effective_hps_and_overheal_without_average(self):
         class Canvas:
             def __init__(self):
                 self.texts = []
@@ -2402,7 +2916,7 @@ class CombatModelTests(unittest.TestCase):
                     "effective_healing": 900,
                     "hps": 90,
                     "overheal_rate": 0.25,
-                    "response": {"average_ms": 500},
+                    "overheal_rate_partial": True,
                 },
                 {
                     "actor_id": TEAMMATE_ID,
@@ -2412,7 +2926,6 @@ class CombatModelTests(unittest.TestCase):
                     "total_healing": 500,
                     "hps": 0,
                     "overheal_rate": 1.0,
-                    "response": {"average_ms": None},
                 },
             ],
         }
@@ -2440,9 +2953,10 @@ class CombatModelTests(unittest.TestCase):
         self.assertIn("治疗者", rendered)
         self.assertIn("900", rendered)
         self.assertIn("90", rendered)
-        self.assertIn("25.0%", rendered)
+        self.assertIn("25.0%*", rendered)
         self.assertIn("100.0%", rendered)
-        self.assertIn("500ms", rendered)
+        self.assertNotIn("500ms", rendered)
+        self.assertEqual(format_overheal_rate(0.25, partial=True), "25.0%*")
         self.assertEqual(format_response_time(1250), "1.25s")
         self.assertIn("明细为已观测部分", healing_coverage_label(
             "server_effective_with_partial_callbacks"
@@ -4557,11 +5071,146 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(healer["peak_hps"], 180.0)
         self.assertEqual(healer["skills"][0]["share"], 1.0)
         self.assertEqual(healer["targets"][0]["name"], "队友")
-        self.assertEqual(healer["response"]["average_ms"], 500.0)
+        self.assertNotIn("average_ms", healer["response"])
         self.assertEqual(healer["response"]["fastest_ms"], 500.0)
         self.assertEqual(healer["response"]["slowest_ms"], 500.0)
         self.assertEqual(healer["response"]["samples"], 1)
         self.assertEqual(healer["response"]["covered_target_count"], 1)
+
+    def test_team_health_summary_aggregates_only_complete_bound_samples(self):
+        model = CombatModel(run_id="team-health-summary")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+
+        self.assertTrue(
+            model.ingest_actor_health(
+                actor_health(BASE_FILETIME + 10_000, SELF_ID, 20_000, 25_000)
+            )
+        )
+        self.assertTrue(
+            model.ingest_actor_health(
+                actor_health(BASE_FILETIME + 20_000, TEAMMATE_ID, 23_100, 26_700)
+            )
+        )
+
+        summary = model.team_health_summary()
+        self.assertTrue(summary["available"])
+        self.assertTrue(summary["complete"])
+        self.assertEqual(summary["expected_member_count"], 2)
+        self.assertEqual(summary["observed_member_count"], 2)
+        self.assertEqual(summary["current_hp"], 43_100)
+        self.assertEqual(summary["max_hp"], 51_700)
+        self.assertEqual(summary["lowest"]["actor_id"], SELF_ID)
+        self.assertEqual(summary["lowest"]["ratio"], 0.8)
+        self.assertEqual(format_team_health_number(summary["current_hp"]), "4.31万")
+        self.assertEqual(format_team_health_number(summary["max_hp"]), "5.17万")
+        self.assertEqual(format_team_health_percent(summary["ratio"]), "83.4%")
+        self.assertEqual(format_team_health_percent(summary["lowest"]["ratio"]), "80%")
+
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 1_000,
+                "death_confirmed": True,
+                "filetime_100ns": BASE_FILETIME + 30_000,
+            }
+        )
+        model.ingest_actor_health(
+            actor_health(BASE_FILETIME + 40_000, SELF_ID, 25_000, 25_000)
+        )
+        model.ingest_actor_health(
+            actor_health(BASE_FILETIME + 50_000, TEAMMATE_ID, 26_700, 26_700)
+        )
+        healed = model.team_health_summary()
+        self.assertEqual(healed["ratio"], 1.0)
+        self.assertEqual(healed["lowest"]["actor_id"], SELF_ID)
+        self.assertEqual(healed["lowest"]["ratio"], 0.8)
+
+        model.party_member_count = 3
+        incomplete = model.team_health_summary()
+        self.assertFalse(incomplete["available"])
+        self.assertFalse(incomplete["complete"])
+        self.assertIsNone(incomplete["current_hp"])
+        self.assertEqual(incomplete["observed_member_count"], 2)
+
+    def test_team_health_does_not_label_idle_full_hp_as_encounter_low(self):
+        model = CombatModel(run_id="team-health-idle-low")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_actor_health(
+            actor_health(BASE_FILETIME + 10_000, SELF_ID, 25_000, 25_000)
+        )
+
+        summary = model.team_health_summary()
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["ratio"], 1.0)
+        self.assertIsNone(summary["lowest"])
+
+    def test_hps_banner_uses_same_current_boss_as_dps(self):
+        class Canvas:
+            def __init__(self):
+                self.rectangles = []
+                self.texts = []
+
+            @staticmethod
+            def delete(*_args):
+                return None
+
+            @staticmethod
+            def winfo_width():
+                return 620
+
+            @staticmethod
+            def winfo_height():
+                return 36
+
+            def create_rectangle(self, *args, **kwargs):
+                self.rectangles.append((args, kwargs))
+
+            def create_text(self, *args, **kwargs):
+                self.texts.append((args, kwargs))
+
+        window = object.__new__(DpsWindow)
+        window.main_meter_mode = "hps"
+        window.monster_hp_canvas = Canvas()
+        monster = type(
+            "Monster",
+            (),
+            {
+                "name": "测试 Boss",
+                "level": 60,
+                "current_hp": 50,
+                "max_hp": 100,
+                "observed_max_hp": 100,
+            },
+        )()
+        window.model = type(
+            "Model",
+            (),
+            {
+                "team_health_summary": lambda _self: (_ for _ in ()).throw(
+                    AssertionError("HPS banner must not replace Boss with team HP")
+                ),
+                "current_monster": lambda _self: monster,
+            },
+        )()
+        window._fit_main_actor_name = lambda value, _width: value
+        window._ui_font = lambda _role: None
+
+        window._draw_monster_hp()
+
+        self.assertEqual(len(window.monster_hp_canvas.rectangles), 2)
+        self.assertEqual(len(window.monster_hp_canvas.texts), 1)
+        text_args, text_options = window.monster_hp_canvas.texts[0]
+        self.assertEqual(text_args[:2], (310, 18))
+        self.assertEqual(
+            text_options["text"],
+            "Lv.60   测试 Boss   50 / 100   50.0%",
+        )
 
     def test_healing_summary_reuses_same_second_aggregate_cache(self):
         model = CombatModel(run_id="healing-cache-test")
@@ -4652,9 +5301,68 @@ class CombatModelTests(unittest.TestCase):
 
         response = model.healing_summary(duration=10.0)["healers"][0]["response"]
         self.assertEqual(response["samples"], 1)
-        self.assertEqual(response["average_ms"], 1_000.0)
+        self.assertNotIn("average_ms", response)
         self.assertEqual(response["fastest_ms"], 1_000.0)
         self.assertEqual(response["slowest_ms"], 1_000.0)
+
+    def test_each_healer_gets_own_first_response_to_same_health_drop(self):
+        second_healer_id = NEARBY_ID
+        model = CombatModel(run_id="healing-response-two-healers")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party(
+            {"entity_ids": [TEAMMATE_ID, second_healer_id]}
+        )
+        for actor_id in (SELF_ID, second_healer_id):
+            model.ingest_profile(
+                {
+                    "entity_id": actor_id,
+                    "entity_type": "Player",
+                    "profession_id": 1_200_002,
+                }
+            )
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        model.ingest_actor_health(
+            actor_health(BASE_FILETIME + 10_000_000, TEAMMATE_ID, 10_000, 10_000)
+        )
+        model.ingest_actor_health(
+            actor_health(BASE_FILETIME + 20_000_000, TEAMMATE_ID, 6_000, 10_000)
+        )
+        model.ingest_heal(
+            healing(
+                BASE_FILETIME + 25_000_000,
+                SELF_ID,
+                TEAMMATE_ID,
+                total=500,
+                effective=500,
+            )
+        )
+        model.ingest_heal(
+            healing(
+                BASE_FILETIME + 28_000_000,
+                second_healer_id,
+                TEAMMATE_ID,
+                total=400,
+                effective=400,
+            )
+        )
+
+        by_actor = {
+            row["actor_id"]: row
+            for row in model.healing_summary(duration=10.0)["healers"]
+        }
+        self.assertEqual(by_actor[SELF_ID]["response"]["samples"], 1)
+        self.assertEqual(
+            by_actor[SELF_ID]["response"]["fastest_ms"], 500.0
+        )
+        self.assertEqual(
+            by_actor[second_healer_id]["response"]["samples"], 1
+        )
+        self.assertEqual(
+            by_actor[second_healer_id]["response"]["fastest_ms"], 800.0
+        )
 
     def test_actor_merge_keeps_earliest_unanswered_hp_drop(self):
         model = CombatModel(run_id="healing-response-actor-merge")
@@ -4743,10 +5451,97 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(healer["hps"], 192.8)
         self.assertIsNone(healer["total_healing"])
         self.assertIsNone(healer["overhealing"])
+        self.assertEqual(healer["overheal_rate"], 0.29)
+        self.assertTrue(healer["overheal_rate_partial"])
         self.assertIsNone(healer["peak_hps"])
         self.assertEqual(healer["observed_effective_healing"], 71)
         self.assertEqual(healer["skills"][0]["effective_healing"], 1_928)
         self.assertIsNone(healer["skills"][0]["total_healing"])
+
+    def test_stage_profession_excludes_confirmed_non_healer_from_hps(self):
+        model = CombatModel(run_id="healing-role-filter")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        self.assertTrue(
+            model.ingest_heal(
+                healing(
+                    BASE_FILETIME + 20_000,
+                    SELF_ID,
+                    TEAMMATE_ID,
+                    total=1_000,
+                    effective=800,
+                )
+            )
+        )
+        self.assertTrue(
+            model.ingest_heal(
+                healing(
+                    BASE_FILETIME + 21_000,
+                    TEAMMATE_ID,
+                    SELF_ID,
+                    total=500,
+                    effective=400,
+                )
+            )
+        )
+        death_time = BASE_FILETIME + 30_000
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 0,
+                "max_hp": 1_000,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "healing-role-settlement",
+                    "filetime_100ns": death_time + 10_000,
+                    "member_count": 2,
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": SELF_ID,
+                            "profession_id": 1_200_002,
+                            "damage": 100,
+                            "effective_healing": 800,
+                            "healing_skills": [
+                                {
+                                    "skill_id": 86_021_030,
+                                    "effective_healing": 800,
+                                }
+                            ],
+                        },
+                        {
+                            "actor_id": TEAMMATE_ID,
+                            "profession_id": 1_200_003,
+                            "damage": 0,
+                            "effective_healing": 400,
+                            "healing_skills": [
+                                {
+                                    "skill_id": 86_021_030,
+                                    "effective_healing": 400,
+                                }
+                            ],
+                        },
+                    ],
+                }
+            )
+        )
+
+        summary = model.healing_summary(duration=10.0)
+        self.assertEqual(
+            [row["actor_id"] for row in summary["healers"]], [SELF_ID]
+        )
+        self.assertNotIn(TEAMMATE_ID, model.stage_healing_snapshots)
+        self.assertEqual(model.entity_professions[TEAMMATE_ID], 1_200_003)
 
     def test_server_verified_healing_keeps_fully_overhealed_skill(self):
         model = CombatModel(run_id="healing-zero-effective-skill")

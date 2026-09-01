@@ -14,6 +14,20 @@ from pathlib import Path
 HISTORY_SCHEMA_VERSION = 1
 _SAFE_ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 _FILETIME_EPOCH_OFFSET = 116_444_736_000_000_000
+_HEALER_PROFESSION_IDS = frozenset({1_200_002})
+
+
+def _parsed_profession_id(value: object) -> int:
+    try:
+        profession_id = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return profession_id if 1_200_001 <= profession_id <= 1_200_007 else 0
+
+
+def _known_non_healer(value: object) -> bool:
+    profession_id = _parsed_profession_id(value)
+    return bool(profession_id and profession_id not in _HEALER_PROFESSION_IDS)
 
 
 class CombatHistoryStore:
@@ -40,9 +54,38 @@ class CombatHistoryStore:
         if not isinstance(value.get("participants"), list):
             return False
         try:
-            return int(value.get("total_damage", 0)) > 0
+            total_damage = int(value.get("total_damage", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             return False
+        if total_damage > 0:
+            return True
+        # A treatment-dummy encounter is intentionally damage-free.  Accept it
+        # only when the record carries positive, explicitly attributed healing;
+        # arbitrary empty records remain invalid.
+        if str(value.get("target_filter", "")).casefold() != "healing_dummy":
+            return False
+        # ``healers`` is optional in older damage-only records, but a
+        # damage-free treatment-dummy record must retain its serialized
+        # collection shape.  Otherwise a truncated/null collection could
+        # masquerade as a valid pure-healing encounter.
+        healers = value.get("healers", [])
+        if "healers" in value and not isinstance(healers, list):
+            return False
+        try:
+            effective = int(value.get("team_effective_healing", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            effective = 0
+        if effective > 0:
+            return True
+        for healer in healers:
+            if not isinstance(healer, dict):
+                continue
+            try:
+                if int(healer.get("effective_healing", 0) or 0) > 0:
+                    return True
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return False
 
     def save(self, record: dict) -> Path:
         payload = dict(record)
@@ -75,6 +118,100 @@ class CombatHistoryStore:
             except OSError:
                 pass
         return target
+
+    @staticmethod
+    def normalize_healing_for_display(record: object) -> object:
+        """Hide confirmed non-healers and obsolete averages in display copies."""
+        if not isinstance(record, dict):
+            return record
+        raw_healers = record.get("healers")
+        if not isinstance(raw_healers, list):
+            return record
+
+        participant_professions: dict[int, int] = {}
+        raw_participants = record.get("participants", [])
+        if isinstance(raw_participants, list):
+            for participant in raw_participants:
+                if not isinstance(participant, dict):
+                    continue
+                try:
+                    actor_id = int(participant.get("actor_id", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                profession_id = _parsed_profession_id(
+                    participant.get("profession_id", 0)
+                )
+                if actor_id > 0 and profession_id:
+                    participant_professions[actor_id] = profession_id
+
+        changed = False
+        healers: list[dict] = []
+        for raw_healer in raw_healers:
+            if not isinstance(raw_healer, dict):
+                changed = True
+                continue
+            try:
+                actor_id = int(raw_healer.get("actor_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                actor_id = 0
+            profession_id = _parsed_profession_id(
+                raw_healer.get("profession_id", 0)
+            ) or participant_professions.get(actor_id, 0)
+            if _known_non_healer(profession_id):
+                changed = True
+                continue
+            healer = dict(raw_healer)
+            response = healer.get("response")
+            if isinstance(response, dict) and "average_ms" in response:
+                response = dict(response)
+                response.pop("average_ms", None)
+                healer["response"] = response
+                changed = True
+            healers.append(healer)
+
+        if not changed:
+            return record
+        updated = dict(record)
+        updated["healers"] = healers
+        try:
+            duration = float(
+                updated.get(
+                    "hps_duration_seconds",
+                    updated.get("duration_seconds", 0.0),
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            duration = 0.0
+        divisor = float(max(1, int(duration))) if duration > 0 else 1.0
+        team_effective = 0
+        for row in healers:
+            try:
+                team_effective += max(
+                    0, int(row.get("effective_healing", 0) or 0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+        parsed_totals: list[int] = []
+        complete_totals = True
+        for row in healers:
+            value = row.get("total_healing")
+            if value is None:
+                complete_totals = False
+                break
+            try:
+                parsed_totals.append(max(0, int(value or 0)))
+            except (TypeError, ValueError, OverflowError):
+                complete_totals = False
+                break
+        team_total = sum(parsed_totals) if complete_totals else None
+        updated["team_hps"] = team_effective / divisor
+        updated["team_effective_healing"] = team_effective
+        updated["team_total_healing"] = team_total
+        updated["team_overhealing"] = (
+            team_total - team_effective if team_total is not None else None
+        )
+        return updated
 
     def delete(self, encounter_id: object) -> bool:
         path = self.directory / f"{self._safe_encounter_id(encounter_id)}.json"
@@ -150,6 +287,8 @@ class CombatHistoryStore:
         record: dict,
         summary: dict,
         summary_id: str,
+        *,
+        missing_only: bool = False,
     ) -> tuple[dict, list[int]]:
         """Apply only server skill rows whose actor total exactly matches history."""
         summary_actors: dict[int, dict] = {}
@@ -194,16 +333,24 @@ class CombatHistoryStore:
                 continue
 
             existing_names: dict[int, str] = {}
+            has_classified_skill_damage = False
             for raw_skill in participant.get("skills", []):
                 if not isinstance(raw_skill, dict):
                     continue
                 try:
                     skill_id = int(raw_skill.get("skill_id", 0) or 0)
+                    skill_damage = max(
+                        0, int(raw_skill.get("damage", 0) or 0)
+                    )
                 except (TypeError, ValueError, OverflowError):
                     continue
                 name = str(raw_skill.get("name", "")).strip()
                 if skill_id > 0 and name:
                     existing_names[skill_id] = name
+                if skill_id > 0 and skill_damage > 0:
+                    has_classified_skill_damage = True
+            if missing_only and has_classified_skill_damage:
+                continue
 
             parsed_skills: dict[int, tuple[int, int]] = {}
             for raw_skill in summary_actor.get("skills", []):
@@ -273,6 +420,50 @@ class CombatHistoryStore:
         updated["participants"] = participants
         return updated, sorted(set(applied_actor_ids))
 
+    @classmethod
+    def restore_exact_stage_skills_for_display(cls, record: object) -> object:
+        """Restore embedded settlement skills without changing archived totals.
+
+        Older history files can contain the authoritative completion table but
+        predate the code that copied its exact teammate skill rows into the
+        participant details.  This method is intentionally display-only: it
+        returns a copied record, requires an authoritative completed summary,
+        and delegates to the same strict actor-total reconciliation used when
+        a live settlement arrives.
+        """
+        if not isinstance(record, dict):
+            return record
+        accounting = record.get("damage_accounting")
+        if not isinstance(accounting, dict):
+            return record
+        summaries = accounting.get("stage_summary_validations")
+        if not isinstance(summaries, list):
+            return record
+
+        restored = record
+        changed = False
+        for summary in summaries:
+            if (
+                not isinstance(summary, dict)
+                or not bool(summary.get("authoritative"))
+                or not bool(summary.get("completion_confirmed"))
+                or not isinstance(summary.get("actors"), list)
+            ):
+                continue
+            summary_id = str(summary.get("summary_id", "")).strip()
+            if not summary_id:
+                continue
+            candidate, actor_ids = cls._apply_exact_stage_skills(
+                restored,
+                summary,
+                summary_id,
+                missing_only=True,
+            )
+            if actor_ids:
+                restored = candidate
+                changed = True
+        return restored if changed else record
+
     @staticmethod
     def _apply_exact_stage_healing(
         record: dict,
@@ -283,13 +474,58 @@ class CombatHistoryStore:
         participant_damage = CombatHistoryStore._actor_damage(
             record.get("participants")
         )
-        existing_healers = {
-            int(row.get("actor_id", 0) or 0): dict(row)
-            for row in record.get("healers", [])
-            if isinstance(row, dict) and int(row.get("actor_id", 0) or 0) > 0
-        }
+        participant_professions: dict[int, int] = {}
+        raw_participants = record.get("participants", [])
+        if isinstance(raw_participants, list):
+            for participant in raw_participants:
+                if not isinstance(participant, dict):
+                    continue
+                try:
+                    participant_id = int(
+                        participant.get("actor_id", 0) or 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                participant_profession = _parsed_profession_id(
+                    participant.get("profession_id", 0)
+                )
+                if participant_id > 0 and participant_profession:
+                    participant_professions[participant_id] = (
+                        participant_profession
+                    )
+        raw_healers = record.get("healers", [])
+        if not isinstance(raw_healers, list):
+            raw_healers = []
+        existing_healers: dict[int, dict] = {}
+        for raw_healer in raw_healers:
+            if not isinstance(raw_healer, dict):
+                continue
+            try:
+                actor_id = int(raw_healer.get("actor_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if actor_id <= 0:
+                continue
+            profession_id = _parsed_profession_id(
+                raw_healer.get("profession_id", 0)
+            ) or participant_professions.get(actor_id, 0)
+            if _known_non_healer(profession_id):
+                continue
+            healer = dict(raw_healer)
+            response = healer.get("response")
+            if isinstance(response, dict) and "average_ms" in response:
+                response = dict(response)
+                response.pop("average_ms", None)
+                healer["response"] = response
+            existing_healers[actor_id] = healer
         try:
-            duration = float(record.get("duration_seconds", 0.0) or 0.0)
+            duration = float(
+                record.get(
+                    "hps_duration_seconds",
+                    record.get("duration_seconds", 0.0),
+                )
+                or 0.0
+            )
         except (TypeError, ValueError, OverflowError):
             duration = 0.0
         divisor = float(max(1, int(duration))) if duration > 0 else 1.0
@@ -308,6 +544,14 @@ class CombatHistoryStore:
                 continue
             if actor_id <= 0:
                 continue
+            profession_id = _parsed_profession_id(
+                raw_actor.get("profession_id", 0)
+            ) or _parsed_profession_id(
+                existing_healers.get(actor_id, {}).get("profession_id", 0)
+            ) or participant_professions.get(actor_id, 0)
+            if _known_non_healer(profession_id):
+                existing_healers.pop(actor_id, None)
+                continue
             if actor_id in participant_damage:
                 if participant_damage[actor_id] != actor_damage:
                     continue
@@ -315,7 +559,10 @@ class CombatHistoryStore:
                 continue
 
             parsed_skills: dict[int, int] = {}
-            for raw_skill in raw_actor.get("healing_skills", []):
+            raw_healing_skills = raw_actor.get("healing_skills", [])
+            if not isinstance(raw_healing_skills, list):
+                raw_healing_skills = []
+            for raw_skill in raw_healing_skills:
                 if not isinstance(raw_skill, dict):
                     continue
                 try:
@@ -357,7 +604,10 @@ class CombatHistoryStore:
             observed_skill_effective: dict[int, int] = {}
             skill_names: dict[int, str] = {}
             observed_skill_rows: dict[int, dict] = {}
-            for raw_skill in existing.get("skills", []):
+            existing_skills = existing.get("skills", [])
+            if not isinstance(existing_skills, list):
+                existing_skills = []
+            for raw_skill in existing_skills:
                 if not isinstance(raw_skill, dict):
                     continue
                 try:
@@ -382,7 +632,23 @@ class CombatHistoryStore:
             )
             total_healing = observed_total if verified else None
             overhealing = (
-                observed_total - effective if verified else None
+                max(0, observed_total - effective) if verified else None
+            )
+            observed_overhealing = max(
+                0, observed_total - observed_effective
+            )
+            observed_overheal_rate = (
+                observed_overhealing / observed_total
+                if observed_total > 0
+                else None
+            )
+            shown_overheal_rate = (
+                overhealing / total_healing
+                if total_healing and overhealing is not None
+                else observed_overheal_rate
+            )
+            overheal_rate_partial = bool(
+                not verified and observed_overheal_rate is not None
             )
             skills = []
             for skill_id, skill_healing in sorted(
@@ -466,24 +732,25 @@ class CombatHistoryStore:
                     "name": str(raw_actor.get("name", "")).strip()
                     or str(existing.get("name", "")).strip()
                     or f"玩家 {actor_id}",
-                    "profession_id": int(
-                        raw_actor.get(
-                            "profession_id", existing.get("profession_id", 0)
-                        )
-                        or 0
-                    ),
+                    "profession_id": profession_id,
                     "hps": effective / divisor,
                     "total_healing": total_healing,
                     "effective_healing": effective,
                     "overhealing": overhealing,
-                    "overheal_rate": (
-                        overhealing / total_healing
-                        if total_healing and overhealing is not None
-                        else None
+                    "overheal_rate": shown_overheal_rate,
+                    "overheal_rate_partial": overheal_rate_partial,
+                    "overheal_rate_source": (
+                        "observed_partial"
+                        if overheal_rate_partial
+                        else "complete"
+                        if shown_overheal_rate is not None
+                        else "unavailable"
                     ),
                     "peak_hps": existing.get("peak_hps") if verified else None,
                     "observed_total_healing": observed_total,
                     "observed_effective_healing": observed_effective,
+                    "observed_overhealing": observed_overhealing,
+                    "observed_overheal_rate": observed_overheal_rate,
                     "coverage": (
                         "server_verified_callbacks"
                         if verified

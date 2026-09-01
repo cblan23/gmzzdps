@@ -140,6 +140,60 @@ class DiagnosticAnalyzerTests(unittest.TestCase):
         self.assertEqual(target["template_id"], 7_100_001)
         self.assertTrue(target["catalog_match"])
         self.assertTrue(target["boss_mode_displayable"])
+        links = report["capture"]["target_identity_links"]
+        self.assertEqual(links["damage_targets"], 1)
+        self.assertEqual(links["native_entity_exact_matches"], 1)
+        self.assertEqual(links["native_template_exact_matches"], 1)
+        self.assertEqual(links["confirmed_boss_exact_matches"], 1)
+
+    def test_non_type3_damage_dummy_validates_common_target_pipeline(self):
+        dummy_template_id = 7_107_304
+        analyzer = DiagnosticAnalyzer(
+            {
+                "7100001": {"boss_type": 3, "name": "其他 Boss"},
+                str(dummy_template_id): {
+                    "boss_type": 0,
+                    "name": "伤害木桩",
+                },
+            }
+        )
+        analyzer.handle(
+            "connected",
+            {
+                "game_pid": 9784,
+                "native_damage_hook_installed": False,
+                "damage_source": "script",
+            },
+        )
+        analyzer.handle(
+            "batch",
+            {
+                "records": [damage_record()],
+                "native_records": [],
+                "native_boss_records": [
+                    native_boss_record(dummy_template_id, 0)
+                ],
+                "native_name_records": [],
+                "native_skill_name_records": [],
+                "native_damage_hook_installed": False,
+            },
+        )
+
+        report = analyzer.finish({"elevated": True})
+
+        self.assertEqual(
+            report["assessment"]["code"], "damage_dummy_pipeline_ok"
+        )
+        capture = report["capture"]
+        self.assertEqual(capture["confirmed_boss_damage_events"], 0)
+        self.assertEqual(capture["damage_dummy_damage_events"], 1)
+        target = capture["damage_targets"][0]
+        self.assertTrue(target["damage_dummy"])
+        self.assertTrue(target["target_mode_displayable"])
+        links = capture["target_identity_links"]
+        self.assertEqual(links["native_entity_exact_matches"], 1)
+        self.assertEqual(links["native_template_exact_matches"], 1)
+        self.assertEqual(links["damage_dummy_exact_matches"], 1)
 
     def test_unknown_target_is_not_reported_as_displayable(self):
         analyzer = DiagnosticAnalyzer(
@@ -311,6 +365,88 @@ class DiagnosticAnalyzerTests(unittest.TestCase):
         self.assertNotIn("private-player-token", report_text)
         self.assertNotIn("private-player-name", report_text)
         self.assertNotIn(str(TARGET_ID), report_text)
+
+    def test_lookup_report_distinguishes_unreadable_object_table(self):
+        analyzer = DiagnosticAnalyzer(
+            {"7100001": {"boss_type": 3, "name": "其他 Boss"}}
+        )
+        analyzer.handle(
+            "connected",
+            {
+                "game_pid": 9784,
+                "native_damage_hook_installed": True,
+                "damage_source": "native",
+            },
+        )
+        analyzer.handle(
+            "batch",
+            {
+                "records": [damage_record()],
+                "native_records": [native_damage_record()],
+                "native_boss_records": [],
+                "native_name_records": [],
+                "native_skill_name_records": [],
+                "native_damage_hook_installed": True,
+                "native_diagnostic": {
+                    "target_boss_lookup_enabled": True,
+                    "target_lookup_candidates": 1,
+                    "target_lookup_object_scans": 1,
+                    "target_lookup_trusted_classes": 1,
+                    "target_lookup_object_table_reads": 1,
+                    "target_lookup_object_table_failures": 1,
+                    "target_lookup_object_slots_scanned": 0,
+                },
+            },
+        )
+
+        report = analyzer.finish({"elevated": True})
+
+        self.assertEqual(
+            report["assessment"]["code"],
+            "target_lookup_object_table_unreadable",
+        )
+
+    def test_lookup_report_distinguishes_exact_target_with_zero_template(self):
+        analyzer = DiagnosticAnalyzer(
+            {"7100001": {"boss_type": 3, "name": "其他 Boss"}}
+        )
+        analyzer.handle(
+            "connected",
+            {
+                "game_pid": 9784,
+                "native_damage_hook_installed": True,
+                "damage_source": "native",
+            },
+        )
+        analyzer.handle(
+            "batch",
+            {
+                "records": [damage_record()],
+                "native_records": [native_damage_record()],
+                "native_boss_records": [],
+                "native_name_records": [],
+                "native_skill_name_records": [],
+                "native_damage_hook_installed": True,
+                "native_diagnostic": {
+                    "target_boss_lookup_enabled": True,
+                    "target_lookup_candidates": 1,
+                    "target_lookup_object_scans": 1,
+                    "target_lookup_trusted_classes": 1,
+                    "target_lookup_object_slots_scanned": 100,
+                    "target_lookup_object_class_candidates": 5,
+                    "target_lookup_object_exact_entity_matches": 1,
+                    "target_lookup_object_exact_template_zero": 1,
+                    "target_lookup_timeouts": 1,
+                },
+            },
+        )
+
+        report = analyzer.finish({"elevated": True})
+
+        self.assertEqual(
+            report["assessment"]["code"],
+            "target_lookup_exact_component_template_zero",
+        )
 
 
 if __name__ == "__main__":

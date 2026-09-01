@@ -8,8 +8,27 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python = Join-Path $ProjectDir ".venv-build310\Scripts\python.exe"
 $CapstoneDll = Join-Path $ProjectDir ".venv-build310\Lib\site-packages\capstone\lib\capstone.dll"
+$SourcePath = Join-Path $ProjectDir "diagnostic_report.py"
 $ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)$([char]0x95EE)$([char]0x9898)$([char]0x68C0)$([char]0x6D4B)$([char]0x5DE5)$([char]0x5177)"
-$OutputName = if ($OutputFilename) { $OutputFilename } else { "$ProductName.exe" }
+$SourceText = Get-Content -LiteralPath $SourcePath -Raw -Encoding UTF8
+$VersionMatch = [regex]::Match(
+    $SourceText,
+    '(?m)^\s*TOOL_VERSION\s*=\s*"(?<version>\d+(?:\.\d+){2,3})(?:\+[^"\r\n]*)?"\s*$'
+)
+if (-not $VersionMatch.Success) {
+    throw "TOOL_VERSION was not found in $SourcePath"
+}
+$ToolVersion = $VersionMatch.Groups["version"].Value
+$FileVersion = if (($ToolVersion.Split('.')).Count -eq 4) {
+    $ToolVersion
+} else {
+    "$ToolVersion.0"
+}
+$OutputName = if ($OutputFilename) {
+    $OutputFilename
+} else {
+    "$ProductName-v$ToolVersion.exe"
+}
 $OutputDirectoryPath = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
     [System.IO.Path]::GetFullPath($OutputDirectory)
 } else {
@@ -47,8 +66,8 @@ try {
         --include-data-files=monster_metadata.json=monster_metadata.json `
         --include-data-files=boss_allowlist.txt=boss_allowlist.txt `
         --include-data-files=cacert.pem=cacert.pem `
-        --file-version=1.0.2.0 `
-        --product-version=1.0.2.0 `
+        --file-version=$FileVersion `
+        --product-version=$FileVersion `
         --product-name="$ProductName" `
         --file-description="$ProductName" `
         --copyright="$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)" `
@@ -58,9 +77,15 @@ try {
         throw "Nuitka build failed with exit code $LASTEXITCODE"
     }
 
-    $OutputPath = Join-Path $OutputDirectoryPath $OutputName
+$OutputPath = Join-Path $OutputDirectoryPath $OutputName
     if (-not (Test-Path -LiteralPath $OutputPath)) {
         throw "EXE was not found after build: $OutputPath"
+    }
+    $ManifestPath = Join-Path $ProjectDir "windows_dpi.manifest"
+    & $Python (Join-Path $ProjectDir "embed_windows_manifest.py") `
+        $OutputPath --manifest $ManifestPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "DPI manifest embedding failed with exit code $LASTEXITCODE"
     }
     Get-Item -LiteralPath $OutputPath
 }

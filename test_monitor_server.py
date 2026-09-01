@@ -216,6 +216,10 @@ class MonitorServerTests(unittest.TestCase):
             self.base_url + update["download_path"], timeout=3.0
         ) as response:
             self.assertEqual(response.status, 200)
+            self.assertIn(
+                'filename="Dps-Logs-v0.0.4.exe"',
+                response.headers.get("Content-Disposition", ""),
+            )
             self.assertEqual(response.read(), update_bytes)
 
         gateway = ServerLicensingGateway(
@@ -370,7 +374,7 @@ class MonitorServerTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertFalse(denied["authorized"])
 
-    def test_card_required_rebind_cooldown_and_admin_override(self):
+    def test_card_required_and_device_rebind_is_temporarily_disabled(self):
         status, missing = self.request(
             "/api/v1/dps/session/start",
             method="POST",
@@ -415,7 +419,8 @@ class MonitorServerTests(unittest.TestCase):
             body={"client_id": "b" * 32, "card_key": card_key},
         )
         self.assertEqual(status, 403)
-        self.assertEqual(cooldown["error"], "card_in_use")
+        self.assertEqual(cooldown["error"], "card_device_locked")
+        self.assertNotIn("retry_after", cooldown)
 
         status, ended = self.request(
             "/api/v1/dps/session/end",
@@ -432,12 +437,22 @@ class MonitorServerTests(unittest.TestCase):
             body={"client_id": "b" * 32, "card_key": card_key},
         )
         self.assertEqual(status, 403)
-        self.assertEqual(cooldown["error"], "card_rebind_cooldown")
-        self.assertGreater(cooldown["retry_after"], 43000)
+        self.assertEqual(cooldown["error"], "card_device_locked")
 
         status, summary = self.request("/api/v1/dps/admin/status", admin=True)
         self.assertEqual(status, 200)
-        card_id = summary["cards"][0]["card_id"]
+        self.assertFalse(summary["device_rebind_enabled"])
+        self.assertEqual(
+            summary["default_rebind_cooldown_seconds"],
+            monitor.CARD_REBIND_COOLDOWN_SECONDS,
+        )
+        card = next(item for item in summary["cards"] if item["card_key"] == card_key)
+        card_id = card["card_id"]
+        self.assertEqual(card["bound_client_id"], "a" * 32)
+        self.assertFalse(card["revoked"])
+        self.assertEqual(
+            card["rebind_cooldown_seconds"], monitor.CARD_REBIND_COOLDOWN_SECONDS
+        )
         status, changed = self.request(
             "/api/v1/dps/admin/cards/update",
             method="POST",
@@ -450,14 +465,121 @@ class MonitorServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertTrue(changed["changed"])
+        self.assertEqual(
+            changed["cooldown_seconds"], monitor.CARD_REBIND_COOLDOWN_SECONDS
+        )
+        self.assertFalse(changed["device_rebind_enabled"])
 
-        status, rebound = self.request(
+        status, still_locked = self.request(
             "/api/v1/dps/session/start",
             method="POST",
             body={"client_id": "b" * 32, "card_key": card_key},
         )
+        self.assertEqual(status, 403)
+        self.assertEqual(still_locked["error"], "card_device_locked")
+
+    def test_existing_ordinary_cards_are_migrated_to_seven_day_cooldown(self):
+        card_key = self.create_card(duration_seconds=7200, note="测试2小时卡")[0]
+        with monitor.database() as connection:
+            connection.execute(
+                "UPDATE cards SET rebind_cooldown_seconds=? WHERE card_key=?",
+                (12 * 60 * 60, card_key),
+            )
+
+        monitor.initialize_database()
+
+        with monitor.database() as connection:
+            row = connection.execute(
+                "SELECT rebind_cooldown_seconds, permanent FROM cards WHERE card_key=?",
+                (card_key,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertFalse(bool(row["permanent"]))
+        self.assertEqual(
+            row["rebind_cooldown_seconds"], monitor.CARD_REBIND_COOLDOWN_SECONDS
+        )
+
+    def test_disabled_rebind_stays_locked_after_manual_unbind_and_elapsed_cooldown(self):
+        card_key = self.create_card(duration_seconds=7200, note="测试2小时卡")[0]
+        status, _started = self.request(
+            "/api/v1/dps/session/start",
+            method="POST",
+            body={"client_id": "a" * 32, "card_key": card_key},
+        )
         self.assertEqual(status, 200)
-        self.assertTrue(rebound["authorized"])
+        status, summary = self.request("/api/v1/dps/admin/status", admin=True)
+        self.assertEqual(status, 200)
+        card = next(item for item in summary["cards"] if item["card_key"] == card_key)
+
+        status, unbound = self.request(
+            "/api/v1/dps/admin/cards/update",
+            method="POST",
+            admin=True,
+            body={"card_id": card["card_id"], "action": "unbind"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(unbound["changed"])
+        with monitor.database() as connection:
+            connection.execute(
+                "UPDATE cards SET last_bound_at=? WHERE card_hash=?",
+                (
+                    monitor.now_epoch() - monitor.CARD_REBIND_COOLDOWN_SECONDS - 1,
+                    card["card_id"],
+                ),
+            )
+
+        status, denied = self.request(
+            "/api/v1/dps/session/start",
+            method="POST",
+            body={"client_id": "b" * 32, "card_key": card_key},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(denied["error"], "card_device_locked")
+
+    def test_disabled_rebind_rejects_legacy_activated_card_without_binding_metadata(self):
+        """A partially migrated/cleared card must not become claimable."""
+        card_key = self.create_card(duration_seconds=7200)[0]
+        status, _started = self.request(
+            "/api/v1/dps/session/start",
+            method="POST",
+            body={"client_id": "a" * 32, "card_key": card_key},
+        )
+        self.assertEqual(status, 200)
+
+        # Simulate an old database row where an administrative clear or a
+        # pre-binding migration removed both binding fields after activation.
+        with monitor.database() as connection:
+            connection.execute(
+                """
+                UPDATE cards SET bound_client_id='', last_bound_at=NULL
+                WHERE card_hash=?
+                """,
+                (monitor.token_digest(card_key),),
+            )
+
+        status, denied = self.request(
+            "/api/v1/dps/session/start",
+            method="POST",
+            body={"client_id": "b" * 32, "card_key": card_key},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(denied["error"], "card_device_locked")
+
+        # With no binding metadata left, the server cannot safely identify the
+        # original machine, so it keeps the card locked instead of guessing.
+        status, still_denied = self.request(
+            "/api/v1/dps/session/start",
+            method="POST",
+            body={"client_id": "a" * 32, "card_key": card_key},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(still_denied["error"], "card_device_locked")
+        with monitor.database() as connection:
+            revoked = connection.execute(
+                "SELECT revoked FROM cards WHERE card_hash=?",
+                (monitor.token_digest(card_key),),
+            ).fetchone()["revoked"]
+        self.assertFalse(bool(revoked))
 
     def test_stale_session_does_not_lock_card_forever(self):
         card_key = self.create_card(duration_seconds=7200)[0]
@@ -675,7 +797,7 @@ class MonitorServerTests(unittest.TestCase):
             },
         )
         self.assertEqual(status, 403)
-        self.assertEqual(denied["error"], "card_in_use")
+        self.assertEqual(denied["error"], "card_device_locked")
 
         status, heartbeat = self.request(
             "/api/v1/dps/session/heartbeat",
@@ -711,6 +833,17 @@ class MonitorServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(ended["ok"])
 
+        # Exercise the legacy cooldown path explicitly; production currently
+        # keeps this policy disabled while the status aggregation remains
+        # covered by a second session on another device.
+        previous_rebind_policy = monitor.CARD_DEVICE_REBIND_ENABLED
+        monitor.CARD_DEVICE_REBIND_ENABLED = True
+        self.addCleanup(
+            setattr,
+            monitor,
+            "CARD_DEVICE_REBIND_ENABLED",
+            previous_rebind_policy,
+        )
         with monitor.database() as connection:
             connection.execute(
                 "UPDATE cards SET rebind_cooldown_seconds=0 WHERE card_key=?",
@@ -790,7 +923,7 @@ class MonitorServerTests(unittest.TestCase):
             body={"client_id": "d" * 32, "card_key": card_key},
         )
         self.assertEqual(status, 403)
-        self.assertEqual(cooldown["error"], "card_rebind_cooldown")
+        self.assertEqual(cooldown["error"], "card_device_locked")
 
         with monitor.database() as connection:
             connection.execute(
@@ -1409,7 +1542,7 @@ class MonitorServerTests(unittest.TestCase):
         heartbeat = licensing.heartbeat(using=True, character_name="莫雪")
         self.assertEqual(heartbeat.card_tier, "weekly")
 
-    def test_partner_card_is_permanent_but_keeps_device_binding(self):
+    def test_partner_card_is_revoked_when_device_changes(self):
         card_key = monitor.PARTNER_CARD_KEY
         self.assertEqual(card_key, "partner-test-key")
         first_client = "1" * 32
@@ -1441,16 +1574,16 @@ class MonitorServerTests(unittest.TestCase):
             body={"client_id": "2" * 32, "card_key": card_key},
         )
         self.assertEqual(status, 403)
-        self.assertEqual(denied["error"], "card_in_use")
+        self.assertEqual(denied["error"], "partner_device_changed")
 
-        status, ended = self.request(
-            "/api/v1/dps/session/end",
+        status, old_session = self.request(
+            "/api/v1/dps/session/heartbeat",
             method="POST",
             token=started["access_token"],
-            body={"session_id": started["session_id"]},
+            body={"using": True},
         )
-        self.assertEqual(status, 200)
-        self.assertTrue(ended["ok"])
+        self.assertEqual(status, 403)
+        self.assertEqual(old_session["error"], "invalid_session")
 
         status, denied = self.request(
             "/api/v1/dps/session/start",
@@ -1458,8 +1591,7 @@ class MonitorServerTests(unittest.TestCase):
             body={"client_id": "2" * 32, "card_key": card_key},
         )
         self.assertEqual(status, 403)
-        self.assertEqual(denied["error"], "card_rebind_cooldown")
-        self.assertGreater(denied["retry_after"], 43_000)
+        self.assertEqual(denied["error"], "card_revoked")
 
         status, summary = self.request("/api/v1/dps/admin/status", admin=True)
         self.assertEqual(status, 200)
@@ -1468,7 +1600,7 @@ class MonitorServerTests(unittest.TestCase):
         )
         self.assertTrue(partner["permanent"])
         self.assertEqual(partner["card_tier"], "partner")
-        self.assertEqual(partner["state"], "active")
+        self.assertEqual(partner["state"], "revoked")
         self.assertEqual(partner["bound_client_id"], first_client)
         self.assertEqual(
             partner["rebind_cooldown_seconds"],

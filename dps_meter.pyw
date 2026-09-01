@@ -20,12 +20,35 @@ import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from dpi_support import (
+    DEFAULT_DPI,
+    configure_tk_dpi_scaling,
+    enable_windows_dpi_awareness,
+    get_window_dpi,
+    logical_pixels_to_physical,
+    tk_font_size_for_pixels,
+    tk_font_spec,
+)
+
+# Tk must not create a window while the process is DPI-unaware.  Keep this
+# import order for both source runs and Nuitka's frozen executable.
+enable_windows_dpi_awareness()
+
 import tkinter as tk
 import tkinter.font as tkfont
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
 
-from capture_process import CaptureProcessClient
+from capture_process import (
+    CaptureProcessClient,
+    TEAM_STATS_MODE_DUMMY,
+    TEAM_STATS_MODE_NAMES,
+    TEAM_STATS_MODE_TEAM,
+    TEAM_STATS_MODE_UNKNOWN,
+    normalize_team_stats_mode,
+    team_stats_mode_name,
+)
 from combat_history import CombatHistoryStore, HISTORY_SCHEMA_VERSION
 from device_identity import resolve_client_id
 from licensing import (
@@ -39,12 +62,20 @@ from licensing import (
 from monster_metadata import load_monster_metadata, resolve_localization_names
 from network_state import (
     BOSS_PHASE_TEMPLATE_TRANSITIONS,
+    DAMAGE_TARGET_TEMPLATE_IDS,
     ENCOUNTER_AUXILIARY_TEMPLATES,
     ENCOUNTER_NON_BOSS_TEMPLATE_IDS,
     EXPLICIT_NON_TYPE3_BOSS_TEMPLATE_IDS,
+    HEALING_TARGET_LEVEL,
+    HEALING_TARGET_NAME,
+    HEALING_TARGET_TEMPLATE_IDS,
     MAX_PARTY_MEMBERS,
     NetworkPacketParser,
     SEPARATE_BOSS_ENCOUNTER_TRANSITIONS,
+    SETTLEMENT_COMBAT_STATISTICS_METHOD,
+    STAGE_COMBAT_STATISTICS_METHOD,
+    is_training_dummy_name,
+    is_training_dummy_template_id,
     boss_name_is_placeholder,
     unique_inferred_auxiliary_for_parent,
 )
@@ -86,6 +117,26 @@ def resolve_program_path(
     return Path(str(executable)).expanduser().resolve()
 
 
+def update_install_paths(
+    update_dir: object, current_executable: object, filename: object
+) -> tuple[Path, Path]:
+    """Return a safe staging path and the versioned installation target."""
+    directory = Path(str(update_dir)).expanduser().resolve()
+    safe_name = Path(str(filename or "")).name
+    if (
+        not safe_name
+        or safe_name in {".", ".."}
+        or not safe_name.casefold().endswith(".exe")
+    ):
+        safe_name = "Dps-Logs-update.exe"
+    target = (directory / safe_name).resolve()
+    current = Path(str(current_executable)).expanduser().resolve()
+    staging = target.with_name(f"{target.stem}.update{target.suffix}")
+    if staging == current:
+        staging = target.with_name(f"{target.stem}.download{target.suffix}")
+    return staging, target
+
+
 APP_EXECUTABLE_PATH = resolve_program_path(
     IS_FROZEN,
     sys.argv[0] if sys.argv else "",
@@ -120,8 +171,8 @@ MONSTER_NAME_CACHE_PATH = DATA_DIR / "monster_name_cache.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
-APP_VERSION = "0.0.15"
-CLIENT_BUILD = "0.0.15+20260901.1"
+APP_VERSION = "0.1.0"
+CLIENT_BUILD = "0.1.0+20260901.1"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
 UI_BRAND = APP_NAME
 BG = "#08090b"
@@ -151,6 +202,8 @@ WINDOW_EXSTYLE_TRANSPARENT = 0x00000020
 WINDOW_EXSTYLE_TOOLWINDOW = 0x00000080
 WINDOW_EXSTYLE_LAYERED = 0x00080000
 WINDOW_EXSTYLE_NOACTIVATE = 0x08000000
+WINDOW_STYLE_POPUP = 0x80000000
+WINDOW_STYLE_CHILD = 0x40000000
 CARD_MEMBERSHIP_LABELS = {
     "normal": "尊贵的用户",
     "weekly": "VIP用户",
@@ -167,6 +220,10 @@ PROFESSION_COLORS = {
     1_200_006: "#ee8c2f",
     1_200_007: "#a255c7",
 }
+# The client identifies the dedicated healer stance as profession 1200002.
+# HPS uses this exact role when it is known; unknown roles remain observable
+# rather than being guessed into or out of the healing table.
+HEALER_PROFESSION_IDS = frozenset({1_200_002})
 
 TEAM_TARGET_ACTIVE_SECONDS = 10.0
 MONSTER_DISPLAY_ACTIVE_SECONDS = 30.0
@@ -236,6 +293,15 @@ def window_exstyle_for_lock(
     return (style & ~managed_bits) | (int(original_style) & managed_bits)
 
 
+def window_style_for_child(style: object) -> int:
+    """Convert a popup style to a child style without changing other bits."""
+    try:
+        value = int(style)
+    except (TypeError, ValueError, OverflowError):
+        value = 0
+    return (value & ~WINDOW_STYLE_POPUP) | WINDOW_STYLE_CHILD
+
+
 def membership_label_for_card_tier(card_tier: object) -> str:
     tier = str(card_tier or "").strip().casefold()
     return CARD_MEMBERSHIP_LABELS.get(tier, CARD_MEMBERSHIP_LABELS["normal"])
@@ -292,6 +358,38 @@ def format_number(value: float | int) -> str:
     return f"{value / 100_000_000:.2f}亿"
 
 
+def format_team_health_number(value: object) -> str:
+    """Format a team HP total in the compact unit used by the HPS banner."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "--"
+    if not math.isfinite(number) or number < 0:
+        return "--"
+    if number >= 100_000_000:
+        formatted = f"{number / 100_000_000:.2f}亿"
+    elif number >= 10_000:
+        formatted = f"{number / 10_000:.2f}万"
+    else:
+        return f"{int(round(number)):,}"
+    return formatted[:-1].rstrip("0.") + formatted[-1]
+
+
+def format_team_health_percent(value: object) -> str:
+    """Format a clamped HP ratio without displaying a distracting .0 suffix."""
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "--"
+    if not math.isfinite(ratio):
+        return "--"
+    percentage = min(100.0, max(0.0, ratio * 100.0))
+    text = f"{percentage:.1f}"
+    if text.endswith(".0"):
+        text = text[:-2]
+    return f"{text}%"
+
+
 def format_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
@@ -318,6 +416,20 @@ def format_response_time(value: object) -> str:
     if milliseconds < 1000:
         return f"{milliseconds:.0f}ms"
     return f"{milliseconds / 1000.0:.2f}s"
+
+
+def format_overheal_rate(value: object, *, partial: bool = False) -> str:
+    """Format an overheal rate and mark an exact observed subset explicitly."""
+    if value is None:
+        return "--"
+    try:
+        rate = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "--"
+    if not math.isfinite(rate):
+        return "--"
+    suffix = "*" if partial else ""
+    return f"{min(1.0, max(0.0, rate)) * 100:.1f}%{suffix}"
 
 
 def healing_coverage_label(value: object) -> str:
@@ -361,6 +473,14 @@ def apply_combat_clock_to_record(
     divisor = dps_duration_seconds(duration)
     if not divisor:
         return updated
+    if (
+        int(updated.get("total_damage", 0) or 0) <= 0
+        and str(updated.get("target_filter", "")) == "healing_dummy"
+    ):
+        # The shared combat-clock endpoint is a DPS contract.  A pure
+        # treatment-dummy record never submits one, and must keep its local
+        # healing interval if an old/stale request is encountered.
+        return updated
     participants: list[dict] = []
     for raw_participant in updated.get("participants", []):
         if not isinstance(raw_participant, dict):
@@ -392,6 +512,25 @@ def apply_combat_clock_to_record(
         healers.append(healer)
     updated["duration_seconds"] = duration
     updated["dps_duration_seconds"] = divisor
+    updated["hps_duration_seconds"] = divisor
+    # The shared-clock contract corrects the divisor only.  Keep the HPS
+    # interval exactly aligned with the DPS interval already stored in this
+    # record; the server's canonical endpoints remain available below in the
+    # ``shared_clock`` audit object.
+    try:
+        started_at = float(
+            updated.get("started_at_epoch", result.started_at) or result.started_at
+        )
+    except (TypeError, ValueError, OverflowError):
+        started_at = float(result.started_at or 0.0)
+    try:
+        ended_at = float(
+            updated.get("ended_at_epoch", result.ended_at) or result.ended_at
+        )
+    except (TypeError, ValueError, OverflowError):
+        ended_at = float(result.ended_at or 0.0)
+    updated["healing_started_at_epoch"] = started_at
+    updated["healing_ended_at_epoch"] = ended_at
     updated["team_dps"] = total_damage / divisor
     updated["healers"] = healers
     updated["team_hps"] = sum(
@@ -514,6 +653,14 @@ def normalize_boss_name(value: object) -> str:
     return "".join(char.casefold() for char in str(value or "") if char.isalnum())
 
 
+def _parsed_profession_id(value: object) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return parsed if 1_200_001 <= parsed <= 1_200_007 else 0
+
+
 def load_boss_name_allowlist(path: Path = BOSS_NAME_ALLOWLIST_PATH) -> tuple[str, ...]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -571,12 +718,30 @@ def boss_phase_continues(left: object, right: object) -> bool:
     )
 
 
-def load_monster_catalog() -> dict[str, dict]:
+def load_target_identity_catalog() -> dict[str, dict]:
+    """Load exact template metadata for display without promoting targets."""
     catalog = load_monster_metadata(MONSTER_METADATA_PATH)
     cached_names = load_json_object(MONSTER_NAME_CACHE_PATH)
     for template_id, name in cached_names.items():
         if isinstance(name, str) and name.strip():
             catalog.setdefault(str(template_id), {})["name"] = name.strip()
+    for template_id, auxiliary in ENCOUNTER_AUXILIARY_TEMPLATES.items():
+        metadata = dict(catalog.get(str(template_id), {}))
+        metadata.update(
+            {
+                "name": auxiliary["name"],
+                "encounter_auxiliary": True,
+                "encounter_parent_template_ids": list(
+                    auxiliary["parent_template_ids"]
+                ),
+            }
+        )
+        catalog[str(template_id)] = metadata
+    return catalog
+
+
+def load_monster_catalog() -> dict[str, dict]:
+    catalog = load_target_identity_catalog()
     allowlist = load_boss_name_allowlist()
     if allowlist:
         filtered: dict[str, dict] = {}
@@ -602,18 +767,8 @@ def load_monster_catalog() -> dict[str, dict]:
             boss_metadata = dict(metadata)
             boss_metadata["boss_type"] = 3
             filtered[template_id] = boss_metadata
-        for template_id, auxiliary in ENCOUNTER_AUXILIARY_TEMPLATES.items():
-            metadata = dict(catalog.get(str(template_id), {}))
-            metadata.update(
-                {
-                    "name": auxiliary["name"],
-                    "encounter_auxiliary": True,
-                    "encounter_parent_template_ids": list(
-                        auxiliary["parent_template_ids"]
-                    ),
-                }
-            )
-            filtered[str(template_id)] = metadata
+        for template_id in ENCOUNTER_AUXILIARY_TEMPLATES:
+            filtered[str(template_id)] = dict(catalog[str(template_id)])
         return filtered
     return catalog
 
@@ -635,6 +790,26 @@ def _catalog_boss_name(
     return name if name and not boss_name_is_placeholder(name) else ""
 
 
+def _catalog_boss_level(
+    catalog: object,
+    template_id: object,
+) -> int | None:
+    if not isinstance(catalog, dict):
+        return None
+    try:
+        parsed_template_id = int(template_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    metadata = catalog.get(str(parsed_template_id), {})
+    if not isinstance(metadata, dict):
+        return None
+    try:
+        level = int(metadata.get("level", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return level if 1 <= level <= 999 else None
+
+
 def restore_history_boss_names(record: object, catalog: object) -> object:
     """Return a display-only history record with placeholder Boss names fixed."""
     if not isinstance(record, dict) or not isinstance(catalog, dict):
@@ -650,15 +825,32 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
         primary_name = _catalog_boss_name(
             catalog, raw_monster.get("template_id", 0)
         )
+        primary_level = _catalog_boss_level(
+            catalog, raw_monster.get("template_id", 0)
+        )
         try:
             primary_entity_id = int(raw_monster.get("entity_id", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             primary_entity_id = 0
         if primary_entity_id and primary_name:
             canonical_by_entity[primary_entity_id] = primary_name
-        if primary_name and boss_name_is_placeholder(raw_monster.get("name", "")):
+        try:
+            monster_level_valid = 1 <= int(
+                raw_monster.get("level", 0) or 0
+            ) <= 999
+        except (TypeError, ValueError, OverflowError):
+            monster_level_valid = False
+        needs_name = not str(raw_monster.get("name", "")).strip() or (
+            boss_name_is_placeholder(raw_monster.get("name", ""))
+        )
+        if (primary_name and needs_name) or (
+            primary_level is not None and not monster_level_valid
+        ):
             monster = dict(raw_monster)
-            monster["name"] = primary_name
+            if primary_name and needs_name:
+                monster["name"] = primary_name
+            if primary_level is not None and not monster_level_valid:
+                monster["level"] = primary_level
             updated["monster"] = monster
             changed = True
 
@@ -677,13 +869,28 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
             canonical_name = _catalog_boss_name(
                 catalog, raw_target.get("template_id", 0)
             ) or canonical_by_entity.get(entity_id, "")
+            canonical_level = _catalog_boss_level(
+                catalog, raw_target.get("template_id", 0)
+            )
             if entity_id and canonical_name:
                 canonical_by_entity[entity_id] = canonical_name
-            if canonical_name and boss_name_is_placeholder(
-                raw_target.get("name", "")
+            try:
+                target_level_valid = 1 <= int(
+                    raw_target.get("level", 0) or 0
+                ) <= 999
+            except (TypeError, ValueError, OverflowError):
+                target_level_valid = False
+            needs_name = not str(raw_target.get("name", "")).strip() or (
+                boss_name_is_placeholder(raw_target.get("name", ""))
+            )
+            if (canonical_name and needs_name) or (
+                canonical_level is not None and not target_level_valid
             ):
                 target = dict(raw_target)
-                target["name"] = canonical_name
+                if canonical_name and needs_name:
+                    target["name"] = canonical_name
+                if canonical_level is not None and not target_level_valid:
+                    target["level"] = canonical_level
                 targets.append(target)
                 targets_changed = True
             else:
@@ -707,8 +914,9 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
             actor_targets: list[object] = []
             actor_targets_changed = False
             for raw_target in raw_actor_targets:
-                if not isinstance(raw_target, dict) or not boss_name_is_placeholder(
-                    raw_target.get("name", "")
+                if not isinstance(raw_target, dict) or (
+                    str(raw_target.get("name", "")).strip()
+                    and not boss_name_is_placeholder(raw_target.get("name", ""))
                 ):
                     actor_targets.append(raw_target)
                     continue
@@ -717,6 +925,11 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
                     entity_id = int(raw_target.get("entity_id", 0) or 0)
                 except (TypeError, ValueError, OverflowError):
                     entity_id = 0
+                direct_catalog_name = _catalog_boss_name(
+                    catalog, raw_target.get("template_id", 0)
+                )
+                if direct_catalog_name:
+                    candidate_names.add(direct_catalog_name)
                 if entity_id and entity_id in canonical_by_entity:
                     candidate_names.add(canonical_by_entity[entity_id])
                 raw_entity_ids = raw_target.get("entity_ids", ())
@@ -754,6 +967,89 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
             updated["participants"] = participants
             changed = True
 
+    return updated if changed else record
+
+
+def _history_skill_name_is_placeholder(value: object, skill_id: int) -> bool:
+    """Return whether a saved skill label contains no useful name."""
+    name = str(value or "").strip()
+    if not name:
+        return True
+    compact = re.sub(r"\s+", "", name).casefold()
+    if compact in {"未知技能", "未命名技能"}:
+        return True
+    return bool(
+        skill_id > 0
+        and re.fullmatch(
+            rf"技能(?:id[:：]?)?{skill_id}",
+            compact,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def restore_history_skill_names(record: object, catalog: object) -> object:
+    """Return a display-only copy with obsolete skill placeholders resolved."""
+    if not isinstance(record, dict) or not isinstance(catalog, dict):
+        return record
+    canonical_names: dict[int, str] = {}
+    for raw_skill_id, raw_name in catalog.items():
+        try:
+            skill_id = int(raw_skill_id)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        name = str(raw_name or "").strip()
+        if skill_id > 0 and name:
+            canonical_names[skill_id] = name
+    if not canonical_names:
+        return record
+
+    updated = dict(record)
+    changed = False
+    for collection_name in ("participants", "healers"):
+        raw_actors = record.get(collection_name)
+        if not isinstance(raw_actors, list):
+            continue
+        actors: list[object] = []
+        actors_changed = False
+        for raw_actor in raw_actors:
+            if not isinstance(raw_actor, dict):
+                actors.append(raw_actor)
+                continue
+            raw_skills = raw_actor.get("skills")
+            if not isinstance(raw_skills, list):
+                actors.append(raw_actor)
+                continue
+            skills: list[object] = []
+            skills_changed = False
+            for raw_skill in raw_skills:
+                if not isinstance(raw_skill, dict):
+                    skills.append(raw_skill)
+                    continue
+                try:
+                    skill_id = int(raw_skill.get("skill_id", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    skill_id = 0
+                canonical_name = canonical_names.get(skill_id, "")
+                if canonical_name and _history_skill_name_is_placeholder(
+                    raw_skill.get("name", ""), skill_id
+                ):
+                    skill = dict(raw_skill)
+                    skill["name"] = canonical_name
+                    skills.append(skill)
+                    skills_changed = True
+                else:
+                    skills.append(raw_skill)
+            if skills_changed:
+                actor = dict(raw_actor)
+                actor["skills"] = skills
+                actors.append(actor)
+                actors_changed = True
+            else:
+                actors.append(raw_actor)
+        if actors_changed:
+            updated[collection_name] = actors
+            changed = True
     return updated if changed else record
 
 
@@ -832,6 +1128,7 @@ class MonsterStats:
     level: int | None = None
     boss_type: int | None = None
     boss_rank: int = 0
+    healing_target: bool = False
     encounter_auxiliary: bool = False
     encounter_parent_template_ids: tuple[int, ...] = ()
     current_hp: float | None = None
@@ -887,6 +1184,7 @@ class CombatModel:
         runtime_skill_names: dict[str, str] | None = None,
         skill_professions: dict[str, list[int]] | None = None,
         entity_names: dict[str, str] | None = None,
+        target_catalog: dict[str, dict] | None = None,
         local_player_name: str = "",
         run_id: str | None = None,
         boss_only: bool = True,
@@ -929,6 +1227,11 @@ class CombatModel:
                 self.skill_professions[parsed_id] = tuple(sorted(set(parsed_classes)))
         self.entity_names: dict[int, str] = {}
         self.entity_professions: dict[int, int] = {}
+        self.target_catalog: dict[str, dict] = {
+            str(template_id): dict(metadata)
+            for template_id, metadata in (target_catalog or {}).items()
+            if isinstance(metadata, dict) and str(template_id).strip()
+        }
         for entity_id, name in (entity_names or {}).items():
             try:
                 parsed_id = int(entity_id)
@@ -978,7 +1281,12 @@ class CombatModel:
         ] = set()
         self.healing_responses: list[dict] = []
         self.actor_health_states: dict[int, dict[str, float | int]] = {}
+        # Lowest HP is an encounter statistic, separate from the latest live
+        # sample.  This prevents post-combat full-health refreshes from
+        # replacing the actual low point shown in the HPS banner.
+        self.actor_health_lows: dict[int, dict[str, float | int]] = {}
         self.pending_health_drops: dict[int, int] = {}
+        self.healing_response_keys: set[tuple[int, int, int]] = set()
         self.healing_revision = 0
         self.healing_summary_cache_key: tuple | None = None
         self.healing_summary_cache: dict | None = None
@@ -1005,6 +1313,15 @@ class CombatModel:
         self.last_archive_signature: tuple | None = None
         self.first_damage_time = 0.0
         self.last_damage_time = 0.0
+        # Treatment-dummy encounters have no damage edge. Keep their clock
+        # separate; mixed real-Boss encounters intentionally use the DPS clock
+        # for both metrics (see healing_duration()).
+        self.first_healing_time = 0.0
+        self.last_healing_time = 0.0
+        self.healing_end_time = 0.0
+        self.healing_end_reason = ""
+        self.healing_target_ids: set[int] = set()
+        self.healing_target_order: list[int] = []
         self.combat_end_time = 0.0
         self.combat_end_reason = ""
         self.idle_gap = 10.0
@@ -1018,6 +1335,48 @@ class CombatModel:
         self.shared_clock_server_time = 0.0
         self.shared_clock_received_at = 0.0
         self.shared_clock_final = False
+
+    def _catalog_target_metadata(self, template_id: object) -> dict:
+        try:
+            parsed_template_id = int(template_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            return {}
+        metadata = self.target_catalog.get(str(parsed_template_id), {})
+        return metadata if isinstance(metadata, dict) else {}
+
+    def _apply_catalog_target_identity(self, monster: MonsterStats) -> bool:
+        """Fill exact target identity from its captured template ID.
+
+        A useful live/localized name always wins.  The catalog is consulted
+        only for an empty or placeholder name, so late generic labels such as
+        ``Boss``/``未知目标`` cannot erase a verified target identity.
+        """
+        metadata = self._catalog_target_metadata(monster.template_id)
+        if not metadata:
+            return False
+        changed = False
+        canonical_name = _catalog_boss_name(
+            self.target_catalog, monster.template_id
+        )
+        existing_name = (
+            monster.name or self.entity_names.get(monster.entity_id, "")
+        ).strip()
+        if canonical_name and (
+            not existing_name or boss_name_is_placeholder(existing_name)
+        ):
+            if monster.name != canonical_name:
+                monster.name = canonical_name
+                changed = True
+            if self.entity_names.get(monster.entity_id) != canonical_name:
+                self.entity_names[monster.entity_id] = canonical_name
+                changed = True
+        canonical_level = _catalog_boss_level(
+            self.target_catalog, monster.template_id
+        )
+        if canonical_level is not None and not monster.level:
+            monster.level = canonical_level
+            changed = True
+        return changed
 
     def set_boss_only(self, value: bool) -> bool:
         value = bool(value)
@@ -1123,6 +1482,19 @@ class CombatModel:
             state.last_time = 0.0
         self.first_damage_time = 0.0
         self.last_damage_time = 0.0
+        self.first_healing_time = 0.0
+        self.last_healing_time = 0.0
+        self.healing_end_time = 0.0
+        self.healing_end_reason = ""
+        self.healing_target_ids.clear()
+        self.healing_target_order.clear()
+        if keep_monsters:
+            for entity_id, monster in self.monsters.items():
+                if monster.healing_target or int(
+                    monster.template_id or 0
+                ) in HEALING_TARGET_TEMPLATE_IDS:
+                    self.healing_target_ids.add(entity_id)
+                    self.healing_target_order.append(entity_id)
         self.combat_end_time = 0.0
         self.combat_end_reason = ""
         self.session_number += 1
@@ -1138,7 +1510,9 @@ class CombatModel:
         self.healing_event_keys.clear()
         self.healing_responses.clear()
         self.actor_health_states.clear()
+        self.actor_health_lows.clear()
         self.pending_health_drops.clear()
+        self.healing_response_keys.clear()
         self.healing_revision += 1
         self.healing_summary_cache_key = None
         self.healing_summary_cache = None
@@ -1168,6 +1542,68 @@ class CombatModel:
             int(event.get("effective_healing", 0) or 0),
         )
 
+    @staticmethod
+    def _health_low_is_lower(
+        candidate: dict[str, object], current: dict[str, object]
+    ) -> bool:
+        """Compare two HP low-point samples without trusting malformed data."""
+        try:
+            candidate_ratio = float(candidate.get("ratio"))
+            current_ratio = float(current.get("ratio"))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(candidate_ratio):
+            return False
+        if not math.isfinite(current_ratio):
+            return True
+        if candidate_ratio != current_ratio:
+            return candidate_ratio < current_ratio
+        try:
+            return int(candidate.get("filetime_100ns", 0) or 0) < int(
+                current.get("filetime_100ns", 0) or 0
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+
+    def _health_sample_in_active_encounter(
+        self, event_time: float, healing_context: bool
+    ) -> bool:
+        """Accept low points only inside the current DPS/HPS encounter."""
+        if not math.isfinite(event_time):
+            return False
+        if self.first_damage_time:
+            return bool(
+                not self.combat_end_time
+                and event_time >= self.first_damage_time - 0.25
+            )
+        # A treatment dummy has no damage edge.  Its exact target identity is
+        # enough to open the local HPS window before the first heal callback.
+        return bool(healing_context and not self.healing_end_time)
+
+    def _healing_role_status(
+        self, actor_id: int, profession_id: object = 0
+    ) -> bool | None:
+        """Return True for a known healer, False for a known non-healer."""
+        explicit = _parsed_profession_id(profession_id)
+        if not explicit:
+            explicit = _parsed_profession_id(
+                self.entity_professions.get(int(actor_id or 0), 0)
+            )
+        if explicit:
+            return explicit in HEALER_PROFESSION_IDS
+        inferred = _parsed_profession_id(self.actor_profession_id(actor_id))
+        if inferred:
+            return inferred in HEALER_PROFESSION_IDS
+        return None
+
+    def _healing_actor_allowed(
+        self, actor_id: int, profession_id: object = 0
+    ) -> bool:
+        # Unknown role data is retained exactly; only an explicit non-healer is
+        # excluded.  This is the conservative choice for older clients whose
+        # roster packets did not carry a profession field.
+        return self._healing_role_status(actor_id, profession_id) is not False
+
     def ingest_actor_health(self, update: dict) -> bool:
         """Track only guarded, real-time party HP samples for response timing."""
         try:
@@ -1176,6 +1612,7 @@ class CombatModel:
             max_hp = float(update.get("max_hp", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
             return False
+        healing_context = self._pure_healing_context()
         if (
             actor_id not in self._current_member_ids()
             or timestamp <= 0
@@ -1190,6 +1627,7 @@ class CombatModel:
         next_state["max_hp"] = max_hp
         next_state["filetime_100ns"] = timestamp
         changed = next_state != state
+        event_time = self._event_seconds(update)
         if "current_hp" in update:
             try:
                 current_hp = float(update["current_hp"])
@@ -1201,12 +1639,39 @@ class CombatModel:
             next_state["current_hp"] = current_hp
             next_state["sample_count"] = int(state.get("sample_count", 0) or 0) + 1
             changed |= previous_hp != current_hp
+            if self._health_sample_in_active_encounter(
+                event_time, healing_context
+            ):
+                ratio = min(1.0, max(0.0, current_hp / max_hp))
+                candidate_low: dict[str, float | int] = {
+                    "actor_id": actor_id,
+                    "current_hp": current_hp,
+                    "max_hp": max_hp,
+                    "ratio": ratio,
+                    "filetime_100ns": timestamp,
+                }
+                previous_low = self.actor_health_lows.get(actor_id)
+                if previous_low is None or self._health_low_is_lower(
+                    candidate_low, previous_low
+                ):
+                    self.actor_health_lows[actor_id] = candidate_low
+                    changed = True
+            if current_hp >= max_hp * 0.999:
+                answered_drop = self.pending_health_drops.pop(actor_id, None)
+                if answered_drop is not None:
+                    self.healing_response_keys = {
+                        key
+                        for key in self.healing_response_keys
+                        if not (key[0] == actor_id and key[1] == answered_drop)
+                    }
+                    changed = True
             if (
                 previous_hp is not None
                 and current_hp < float(previous_hp)
-                and self.first_damage_time
+                and (self.first_damage_time or healing_context)
                 and self._event_seconds(update) >= self.first_damage_time
                 and not self.combat_end_time
+                and not self.healing_end_time
             ):
                 # One response sample starts at the first confirmed HP loss
                 # and ends at the first subsequent effective heal. Additional
@@ -1215,6 +1680,148 @@ class CombatModel:
                 changed = True
         self.actor_health_states[actor_id] = next_state
         return changed
+
+    def team_health_summary(self) -> dict:
+        """Return an exact aggregate of the currently bound party HP samples.
+
+        Health is intentionally reported only when every currently known party
+        member has a valid current/max sample.  A partial sum would look like a
+        team total while silently omitting a member, which is more misleading
+        than a short-lived placeholder in the HPS banner.
+        """
+        member_ids = set(self._current_member_ids())
+        if not member_ids:
+            # Accepted actor-health samples are already guarded by
+            # ``_current_member_ids`` at ingestion time.  Keeping this fallback
+            # makes the method useful during the brief roster hand-off window.
+            member_ids = set(self.actor_health_states)
+
+        expected_count = len(member_ids)
+        try:
+            roster_count = int(self.party_member_count or 0)
+        except (TypeError, ValueError, OverflowError):
+            roster_count = 0
+        if roster_count > expected_count:
+            expected_count = roster_count
+
+        ordered_ids = list(self.friend_order)
+        ordered_ids.extend(
+            actor_id for actor_id in sorted(member_ids) if actor_id not in ordered_ids
+        )
+        members: list[dict] = []
+        for actor_id in ordered_ids:
+            if actor_id not in member_ids:
+                continue
+            state = self.actor_health_states.get(actor_id)
+            if not isinstance(state, dict):
+                continue
+            try:
+                current_hp = float(state.get("current_hp"))
+                max_hp = float(state.get("max_hp"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if (
+                not math.isfinite(current_hp)
+                or not math.isfinite(max_hp)
+                or max_hp <= 0
+                or current_hp < 0
+                or current_hp > max_hp * 1.02
+            ):
+                continue
+            current_hp = min(current_hp, max_hp)
+            ratio = min(1.0, max(0.0, current_hp / max_hp))
+            member = {
+                "actor_id": actor_id,
+                "current_hp": current_hp,
+                "max_hp": max_hp,
+                "ratio": ratio,
+                "filetime_100ns": int(state.get("filetime_100ns", 0) or 0),
+            }
+            low = self.actor_health_lows.get(actor_id)
+            if isinstance(low, dict):
+                try:
+                    low_ratio = float(low.get("ratio"))
+                    low_hp = float(low.get("current_hp"))
+                    low_max = float(low.get("max_hp"))
+                    low_time = int(low.get("filetime_100ns", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    low_ratio = float("nan")
+                    low_hp = low_max = 0.0
+                    low_time = 0
+                if (
+                    math.isfinite(low_ratio)
+                    and math.isfinite(low_hp)
+                    and math.isfinite(low_max)
+                    and low_max > 0
+                    and 0 <= low_hp <= low_max * 1.02
+                    and low_time > 0
+                ):
+                    member["encounter_low"] = {
+                        "actor_id": actor_id,
+                        "current_hp": min(low_hp, low_max),
+                        "max_hp": low_max,
+                        "ratio": min(1.0, max(0.0, low_ratio)),
+                        "filetime_100ns": low_time,
+                    }
+            members.append(member)
+
+        complete = bool(members) and len(members) == expected_count
+        if not complete:
+            return {
+                "available": False,
+                "complete": False,
+                "expected_member_count": expected_count,
+                "observed_member_count": len(members),
+                "current_hp": None,
+                "max_hp": None,
+                "ratio": None,
+                "lowest": None,
+                "lowest_encounter": None,
+                "members": members,
+            }
+
+        current_total = sum(item["current_hp"] for item in members)
+        max_total = sum(item["max_hp"] for item in members)
+        current_lowest = min(
+            members,
+            key=lambda item: (float(item["ratio"]), int(item["actor_id"])),
+        )
+        encounter_lows = [
+            item["encounter_low"]
+            for item in members
+            if isinstance(item.get("encounter_low"), dict)
+        ]
+        lowest_encounter = (
+            min(
+                encounter_lows,
+                key=lambda item: (
+                    float(item.get("ratio", 1.0)),
+                    int(item.get("actor_id", 0) or 0),
+                ),
+            )
+            if encounter_lows
+            else None
+        )
+        return {
+            "available": True,
+            "complete": True,
+            "expected_member_count": expected_count,
+            "observed_member_count": len(members),
+            "current_hp": current_total,
+            "max_hp": max_total,
+            "ratio": current_total / max_total if max_total > 0 else None,
+            # ``lowest`` is strictly the encounter low.  A full-health frame
+            # observed before/after a pull must not masquerade as a fight-wide
+            # minimum when no in-encounter sample was captured.
+            "lowest": (
+                dict(lowest_encounter) if lowest_encounter is not None else None
+            ),
+            "current_lowest": dict(current_lowest),
+            "lowest_encounter": (
+                dict(lowest_encounter) if lowest_encounter is not None else None
+            ),
+            "members": members,
+        }
 
     def ingest_heal(self, event: dict) -> bool:
         """Ingest one exact HealSyncV2 callback without changing DPS clocks."""
@@ -1227,46 +1834,140 @@ class CombatModel:
             timestamp = int(event.get("filetime_100ns", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             return False
-        members = self._current_member_ids()
         if (
-            not self.first_damage_time
-            or healer_id not in members
-            or target_id not in members
+            healer_id <= 0
+            or target_id <= 0
             or skill_id <= 0
             or total_healing < 0
             or not 0 <= effective_healing <= total_healing
             or timestamp <= 0
         ):
             return False
+
+        # A HealSync may be the first packet after the native template poll.
+        # Accept the target only when the exact allowlisted template/profile is
+        # already known; the display name is never used as a fallback.
+        try:
+            target_template_id = int(event.get("target_template_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            target_template_id = 0
+        if target_template_id in HEALING_TARGET_TEMPLATE_IDS:
+            self._register_healing_target(
+                target_id,
+                template_id=target_template_id,
+                level=event.get("target_level"),
+            )
+        target_is_healing = self._is_healing_target(target_id)
+        members = self._current_member_ids()
+        if healer_id not in members:
+            return False
+        event_profession = _parsed_profession_id(event.get("profession_id", 0))
+        if (
+            event_profession
+            and self.entity_professions.get(healer_id) != event_profession
+        ):
+            self.entity_professions[healer_id] = event_profession
+            self.healing_revision += 1
+            self.healing_summary_cache_key = None
+            self.healing_summary_cache = None
+        if not self._healing_actor_allowed(healer_id, event_profession):
+            return False
+        damage_context = bool(
+            self.first_damage_time and self._encounter_damage_target_ids()
+        )
+        pure_healing_context = bool(
+            target_is_healing
+            and not self.first_damage_time
+            and not self.combat_end_time
+        )
+        if target_is_healing:
+            # Treatment dummies are a standalone HPS source.  They must not be
+            # mixed into a real Boss pull or become a hidden DPS target.
+            if not pure_healing_context:
+                return False
+        elif target_id not in members or not damage_context:
+            # Ordinary party healing has no encounter boundary until a real
+            # Boss damage edge exists.
+            return False
+
         event_time = self._event_seconds(event)
-        encounter_end = self.combat_end_time or 0.0
-        if event_time < self.first_damage_time - 0.25:
+        if not math.isfinite(event_time):
             return False
-        if encounter_end and event_time > encounter_end + 1.0:
-            return False
+        if damage_context:
+            encounter_end = self.combat_end_time or 0.0
+            if event_time < self.first_damage_time - 0.25:
+                return False
+            if encounter_end and event_time > encounter_end + 1.0:
+                return False
+        else:
+            # A delayed callback after an idle-closed dummy encounter belongs
+            # to that record only inside the small packet-lateness window.  A
+            # larger gap starts a new dummy encounter before this event.
+            if (
+                self.last_healing_time
+                and event_time - self.last_healing_time > self.idle_gap
+            ):
+                self.reset(
+                    keep_identity=True,
+                    keep_monsters=True,
+                    archive_reason="new_encounter",
+                )
+                target_is_healing = self._is_healing_target(target_id)
+                if not target_is_healing:
+                    return False
+            if self.first_healing_time and event_time < self.first_healing_time - 0.25:
+                return False
+            if self.healing_end_time and event_time > self.healing_end_time + 1.0:
+                return False
         key = self._healing_event_key(event)
         if key in self.healing_event_keys:
             return False
         exact_event = dict(event)
         exact_event["overhealing"] = total_healing - effective_healing
         exact_event["healing_source"] = "network_exact"
+        exact_event["healing_target"] = target_is_healing
+        if event_profession:
+            exact_event["profession_id"] = event_profession
+        if target_is_healing:
+            exact_event["target_template_id"] = int(
+                self.monsters[target_id].template_id or target_template_id or 0
+            )
         self.healing_events.append(exact_event)
         self.healing_event_keys.add(key)
+        if not self.first_healing_time:
+            self.first_healing_time = event_time
+        else:
+            self.first_healing_time = min(self.first_healing_time, event_time)
+        self.last_healing_time = max(self.last_healing_time, event_time)
+        if pure_healing_context:
+            self.healing_end_time = 0.0
+            self.healing_end_reason = ""
+            self.encounter_team_size = min(
+                MAX_PARTY_MEMBERS,
+                max(self.encounter_team_size, len(self._current_member_ids())),
+            )
+        self.healing_revision += 1
+        self.healing_summary_cache_key = None
+        self.healing_summary_cache = None
 
         drop_time = self.pending_health_drops.get(target_id)
         if effective_healing > 0 and drop_time is not None and timestamp >= drop_time:
-            response_ms = (timestamp - drop_time) / 10_000.0
-            self.healing_responses.append(
-                {
-                    "healer_id": healer_id,
-                    "target_id": target_id,
-                    "drop_filetime_100ns": drop_time,
-                    "heal_filetime_100ns": timestamp,
-                    "response_ms": response_ms,
-                }
-            )
-            self.pending_health_drops.pop(target_id, None)
+            response_key = (target_id, drop_time, healer_id)
+            if response_key not in self.healing_response_keys:
+                response_ms = (timestamp - drop_time) / 10_000.0
+                self.healing_responses.append(
+                    {
+                        "healer_id": healer_id,
+                        "target_id": target_id,
+                        "drop_filetime_100ns": drop_time,
+                        "heal_filetime_100ns": timestamp,
+                        "response_ms": response_ms,
+                    }
+                )
+                self.healing_response_keys.add(response_key)
         if self.combat_end_time:
+            self._queue_current_record_refresh()
+        elif self.healing_end_time:
             self._queue_current_record_refresh()
         return True
 
@@ -1290,6 +1991,8 @@ class CombatModel:
     def active_stage_healing_snapshot(
         self, actor_id: int
     ) -> StageHealingSnapshot | None:
+        if not self._healing_actor_allowed(int(actor_id)):
+            return None
         snapshot = self.stage_healing_snapshots.get(int(actor_id))
         if snapshot is None:
             return None
@@ -1312,6 +2015,10 @@ class CombatModel:
             except (TypeError, ValueError, OverflowError):
                 continue
             if actor_id <= 0 or target_id <= 0 or skill_id <= 0 or effective > total:
+                continue
+            if not self._healing_actor_allowed(
+                actor_id, event.get("profession_id", 0)
+            ):
                 continue
             row = result.setdefault(
                 actor_id,
@@ -1341,7 +2048,7 @@ class CombatModel:
 
     def healing_summary(self, duration: float | None = None) -> dict:
         divisor = dps_duration_seconds(
-            self.duration() if duration is None else duration
+            self.healing_duration() if duration is None else duration
         )
         snapshot_signature = tuple(
             sorted(
@@ -1386,6 +2093,17 @@ class CombatModel:
                     for actor_id, state in self.actor_health_states.items()
                 )
             ),
+            tuple(
+                sorted(
+                    (
+                        actor_id,
+                        int(low.get("filetime_100ns", 0) or 0),
+                        round(float(low.get("ratio", 1.0) or 1.0), 6),
+                    )
+                    for actor_id, low in self.actor_health_lows.items()
+                    if isinstance(low, dict)
+                )
+            ),
             len(self.runtime_skill_names),
         )
         if (
@@ -1401,11 +2119,18 @@ class CombatModel:
             for actor_id in self.stage_healing_snapshots
             if self.active_stage_healing_snapshot(actor_id) is not None
         )
+        actor_ids = {
+            actor_id
+            for actor_id in actor_ids
+            if self._healing_actor_allowed(actor_id)
+        }
         response_by_actor: dict[int, list[dict]] = {}
         for response in self.healing_responses:
             try:
                 healer_id = int(response.get("healer_id", 0) or 0)
             except (TypeError, ValueError, OverflowError):
+                continue
+            if not self._healing_actor_allowed(healer_id):
                 continue
             response_by_actor.setdefault(healer_id, []).append(response)
 
@@ -1413,6 +2138,8 @@ class CombatModel:
         ordered_ids.extend(actor_id for actor_id in actor_ids if actor_id not in ordered_ids)
         healers: list[dict] = []
         for actor_id in actor_ids:
+            if not self._healing_actor_allowed(actor_id):
+                continue
             raw = raw_by_actor.get(
                 actor_id,
                 {
@@ -1453,6 +2180,22 @@ class CombatModel:
                 else None
             )
             overhealing = total - effective if total is not None else None
+            observed_total = int(raw["total"])
+            observed_effective = int(raw["effective"])
+            observed_overhealing = max(0, observed_total - observed_effective)
+            observed_overheal_rate = (
+                observed_overhealing / observed_total
+                if observed_total > 0
+                else None
+            )
+            shown_overheal_rate = (
+                overhealing / total
+                if total is not None and total > 0
+                else observed_overheal_rate
+            )
+            overheal_rate_partial = bool(
+                total is None and observed_overheal_rate is not None
+            )
             skill_rows: list[dict] = []
             if snapshot is not None:
                 for skill_id, skill_effective in sorted(
@@ -1545,7 +2288,6 @@ class CombatModel:
                     )
 
             target_rows = []
-            observed_effective = int(raw["effective"])
             for target_id, values in sorted(
                 raw["targets"].items(),
                 key=lambda item: int(item[1].get("effective", 0) or 0),
@@ -1595,10 +2337,14 @@ class CombatModel:
                     "total_healing": total,
                     "effective_healing": effective,
                     "overhealing": overhealing,
-                    "overheal_rate": (
-                        overhealing / total
-                        if total is not None and total > 0
-                        else None
+                    "overheal_rate": shown_overheal_rate,
+                    "overheal_rate_partial": overheal_rate_partial,
+                    "overheal_rate_source": (
+                        "observed_partial"
+                        if overheal_rate_partial
+                        else "complete"
+                        if shown_overheal_rate is not None
+                        else "unavailable"
                     ),
                     "peak_hps": (
                         observed_peak_hps
@@ -1606,18 +2352,15 @@ class CombatModel:
                         else None
                     ),
                     "observed_peak_hps": observed_peak_hps,
-                    "observed_total_healing": int(raw["total"]),
+                    "observed_total_healing": observed_total,
                     "observed_effective_healing": observed_effective,
+                    "observed_overhealing": observed_overhealing,
+                    "observed_overheal_rate": observed_overheal_rate,
                     "events": int(raw["events"]),
                     "coverage": coverage,
                     "skills": skill_rows,
                     "targets": target_rows,
                     "response": {
-                        "average_ms": (
-                            sum(response_values) / len(response_values)
-                            if response_values
-                            else None
-                        ),
                         "fastest_ms": min(response_values) if response_values else None,
                         "slowest_ms": max(response_values) if response_values else None,
                         "samples": len(response_values),
@@ -1656,6 +2399,7 @@ class CombatModel:
         )
         summary = {
             "peak_window_seconds": 5,
+            "hps_duration_seconds": divisor,
             "team_hps": team_effective / divisor if divisor else 0.0,
             "team_total_healing": team_total,
             "team_effective_healing": team_effective,
@@ -1847,6 +2591,14 @@ class CombatModel:
         if len(filtered_responses) != len(self.healing_responses):
             self.healing_responses = filtered_responses
             changed = True
+        filtered_response_keys = {
+            key
+            for key in self.healing_response_keys
+            if key[0] != entity_id and key[2] != entity_id
+        }
+        if filtered_response_keys != self.healing_response_keys:
+            self.healing_response_keys = filtered_response_keys
+            changed = True
 
         for summary_id, summary in list(self.stage_summaries.items()):
             actors = summary.get("actors", [])
@@ -2025,6 +2777,10 @@ class CombatModel:
 
     def _target_event_disposition(self, target_id: int) -> str:
         """Return accept, pending, or reject for an incoming damage target."""
+        if self._is_healing_target(target_id):
+            # HealSyncV2 targets are never damage targets, even when a stale
+            # Boss binding is still present from the previous pull.
+            return "reject"
         if not self.boss_only:
             return "accept"
         if self._is_priority_target(target_id):
@@ -2178,6 +2934,8 @@ class CombatModel:
         return bool(
             self.first_damage_time
             or self.last_damage_time
+            or self.first_healing_time
+            or self.last_healing_time
             or any(
                 state.accepted_damage > 0
                 for state in self.team_damage_states.values()
@@ -2363,8 +3121,97 @@ class CombatModel:
     def _monster_max_hp(monster: MonsterStats) -> float:
         return max(monster.max_hp or 0.0, monster.observed_max_hp or 0.0)
 
+    def _is_healing_target(self, entity_id: int) -> bool:
+        """Return true only for an explicitly identified treatment dummy.
+
+        The name alone is deliberately insufficient here.  A real encounter
+        can contain an object whose localized name happens to include ``木桩``;
+        only the native template/profile marker is allowed to open a pure-HPS
+        encounter.
+        """
+        try:
+            parsed_id = int(entity_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not parsed_id:
+            return False
+        monster = self.monsters.get(parsed_id)
+        if monster is not None and bool(monster.healing_target):
+            return True
+        if monster is not None and int(monster.template_id or 0) in HEALING_TARGET_TEMPLATE_IDS:
+            return True
+        return parsed_id in self.healing_target_ids
+
+    def _register_healing_target(
+        self,
+        entity_id: int,
+        *,
+        template_id: int = 0,
+        level: int | None = None,
+    ) -> bool:
+        """Bind one exact treatment-dummy identity without making it a Boss."""
+        try:
+            parsed_id = int(entity_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not parsed_id:
+            return False
+        try:
+            parsed_template = int(template_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            parsed_template = 0
+        if parsed_template and parsed_template not in HEALING_TARGET_TEMPLATE_IDS:
+            return False
+        monster = self.monsters.setdefault(parsed_id, MonsterStats(parsed_id))
+        changed = not monster.healing_target
+        monster.healing_target = True
+        if parsed_template and monster.template_id != parsed_template:
+            monster.template_id = parsed_template
+            changed = True
+        if not monster.name or monster.name == "Monster":
+            monster.name = HEALING_TARGET_NAME
+            changed = True
+        if not monster.entity_type or monster.entity_type.casefold() in {
+            "monster",
+            "boss",
+        }:
+            monster.entity_type = "TrainingDummy"
+            changed = True
+        if level is not None:
+            try:
+                parsed_level = int(level)
+            except (TypeError, ValueError, OverflowError):
+                parsed_level = HEALING_TARGET_LEVEL
+            if not 1 <= parsed_level <= 999:
+                parsed_level = HEALING_TARGET_LEVEL
+            if monster.level != parsed_level:
+                monster.level = parsed_level
+                changed = True
+        self.entity_names[parsed_id] = HEALING_TARGET_NAME
+        if parsed_id not in self.healing_target_ids:
+            self.healing_target_ids.add(parsed_id)
+            self.healing_target_order.append(parsed_id)
+            changed = True
+        return changed
+
+    def _pure_healing_context(self) -> bool:
+        """Whether the current encounter is the exact treatment-dummy case."""
+        return bool(
+            not self.first_damage_time
+            and not self.combat_end_time
+            and self.healing_target_ids
+        )
+
     def _is_dummy_target(self, entity_id: int) -> bool:
+        if self._is_healing_target(entity_id):
+            return False
         monster = self.monsters.get(int(entity_id or 0))
+        if monster is not None:
+            try:
+                if int(monster.template_id or 0) in DAMAGE_TARGET_TEMPLATE_IDS:
+                    return True
+            except (TypeError, ValueError, OverflowError):
+                pass
         name = (
             (monster.name if monster is not None else "")
             or self.entity_names.get(int(entity_id or 0), "")
@@ -2385,6 +3232,8 @@ class CombatModel:
         return self.self_id is not None and actor_id == self.self_id
 
     def _monster_rank(self, monster: MonsterStats) -> int:
+        if self._is_healing_target(monster.entity_id):
+            return 0
         if self._is_dummy_target(monster.entity_id):
             return 3
         if monster.boss_rank >= 3 or monster.boss_type == 3:
@@ -2441,6 +3290,8 @@ class CombatModel:
         monster = self.monsters.get(entity_id)
         if monster is None or entity_id in self.friendly_ids:
             return False
+        if self._is_healing_target(entity_id):
+            return False
         if monster.entity_type.casefold() in {"player", "role"}:
             return False
         return not self.boss_only or self._monster_rank(monster) > 0
@@ -2466,6 +3317,8 @@ class CombatModel:
 
     def _is_encounter_damage_target(self, entity_id: int) -> bool:
         if not entity_id:
+            return False
+        if self._is_healing_target(entity_id):
             return False
         if self.boss_only:
             return bool(
@@ -2576,7 +3429,29 @@ class CombatModel:
 
     def _archive_signature(self) -> tuple | None:
         total = sum(actor.damage for actor in self.stats.values())
-        if total <= 0 or not self.first_damage_time or not self.last_damage_time:
+        observed_healing = 0
+        for event in self.healing_events:
+            try:
+                observed_healing += max(
+                    0, int(event.get("total_healing", 0) or 0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+        snapshot_healing = sum(
+            max(0, int(snapshot.effective_healing or 0))
+            for actor_id, snapshot in self.stage_healing_snapshots.items()
+            if self.active_stage_healing_snapshot(actor_id) is not None
+        )
+        damage_context = bool(
+            total > 0 and self.first_damage_time and self.last_damage_time
+        )
+        pure_healing_context = bool(
+            not damage_context
+            and self.first_healing_time
+            and self.healing_target_ids
+            and observed_healing + snapshot_healing > 0
+        )
+        if not damage_context and not pure_healing_context:
             return None
         actors = tuple(
             sorted(
@@ -2606,6 +3481,11 @@ class CombatModel:
                 for actor_id, actor in self.stats.items()
             )
         )
+        target_ids_for_signature = (
+            self._encounter_damage_target_ids()
+            if damage_context
+            else set(self.healing_target_ids)
+        )
         targets = tuple(
             sorted(
                 (
@@ -2617,7 +3497,7 @@ class CombatModel:
                     monster.max_hp,
                     monster.observed_max_hp,
                 )
-                for entity_id in self.encounter_target_ids
+                for entity_id in target_ids_for_signature
                 if (monster := self.monsters.get(entity_id)) is not None
             )
         )
@@ -2648,9 +3528,14 @@ class CombatModel:
                     if self.active_stage_healing_snapshot(actor_id) is not None
                 )
             ),
+            round(self.first_healing_time, 3),
+            round(self.last_healing_time, 3),
+            round(self.healing_end_time, 3),
+            tuple(sorted(self.healing_target_ids)),
         )
         return (
             self.encounter_id,
+            "damage" if damage_context else "healing",
             round(self.first_damage_time, 3),
             round(self.last_damage_time, 3),
             round(self.combat_end_time, 3),
@@ -2668,11 +3553,33 @@ class CombatModel:
         signature = self._archive_signature()
         if signature is None:
             return None
-        ended_at = self.combat_end_time or self.last_damage_time
-        duration = self.duration()
-        if not duration:
-            duration = max(1.0, ended_at - self.first_damage_time)
-        dps_duration = dps_duration_seconds(duration)
+        total_observed_damage = sum(
+            max(0, int(actor.damage or 0)) for actor in self.stats.values()
+        )
+        damage_context = bool(
+            total_observed_damage > 0
+            and self.first_damage_time
+            and self.last_damage_time
+        )
+        pure_healing_context = not damage_context
+        if damage_context:
+            started_at = self.first_damage_time
+            ended_at = self.combat_end_time or self.last_damage_time
+            duration = self.duration()
+            if not duration:
+                duration = max(1.0, ended_at - started_at)
+            dps_duration = dps_duration_seconds(duration)
+            hps_duration = dps_duration
+        else:
+            started_at = self.first_healing_time
+            ended_at = self.healing_end_time or self.last_healing_time
+            if not started_at or not ended_at:
+                return None
+            duration = max(1.0, ended_at - started_at)
+            # A treatment-dummy record has no DPS denominator.  HPS still uses
+            # the same whole-second divisor shown in the HPS UI.
+            dps_duration = 0.0
+            hps_duration = dps_duration_seconds(duration)
         healing = self.healing_summary(duration)
         rows = sorted(
             (actor for actor in self.stats.values() if actor.damage > 0),
@@ -2789,7 +3696,11 @@ class CombatModel:
                 }
             )
 
-        target_ids = self._encounter_damage_target_ids()
+        target_ids = (
+            self._encounter_damage_target_ids()
+            if damage_context
+            else set(self.healing_target_ids)
+        )
         target_models = [
             self.monsters[entity_id]
             for entity_id in target_ids
@@ -2964,21 +3875,26 @@ class CombatModel:
             "encounter_id": self.encounter_id,
             "source": "network_rpc",
             "archive_reason": str(reason),
-            "started_at_epoch": self.first_damage_time,
+            "started_at_epoch": started_at,
             "ended_at_epoch": ended_at,
-            "started_at": self._iso_timestamp(self.first_damage_time),
+            "started_at": self._iso_timestamp(started_at),
             "ended_at": self._iso_timestamp(ended_at),
             "saved_at_epoch": now,
             "saved_at": self._iso_timestamp(now),
             "duration_seconds": duration,
             "dps_duration_seconds": dps_duration,
+            "hps_duration_seconds": hps_duration,
+            "healing_started_at_epoch": (
+                self.first_damage_time if damage_context else self.first_healing_time
+            ),
+            "healing_ended_at_epoch": ended_at,
             "duration_source": (
                 "server_shared_clock"
-                if self.shared_clock_final
-                else "local_network_events"
+                if self.shared_clock_final and damage_context
+                else ("local_healing_events" if pure_healing_context else "local_network_events")
             ),
             "total_damage": total_damage,
-            "team_dps": total_damage / dps_duration,
+            "team_dps": total_damage / dps_duration if dps_duration else 0.0,
             "team_hps": float(healing.get("team_hps", 0.0) or 0.0),
             "team_total_healing": healing.get("team_total_healing"),
             "team_effective_healing": int(
@@ -3007,14 +3923,29 @@ class CombatModel:
                 ],
             },
             "team_size": (
-                len(participants)
-                if self._is_dummy_encounter()
-                else min(
+                min(
                     MAX_PARTY_MEMBERS,
-                    max(len(participants), self.encounter_team_size),
+                    max(
+                        len(healing.get("healers", [])),
+                        self.encounter_team_size,
+                        len(self._current_member_ids()),
+                    ),
+                )
+                if pure_healing_context
+                else (
+                    len(participants)
+                    if self._is_dummy_encounter()
+                    else min(
+                        MAX_PARTY_MEMBERS,
+                        max(len(participants), self.encounter_team_size),
+                    )
                 )
             ),
-            "target_filter": "boss" if self.boss_only else "all_monsters",
+            "target_filter": (
+                "healing_dummy"
+                if pure_healing_context
+                else ("boss" if self.boss_only else "all_monsters")
+            ),
             "monster": primary_target,
             "targets": targets,
             "participants": participants,
@@ -3035,12 +3966,19 @@ class CombatModel:
 
     def _queue_current_record_refresh(self) -> bool:
         target_depleted = self._target_hp_depleted()
-        if not self.combat_end_time and (
-            not target_depleted or self._multiphase_encounter()
+        pure_healing_finished = bool(
+            not self.first_damage_time and self.healing_end_time
+        )
+        if (
+            not self.combat_end_time
+            and not pure_healing_finished
+            and (not target_depleted or self._multiphase_encounter())
         ):
             return False
         reason = self.combat_end_reason or (
-            "target_defeated" if target_depleted else "completed"
+            self.healing_end_reason
+            if pure_healing_finished
+            else ("target_defeated" if target_depleted else "completed")
         )
         record = self.build_combat_record(reason)
         signature = self._archive_signature()
@@ -3074,13 +4012,26 @@ class CombatModel:
         return True
 
     def finalize_if_idle(self, now: float | None = None) -> bool:
-        if not self.last_damage_time:
-            return False
         if self.combat_end_time:
             return self.archive_current(
                 self.combat_end_reason or "completed"
             )
         now = time.time() if now is None else now
+        if not self.last_damage_time:
+            if not self.last_healing_time:
+                return False
+            if self.healing_end_time:
+                return self.archive_current(
+                    self.healing_end_reason or "completed"
+                )
+            if now - self.last_healing_time < self.idle_gap:
+                return False
+            self.healing_end_time = self.last_healing_time
+            self.healing_end_reason = "idle"
+            self.healing_revision += 1
+            self.healing_summary_cache_key = None
+            self.healing_summary_cache = None
+            return self.archive_current("idle")
         if (
             self.boss_reset_pending_100ns
             and now - self.last_damage_time >= self.idle_gap
@@ -3796,30 +4747,118 @@ class CombatModel:
             or summary_id in self.rejected_stage_summary_ids
         ):
             return False
-        if not self._encounter_damage_target_ids() or not self.first_damage_time:
+
+        raw_summary_actors = [
+            raw_actor
+            for raw_actor in update.get("actors", [])
+            if isinstance(raw_actor, dict)
+        ]
+        profession_metadata_changed = False
+        for raw_actor in raw_summary_actors:
+            try:
+                actor_id = int(raw_actor.get("actor_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            profession_id = _parsed_profession_id(
+                raw_actor.get("profession_id", 0)
+            )
+            if actor_id <= 0 or not profession_id:
+                continue
+            if self.entity_professions.get(actor_id) != profession_id:
+                self.entity_professions[actor_id] = profession_id
+                profession_metadata_changed = True
+            if profession_id not in HEALER_PROFESSION_IDS:
+                if self.stage_healing_snapshots.pop(actor_id, None) is not None:
+                    profession_metadata_changed = True
+        if profession_metadata_changed:
+            self.healing_revision += 1
+            self.healing_summary_cache_key = None
+            self.healing_summary_cache = None
+
+        summary_has_healing = False
+        for raw_actor in raw_summary_actors:
+            try:
+                actor_id = int(raw_actor.get("actor_id", 0) or 0)
+                has_effective_healing = (
+                    int(raw_actor.get("effective_healing", 0) or 0) > 0
+                )
+                if (
+                    actor_id > 0
+                    and has_effective_healing
+                    and self._healing_actor_allowed(
+                        actor_id, raw_actor.get("profession_id", 0)
+                    )
+                ):
+                    summary_has_healing = True
+                    break
+            except (TypeError, ValueError, OverflowError):
+                continue
+        damage_context = bool(
+            self.first_damage_time and self._encounter_damage_target_ids()
+        )
+        pure_healing_context = bool(
+            not damage_context
+            and self.healing_target_ids
+            and (self.first_healing_time or summary_has_healing)
+        )
+        if not damage_context and not pure_healing_context:
             self.rejected_stage_summary_ids.add(summary_id)
             return False
 
         summary_total = 0
         summary_actor_ids: set[int] = set()
+        summary_healing_actor_ids: set[int] = set()
         summary_damage_by_actor: dict[int, int] = {}
-        for raw_actor in update.get("actors", []):
-            if not isinstance(raw_actor, dict):
-                continue
+        current_members = self._current_member_ids()
+        for raw_actor in raw_summary_actors:
             try:
                 actor_id = int(raw_actor.get("actor_id", 0) or 0)
                 damage = max(0, int(raw_actor.get("damage", 0) or 0))
             except (TypeError, ValueError, OverflowError):
                 continue
-            if actor_id <= 0 or not self._actor_counts_for_encounter(actor_id):
+            if actor_id <= 0:
+                continue
+            if pure_healing_context:
+                if actor_id not in current_members:
+                    continue
+                try:
+                    if (
+                        int(raw_actor.get("effective_healing", 0) or 0) > 0
+                        and self._healing_actor_allowed(
+                            actor_id, raw_actor.get("profession_id", 0)
+                        )
+                    ):
+                        summary_healing_actor_ids.add(actor_id)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            elif not self._actor_counts_for_encounter(actor_id):
                 continue
             summary_damage_by_actor[actor_id] = damage
             summary_total += damage
             if damage > 0:
                 summary_actor_ids.add(actor_id)
+        if pure_healing_context and not summary_healing_actor_ids:
+            self.rejected_stage_summary_ids.add(summary_id)
+            return False
         summary_time = self._event_seconds({"filetime_100ns": timestamp})
+        if not math.isfinite(summary_time):
+            self.rejected_stage_summary_ids.add(summary_id)
+            return False
+        if pure_healing_context and summary_healing_actor_ids:
+            if not self.first_healing_time:
+                self.first_healing_time = summary_time
+            else:
+                self.first_healing_time = min(self.first_healing_time, summary_time)
+            self.last_healing_time = max(self.last_healing_time, summary_time)
+            self.healing_revision += 1
+            self.healing_summary_cache_key = None
+            self.healing_summary_cache = None
         observed_total = sum(actor.damage for actor in self.stats.values())
-        encounter_edge = self.combat_end_time or self.last_damage_time
+        encounter_edge = (
+            (self.combat_end_time or self.last_damage_time)
+            if damage_context
+            else (self.healing_end_time or self.last_healing_time)
+        )
         summary_delay = (
             summary_time - encounter_edge if encounter_edge else float("inf")
         )
@@ -3838,15 +4877,23 @@ class CombatModel:
                 * STAGE_SUMMARY_TOTAL_TOLERANCE_RATIO
             ),
         )
-        total_plausible = bool(
-            summary_total > 0
-            and observed_total > 0
-            and abs(summary_total - observed_total) <= total_tolerance
-            and min(summary_total, observed_total)
-            >= max(summary_total, observed_total) * 0.5
+        total_plausible = (
+            bool(
+                summary_total > 0
+                and observed_total > 0
+                and abs(summary_total - observed_total) <= total_tolerance
+                and min(summary_total, observed_total)
+                >= max(summary_total, observed_total) * 0.5
+            )
+            if damage_context
+            else bool(summary_healing_actor_ids)
         )
         self_plausible = True
-        if self.self_id is not None and self.self_id in summary_damage_by_actor:
+        if (
+            damage_context
+            and self.self_id is not None
+            and self.self_id in summary_damage_by_actor
+        ):
             observed_self = self.stats.get(self.self_id)
             observed_self_damage = observed_self.damage if observed_self else 0
             summary_self_damage = summary_damage_by_actor[self.self_id]
@@ -3865,15 +4912,23 @@ class CombatModel:
         end_snapshot = bool(
             0 <= summary_delay <= final_window
             and (
-                authoritative
-                or
-                self.combat_end_time
-                or self._target_hp_depleted()
-                or summary_delay >= self._encounter_idle_timeout()
+                (
+                    authoritative
+                    or self.combat_end_time
+                    or self._target_hp_depleted()
+                    or summary_delay >= self._encounter_idle_timeout()
+                )
+                if damage_context
+                else (
+                    authoritative
+                    or completion_confirmed
+                    or summary_delay >= self.idle_gap
+                )
             )
         )
         exact_snapshot = bool(
-            summary_total > 0
+            damage_context
+            and summary_total > 0
             and actor_overlap
             and self_plausible
             and end_snapshot
@@ -3903,13 +4958,16 @@ class CombatModel:
             and all(not row["difference"] for row in actor_differences)
         )
         authoritative_total_plausible = bool(
-            summary_total > 0
+            damage_context
+            and summary_total > 0
             and observed_total > 0
             and min(summary_total, observed_total)
             >= max(summary_total, observed_total) * 0.5
         )
         encounter_concluded = bool(
-            self.combat_end_time or self._target_hp_depleted()
+            (self.combat_end_time or self._target_hp_depleted())
+            if damage_context
+            else (self.healing_end_time or completion_confirmed)
         )
         confirmed_multiphase_completion = bool(
             self._multiphase_encounter()
@@ -3917,7 +4975,8 @@ class CombatModel:
             and self._target_hp_depleted()
         )
         would_allow_legacy_correction = bool(
-            authoritative
+            damage_context
+            and authoritative
             and end_snapshot
             and encounter_concluded
             and (
@@ -3942,6 +5001,9 @@ class CombatModel:
             "absolute_difference": abs(summary_total - observed_total),
             "total_tolerance": total_tolerance,
             "total_plausible": total_plausible,
+            "damage_context": damage_context,
+            "pure_healing_context": pure_healing_context,
+            "summary_healing_actor_count": len(summary_healing_actor_ids),
             "self_plausible": self_plausible,
             "actor_overlap_count": len(actor_overlap),
             "summary_delay_seconds": (
@@ -3963,7 +5025,10 @@ class CombatModel:
         self.stage_summaries[summary_id] = validation_update
 
         if summary_time <= self.stage_summary_guard_until or (
-            not authoritative and end_snapshot and not total_plausible
+            not pure_healing_context
+            and not authoritative
+            and end_snapshot
+            and not total_plausible
         ):
             self.rejected_stage_summary_ids.add(summary_id)
             self._queue_current_record_refresh()
@@ -3973,13 +5038,18 @@ class CombatModel:
         applied_skill_actor_ids: list[int] = []
         midfight_summary = bool(
             not authoritative
+            and damage_context
             and self.first_damage_time
             and summary_time >= self.first_damage_time
             and -0.5 <= summary_delay <= 8.0
         )
         snapshot_eligible = bool(
-            (end_snapshot and (authoritative or completion_confirmed))
+            (
+                end_snapshot
+                and (authoritative or completion_confirmed)
+            )
             or midfight_summary
+            or (pure_healing_context and summary_has_healing)
         )
         if snapshot_eligible:
             for raw_actor in update.get("actors", []):
@@ -3989,6 +5059,8 @@ class CombatModel:
                     summary_id, timestamp, raw_actor
                 )
                 if snapshot is None or snapshot.actor_id == self.self_id:
+                    continue
+                if pure_healing_context and snapshot.actor_id not in current_members:
                     continue
                 observed_actor = self.stats.get(snapshot.actor_id)
                 if (
@@ -4017,6 +5089,16 @@ class CombatModel:
                 if healing_snapshot is None or not self._actor_counts_for_encounter(
                     healing_snapshot.actor_id
                 ):
+                    continue
+                if not self._healing_actor_allowed(
+                    healing_snapshot.actor_id,
+                    raw_actor.get("profession_id", 0),
+                ):
+                    self.stage_healing_snapshots.pop(
+                        healing_snapshot.actor_id, None
+                    )
+                    continue
+                if pure_healing_context and healing_snapshot.actor_id not in current_members:
                     continue
                 observed_actor = self.stats.get(healing_snapshot.actor_id)
                 observed_damage = int(
@@ -4078,8 +5160,19 @@ class CombatModel:
                 # Stage rows can retain deaths from earlier pulls. Deaths are
                 # therefore always counted from live life-state transitions.
         if skill_snapshots_changed or healing_snapshots_changed or metrics_changed:
+            self.healing_revision += 1 if healing_snapshots_changed else 0
+            self.healing_summary_cache_key = None
+            self.healing_summary_cache = None
             self._recompute()
             self._queue_current_record_refresh()
+
+        if (
+            pure_healing_context
+            and (completion_confirmed or summary_delay >= self.idle_gap)
+            and self.last_healing_time
+        ):
+            self.healing_end_time = max(self.last_healing_time, summary_time)
+            self.healing_end_reason = "target_defeated" if completion_confirmed else "idle"
 
         # Mid-fight stage rows may supply crit counters. A validated final
         # settlement may also have reconciled the damage totals above.
@@ -4480,6 +5573,14 @@ class CombatModel:
             ) >= int(current_health.get("filetime_100ns", 0) or 0):
                 self.actor_health_states[new_actor] = old_health
             changed = True
+        old_health_low = self.actor_health_lows.pop(old_actor, None)
+        if old_health_low is not None:
+            current_health_low = self.actor_health_lows.get(new_actor)
+            if current_health_low is None or self._health_low_is_lower(
+                old_health_low, current_health_low
+            ):
+                self.actor_health_lows[new_actor] = old_health_low
+            changed = True
         old_drop = self.pending_health_drops.pop(old_actor, 0)
         if old_drop:
             current_drop = self.pending_health_drops.get(new_actor, 0)
@@ -4503,6 +5604,17 @@ class CombatModel:
             if int(response.get("target_id", 0) or 0) == old_actor:
                 response["target_id"] = new_actor
                 healing_rebound = True
+        rebound_response_keys = {
+            (
+                new_actor if target_id == old_actor else target_id,
+                drop_time,
+                new_actor if healer_id == old_actor else healer_id,
+            )
+            for target_id, drop_time, healer_id in self.healing_response_keys
+        }
+        if rebound_response_keys != self.healing_response_keys:
+            self.healing_response_keys = rebound_response_keys
+            healing_rebound = True
         if healing_rebound:
             self.healing_event_keys = {
                 self._healing_event_key(event) for event in self.healing_events
@@ -4556,6 +5668,9 @@ class CombatModel:
         self.member_life_times[actor_id] = timestamp
         if changed:
             self.pending_health_drops.pop(actor_id, None)
+            self.healing_response_keys = {
+                key for key in self.healing_response_keys if key[0] != actor_id
+            }
         event_time = self._event_seconds(update)
         if (
             dead
@@ -4680,6 +5795,31 @@ class CombatModel:
         was_priority_target = self._is_priority_target(entity_id)
         changed = False
         monster = self.monsters.setdefault(entity_id, MonsterStats(entity_id))
+        # Once a target has been identified by an exact treatment-dummy
+        # template, that identity is authoritative for the rest of the
+        # encounter.  Generic profile packets can arrive later with stale
+        # Boss/type fields; remember the canonical template before applying
+        # any such packet so it cannot downgrade or promote the dummy.
+        try:
+            existing_healing_template = int(monster.template_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            existing_healing_template = 0
+        if existing_healing_template not in HEALING_TARGET_TEMPLATE_IDS:
+            existing_healing_template = 0
+        try:
+            template_hint = int(update.get("template_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            template_hint = 0
+        healing_target_hint = bool(
+            update.get("healing_target") is True
+            or template_hint in HEALING_TARGET_TEMPLATE_IDS
+            or monster.healing_target
+        )
+        if healing_target_hint:
+            changed |= self._register_healing_target(
+                entity_id,
+                template_id=template_hint,
+            )
         try:
             boss_type_hint = int(update.get("boss_type", -1) or 0)
             boss_rank_hint = int(update.get("boss_rank", 0) or 0)
@@ -4687,18 +5827,23 @@ class CombatModel:
             boss_type_hint = boss_rank_hint = 0
         entity_type_hint = str(update.get("entity_type", "")).casefold()
         known_boss = bool(
-            self._monster_rank(monster) > 0
+            not healing_target_hint
+            and (
+                self._monster_rank(monster) > 0
             or entity_id == self.combat_target_id
             or "boss" in entity_type_hint
             or "首领" in entity_type_hint
             or boss_type_hint == 3
             or boss_rank_hint > 0
+            )
         )
         if update.get("name") and not (
             known_boss and boss_name_is_placeholder(update.get("name"))
         ):
             changed |= self.ingest_name(update)
         entity_type = str(update.get("entity_type", "")).strip()[:64]
+        if healing_target_hint:
+            entity_type = "TrainingDummy"
         if entity_type and monster.entity_type != entity_type:
             monster.entity_type = entity_type
             changed = True
@@ -4706,7 +5851,12 @@ class CombatModel:
             level = int(update["level"])
         except (KeyError, TypeError, ValueError):
             level = None
-        if level is not None and 1 <= level <= 999 and monster.level != level:
+        if (
+            level is not None
+            and 1 <= level <= 999
+            and not healing_target_hint
+            and monster.level != level
+        ):
             monster.level = level
             changed = True
         try:
@@ -4719,14 +5869,27 @@ class CombatModel:
         try:
             template_id = int(update["template_id"])
         except (KeyError, TypeError, ValueError):
-            template_id = 0
-        if template_id and monster.template_id != template_id:
+            template_id = template_hint
+        if healing_target_hint:
+            canonical_template = (
+                existing_healing_template
+                or (template_hint if template_hint in HEALING_TARGET_TEMPLATE_IDS else 0)
+                or (template_id if template_id in HEALING_TARGET_TEMPLATE_IDS else 0)
+            )
+            if canonical_template and monster.template_id != canonical_template:
+                monster.template_id = canonical_template
+                changed = True
+        elif template_id and monster.template_id != template_id:
             monster.template_id = template_id
             changed = True
+        if not healing_target_hint:
+            changed |= self._apply_catalog_target_identity(monster)
         try:
             boss_type = int(update["boss_type"])
         except (KeyError, TypeError, ValueError):
             boss_type = None
+        if healing_target_hint:
+            boss_type = 0
         if boss_type is not None and monster.boss_type != boss_type:
             monster.boss_type = boss_type
             changed = True
@@ -4737,6 +5900,37 @@ class CombatModel:
         if boss_rank and monster.boss_rank != boss_rank:
             monster.boss_rank = boss_rank
             changed = True
+        if healing_target_hint:
+            # A later generic profile must not promote the treatment dummy to
+            # a Boss.  Keep the marker and canonical identity authoritative.
+            try:
+                current_template = int(monster.template_id or 0)
+            except (TypeError, ValueError, OverflowError):
+                current_template = 0
+            changed |= self._register_healing_target(
+                entity_id,
+                template_id=(
+                    current_template
+                    if current_template in HEALING_TARGET_TEMPLATE_IDS
+                    else 0
+                ),
+                level=monster.level or HEALING_TARGET_LEVEL,
+            )
+            if monster.entity_type != "TrainingDummy":
+                monster.entity_type = "TrainingDummy"
+                changed = True
+            if monster.boss_type != 0:
+                monster.boss_type = 0
+                changed = True
+            if monster.boss_rank:
+                monster.boss_rank = 0
+                changed = True
+            if monster.name != HEALING_TARGET_NAME:
+                monster.name = HEALING_TARGET_NAME
+                changed = True
+            if self.entity_names.get(entity_id) != HEALING_TARGET_NAME:
+                self.entity_names[entity_id] = HEALING_TARGET_NAME
+                changed = True
         if "encounter_auxiliary" in update:
             encounter_auxiliary = bool(update.get("encounter_auxiliary"))
             if monster.encounter_auxiliary != encounter_auxiliary:
@@ -4806,7 +6000,7 @@ class CombatModel:
             timestamp = int(update.get("filetime_100ns", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             timestamp = 0
-        if timestamp and confirmed_non_player:
+        if timestamp and (confirmed_non_player or monster.healing_target):
             monster.last_update_100ns = max(monster.last_update_100ns, timestamp)
             self.target_activity_100ns[entity_id] = max(
                 self.target_activity_100ns.get(entity_id, 0), timestamp
@@ -5331,8 +6525,14 @@ class CombatModel:
         ).strip()
         if name and not boss_name_is_placeholder(name):
             return name
+        if monster is not None:
+            catalog_name = _catalog_boss_name(
+                self.target_catalog, monster.template_id
+            )
+            if catalog_name:
+                return catalog_name
         if entity_id == self.combat_target_id:
-            return name or "Boss"
+            return "Boss"
         add_order = [
             target_id
             for target_id in self.encounter_target_order
@@ -5487,9 +6687,25 @@ class CombatModel:
             return False
         if any(ord(char) < 0x20 for char in name):
             return False
+        monster = self.monsters.get(entity_id)
+        catalog_name = (
+            _catalog_boss_name(self.target_catalog, monster.template_id)
+            if monster is not None
+            else ""
+        )
+        if boss_name_is_placeholder(name):
+            existing_name = self.entity_names.get(entity_id, "").strip()
+            if existing_name and not boss_name_is_placeholder(existing_name):
+                return False
+            if catalog_name:
+                name = catalog_name
         if self.entity_names.get(entity_id) == name:
             return False
         self.entity_names[entity_id] = name
+        if monster is not None and (
+            not monster.name or boss_name_is_placeholder(monster.name)
+        ):
+            monster.name = name
         if entity_id == self.self_id:
             self.local_player_name = name
         return True
@@ -5536,6 +6752,30 @@ class CombatModel:
             self.shared_clock_duration_seconds + elapsed_since_sync,
         )
 
+    def healing_duration(self, now: float | None = None) -> float:
+        """Use DPS timing for real Boss pulls and local timing for dummies."""
+        if self.first_damage_time:
+            return self.duration(now)
+        if not self.first_healing_time:
+            return 0.0
+        now = time.time() if now is None else float(now)
+        if self.healing_end_time:
+            end = self.healing_end_time
+        elif now - self.last_healing_time < self.idle_gap:
+            end = now
+        else:
+            end = self.last_healing_time
+        return max(1.0, end - self.first_healing_time)
+
+    def healing_active(self, now: float | None = None) -> bool:
+        """Return the HPS live state without changing the DPS live state."""
+        if self.first_damage_time:
+            return self.active(now)
+        if not self.last_healing_time or self.healing_end_time:
+            return False
+        now = time.time() if now is None else float(now)
+        return now - self.last_healing_time < self.idle_gap
+
     def combat_in_progress(self, now: float | None = None) -> bool:
         return self.active(now)
 
@@ -5571,7 +6811,24 @@ class IconFactory:
 
     def __init__(self, root: tk.Misc):
         self.root = root
+        self.window_dpi = get_window_dpi(root)
         self.cache: dict[tuple[object, ...], ImageTk.PhotoImage] = {}
+
+    def set_dpi(self, dpi: object) -> bool:
+        """Switch subsequent raster assets to the window's physical DPI."""
+
+        try:
+            normalized = int(dpi)
+        except (TypeError, ValueError, OverflowError):
+            normalized = DEFAULT_DPI
+        normalized = max(72, min(384, normalized))
+        if normalized == self.window_dpi:
+            return False
+        self.window_dpi = normalized
+        return True
+
+    def _physical_size(self, logical_size: object) -> int:
+        return logical_pixels_to_physical(logical_size, self.window_dpi)
 
     @staticmethod
     def _font(size: int, *, bold: bool = False):
@@ -5639,10 +6896,11 @@ class IconFactory:
         return self._rounded(image, max(4, size // 5))
 
     def app_logo(self, size: int = 18) -> ImageTk.PhotoImage:
-        key = ("app", 0, size, ACCENT)
+        physical_size = self._physical_size(size)
+        key = ("app", 0, physical_size, ACCENT)
         if key not in self.cache:
-            image = self._from_file(APP_LOGO_PATH, size) or self._draw_badge(
-                "D", ACCENT, size, 0
+            image = self._from_file(APP_LOGO_PATH, physical_size) or self._draw_badge(
+                "D", ACCENT, physical_size, 0
             )
             self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
         return self.cache[key]
@@ -5691,6 +6949,35 @@ class IconFactory:
                 fill=stroke,
                 width=width,
                 joint="curve",
+            )
+        elif name in {"clear", "trash"}:
+            # Use an unmistakable bin for the destructive clear action.  The
+            # old circular arrow looked like refresh/reload during combat.
+            draw.rounded_rectangle(
+                (point(7), point(8), point(17), point(21)),
+                radius=point(1.5),
+                outline=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(5), point(7), point(19), point(7)),
+                fill=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(9), point(4), point(15), point(4)),
+                fill=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(10), point(11), point(10), point(18)),
+                fill=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(14), point(11), point(14), point(18)),
+                fill=stroke,
+                width=width,
             )
         elif name in {"eye", "eye_off"}:
             draw.ellipse(
@@ -5831,10 +7118,13 @@ class IconFactory:
     def toolbar(
         self, name: str, size: int = 20, color: str = TEXT
     ) -> ImageTk.PhotoImage:
-        key = ("toolbar", str(name), int(size), str(color))
+        physical_size = self._physical_size(size)
+        key = ("toolbar", str(name), physical_size, str(color))
         if key not in self.cache:
             self.cache[key] = ImageTk.PhotoImage(
-                self._draw_toolbar_icon(str(name), int(size), str(color)),
+                self._draw_toolbar_icon(
+                    str(name), physical_size, str(color)
+                ),
                 master=self.root,
             )
         return self.cache[key]
@@ -5842,11 +7132,15 @@ class IconFactory:
     def profession(self, class_id: int | None, size: int = 34) -> ImageTk.PhotoImage:
         class_id = int(class_id or 0)
         color = PROFESSION_COLORS.get(class_id, SUBTLE)
-        key = ("profession", class_id, size, color)
+        physical_size = self._physical_size(size)
+        key = ("profession", class_id, physical_size, color)
         if key not in self.cache:
             path = ASSET_DIR / "professions" / f"{class_id}.png"
-            image = self._from_file(path, size) or self._draw_badge(
-                self.PROFESSION_GLYPHS.get(class_id, "?"), color, size, class_id
+            image = self._from_file(path, physical_size) or self._draw_badge(
+                self.PROFESSION_GLYPHS.get(class_id, "?"),
+                color,
+                physical_size,
+                class_id,
             )
             self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
         return self.cache[key]
@@ -5859,12 +7153,15 @@ class IconFactory:
         size: int = 36,
     ) -> ImageTk.PhotoImage:
         color = PROFESSION_COLORS.get(int(class_id or 0), "#526273")
-        key = ("skill", int(skill_id), size, color)
+        physical_size = self._physical_size(size)
+        key = ("skill", int(skill_id), physical_size, color)
         if key not in self.cache:
             path = ASSET_DIR / "skills" / f"{int(skill_id)}.png"
-            image = self._from_file(path, size) or self._draw_badge(
-                (name or "?")[:1], color, size, int(skill_id)
-            )
+            image = self._from_file(path, physical_size)
+            if image is None:
+                # Do not invent an icon when no extracted game asset exists.
+                size = physical_size
+                image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
             self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
         return self.cache[key]
 
@@ -6292,6 +7589,127 @@ class BossNameResolver(threading.Thread):
                 write_json_object(MONSTER_NAME_CACHE_PATH, self.cached_names)
 
 
+TEAM_CAPTURE_EVIDENCE_METHODS = frozenset(
+    {
+        "OnMsgDungeonReadinessCheck",
+        "OnMsgDungeonStageSettlement",
+        STAGE_COMBAT_STATISTICS_METHOD,
+        SETTLEMENT_COMBAT_STATISTICS_METHOD,
+        "OnMsgUpdateDungeonBattleStatistics",
+        "OnMsgUpdateDungeonTeamPlayerBattleStatistics",
+    }
+)
+SCENE_CAPTURE_RESET_METHODS = frozenset({"OnMsgBeforeEnterNewSpace"})
+
+
+def classify_team_stats_mode(
+    parser: object,
+    batch: dict | None,
+    current_mode: object = TEAM_STATS_MODE_UNKNOWN,
+) -> tuple[str, str]:
+    """Classify only from explicit target/protocol evidence.
+
+    The classifier is deliberately conservative.  A name or a single damage
+    amount cannot turn on the active team-RPC hook; exact dummy templates,
+    parser-confirmed active Boss state, an explicit multi-player roster, or
+    explicit dungeon protocol messages are required.  The returned reason is
+    diagnostic-only.
+    """
+    current_code = normalize_team_stats_mode(
+        current_mode, default=TEAM_STATS_MODE_UNKNOWN
+    )
+    current_name = TEAM_STATS_MODE_NAMES.get(
+        current_code, TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_UNKNOWN]
+    )
+    payload = batch if isinstance(batch, dict) else {}
+    records = [
+        item
+        for item in (payload.get("records", []) or [])
+        if isinstance(item, dict)
+    ]
+    native_boss_records = [
+        item
+        for item in (payload.get("native_boss_records", []) or [])
+        if isinstance(item, dict)
+    ]
+    methods = {str(item.get("method", "")) for item in records}
+    scene_reset = bool(methods & SCENE_CAPTURE_RESET_METHODS)
+    explicit_team_protocol = bool(methods & TEAM_CAPTURE_EVIDENCE_METHODS)
+
+    native_dummy = False
+    for record in native_boss_records:
+        try:
+            template_id = int(record.get("template_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            template_id = 0
+        if is_training_dummy_template_id(template_id):
+            native_dummy = True
+            break
+        # A localized name is only a secondary fallback when the native record
+        # explicitly describes a training target; name alone never promotes a
+        # normal entity to dummy mode.
+        entity_type = str(record.get("entity_type", "")).casefold()
+        if (
+            "training" in entity_type
+            and is_training_dummy_name(record.get("name", ""))
+        ):
+            native_dummy = True
+            break
+
+    context: dict[str, object] = {}
+    getter = getattr(parser, "current_capture_context", None)
+    if callable(getter):
+        try:
+            candidate = getter()
+            if isinstance(candidate, dict):
+                context = candidate
+        except Exception:
+            context = {}
+    active_target_id = int(context.get("active_target_id", 0) or 0)
+    active_target_dummy = bool(
+        context.get("active_target_is_training_dummy", False)
+    )
+    target_dummy = bool(context.get("target_is_training_dummy", False))
+    parser_dummy = bool(active_target_dummy or target_dummy)
+    parser_non_dummy_boss = bool(context.get("has_non_dummy_boss", False))
+    try:
+        party_member_count = int(context.get("party_member_count", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        party_member_count = 0
+    # The native ring can deliver a retired dummy object in the same poll as a
+    # newly active Boss.  Once the parser has an active non-dummy target, that
+    # stronger current-target evidence must win over the stale observation.
+    if active_target_id and parser_non_dummy_boss and not active_target_dummy:
+        native_dummy = False
+
+    # A full scene transition invalidates all prior target observations.  The
+    # native metadata ring is polled before network records, so a dummy object
+    # in this same batch may be stale from the previous space; wait for the
+    # first post-transition batch before enabling either mode.
+    if scene_reset:
+        return (
+            TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_UNKNOWN],
+            "scene_transition",
+        )
+
+    # Exact dummy evidence wins over ordinary party/roster hints.  Explicit
+    # dungeon protocol is the one exception: it proves the scene is a team
+    # encounter even if a stale dummy object is present in the same poll.
+    if (native_dummy or parser_dummy) and not explicit_team_protocol:
+        return TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_DUMMY], "exact_dummy_template"
+    if explicit_team_protocol:
+        return TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_TEAM], "dungeon_protocol"
+    if party_member_count > 1:
+        return TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_TEAM], "multiplayer_party"
+    if parser_non_dummy_boss and (active_target_id or context.get("party_seen")):
+        return TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_TEAM], "confirmed_boss"
+    if current_name == TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_DUMMY] and parser_dummy:
+        return current_name, "dummy_state_held"
+    if current_name == TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_TEAM]:
+        return current_name, "team_state_held"
+    return TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_UNKNOWN], "awaiting_scene_evidence"
+
+
 class HookWorker(threading.Thread):
     def __init__(
         self,
@@ -6306,6 +7724,12 @@ class HookWorker(threading.Thread):
         self.target_boss_lookup_event = threading.Event()
         if target_boss_lookup_enabled:
             self.target_boss_lookup_event.set()
+        # The main application starts with no assumption about the scene.  A
+        # child capture process receives this state and therefore cannot create
+        # the active team-RPC hook while a training dummy is still unknown.
+        self.team_stats_mode = TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_UNKNOWN]
+        self.team_stats_mode_reason = "startup"
+        self.team_stats_mode_changes = 0
         self.diagnostic_lock = threading.Lock()
         self.diagnostics: dict[str, object] = {
             "stage": "created",
@@ -6313,6 +7737,9 @@ class HookWorker(threading.Thread):
             "network_hook_installed": False,
             "native_damage_hook_installed": False,
             "team_stats_hook_installed": False,
+            "team_stats_mode": self.team_stats_mode,
+            "team_stats_mode_reason": self.team_stats_mode_reason,
+            "team_stats_mode_changes": 0,
             "team_stats_requests": 0,
             "team_stats_last_result": 0,
             "team_stats_last_request_filetime": 0,
@@ -6431,6 +7858,38 @@ class HookWorker(threading.Thread):
     def _update_diagnostics(self, **values: object) -> None:
         with self.diagnostic_lock:
             self.diagnostics.update(values)
+
+    def _apply_team_stats_mode(
+        self,
+        capture: CaptureProcessClient | None,
+        parser: object,
+        batch: dict | None,
+    ) -> None:
+        """Propagate the conservative scene classification to the child."""
+        next_mode, reason = classify_team_stats_mode(
+            parser,
+            batch,
+            self.team_stats_mode,
+        )
+        normalized = team_stats_mode_name(next_mode)
+        changed = normalized != self.team_stats_mode
+        self.team_stats_mode = normalized
+        self.team_stats_mode_reason = str(reason or "")[:64]
+        if changed:
+            self.team_stats_mode_changes += 1
+        self._update_diagnostics(
+            team_stats_mode=self.team_stats_mode,
+            team_stats_mode_reason=self.team_stats_mode_reason,
+            team_stats_mode_changes=self.team_stats_mode_changes,
+        )
+        if capture is not None and changed:
+            try:
+                capture.set_team_stats_mode(self.team_stats_mode)
+            except Exception:
+                self.emit(
+                    "diagnostic",
+                    "team-stat mode propagation failed",
+                )
 
     def set_target_boss_lookup_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -6834,11 +8293,16 @@ class HookWorker(threading.Thread):
             capture = CaptureProcessClient(
                 parent_pid=os.getpid(),
                 target_boss_lookup_enabled=target_boss_lookup_sent,
+                team_stats_mode=TEAM_STATS_MODE_UNKNOWN,
             )
+            self.team_stats_mode = TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_UNKNOWN]
+            self.team_stats_mode_reason = "capture_session_start"
             capture.start()
             self._update_diagnostics(
                 stage="capture_process_starting",
                 capture_process_pid=capture.pid,
+                team_stats_mode=self.team_stats_mode,
+                team_stats_mode_reason=self.team_stats_mode_reason,
             )
 
             while True:
@@ -6926,9 +8390,18 @@ class HookWorker(threading.Thread):
                         team_stats_hook_installed=bool(
                             payload.get("team_stats_hook_installed", False)
                         ),
+                        team_stats_mode=team_stats_mode_name(
+                            payload.get(
+                                "team_stats_mode", TEAM_STATS_MODE_UNKNOWN
+                            )
+                        ),
                         damage_source=str(payload.get("damage_source", "none")),
                         game_pid=game_pid,
                     )
+                    self.team_stats_mode = team_stats_mode_name(
+                        payload.get("team_stats_mode", TEAM_STATS_MODE_UNKNOWN)
+                    )
+                    self.team_stats_mode_reason = "child_connected"
                     self.emit("connected", {"pid": game_pid, "log": str(log_path)})
                     restored_boss = self._restore_same_process_boss(parser, game_pid)
                     self._update_diagnostics(boss_state_restored=restored_boss)
@@ -6957,6 +8430,7 @@ class HookWorker(threading.Thread):
                         )
                         or profile_cache_dirty
                     )
+                    self._apply_team_stats_mode(capture, parser, payload)
                 elif kind == "diagnostic":
                     self._handle_capture_diagnostic(payload)
                 elif kind == "cleanup_error":
@@ -6972,10 +8446,17 @@ class HookWorker(threading.Thread):
                     prefix = "连接失败" if stage == "network_hook_failed" else "采集异常"
                     self.emit("error", f"{prefix}：{detail}" if detail else prefix)
                 elif kind == "session_closed" and isinstance(payload, dict):
+                    closed_mode = team_stats_mode_name(
+                        payload.get("team_stats_mode", self.team_stats_mode)
+                    )
+                    self.team_stats_mode = closed_mode
+                    self.team_stats_mode_reason = "session_closed"
                     self._update_diagnostics(
                         network_hook_installed=False,
                         native_damage_hook_installed=False,
                         team_stats_hook_installed=False,
+                        team_stats_mode=closed_mode,
+                        team_stats_mode_reason="session_closed",
                         damage_source="none",
                     )
                 elif kind == "fatal":
@@ -7080,6 +8561,8 @@ class _LegacyDpsWindow:
         self.root.attributes("-topmost", bool(self.config.get("topmost", True)))
         self.root.attributes("-alpha", float(self.config.get("alpha", 0.94)))
         self.root.overrideredirect(True)
+        self.root.update_idletasks()
+        self.window_dpi = configure_tk_dpi_scaling(self.root)
         self._build_styles()
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -7099,7 +8582,7 @@ class _LegacyDpsWindow:
             borderwidth=0,
             relief="flat",
             rowheight=30,
-            font=("Microsoft YaHei UI", 10),
+            font=tk_font_spec("Microsoft YaHei UI", 10),
         )
         style.map(
             "Dps.Treeview",
@@ -7112,7 +8595,7 @@ class _LegacyDpsWindow:
             foreground=MUTED,
             relief="flat",
             borderwidth=0,
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
         )
         style.map("Dps.Treeview.Heading", background=[("active", PANEL_2)])
 
@@ -7128,7 +8611,7 @@ class _LegacyDpsWindow:
             activeforeground=TEXT,
             borderwidth=0,
             relief="flat",
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
             cursor="hand2",
         )
 
@@ -7139,14 +8622,14 @@ class _LegacyDpsWindow:
         top.bind("<ButtonPress-1>", self._drag_start)
         top.bind("<B1-Motion>", self._drag_move)
 
-        self.dot = tk.Label(top, text="●", bg=BG, fg=WARN, font=("Segoe UI", 10))
+        self.dot = tk.Label(top, text="●", bg=BG, fg=WARN, font=tk_font_spec("Segoe UI", 10))
         self.dot.pack(side="left", padx=(12, 6))
         title = tk.Label(
             top,
             text="诡秘之主  伤害统计",
             bg=BG,
             fg=TEXT,
-            font=("Microsoft YaHei UI", 11, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 11, "bold"),
         )
         title.pack(side="left")
         title.bind("<ButtonPress-1>", self._drag_start)
@@ -7166,7 +8649,7 @@ class _LegacyDpsWindow:
             text="总伤害  0",
             bg=PANEL_2,
             fg=TEXT,
-            font=("Microsoft YaHei UI", 13, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 13, "bold"),
         )
         self.total_label.pack(side="left", padx=12)
         self.dps_label = tk.Label(
@@ -7174,7 +8657,7 @@ class _LegacyDpsWindow:
             text="每秒  0",
             bg=PANEL_2,
             fg=ACCENT,
-            font=("Microsoft YaHei UI", 13, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 13, "bold"),
         )
         self.dps_label.pack(side="left", padx=(8, 0))
         self.time_label = tk.Label(
@@ -7182,7 +8665,7 @@ class _LegacyDpsWindow:
             text="00:00",
             bg=PANEL_2,
             fg=MUTED,
-            font=("Segoe UI", 10),
+            font=tk_font_spec("Segoe UI", 10),
         )
         self.time_label.pack(side="right", padx=12)
 
@@ -7230,7 +8713,7 @@ class _LegacyDpsWindow:
             bg=BG,
             fg=MUTED,
             anchor="w",
-            font=("Microsoft YaHei UI", 8),
+            font=tk_font_spec("Microsoft YaHei UI", 8),
         )
         self.status_label.pack(fill="both", padx=11)
 
@@ -7397,7 +8880,7 @@ class _LegacyDpsWindow:
             bg=BG,
             fg=TEXT,
             anchor="w",
-            font=("Microsoft YaHei UI", 12, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 12, "bold"),
         )
         self.skill_title_label.pack(side="left", fill="both", expand=True)
 
@@ -7407,7 +8890,7 @@ class _LegacyDpsWindow:
             bg=PANEL_2,
             fg=MUTED,
             anchor="w",
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
         )
         self.skill_total_label.pack(fill="x", padx=10, pady=(0, 6), ipady=7)
 
@@ -7582,6 +9065,7 @@ class DpsWindow:
                     skill_professions.setdefault(str(skill_id), class_ids)
 
         skill_names = load_skill_catalog()
+        target_catalog = load_target_identity_catalog()
         runtime_skill_names = self.config.get("runtime_skill_names", {})
         self.history_store = CombatHistoryStore(HISTORY_DIR)
         self.model = CombatModel(
@@ -7591,6 +9075,7 @@ class DpsWindow:
             ),
             skill_professions=skill_professions,
             entity_names={},
+            target_catalog=target_catalog,
             local_player_name="",
             boss_only=True,
         )
@@ -7628,6 +9113,16 @@ class DpsWindow:
         self.show_critical_rate = bool(
             self.config.get("show_critical_rate", True)
         )
+        self.show_effective_healing = bool(
+            self.config.get("show_effective_healing", True)
+        )
+        self.show_hps = bool(self.config.get("show_hps", True))
+        self.show_overheal_rate = bool(
+            self.config.get("show_overheal_rate", True)
+        )
+        # The average-response column was removed in v0.0.15.  Purge the old
+        # preference so upgraded installations cannot bring it back.
+        self.config.pop("show_healing_response", None)
         self.main_meter_mode = str(
             self.config.get("main_meter_mode", "dps") or "dps"
         ).casefold()
@@ -7730,6 +9225,9 @@ class DpsWindow:
         self.settings_show_dps_var: tk.BooleanVar | None = None
         self.settings_show_share_var: tk.BooleanVar | None = None
         self.settings_show_critical_var: tk.BooleanVar | None = None
+        self.settings_show_effective_healing_var: tk.BooleanVar | None = None
+        self.settings_show_hps_var: tk.BooleanVar | None = None
+        self.settings_show_overheal_rate_var: tk.BooleanVar | None = None
         self.settings_font_value_label: tk.Label | None = None
         self.main_tooltip: tk.Toplevel | None = None
         self.main_tooltip_after_id: str | None = None
@@ -7738,6 +9236,8 @@ class DpsWindow:
         self.main_content_overlay_header: tk.Canvas | None = None
         self.main_content_overlay_rows: tk.Canvas | None = None
         self.main_content_overlay_dps: tk.Canvas | None = None
+        self.main_content_overlay_hwnd = 0
+        self.main_content_overlay_child = False
         self.main_content_overlay_sync_after_id: str | None = None
         self.main_content_overlay_root_geometry: tuple[int, int, int, int] | None = None
         self.main_content_overlay_click_through_ready = False
@@ -7797,8 +9297,17 @@ class DpsWindow:
             "-topmost",
             self.window_locked or bool(self.config.get("topmost", True)),
         )
-        self.root.attributes("-alpha", self.window_alpha)
+        # Keep the first backing surface opaque until the mapped HWND has been
+        # calibrated to its real monitor. Creating a layered/alpha surface at
+        # 96 DPI and moving it to a 125% monitor makes DWM scale that cached
+        # surface, which is especially visible on small Chinese glyphs.
+        self.root.attributes("-alpha", 1.0)
         self.root.overrideredirect(True)
+        # Query the real HWND after geometry is assigned.  Calling DPI
+        # calibration while the root is still at Tk's default (and withdrawn)
+        # scale makes a 125% monitor build every font at 96 DPI first.
+        self.root.update_idletasks()
+        self._configure_tk_dpi_scaling()
         self._initialize_ui_fonts()
         self.icons = IconFactory(self.root)
         self.app_window_icon = self.icons.app_logo(64)
@@ -7824,6 +9333,10 @@ class DpsWindow:
         self.root.after(160, self._render)
         self.root.after(20, lambda: self._apply_windows_style(self.root))
         self.root.after(45, self._apply_main_transparency)
+        # Run once immediately after the first map, then keep a lightweight
+        # monitor-transition fallback.  A 250 ms delay was long enough for a
+        # newly-started 125% session to paint one blurry frame.
+        self.root.after(0, self._refresh_window_dpi)
         self.root.after(0, self._show_login)
 
     def _enabled_damage_metrics(self) -> tuple[str, ...]:
@@ -7838,33 +9351,53 @@ class DpsWindow:
             if enabled
         )
 
+    def _enabled_healing_metrics(self) -> tuple[str, ...]:
+        return tuple(
+            key
+            for key, enabled in (
+                ("effective", getattr(self, "show_effective_healing", True)),
+                ("hps", getattr(self, "show_hps", True)),
+                ("overheal", getattr(self, "show_overheal_rate", True)),
+            )
+            if enabled
+        )
+
     def _enabled_main_metrics(self) -> tuple[str, ...]:
         if getattr(self, "main_meter_mode", "dps") == "hps":
-            return ("effective", "hps", "overheal", "response")
+            return self._enabled_healing_metrics()
         return self._enabled_damage_metrics()
 
     def _compact_target_width(self) -> int:
         return compact_width_for_visible_metrics(len(self._enabled_main_metrics()))
 
     def _adaptive_compact_geometry(
-        self, value: object, fallback_x: int = 32, fallback_y: int = 120
+        self,
+        value: object,
+        fallback_x: int = 32,
+        fallback_y: int = 120,
+        *,
+        fit_visible_metrics: bool = False,
     ) -> str:
         match = re.fullmatch(
             r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", str(value or "")
         )
         if match:
-            _width, height, x, y = match.groups()
+            width, height, x, y = match.groups()
+            parsed_width = max(MINI_MIN_WIDTH, int(width))
             parsed_height = max(MINI_MIN_HEIGHT, int(height))
             suffix = f"{x}{y}"
         else:
+            parsed_width = self._compact_target_width()
             parsed_height = MINI_DEFAULT_HEIGHT
             suffix = f"{int(fallback_x):+d}{int(fallback_y):+d}"
-        return f"{self._compact_target_width()}x{parsed_height}{suffix}"
+        if fit_visible_metrics:
+            parsed_width = self._compact_target_width()
+        return f"{parsed_width}x{parsed_height}{suffix}"
 
     def _initial_geometry(self) -> str:
         if self.compact_mode:
             saved = str(self.config.get("compact_geometry", ""))
-            saved = self._adaptive_compact_geometry(saved)
+            saved = self._adaptive_compact_geometry(saved, fit_visible_metrics=True)
             self.config["compact_geometry"] = saved
             return self._visible_geometry(
                 saved, MINI_DEFAULT_WIDTH, MINI_DEFAULT_HEIGHT
@@ -7896,11 +9429,11 @@ class DpsWindow:
         available = tkfont.families(self.root)
         self.ui_font_family = preferred_font_family(
             available,
-            ("MiSans", "Microsoft YaHei UI", "Microsoft YaHei"),
+            ("Microsoft YaHei UI", "Microsoft YaHei", "MiSans"),
         )
         self.number_font_family = preferred_font_family(
             available,
-            ("Segoe UI Variable Text", "Segoe UI", self.ui_font_family),
+            ("Segoe UI", "Microsoft YaHei UI", self.ui_font_family),
         )
         try:
             configured_size = int(self.config.get("font_size", 14))
@@ -7909,6 +9442,91 @@ class DpsWindow:
         self.ui_font_size = min(18, max(12, configured_size))
         self.ui_fonts: dict[str, tkfont.Font] = {}
         self._configure_ui_fonts()
+
+    def _configure_tk_dpi_scaling(self) -> None:
+        """Match Tk point rendering to the physical DPI of the display."""
+        self.window_dpi = configure_tk_dpi_scaling(self.root)
+        self.dpi_scale = self.window_dpi / 96.0
+
+    def _prepare_toplevel_dpi(self, window: tk.Misc) -> None:
+        """Calibrate a newly-created Toplevel before its fonts are measured.
+
+        Tk shares its scaling database across Toplevels.  Querying the child
+        after its geometry is assigned lets Windows choose the monitor that
+        will actually display it, instead of inheriting a 96-DPI bootstrap
+        value from a withdrawn root.
+        """
+        try:
+            window.update_idletasks()
+            target = window
+            # Click-through helpers are intentionally withdrawn while their
+            # native styles are installed. If the parent is already mapped,
+            # it is the authoritative monitor for those child surfaces.
+            if (
+                not window.winfo_ismapped()
+                and self.root.winfo_exists()
+                and self.root.winfo_ismapped()
+            ):
+                target = self.root
+            dpi = configure_tk_dpi_scaling(target)
+            if dpi != getattr(self, "window_dpi", 0):
+                self.window_dpi = dpi
+                self.dpi_scale = dpi / 96.0
+                if hasattr(self, "icons"):
+                    self.icons.set_dpi(dpi)
+            if hasattr(self, "ui_fonts"):
+                # Reconfigure even when the numeric DPI did not change: a
+                # different Toplevel may have changed Tk's display scaling
+                # since this font set was last measured.
+                self._configure_ui_fonts()
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            return
+
+    def _apply_window_dpi_if_changed(self, *, force: bool = False) -> bool:
+        """Apply the mapped root DPI without scheduling another poll."""
+        if self.closing or not self.root.winfo_exists():
+            return False
+        dpi = get_window_dpi(self.root)
+        if not force and dpi == getattr(self, "window_dpi", 0):
+            return False
+        self.window_dpi = dpi
+        self.dpi_scale = dpi / 96.0
+        configure_tk_dpi_scaling(self.root)
+        if hasattr(self, "icons"):
+            self.icons.set_dpi(dpi)
+        if hasattr(self, "ui_fonts"):
+            # Tk caches the pixel metrics of an existing named font. Changing
+            # tk scaling alone does not rebuild those metrics, so reconfigure
+            # every shared font even when its point size is unchanged.
+            self._configure_ui_fonts()
+            self._sync_action_buttons()
+            self._draw_main_header()
+            self._draw_main_rows()
+            self._draw_monster_hp()
+            self._draw_history_list()
+            self._draw_history_participants()
+            self._draw_history_skills()
+            self._render_skill_details()
+            self._schedule_main_content_overlay_sync()
+        return True
+
+    def _refresh_window_dpi(self) -> None:
+        """Refresh fonts after the borderless window crosses a monitor.
+
+        Tk does not expose ``WM_DPICHANGED`` as a normal virtual event.  A
+        lightweight poll keeps a window moved between 100% and 125% monitors
+        sharp without touching the capture thread or redrawing every frame.
+        """
+        if self.closing or not self.root.winfo_exists():
+            return
+        try:
+            self._apply_window_dpi_if_changed()
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            pass
+        try:
+            self.root.after(250, self._refresh_window_dpi)
+        except tk.TclError:
+            return
 
     def _configure_ui_fonts(self) -> None:
         base = int(self.ui_font_size)
@@ -7930,7 +9548,14 @@ class DpsWindow:
             "icon": ("Segoe UI Symbol", base + 3, "normal"),
         }
         for role, (family, pixels, weight) in specs.items():
-            options = {"family": family, "size": -int(pixels), "weight": weight}
+            # Positive Tk sizes are points and remain vector-rendered at the
+            # display scale.  Negative sizes are physical pixels and are
+            # bitmap-scaled poorly on 125% displays.
+            options = {
+                "family": family,
+                "size": tk_font_size_for_pixels(pixels),
+                "weight": weight,
+            }
             if role in self.ui_fonts:
                 self.ui_fonts[role].configure(**options)
             else:
@@ -7953,6 +9578,7 @@ class DpsWindow:
         window.title(f"{UI_BRAND} · 登录")
         window.configure(bg=BORDER)
         window.geometry(f"{width}x{height}+{x}+{y}")
+        self._prepare_toplevel_dpi(window)
         window.resizable(False, False)
         window.attributes("-topmost", True)
         window.attributes("-alpha", 1.0)
@@ -8201,6 +9827,8 @@ class DpsWindow:
         self.login_status_label = None
         self.login_button = None
         self.root.deiconify()
+        self.root.update_idletasks()
+        self._apply_window_dpi_if_changed(force=True)
         self.root.lift()
         if not self.window_locked:
             self.root.focus_force()
@@ -8373,11 +10001,10 @@ class DpsWindow:
                 )
 
             try:
-                destination = UPDATE_DIR / update.filename
-                if IS_FROZEN and destination.resolve() == APP_EXECUTABLE_PATH:
-                    destination = destination.with_name(
-                        f"{destination.stem}.update{destination.suffix}"
-                    )
+                staging_path, target_path = update_install_paths(
+                    UPDATE_DIR, APP_EXECUTABLE_PATH, update.filename
+                )
+                destination = staging_path if IS_FROZEN else target_path
                 path = self.licensing.download_update(
                     update, destination, report_progress
                 )
@@ -8421,7 +10048,14 @@ class DpsWindow:
                 self.update_action_button.configure(text="已下载", bg=PANEL_2, fg=ACCENT)
             return
         try:
-            self._launch_update_replacer(update_path)
+            _staging_path, target_path = update_install_paths(
+                UPDATE_DIR, APP_EXECUTABLE_PATH, update.filename
+            )
+            self._launch_update_replacer(
+                update_path,
+                target_path=target_path,
+                legacy_target_path=APP_EXECUTABLE_PATH,
+            )
         except OSError as exc:
             self._handle_update_download_failed(str(exc))
             return
@@ -8438,12 +10072,21 @@ class DpsWindow:
         if self.update_action_button is not None:
             self.update_action_button.configure(text="重试", bg=ACCENT, fg="#07110e")
 
-    def _launch_update_replacer(self, update_path: Path) -> None:
-        target_path = APP_EXECUTABLE_PATH
+    def _launch_update_replacer(
+        self,
+        update_path: Path,
+        *,
+        target_path: Path | None = None,
+        legacy_target_path: Path | None = None,
+    ) -> None:
+        target_path = Path(target_path or APP_EXECUTABLE_PATH).resolve()
+        legacy_target_path = Path(
+            legacy_target_path or APP_EXECUTABLE_PATH
+        ).resolve()
         UPDATE_DIR.mkdir(parents=True, exist_ok=True)
         script_path = UPDATE_DIR / "apply-update.ps1"
         script_path.write_text(
-            "param([int]$TargetPid,[string]$Source,[string]$Target)\n"
+            "param([int]$TargetPid,[string]$Source,[string]$Target,[string]$LegacyTarget)\n"
             "$ErrorActionPreference = 'Stop'\n"
             "Wait-Process -Id $TargetPid -ErrorAction SilentlyContinue\n"
             "$installed = $false\n"
@@ -8452,6 +10095,9 @@ class DpsWindow:
             "  catch { Start-Sleep -Milliseconds 500 }\n"
             "}\n"
             "if ($installed) {\n"
+            "  if ($LegacyTarget -and (-not [StringComparer]::OrdinalIgnoreCase.Equals([System.IO.Path]::GetFullPath($LegacyTarget), [System.IO.Path]::GetFullPath($Target)))) {\n"
+            "    try { Copy-Item -LiteralPath $Source -Destination $LegacyTarget -Force } catch { }\n"
+            "  }\n"
             "  Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)\n"
             "  Remove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue\n"
             "}\n"
@@ -8476,6 +10122,8 @@ class DpsWindow:
                 str(update_path.resolve()),
                 "-Target",
                 str(target_path),
+                "-LegacyTarget",
+                str(legacy_target_path),
             ],
             close_fds=True,
             creationflags=creation_flags,
@@ -8550,7 +10198,7 @@ class DpsWindow:
         bg: str = SURFACE,
         hover: str = PANEL_2,
         fg: str = MUTED,
-        font=("Microsoft YaHei UI", 10),
+        font=tk_font_spec("Microsoft YaHei UI", 10),
     ) -> tk.Label:
         label = tk.Label(
             parent,
@@ -8655,6 +10303,156 @@ class DpsWindow:
         return DpsWindow._win32_extended_style(hwnd) == (int(style) & 0xFFFFFFFF)
 
     @staticmethod
+    def _win32_window_style(hwnd: int) -> int | None:
+        """Read the regular style bits for a native window handle."""
+        if sys.platform != "win32" or not hwnd:
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            if ctypes.sizeof(ctypes.c_void_p) == 8:
+                getter = user32.GetWindowLongPtrW
+                getter.restype = ctypes.c_ssize_t
+            else:
+                getter = user32.GetWindowLongW
+                getter.restype = wintypes.LONG
+            getter.argtypes = (wintypes.HWND, ctypes.c_int)
+            ctypes.set_last_error(0)
+            value = int(getter(hwnd, -16))
+            if value == 0 and ctypes.get_last_error():
+                return None
+            return value & 0xFFFFFFFF
+        except (AttributeError, OSError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _set_win32_window_style(hwnd: int, style: int) -> bool:
+        """Set regular style bits and force native frame recalculation."""
+        if sys.platform != "win32" or not hwnd:
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            pointer_sized = ctypes.sizeof(ctypes.c_void_p) == 8
+            if pointer_sized:
+                setter = user32.SetWindowLongPtrW
+                setter.restype = ctypes.c_ssize_t
+                encoded = int(style) & 0xFFFFFFFF
+            else:
+                setter = user32.SetWindowLongW
+                setter.restype = wintypes.LONG
+                encoded = ctypes.c_long(int(style) & 0xFFFFFFFF).value
+            setter.argtypes = (
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_ssize_t if pointer_sized else wintypes.LONG,
+            )
+            ctypes.set_last_error(0)
+            previous = int(setter(hwnd, -16, encoded))
+            if previous == 0 and ctypes.get_last_error():
+                return False
+            set_position = user32.SetWindowPos
+            set_position.argtypes = (
+                wintypes.HWND,
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.UINT,
+            )
+            set_position.restype = wintypes.BOOL
+            # SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+            if not set_position(hwnd, 0, 0, 0, 0, 0, 0x0037):
+                return False
+            return DpsWindow._win32_window_style(hwnd) == (
+                int(style) & 0xFFFFFFFF
+            )
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+
+    def _configure_main_content_overlay_child(self, window: tk.Misc) -> bool:
+        """Make the opaque-content helper a child of the single DPS window.
+
+        A top-level transparent helper can lag behind a borderless parent while
+        it is dragged, and some Windows compositors expose its color-keyed
+        background as a second panel.  A native child keeps the exact same
+        rendering path while inheriting the parent position and z-order.
+        """
+        if sys.platform != "win32" or not window.winfo_exists():
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            overlay_hwnd = self._win32_root_handle(window)
+            parent_hwnd = self._win32_root_handle(self.root)
+            if not overlay_hwnd or not parent_hwnd:
+                return False
+            style = self._win32_window_style(overlay_hwnd)
+            if style is None:
+                return False
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            set_parent = user32.SetParent
+            set_parent.argtypes = (wintypes.HWND, wintypes.HWND)
+            set_parent.restype = wintypes.HWND
+            ctypes.set_last_error(0)
+            if not set_parent(overlay_hwnd, parent_hwnd):
+                # SetParent returns NULL on failure; a desktop/owner handle is
+                # valid for the old parent, so only treat an actual Win32 error
+                # as failure.
+                if ctypes.get_last_error():
+                    return False
+            child_style = window_style_for_child(style)
+            if not self._set_win32_window_style(overlay_hwnd, child_style):
+                return False
+            self.main_content_overlay_hwnd = int(overlay_hwnd)
+            self.main_content_overlay_child = True
+            return True
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            return False
+
+    def _set_main_content_overlay_bounds(
+        self, window: tk.Misc, width: int, height: int, root_x: int, root_y: int
+    ) -> None:
+        if self.main_content_overlay_child and self.main_content_overlay_hwnd:
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                set_position = user32.SetWindowPos
+                set_position.argtypes = (
+                    wintypes.HWND,
+                    wintypes.HWND,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    wintypes.UINT,
+                )
+                set_position.restype = wintypes.BOOL
+                # Child coordinates are relative to the DPS root.  HWND_TOP
+                # keeps the helper above the root's normal Tk child widgets.
+                set_position(
+                    self.main_content_overlay_hwnd,
+                    0,
+                    0,
+                    0,
+                    int(width),
+                    int(height),
+                    0x0010 | 0x0040 | 0x0020,
+                )
+                return
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
+        window.geometry(f"{int(width)}x{int(height)}{int(root_x):+d}{int(root_y):+d}")
+
+    @staticmethod
     def _set_window_topmost_noactivate(window: tk.Misc, topmost: bool) -> bool:
         """Change native z-order without activating an auxiliary window."""
         if sys.platform != "win32" or not window.winfo_exists():
@@ -8728,7 +10526,11 @@ class DpsWindow:
         value = bool(value)
         self.root.attributes("-topmost", value)
         window = getattr(self, "main_content_overlay_window", None)
-        if window is not None and window.winfo_exists():
+        if (
+            window is not None
+            and window.winfo_exists()
+            and not getattr(self, "main_content_overlay_child", False)
+        ):
             if self._set_window_topmost_noactivate(window, value):
                 self.main_content_overlay_topmost = value
 
@@ -8783,6 +10585,7 @@ class DpsWindow:
             window = tk.Toplevel(self.root)
             window.withdraw()
             self.unlock_window = window
+            self._prepare_toplevel_dpi(window)
             window.title("解锁 DPS 窗口")
             window.configure(bg=BORDER)
             window.overrideredirect(True)
@@ -8880,6 +10683,7 @@ class DpsWindow:
         logo = tk.Label(
             self.titlebar, image=logo_image, bg=BG, bd=0
         )
+        self.main_logo = logo
         logo.image = logo_image
         logo.pack(side="left", padx=(2, 7), pady=7)
         self._bind_drag(logo, self.root)
@@ -8919,7 +10723,7 @@ class DpsWindow:
             actions, "share", "分享", self._share_current
         )
         self.reset_button = self._main_icon_button(
-            actions, "reset", "清空", self.reset
+            actions, "trash", "清空本场记录", self.reset
         )
         self.privacy_button = self._main_icon_button(
             actions,
@@ -9286,6 +11090,8 @@ class DpsWindow:
         self.main_content_overlay_header = None
         self.main_content_overlay_rows = None
         self.main_content_overlay_dps = None
+        self.main_content_overlay_hwnd = 0
+        self.main_content_overlay_child = False
         self.main_content_overlay_root_geometry = None
         self.main_content_overlay_click_through_ready = False
         self.main_content_overlay_topmost = None
@@ -9299,6 +11105,7 @@ class DpsWindow:
         try:
             window = tk.Toplevel(self.root)
             window.withdraw()
+            self._prepare_toplevel_dpi(window)
             window.title(f"{UI_BRAND} · 前景内容")
             window.configure(bg=MAIN_CONTENT_OVERLAY_KEY)
             window.overrideredirect(True)
@@ -9330,6 +11137,8 @@ class DpsWindow:
                 | WINDOW_EXSTYLE_NOACTIVATE,
             ):
                 raise tk.TclError("could not configure the content overlay")
+            if not self._configure_main_content_overlay_child(window):
+                raise tk.TclError("could not attach the content overlay")
             self.main_content_overlay_click_through_ready = True
             return True
         except (AttributeError, OSError, tk.TclError):
@@ -9400,16 +11209,20 @@ class DpsWindow:
                 root_width,
                 root_height,
             )
-            desired_geometry = (
-                f"{root_width}x{root_height}{root_x:+d}{root_y:+d}"
-            )
             if geometry_signature != self.main_content_overlay_root_geometry:
-                window.geometry(desired_geometry)
+                self._set_main_content_overlay_bounds(
+                    window,
+                    root_width,
+                    root_height,
+                    root_x,
+                    root_y,
+                )
                 self.main_content_overlay_root_geometry = geometry_signature
-            overlay_topmost = bool(self.root.attributes("-topmost"))
-            if overlay_topmost != self.main_content_overlay_topmost:
-                if self._set_window_topmost_noactivate(window, overlay_topmost):
-                    self.main_content_overlay_topmost = overlay_topmost
+            if not self.main_content_overlay_child:
+                overlay_topmost = bool(self.root.attributes("-topmost"))
+                if overlay_topmost != self.main_content_overlay_topmost:
+                    if self._set_window_topmost_noactivate(window, overlay_topmost):
+                        self.main_content_overlay_topmost = overlay_topmost
             rows_visible = self._place_overlay_canvas(
                 rows_canvas, self.rows_canvas, root_x, root_y
             )
@@ -9426,7 +11239,17 @@ class DpsWindow:
                 self._draw_main_rows_on_canvas(
                     rows_canvas,
                     update_scroll_state=False,
-                    draw_empty_state=False,
+                    # The overlay owns the visible empty-state message too.
+                    # Drawing it only during the slower meter refresh and
+                    # omitting it here made the 16 ms overlay sync cover the
+                    # message, so "no damage/healing" visibly blinked.
+                    draw_empty_state=True,
+                    # The root underneath is alpha-blended. Every overlay
+                    # refresh must mask those backing glyphs before drawing
+                    # the opaque player rows; otherwise the same text is
+                    # composited twice and looks soft at fractional DPI such
+                    # as Windows 125% (120 DPI).
+                    opaque_background=True,
                 )
             self._draw_main_content_overlay_dps()
             if window.state() != "normal":
@@ -9442,6 +11265,17 @@ class DpsWindow:
         canvas.delete("all")
         if self.compact_mode or not self.dps_value.winfo_ismapped():
             return
+        # Mask the translucent label underneath.  Without this opaque
+        # backing, the same glyph is composited once by the root and once by
+        # the foreground canvas, which reads as blur at 125% DPI.
+        canvas.create_rectangle(
+            0,
+            0,
+            max(1, canvas.winfo_width()),
+            max(1, canvas.winfo_height()),
+            fill=BG,
+            outline="",
+        )
         canvas.create_text(
             max(1, canvas.winfo_width()) // 2,
             max(1, canvas.winfo_height()) // 2,
@@ -9454,6 +11288,16 @@ class DpsWindow:
     def _main_window_configure(self, event) -> None:
         if event.widget is not self.root:
             return
+        # A Configure event is delivered immediately during a cross-monitor
+        # move.  The periodic check remains as a fallback for borderless
+        # windows that do not emit a second event after Windows repositions
+        # them for the new DPI.
+        try:
+            dpi = get_window_dpi(self.root)
+            if dpi != getattr(self, "window_dpi", 0):
+                self._apply_window_dpi_if_changed()
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            pass
         self._sync_titlebar_density(int(event.width))
         geometry_signature = (
             self.root.winfo_rootx(),
@@ -9469,6 +11313,13 @@ class DpsWindow:
     def _main_window_map_state(self, event) -> None:
         if event.widget is not self.root:
             return
+        try:
+            # A withdrawn root can only provide a provisional monitor DPI.
+            # Rebuild the named fonts immediately once the real HWND is mapped,
+            # before the alpha foreground helper paints its first frame.
+            self._apply_window_dpi_if_changed(force=True)
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            pass
         self.main_content_overlay_root_geometry = None
         self._schedule_main_content_overlay_sync()
 
@@ -9500,7 +11351,6 @@ class DpsWindow:
                 self.table_panel.pack(fill="both", expand=True, padx=2, pady=2)
             else:
                 self.table_panel.pack_configure(padx=2, pady=2)
-            self.resize_grip.place_forget()
             self.root.minsize(MINI_MIN_WIDTH, MINI_MIN_HEIGHT)
             self.config["compact_layout_version"] = 3
             self._dismiss_compact_auxiliary_windows()
@@ -9525,8 +11375,11 @@ class DpsWindow:
                     pady=(1, 1),
                     before=self.table_panel,
                 )
-            self.resize_grip.place(relx=1.0, rely=1.0, anchor="se")
             self.root.minsize(MAIN_MIN_WIDTH, MAIN_MIN_HEIGHT)
+        # Borderless windows have no native sizing frame.  Keep the custom
+        # grip in compact mode as well so both width and height remain free.
+        self.resize_grip.place(relx=1.0, rely=1.0, anchor="se")
+        self.resize_grip.lift()
         self._draw_main_header()
         self._draw_main_rows()
         self._sync_titlebar_density()
@@ -9556,7 +11409,10 @@ class DpsWindow:
         fallback_x = self.root.winfo_x() if self.root.winfo_exists() else 32
         fallback_y = self.root.winfo_y() if self.root.winfo_exists() else 120
         geometry = self._adaptive_compact_geometry(
-            self.config.get("compact_geometry", ""), fallback_x, fallback_y
+            self.config.get("compact_geometry", ""),
+            fallback_x,
+            fallback_y,
+            fit_visible_metrics=True,
         )
         self.config["compact_geometry"] = geometry
         if self.compact_mode and self.root.winfo_exists():
@@ -9638,7 +11494,7 @@ class DpsWindow:
             bg=BG,
             fg=MUTED,
             anchor="w",
-            font=("Microsoft YaHei UI", 7, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 7, "bold"),
         ).pack(side="left", fill="y", padx=(5, 5))
         label = tk.Label(
             frame,
@@ -9646,7 +11502,7 @@ class DpsWindow:
             bg=BG,
             fg=TEXT,
             anchor="w",
-            font=("Segoe UI", 9, "bold"),
+            font=tk_font_spec("Segoe UI", 9, "bold"),
         )
         label.pack(side="left", fill="both", expand=True)
         return label
@@ -9661,7 +11517,7 @@ class DpsWindow:
             padx=4,
             pady=2,
             cursor="hand2",
-            font=("Microsoft YaHei UI", 7, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 7, "bold"),
         )
         label._disabled = False
         label.bind(
@@ -9755,6 +11611,7 @@ class DpsWindow:
         window.title(f"{APP_TITLE} · 问题反馈")
         window.configure(bg=BORDER)
         window.geometry(self._visible_geometry(f"{width}x{height}+{x}+{y}", width, height))
+        self._prepare_toplevel_dpi(window)
         window.resizable(False, False)
         window.attributes("-topmost", bool(self.root.attributes("-topmost")))
         window.attributes("-alpha", 1.0)
@@ -9781,7 +11638,7 @@ class DpsWindow:
             text="问题反馈",
             bg=SURFACE,
             fg=TEXT,
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
         )
         title.pack(side="left")
         self._bind_drag(title, window)
@@ -9792,7 +11649,7 @@ class DpsWindow:
             width=34,
             hover="#7f2d35",
             fg="#c5ccd3",
-            font=("Segoe UI", 13),
+            font=tk_font_spec("Segoe UI", 13),
         ).pack(side="right", fill="y")
 
         content = tk.Frame(body, bg=BG)
@@ -9803,7 +11660,7 @@ class DpsWindow:
             bg=BG,
             fg=MUTED,
             anchor="w",
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
         ).pack(fill="x", pady=(0, 12))
 
         category_row = tk.Frame(content, bg=BG)
@@ -9814,7 +11671,7 @@ class DpsWindow:
             bg=BG,
             fg=TEXT,
             anchor="w",
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
         ).pack(side="left")
         self.feedback_category_var = tk.StringVar(
             master=window, value=FEEDBACK_CATEGORIES[0][0]
@@ -9835,14 +11692,14 @@ class DpsWindow:
             highlightbackground=BORDER,
             width=14,
             anchor="w",
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
         )
         category_menu["menu"].configure(
             bg=PANEL,
             fg=TEXT,
             activebackground=PANEL_2,
             activeforeground=TEXT,
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
         )
         category_menu.pack(side="right")
 
@@ -9874,7 +11731,7 @@ class DpsWindow:
             bg=BG,
             fg=TEXT,
             anchor="w",
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
         ).pack(side="left")
         self.feedback_record_var = tk.StringVar(
             master=window, value=default_record_label
@@ -9895,14 +11752,14 @@ class DpsWindow:
             highlightbackground=BORDER,
             width=29,
             anchor="w",
-            font=("Microsoft YaHei UI", 8),
+            font=tk_font_spec("Microsoft YaHei UI", 8),
         )
         record_menu["menu"].configure(
             bg=PANEL,
             fg=TEXT,
             activebackground=PANEL_2,
             activeforeground=TEXT,
-            font=("Microsoft YaHei UI", 8),
+            font=tk_font_spec("Microsoft YaHei UI", 8),
         )
         record_menu.pack(side="right")
 
@@ -9912,7 +11769,7 @@ class DpsWindow:
             bg=BG,
             fg=TEXT,
             anchor="w",
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
         ).pack(fill="x", pady=(0, 6))
         self.feedback_content = tk.Text(
             content,
@@ -9927,7 +11784,7 @@ class DpsWindow:
             bd=0,
             padx=10,
             pady=8,
-            font=("Microsoft YaHei UI", 9),
+            font=tk_font_spec("Microsoft YaHei UI", 9),
         )
         self.feedback_content.pack(fill="both", expand=True)
 
@@ -9944,7 +11801,7 @@ class DpsWindow:
             cursor="hand2",
             bd=0,
             highlightthickness=0,
-            font=("Microsoft YaHei UI", 8),
+            font=tk_font_spec("Microsoft YaHei UI", 8),
         )
         diagnostics_toggle.pack(anchor="w", pady=(8, 3))
 
@@ -9957,7 +11814,7 @@ class DpsWindow:
             bg=BG,
             fg=MUTED,
             anchor="w",
-            font=("Microsoft YaHei UI", 8),
+            font=tk_font_spec("Microsoft YaHei UI", 8),
         )
         self.feedback_status_label.pack(side="left", fill="both", expand=True)
         self.feedback_submit_button = self._label_button(
@@ -9968,7 +11825,7 @@ class DpsWindow:
             bg=ACCENT,
             hover="#86edca",
             fg="#07110e",
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
         )
         self.feedback_submit_button.pack(side="right", fill="y")
         window.after(20, lambda: self._apply_windows_style(window))
@@ -10086,6 +11943,9 @@ class DpsWindow:
             "saved_at_epoch": float(record.get("saved_at_epoch", 0.0) or 0.0),
             "archive_reason": str(record.get("archive_reason", "")),
             "duration_seconds": float(record.get("duration_seconds", 0.0) or 0.0),
+            "hps_duration_seconds": float(
+                record.get("hps_duration_seconds", 0.0) or 0.0
+            ),
             "dps_duration_seconds": float(
                 record.get("dps_duration_seconds", 0.0) or 0.0
             ),
@@ -10467,11 +12327,42 @@ class DpsWindow:
         return saved
 
     def _load_recent_history(self, limit: int) -> list[dict]:
+        model_catalog = getattr(
+            getattr(self, "model", None), "target_catalog", {}
+        )
+        catalog = (
+            {
+                str(template_id): dict(metadata)
+                for template_id, metadata in model_catalog.items()
+                if isinstance(metadata, dict)
+            }
+            if isinstance(model_catalog, dict)
+            else {}
+        )
         worker = getattr(self, "worker", None)
-        catalog = getattr(worker, "monster_catalog", {})
+        worker_catalog = getattr(worker, "monster_catalog", {})
+        if isinstance(worker_catalog, dict):
+            for template_id, metadata in worker_catalog.items():
+                if isinstance(metadata, dict):
+                    catalog.setdefault(str(template_id), {}).update(metadata)
+        if not catalog:
+            catalog = load_target_identity_catalog()
+        skill_catalog = load_skill_catalog()
+        runtime_skill_names = getattr(
+            getattr(self, "model", None), "runtime_skill_names", {}
+        )
+        if isinstance(runtime_skill_names, dict):
+            skill_catalog = dict(skill_catalog)
+            for skill_id, name in runtime_skill_names.items():
+                skill_catalog.setdefault(str(skill_id), name)
         records: list[dict] = []
         for record in self.history_store.load_recent(limit):
-            restored = restore_history_boss_names(record, catalog)
+            restored = CombatHistoryStore.restore_exact_stage_skills_for_display(
+                record
+            )
+            restored = CombatHistoryStore.normalize_healing_for_display(restored)
+            restored = restore_history_boss_names(restored, catalog)
+            restored = restore_history_skill_names(restored, skill_catalog)
             if isinstance(restored, dict):
                 records.append(restored)
         return records
@@ -10503,6 +12394,22 @@ class DpsWindow:
         if hide_names:
             return f"玩家{index + 1}"
         return str(participant.get("name", "")).strip() or f"玩家{index + 1}"
+
+    @staticmethod
+    def _history_display_duration(record: dict, healing_mode: bool = False) -> float:
+        """Return the archived divisor for the selected history mode."""
+        key = "hps_duration_seconds" if healing_mode else "duration_seconds"
+        fallback = "duration_seconds"
+        try:
+            value = float(record.get(key, record.get(fallback, 0.0)) or 0.0)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            value = 0.0
+        if healing_mode and value <= 0:
+            try:
+                value = float(record.get(fallback, 0.0) or 0.0)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                value = 0.0
+        return max(0.0, value)
 
     @staticmethod
     def _history_share_text(
@@ -10578,6 +12485,10 @@ class DpsWindow:
 
     @staticmethod
     def _history_is_boss(record: dict) -> bool:
+        if str(record.get("target_filter", "")).casefold() == "healing_dummy":
+            # Pure HPS records are deliberately not Boss records, but they
+            # still belong in the history view when the normal filter is on.
+            return True
         monster = record.get("monster")
         if not isinstance(monster, dict):
             return False
@@ -10642,6 +12553,7 @@ class DpsWindow:
         window.title(UI_BRAND)
         window.configure(bg=BORDER)
         window.geometry(self._initial_history_geometry(x, y))
+        self._prepare_toplevel_dpi(window)
         window.resizable(False, False)
         window.attributes("-topmost", bool(self.root.attributes("-topmost")))
         window.attributes("-alpha", 1.0)
@@ -11392,7 +13304,11 @@ class DpsWindow:
         tabs.pack(fill="x", padx=40)
         tabs.pack_propagate(False)
         self.backend_settings_buttons = {}
-        for key, caption in (("general", "总体设置"), ("dps", "DPS 设置")):
+        for key, caption in (
+            ("general", "总体设置"),
+            ("dps", "DPS 设置"),
+            ("hps", "HPS 设置"),
+        ):
             button = tk.Label(
                 tabs,
                 text=caption,
@@ -11427,7 +13343,17 @@ class DpsWindow:
             highlightthickness=1,
             highlightbackground=BORDER,
         )
-        self.backend_settings_frames = {"general": general, "dps": dps}
+        hps = tk.Frame(
+            host,
+            bg=PANEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        self.backend_settings_frames = {
+            "general": general,
+            "dps": dps,
+            "hps": hps,
+        }
         for frame in self.backend_settings_frames.values():
             frame.grid(row=0, column=0, sticky="nsew")
 
@@ -11563,6 +13489,31 @@ class DpsWindow:
             ("显示死亡时间", tk.BooleanVar(master=self.history_window), True),
         ):
             self._settings_check_row(dps, caption, variable, disabled=disabled)
+
+        tk.Label(
+            hps,
+            text="HPS 设置",
+            bg=PANEL,
+            fg=TEXT,
+            anchor="w",
+            font=self._ui_font("title"),
+        ).pack(fill="x", padx=24, pady=(22, 14))
+        tk.Frame(hps, bg=BORDER, height=1).pack(fill="x", padx=24)
+        self.settings_show_effective_healing_var = tk.BooleanVar(
+            master=self.history_window, value=self.show_effective_healing
+        )
+        self.settings_show_hps_var = tk.BooleanVar(
+            master=self.history_window, value=self.show_hps
+        )
+        self.settings_show_overheal_rate_var = tk.BooleanVar(
+            master=self.history_window, value=self.show_overheal_rate
+        )
+        for caption, variable in (
+            ("显示有效治疗", self.settings_show_effective_healing_var),
+            ("显示 HPS", self.settings_show_hps_var),
+            ("显示过量率", self.settings_show_overheal_rate_var),
+        ):
+            self._settings_check_row(hps, caption, variable, disabled=False)
 
         save_bar = tk.Frame(page, bg=BG, height=76)
         save_bar.pack(fill="x", padx=40)
@@ -11731,6 +13682,16 @@ class DpsWindow:
             self.show_damage_share = bool(self.settings_show_share_var.get())
         if self.settings_show_critical_var is not None:
             self.show_critical_rate = bool(self.settings_show_critical_var.get())
+        if self.settings_show_effective_healing_var is not None:
+            self.show_effective_healing = bool(
+                self.settings_show_effective_healing_var.get()
+            )
+        if self.settings_show_hps_var is not None:
+            self.show_hps = bool(self.settings_show_hps_var.get())
+        if self.settings_show_overheal_rate_var is not None:
+            self.show_overheal_rate = bool(
+                self.settings_show_overheal_rate_var.get()
+            )
         self._sync_compact_geometry_width()
         self._configure_ui_fonts()
         self._sync_action_buttons()
@@ -11820,6 +13781,7 @@ class DpsWindow:
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
         row_height = 66
+        healing_mode = getattr(self, "history_meter_mode", "dps") == "hps"
         if not self.history_records:
             canvas.create_text(
                 width // 2,
@@ -11879,8 +13841,9 @@ class DpsWindow:
                 11,
                 top + 52,
                 text=(
-                    f"{format_duration(float(record.get('duration_seconds', 0) or 0))}"
-                    f"   总伤害 {format_number(record.get('total_damage', 0))}"
+                    f"{format_duration(self._history_display_duration(record, healing_mode))}"
+                    f"   {('有效治疗' if healing_mode else '总伤害')} "
+                    f"{format_number(record.get('team_effective_healing', 0) if healing_mode else record.get('total_damage', 0))}"
                 ),
                 fill=ACCENT if selected else MUTED,
                 anchor="w",
@@ -12012,7 +13975,7 @@ class DpsWindow:
             self.history_time_label.configure(
                 text=(
                     f"{self._history_timestamp(record)}   ·   "
-                    f"{format_duration(float(record.get('duration_seconds', 0) or 0))}"
+                    f"{format_duration(self._history_display_duration(record, healing_mode))}"
                 )
             )
             if self.history_total_value is not None:
@@ -12067,9 +14030,9 @@ class DpsWindow:
                             text=(
                                 f"{coverage}  ·  峰值 HPS "
                                 f"{format_optional_number(selected_participant.get('peak_hps'))}"
-                                f"  ·  响应 均{format_response_time(response.get('average_ms'))} / "
-                                f"快{format_response_time(response.get('fastest_ms'))} / "
+                                f"  ·  响应 快{format_response_time(response.get('fastest_ms'))} / "
                                 f"慢{format_response_time(response.get('slowest_ms'))}"
+                                f"（{int(response.get('samples', 0) or 0)}次）"
                             )
                         )
                 else:
@@ -12104,7 +14067,7 @@ class DpsWindow:
 
     def _history_participant_columns(self, width: int) -> dict[str, int]:
         enabled = list(
-            ("effective", "hps", "overheal", "response")
+            self._enabled_healing_metrics()
             if getattr(self, "history_meter_mode", "dps") == "hps"
             else self._enabled_damage_metrics()
         )
@@ -12150,10 +14113,9 @@ class DpsWindow:
             "effective": "有效治疗",
             "hps": "HPS",
             "overheal": "过量率",
-            "response": "平均响应",
         }
         for key in (
-            ("effective", "hps", "overheal", "response")
+            ("effective", "hps", "overheal")
             if getattr(self, "history_meter_mode", "dps") == "hps"
             else ("damage", "dps", "share", "critical")
         ):
@@ -12189,7 +14151,7 @@ class DpsWindow:
                 height // 2,
                 text="暂无团队治疗" if healing_mode else "暂无团队伤害",
                 fill=MUTED,
-                font=("Microsoft YaHei UI", 9, "bold"),
+                font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
             )
             canvas.configure(scrollregion=(0, 0, width, height))
             return
@@ -12210,14 +14172,13 @@ class DpsWindow:
             default=0,
         )
         columns = self._history_participant_columns(width)
-        try:
-            duration = max(
-                0.0, float(record.get("duration_seconds", 0.0) or 0.0)
-            )
-        except (AttributeError, TypeError, ValueError, OverflowError):
-            duration = 0.0
+        duration = self._history_display_duration(record, healing_mode)
         dps_duration = dps_duration_seconds(
-            record.get("dps_duration_seconds", duration)
+            record.get(
+                "hps_duration_seconds" if healing_mode else "dps_duration_seconds",
+                duration,
+            )
+            or duration
         )
         row_height = 34
         for index, participant in enumerate(participants):
@@ -12288,22 +14249,18 @@ class DpsWindow:
                 tags=(tag,),
             )
             if healing_mode:
-                response = participant.get("response", {})
-                response = response if isinstance(response, dict) else {}
                 overheal_rate = participant.get("overheal_rate")
                 values = {
                     "effective": format_number(primary_value),
                     "hps": format_number(participant.get("hps", 0)),
-                    "overheal": (
-                        f"{float(overheal_rate) * 100:.1f}%"
-                        if overheal_rate is not None
-                        else "--"
-                    ),
-                    "response": format_response_time(
-                        response.get("average_ms")
+                    "overheal": format_overheal_rate(
+                        overheal_rate,
+                        partial=bool(
+                            participant.get("overheal_rate_partial")
+                        ),
                     ),
                 }
-                keys = ("effective", "hps", "overheal", "response")
+                keys = ("effective", "hps", "overheal")
             else:
                 try:
                     damage = max(
@@ -12761,7 +14718,7 @@ class DpsWindow:
                 height // 2,
                 text="暂无个人详情",
                 fill=MUTED,
-                font=("Microsoft YaHei UI", 9, "bold"),
+                font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
             )
             canvas.configure(scrollregion=(0, 0, width, height))
             return
@@ -12795,10 +14752,10 @@ class DpsWindow:
         top = 0
 
         canvas.create_rectangle(0, top, width, top + header_height, fill=SURFACE, outline="")
-        canvas.create_text(9, top + 14, text="伤害目标", fill=ACCENT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
-        canvas.create_text(int(width * 0.55), top + 14, text="类型", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
-        canvas.create_text(int(width * 0.77), top + 14, text="伤害", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
-        canvas.create_text(width - 12, top + 14, text="占个人总伤", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(9, top + 14, text="伤害目标", fill=ACCENT, anchor="w", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(int(width * 0.55), top + 14, text="类型", fill=MUTED, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(int(width * 0.77), top + 14, text="伤害", fill=MUTED, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(width - 12, top + 14, text="占个人总伤", fill=MUTED, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
         top += header_height
         if targets:
             for index, target in enumerate(targets):
@@ -12811,26 +14768,26 @@ class DpsWindow:
                 if entity_count > 1:
                     name = f"{name} ×{entity_count}"
                 canvas.create_rectangle(0, top, width, bottom - 1, fill=base, outline="")
-                canvas.create_text(9, top + 17, text=name, fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
-                canvas.create_text(int(width * 0.55), top + 17, text=kind, fill=color, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
-                canvas.create_text(int(width * 0.77), top + 17, text=format_number(target.get("damage", 0)), fill=TEXT, anchor="e", font=("Segoe UI", 8, "bold"))
-                canvas.create_text(width - 12, top + 17, text=f"{float(target.get('share', 0.0) or 0.0) * 100:.1f}%", fill=TEXT, anchor="e", font=("Segoe UI", 8))
+                canvas.create_text(9, top + 17, text=name, fill=TEXT, anchor="w", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+                canvas.create_text(int(width * 0.55), top + 17, text=kind, fill=color, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+                canvas.create_text(int(width * 0.77), top + 17, text=format_number(target.get("damage", 0)), fill=TEXT, anchor="e", font=tk_font_spec("Segoe UI", 8, "bold"))
+                canvas.create_text(width - 12, top + 17, text=f"{float(target.get('share', 0.0) or 0.0) * 100:.1f}%", fill=TEXT, anchor="e", font=tk_font_spec("Segoe UI", 8))
                 top = bottom
         else:
             canvas.create_rectangle(0, top, width, top + row_height - 1, fill=PANEL, outline="")
-            canvas.create_text(9, top + 17, text="暂无目标明细", fill=MUTED, anchor="w", font=("Microsoft YaHei UI", 8))
+            canvas.create_text(9, top + 17, text="暂无目标明细", fill=MUTED, anchor="w", font=tk_font_spec("Microsoft YaHei UI", 8))
             top += row_height
 
         canvas.create_rectangle(0, top, width, top + header_height, fill=SURFACE, outline="")
-        canvas.create_text(9, top + 14, text="技能明细", fill=ACCENT, anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
-        canvas.create_text(damage_x, top + 14, text="伤害", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
-        canvas.create_text(share_x, top + 14, text="占比", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
-        canvas.create_text(hits_x, top + 14, text="次数", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
-        canvas.create_text(max_x, top + 14, text="最大伤害", fill=MUTED, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(9, top + 14, text="技能明细", fill=ACCENT, anchor="w", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(damage_x, top + 14, text="伤害", fill=MUTED, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(share_x, top + 14, text="占比", fill=MUTED, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(hits_x, top + 14, text="次数", fill=MUTED, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+        canvas.create_text(max_x, top + 14, text="最大伤害", fill=MUTED, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
         top += header_height
         if not skills:
             canvas.create_rectangle(0, top, width, top + row_height - 1, fill=PANEL, outline="")
-            canvas.create_text(9, top + 17, text="暂无技能明细", fill=MUTED, anchor="w", font=("Microsoft YaHei UI", 8))
+            canvas.create_text(9, top + 17, text="暂无技能明细", fill=MUTED, anchor="w", font=tk_font_spec("Microsoft YaHei UI", 8))
             top += row_height
         for index, skill in enumerate(skills):
             bottom = top + row_height
@@ -12848,7 +14805,7 @@ class DpsWindow:
                 text=str(skill.get("name", "")).strip() or "未命名技能",
                 fill=TEXT,
                 anchor="w",
-                font=("Microsoft YaHei UI", 8, "bold"),
+                font=tk_font_spec("Microsoft YaHei UI", 8, "bold"),
             )
             canvas.create_text(
                 damage_x,
@@ -12856,7 +14813,7 @@ class DpsWindow:
                 text=format_number(skill.get("damage", 0)),
                 fill=TEXT,
                 anchor="e",
-                font=("Segoe UI", 8, "bold"),
+                font=tk_font_spec("Segoe UI", 8, "bold"),
             )
             canvas.create_text(
                 share_x,
@@ -12864,7 +14821,7 @@ class DpsWindow:
                 text=f"{float(skill.get('share', 0.0) or 0.0) * 100:.1f}%",
                 fill=TEXT,
                 anchor="e",
-                font=("Segoe UI", 8),
+                font=tk_font_spec("Segoe UI", 8),
             )
             canvas.create_text(
                 hits_x,
@@ -12872,7 +14829,7 @@ class DpsWindow:
                 text=hits_text,
                 fill=TEXT,
                 anchor="e",
-                font=("Microsoft YaHei UI", 8),
+                font=tk_font_spec("Microsoft YaHei UI", 8),
             )
             canvas.create_text(
                 max_x,
@@ -12880,7 +14837,7 @@ class DpsWindow:
                 text=max_hit_text,
                 fill=TEXT,
                 anchor="e",
-                font=("Segoe UI", 8),
+                font=tk_font_spec("Segoe UI", 8),
             )
             top = bottom
         canvas.configure(scrollregion=(0, 0, width, max(height, top)))
@@ -13111,6 +15068,9 @@ class DpsWindow:
         self.settings_show_dps_var = None
         self.settings_show_share_var = None
         self.settings_show_critical_var = None
+        self.settings_show_effective_healing_var = None
+        self.settings_show_hps_var = None
+        self.settings_show_overheal_rate_var = None
         self.settings_font_value_label = None
         self.tray_history_hidden = False
         save_config(self.config)
@@ -13121,6 +15081,8 @@ class DpsWindow:
             and not self.compact_mode
         ):
             self.root.deiconify()
+            self.root.update_idletasks()
+            self._apply_window_dpi_if_changed(force=True)
             self.root.lift()
             if not self.window_locked:
                 self.root.focus_force()
@@ -13196,11 +15158,99 @@ class DpsWindow:
         if self.expiry_label.cget("text") != text:
             self.expiry_label.configure(text=text)
 
+    def _draw_team_health(self, canvas: tk.Canvas, width: int, height: int) -> None:
+        """Draw the HPS banner from bound party HP samples only."""
+        summary_method = getattr(self.model, "team_health_summary", None)
+        summary = summary_method() if callable(summary_method) else {}
+        if not isinstance(summary, dict):
+            summary = {}
+        available = bool(summary.get("available"))
+        ratio = summary.get("ratio") if available else None
+        try:
+            ratio_value = float(ratio)
+        except (TypeError, ValueError, OverflowError):
+            ratio_value = 0.0
+        ratio_value = min(1.0, max(0.0, ratio_value))
+
+        canvas.create_rectangle(
+            1,
+            3,
+            width - 1,
+            height - 3,
+            fill="#12231f" if available else "#15171a",
+            outline="#315b4c" if available else "#34383d",
+        )
+        if available and ratio_value > 0:
+            canvas.create_rectangle(
+                2,
+                4,
+                max(3, int((width - 3) * ratio_value)),
+                height - 4,
+                fill="#2e8f6b",
+                outline="",
+            )
+
+        if available:
+            lowest = summary.get("lowest")
+            if not isinstance(lowest, dict):
+                lowest = {}
+            try:
+                lowest_actor_id = int(lowest.get("actor_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                lowest_actor_id = 0
+            lowest_name = ""
+            if lowest_actor_id:
+                shown_name = getattr(self, "_shown_actor_name", None)
+                if callable(shown_name):
+                    try:
+                        lowest_name = str(shown_name(lowest_actor_id) or "").strip()
+                    except (TypeError, ValueError, AttributeError):
+                        lowest_name = ""
+                if not lowest_name:
+                    display_name = getattr(self.model, "display_name", None)
+                    if callable(display_name):
+                        try:
+                            lowest_name = str(
+                                display_name(lowest_actor_id) or ""
+                            ).strip()
+                        except (TypeError, ValueError, AttributeError):
+                            lowest_name = ""
+            lowest_text = "--"
+            if lowest_actor_id and lowest.get("ratio") is not None:
+                lowest_name = self._fit_main_actor_name(
+                    lowest_name or "玩家", max(80, width - 360)
+                )
+                lowest_text = (
+                    f"{lowest_name} "
+                    f"{format_team_health_percent(lowest.get('ratio'))}"
+                )
+            status_text = (
+                f"团队生命  {format_team_health_number(summary.get('current_hp'))}"
+                f" / {format_team_health_number(summary.get('max_hp'))}"
+                f"  {format_team_health_percent(summary.get('ratio'))}"
+                f"  ｜  最低：{lowest_text}"
+            )
+            text_color = "#effff8"
+        else:
+            status_text = "团队生命  -- / --  --  ｜  最低：--"
+            text_color = MUTED
+        canvas.create_text(
+            width // 2,
+            height // 2,
+            text=status_text,
+            fill=text_color,
+            font=self._ui_font("strong"),
+        )
+
     def _draw_monster_hp(self) -> None:
         canvas = self.monster_hp_canvas
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
+        # DPS and HPS are two views of the same encounter, so both tabs keep
+        # the same exact target banner.  Team-health sampling remains model
+        # data for healing analysis, but must not replace Boss identity/HP in
+        # the main HPS view.
         monster = self.model.current_monster()
         if monster is None:
             canvas.create_rectangle(
@@ -13295,7 +15345,6 @@ class DpsWindow:
                 "effective": "有效" if compact else "有效治疗",
                 "hps": "HPS",
                 "overheal": "过量" if compact else "过量率",
-                "response": "响应" if compact else "平均响应",
             }
         else:
             captions = (
@@ -13322,7 +15371,7 @@ class DpsWindow:
             font=header_font,
         )
         for key in (
-            ("effective", "hps", "overheal", "response")
+            ("effective", "hps", "overheal")
             if healing_mode
             else ("damage", "dps", "share", "critical")
         ):
@@ -13576,7 +15625,8 @@ class DpsWindow:
             self._draw_main_rows_on_canvas(
                 overlay,
                 update_scroll_state=False,
-                draw_empty_state=False,
+                draw_empty_state=True,
+                opaque_background=True,
             )
 
     def _draw_main_rows_on_canvas(
@@ -13585,12 +15635,22 @@ class DpsWindow:
         *,
         update_scroll_state: bool,
         draw_empty_state: bool = True,
+        opaque_background: bool = False,
     ) -> None:
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
         healing_mode = getattr(self, "main_meter_mode", "dps") == "hps"
-        duration = dps_duration_seconds(self.model.duration())
+        if healing_mode:
+            healing_duration = getattr(self.model, "healing_duration", None)
+            raw_duration = (
+                healing_duration()
+                if callable(healing_duration)
+                else self.model.duration()
+            )
+        else:
+            raw_duration = self.model.duration()
+        duration = dps_duration_seconds(raw_duration)
         if healing_mode:
             healing = getattr(self, "latest_healing_summary", {})
             if not isinstance(healing, dict):
@@ -13637,6 +15697,13 @@ class DpsWindow:
             if update_scroll_state:
                 self.main_scroll_offset = 0
                 self.main_scroll_content_height = height
+            if opaque_background:
+                # The root window is intentionally translucent.  Cover the
+                # backing canvas before drawing the opaque foreground text so
+                # it cannot show through as a second, blurry glyph.
+                canvas.create_rectangle(
+                    0, 0, width, height, fill=BG, outline=""
+                )
             if draw_empty_state:
                 canvas.create_text(
                     width // 2,
@@ -13666,6 +15733,16 @@ class DpsWindow:
             _profession, color = self._profession_info(class_id)
             bar = blend_color(BG, color, 0.22)
             tag = f"actor:{actor_id}"
+            if opaque_background:
+                canvas.create_rectangle(
+                    0,
+                    top,
+                    width,
+                    bottom,
+                    fill=BG,
+                    outline="",
+                    tags=(f"{tag}:background",),
+                )
             canvas.create_rectangle(
                 0,
                 top,
@@ -13697,22 +15774,16 @@ class DpsWindow:
                 tags=(tag,),
             )
             if healing_mode:
-                response = row.get("response", {})
-                response = response if isinstance(response, dict) else {}
                 overheal_rate = row.get("overheal_rate")
                 values = {
                     "effective": format_number(primary_value),
                     "hps": format_number(row.get("hps", 0)),
-                    "overheal": (
-                        f"{float(overheal_rate) * 100:.1f}%"
-                        if overheal_rate is not None
-                        else "--"
-                    ),
-                    "response": format_response_time(
-                        response.get("average_ms")
+                    "overheal": format_overheal_rate(
+                        overheal_rate,
+                        partial=bool(row.get("overheal_rate_partial")),
                     ),
                 }
-                for key in ("effective", "hps", "overheal", "response"):
+                for key in ("effective", "hps", "overheal"):
                     if key not in columns:
                         continue
                     canvas.create_text(
@@ -13926,6 +15997,8 @@ class DpsWindow:
                 )
             )
             self.login_window.deiconify()
+            self.login_window.update_idletasks()
+            self._prepare_toplevel_dpi(self.login_window)
             self.login_window.lift()
             self.login_window.focus_force()
             return
@@ -13938,6 +16011,8 @@ class DpsWindow:
         )
         self.root.overrideredirect(True)
         self.root.deiconify()
+        self.root.update_idletasks()
+        self._apply_window_dpi_if_changed(force=True)
         self.root.lift()
         if not self.window_locked:
             self.root.focus_force()
@@ -13953,6 +16028,8 @@ class DpsWindow:
                 self._visible_geometry(self.skill_window.geometry(), 560, 360)
             )
             self.skill_window.deiconify()
+            self.skill_window.update_idletasks()
+            self._prepare_toplevel_dpi(self.skill_window)
             self.skill_window.lift()
         if (
             self.tray_history_hidden
@@ -13965,6 +16042,8 @@ class DpsWindow:
                 )
             )
             self.history_window.deiconify()
+            self.history_window.update_idletasks()
+            self._prepare_toplevel_dpi(self.history_window)
             self.history_window.lift()
         if (
             self.tray_feedback_hidden
@@ -13975,6 +16054,8 @@ class DpsWindow:
                 self._visible_geometry(self.feedback_window.geometry(), 500, 418)
             )
             self.feedback_window.deiconify()
+            self.feedback_window.update_idletasks()
+            self._prepare_toplevel_dpi(self.feedback_window)
             self.feedback_window.lift()
         self.tray_skill_hidden = False
         self.tray_history_hidden = False
@@ -14013,7 +16094,19 @@ class DpsWindow:
         try:
             self.root.update_idletasks()
             self.root.configure(bg=BG)
-            self.root.attributes("-alpha", self.window_alpha)
+            # A withdrawn root is still backed by an HWND. Keep that bootstrap
+            # surface opaque; applying the configured alpha before the first
+            # map can make DWM cache it at the wrong DPI and soften all text.
+            try:
+                root_is_visible = self.root.state() == "normal"
+            except (AttributeError, tk.TclError):
+                # Lightweight test doubles and older Tk builds may not expose
+                # ``state``; those roots are treated as visible.
+                root_is_visible = True
+            if root_is_visible:
+                self.root.attributes("-alpha", self.window_alpha)
+            else:
+                self.root.attributes("-alpha", 1.0)
             if bool(getattr(self, "window_locked", False)):
                 self._set_window_click_through(self.root, True)
         except tk.TclError:
@@ -14154,7 +16247,12 @@ class DpsWindow:
                 self.model.combat_clock_snapshot(now)
             )
         self._flush_combat_history()
-        duration = self.model.duration(now)
+        main_meter_mode = getattr(self, "main_meter_mode", "dps")
+        duration = (
+            self.model.healing_duration(now)
+            if main_meter_mode == "hps"
+            else self.model.duration(now)
+        )
         dps_duration = dps_duration_seconds(duration)
         damage_total = sum(row.damage for row in self.model.current_stats())
         healing_detail_visible = bool(
@@ -14162,9 +16260,15 @@ class DpsWindow:
             and getattr(self, "skill_window", None) is not None
             and self.skill_window.winfo_exists()
         )
-        main_meter_mode = getattr(self, "main_meter_mode", "dps")
         if main_meter_mode == "hps" or healing_detail_visible:
-            self.latest_healing_summary = self.model.healing_summary(duration)
+            summary_duration = (
+                self.model.healing_duration(now)
+                if main_meter_mode == "hps"
+                else self.model.duration(now)
+            )
+            self.latest_healing_summary = self.model.healing_summary(
+                summary_duration
+            )
         if main_meter_mode == "hps":
             shown_total = int(
                 self.latest_healing_summary.get(
@@ -14188,11 +16292,24 @@ class DpsWindow:
         dps_text = format_number(shown_rate)
         self.dps_value.configure(text=dps_text)
         self._draw_main_content_overlay_dps()
-        state = (
-            "战斗中"
-            if self.model.active(now)
-            else ("已结束" if damage_total else "待机")
-        )
+        if main_meter_mode == "hps":
+            healing_total = int(
+                self.latest_healing_summary.get(
+                    "team_effective_healing", 0
+                )
+                or 0
+            )
+            state = (
+                "战斗中"
+                if self.model.healing_active(now)
+                else ("已结束" if healing_total else "待机")
+            )
+        else:
+            state = (
+                "战斗中"
+                if self.model.active(now)
+                else ("已结束" if damage_total else "待机")
+            )
         self.time_value.configure(
             text=format_duration(duration),
             fg=ACCENT if state == "战斗中" else TEXT,
@@ -14318,6 +16435,7 @@ class DpsWindow:
         window.title(f"{APP_TITLE} · 个人详情")
         window.configure(bg=BORDER)
         window.geometry(self._initial_skill_geometry(x, y))
+        self._prepare_toplevel_dpi(window)
         window.minsize(520, 340)
         window.attributes("-topmost", bool(self.root.attributes("-topmost")))
         window.attributes("-alpha", 1.0)
@@ -14344,7 +16462,7 @@ class DpsWindow:
             text="个人伤害详情",
             bg=SURFACE,
             fg=TEXT,
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
         )
         self.skill_window_title_label.pack(side="left", padx=(2, 8))
         self._bind_drag(self.skill_window_title_label, window)
@@ -14355,7 +16473,7 @@ class DpsWindow:
             width=34,
             hover="#7f2d35",
             fg="#c5ccd3",
-            font=("Segoe UI", 13),
+            font=tk_font_spec("Segoe UI", 13),
         )
         close_button.pack(side="right", fill="y")
         self.skill_max_button = self._label_button(
@@ -14363,7 +16481,7 @@ class DpsWindow:
             "□",
             lambda: self._toggle_maximize(window),
             width=34,
-            font=("Segoe UI", 10),
+            font=tk_font_spec("Segoe UI", 10),
         )
         self.skill_max_button.pack(side="right", fill="y")
 
@@ -14380,7 +16498,7 @@ class DpsWindow:
             bg=BG,
             fg=TEXT,
             anchor="w",
-            font=("Microsoft YaHei UI", 12, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 12, "bold"),
         )
         self.skill_title_label.pack(fill="x", pady=(8, 0))
         self.skill_combat_metrics_label = tk.Label(
@@ -14389,7 +16507,7 @@ class DpsWindow:
             bg=BG,
             fg=MUTED,
             anchor="w",
-            font=("Microsoft YaHei UI", 8),
+            font=tk_font_spec("Microsoft YaHei UI", 8),
         )
         self.skill_combat_metrics_label.pack(fill="x", pady=(2, 7))
 
@@ -14402,7 +16520,7 @@ class DpsWindow:
             fg=TEXT,
             padx=10,
             anchor="e",
-            font=("Microsoft YaHei UI", 9, "bold"),
+            font=tk_font_spec("Microsoft YaHei UI", 9, "bold"),
         )
         self.skill_total_label.pack(fill="both", expand=True)
         self.skill_dps_label = tk.Label(
@@ -14412,7 +16530,7 @@ class DpsWindow:
             fg=MUTED,
             padx=10,
             anchor="e",
-            font=("Microsoft YaHei UI", 8),
+            font=tk_font_spec("Microsoft YaHei UI", 8),
         )
         self.skill_dps_label.pack(fill="both", expand=True)
 
@@ -14429,7 +16547,7 @@ class DpsWindow:
                 padx=13,
                 pady=5,
                 cursor="hand2",
-                font=("Microsoft YaHei UI", 8, "bold"),
+                font=tk_font_spec("Microsoft YaHei UI", 8, "bold"),
             )
             tab.pack(side="left", fill="y")
             tab.bind(
@@ -14464,7 +16582,7 @@ class DpsWindow:
         )
         self.skill_rows_canvas.bind("<Configure>", lambda _event: self._draw_skill_rows())
 
-        grip = tk.Label(body, text="◢", bg=BG, fg=SUBTLE, cursor="size_nw_se", font=("Segoe UI", 9))
+        grip = tk.Label(body, text="◢", bg=BG, fg=SUBTLE, cursor="size_nw_se", font=tk_font_spec("Segoe UI", 9))
         grip.place(relx=1.0, rely=1.0, anchor="se")
         grip.bind("<ButtonPress-1>", lambda event: self._resize_start(event, window))
         grip.bind("<B1-Motion>", lambda event: self._resize_move(event, window, 520, 340))
@@ -14503,7 +16621,9 @@ class DpsWindow:
         canvas = self.skill_header_canvas
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
-        font = ("Microsoft YaHei UI", 8, "bold")
+        # Reuse the DPI-aware font registry so headers remain as sharp as the
+        # row text when the display scale or the user font setting changes.
+        font = self._ui_font("small")
         if self.skill_panel_mode == "healing":
             if self.skill_detail_mode == "targets":
                 effective_x = int(width * 0.62)
@@ -14813,7 +16933,7 @@ class DpsWindow:
         damage_x, share_x, hits_x, max_x = self._skill_columns(width)
         row_height = 38
         if not skill_rows:
-            canvas.create_text(width // 2, height // 2, text="暂无技能伤害", fill=MUTED, font=("Microsoft YaHei UI", 10, "bold"))
+            canvas.create_text(width // 2, height // 2, text="暂无技能伤害", fill=MUTED, font=tk_font_spec("Microsoft YaHei UI", 10, "bold"))
             canvas.configure(scrollregion=(0, 0, width, height))
             return
         for index, (skill_id, name, damage, hits, max_hit) in enumerate(skill_rows):
@@ -14827,11 +16947,11 @@ class DpsWindow:
             canvas.create_rectangle(0, top, 3, bottom - 1, fill=color, outline="")
             icon = self.icons.skill(skill_id, name, class_id, 22)
             canvas.create_image(8, top + 8, image=icon, anchor="nw")
-            canvas.create_text(38, top + 19, text=name, fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 9, "bold"))
-            canvas.create_text(damage_x, top + 19, text=format_number(damage), fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
-            canvas.create_text(share_x, top + 19, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
-            canvas.create_text(hits_x, top + 19, text="--" if hits is None else str(hits), fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
-            canvas.create_text(max_x, top + 19, text="--" if max_hit is None else format_number(max_hit), fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
+            canvas.create_text(38, top + 19, text=name, fill=TEXT, anchor="w", font=tk_font_spec("Microsoft YaHei UI", 9, "bold"))
+            canvas.create_text(damage_x, top + 19, text=format_number(damage), fill=TEXT, anchor="e", font=tk_font_spec("Segoe UI", 9, "bold"))
+            canvas.create_text(share_x, top + 19, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=tk_font_spec("Segoe UI", 9, "bold"))
+            canvas.create_text(hits_x, top + 19, text="--" if hits is None else str(hits), fill=TEXT, anchor="e", font=tk_font_spec("Segoe UI", 9, "bold"))
+            canvas.create_text(max_x, top + 19, text="--" if max_hit is None else format_number(max_hit), fill=TEXT, anchor="e", font=tk_font_spec("Segoe UI", 9, "bold"))
             canvas.create_line(0, bottom - 1, width, bottom - 1, fill=blend_color(BORDER, base, 0.45))
         canvas.configure(scrollregion=(0, 0, width, max(height, len(skill_rows) * row_height)))
 
@@ -14849,7 +16969,7 @@ class DpsWindow:
                 height // 2,
                 text="暂无目标伤害",
                 fill=MUTED,
-                font=("Microsoft YaHei UI", 10, "bold"),
+                font=tk_font_spec("Microsoft YaHei UI", 10, "bold"),
             )
             canvas.configure(scrollregion=(0, 0, width, height))
             return
@@ -14876,10 +16996,10 @@ class DpsWindow:
                 outline="",
             )
             canvas.create_rectangle(0, top, 3, bottom - 1, fill=color, outline="")
-            canvas.create_text(12, top + 19, text=name, fill=TEXT, anchor="w", font=("Microsoft YaHei UI", 9, "bold"))
-            canvas.create_text(kind_x, top + 19, text=kind, fill=color, anchor="e", font=("Microsoft YaHei UI", 8, "bold"))
-            canvas.create_text(damage_x, top + 19, text=format_number(row.get("damage", 0)), fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
-            canvas.create_text(share_x, top + 19, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=("Segoe UI", 9, "bold"))
+            canvas.create_text(12, top + 19, text=name, fill=TEXT, anchor="w", font=tk_font_spec("Microsoft YaHei UI", 9, "bold"))
+            canvas.create_text(kind_x, top + 19, text=kind, fill=color, anchor="e", font=tk_font_spec("Microsoft YaHei UI", 8, "bold"))
+            canvas.create_text(damage_x, top + 19, text=format_number(row.get("damage", 0)), fill=TEXT, anchor="e", font=tk_font_spec("Segoe UI", 9, "bold"))
+            canvas.create_text(share_x, top + 19, text=f"{share * 100:.1f}%", fill=TEXT, anchor="e", font=tk_font_spec("Segoe UI", 9, "bold"))
             canvas.create_line(0, bottom - 1, width, bottom - 1, fill=blend_color(BORDER, base, 0.45))
         canvas.configure(scrollregion=(0, 0, width, max(height, len(rows) * row_height)))
 
@@ -14932,8 +17052,7 @@ class DpsWindow:
                 self.skill_combat_metrics_label.configure(
                     text=(
                         f"{coverage}  ·  总治疗 {total_text}  ·  过量 {overheal_text}  ·  "
-                        f"峰值HPS {peak_text}  ·  响应 均"
-                        f"{format_response_time(response.get('average_ms'))} / 快"
+                        f"峰值HPS {peak_text}  ·  响应 快"
                         f"{format_response_time(response.get('fastest_ms'))} / 慢"
                         f"{format_response_time(response.get('slowest_ms'))}"
                         f"（{sample_count}次）"
@@ -14979,6 +17098,14 @@ class DpsWindow:
         self.config["show_dps"] = self.show_dps
         self.config["show_damage_share"] = self.show_damage_share
         self.config["show_critical_rate"] = self.show_critical_rate
+        self.config["show_effective_healing"] = bool(
+            getattr(self, "show_effective_healing", True)
+        )
+        self.config["show_hps"] = bool(getattr(self, "show_hps", True))
+        self.config["show_overheal_rate"] = bool(
+            getattr(self, "show_overheal_rate", True)
+        )
+        self.config.pop("show_healing_response", None)
         self.config["main_meter_mode"] = getattr(
             self, "main_meter_mode", "dps"
         )
@@ -15101,6 +17228,8 @@ def main() -> None:
         if instance_guard.already_running:
             activate_existing_instance(attempts=20)
             return
+        # Select process DPI awareness before Tk creates its first HWND.
+        enable_windows_dpi_awareness()
         DpsWindow().run()
     except Exception:
         details = traceback.format_exc()

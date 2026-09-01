@@ -43,7 +43,9 @@ MAX_CARD_DURATION_DAYS = 3650
 MIN_CARD_DURATION_SECONDS = 60 * 60
 MAX_CARD_DURATION_SECONDS = MAX_CARD_DURATION_DAYS * 86400
 MAX_CARD_BATCH = 500
-CARD_REBIND_COOLDOWN_SECONDS = 12 * 60 * 60
+# Device transfers are intentionally disabled until an explicit policy change.
+CARD_DEVICE_REBIND_ENABLED = False
+CARD_REBIND_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
 MAX_FEEDBACK_CONTENT = 2000
 MAX_FEEDBACK_DIAGNOSTICS_BYTES = 384 * 1024
 MAX_DIAGNOSTIC_REPORT_BYTES = 192 * 1024
@@ -110,6 +112,14 @@ def version_tuple(value: object) -> tuple[int, ...]:
     if not re.fullmatch(r"\d+(?:\.\d+){1,3}", main):
         return ()
     return tuple(int(part) for part in main.split("."))
+
+
+def update_download_fallback_filename(version: object) -> str:
+    """Return an ASCII filename that still carries the current release."""
+    parts = version_tuple(version)
+    if not parts:
+        return "Dps-Logs-update.exe"
+    return f"Dps-Logs-v{'.'.join(str(part) for part in parts)}.exe"
 
 
 def same_release_version(left: object, right: object) -> bool:
@@ -269,6 +279,8 @@ def card_error(error: str) -> str:
         "card_invalid": "卡号不存在或格式不正确。",
         "card_expired": "卡号使用时间已结束。",
         "card_revoked": "卡号已被停用。",
+        "partner_device_changed": "莫雪的小伙伴卡检测到更换设备，卡号已永久失效。",
+        "card_device_locked": "当前暂不支持更换电脑，卡号仍绑定原设备。",
         "card_bound": "卡号已绑定其他设备。",
         "card_in_use": "该卡号已在其他客户端登录。",
         "card_rebind_cooldown": "卡号正在设备改绑冷却中。",
@@ -297,7 +309,7 @@ def initialize_database() -> None:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with database() as connection:
         connection.executescript(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS clients (
                 client_id TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
@@ -328,7 +340,7 @@ def initialize_database() -> None:
                 expires_at REAL,
                 bound_client_id TEXT NOT NULL DEFAULT '',
                 last_bound_at REAL,
-                rebind_cooldown_seconds INTEGER NOT NULL DEFAULT 43200,
+                rebind_cooldown_seconds INTEGER NOT NULL DEFAULT {CARD_REBIND_COOLDOWN_SECONDS},
                 last_used_at REAL,
                 revoked INTEGER NOT NULL DEFAULT 0,
                 sold INTEGER NOT NULL DEFAULT 0,
@@ -348,7 +360,7 @@ def initialize_database() -> None:
                 app_version TEXT NOT NULL DEFAULT '',
                 category TEXT NOT NULL DEFAULT 'other',
                 content TEXT NOT NULL,
-                diagnostics_json TEXT NOT NULL DEFAULT '{}',
+                diagnostics_json TEXT NOT NULL DEFAULT '{{}}',
                 remote_ip TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS combat_clocks (
@@ -401,9 +413,9 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE cards ADD COLUMN last_bound_at REAL")
         if "rebind_cooldown_seconds" not in card_columns:
             connection.execute(
-                """
+                f"""
                 ALTER TABLE cards ADD COLUMN rebind_cooldown_seconds
-                INTEGER NOT NULL DEFAULT 43200
+                INTEGER NOT NULL DEFAULT {CARD_REBIND_COOLDOWN_SECONDS}
                 """
             )
         if "card_key" not in card_columns:
@@ -422,6 +434,15 @@ def initialize_database() -> None:
             connection.execute(
                 "ALTER TABLE cards ADD COLUMN remark TEXT NOT NULL DEFAULT ''"
             )
+        # Upgrade every ordinary card to the current seven-day policy. Partner
+        # cards are permanent and use the device-change invalidation path.
+        connection.execute(
+            """
+            UPDATE cards SET rebind_cooldown_seconds=?
+            WHERE permanent=0
+            """,
+            (CARD_REBIND_COOLDOWN_SECONDS,),
+        )
         if PARTNER_CARD_KEY:
             partner_hash = token_digest(PARTNER_CARD_KEY)
             connection.execute(
@@ -534,9 +555,12 @@ class MonitorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(metadata["size"]))
         encoded_filename = quote(str(metadata["filename"]), safe="")
+        fallback_filename = update_download_fallback_filename(
+            metadata["latest_version"]
+        )
         self.send_header(
             "Content-Disposition",
-            "attachment; filename=\"Dps-Logs-update.exe\"; "
+            f'attachment; filename="{fallback_filename}"; '
             f"filename*=UTF-8''{encoded_filename}",
         )
         self.send_header("Cache-Control", "no-store")
@@ -746,6 +770,44 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 """,
                 (timestamp, card_hash, online_threshold),
             )
+            bound_client_id = str(card["bound_client_id"] or "")
+            activated_at = float(card["activated_at"] or 0)
+            last_bound_at = float(card["last_bound_at"] or 0)
+            binding_changed = bound_client_id != client_id
+            device_changed = bool(bound_client_id) and binding_changed
+            # An activated card is already owned, even when a legacy row has
+            # lost its bound client/timestamp.  Treat that state as locked so
+            # the temporary no-rebind policy cannot be bypassed by migration
+            # artifacts or an administrative unbind.
+            device_binding_locked = (
+                not CARD_DEVICE_REBIND_ENABLED
+                and binding_changed
+                and bool(bound_client_id or activated_at)
+            )
+            if card_tier == "partner" and device_changed:
+                # Partner cards are single-device credentials.  Revoke before
+                # checking active sessions so a second computer cannot merely
+                # receive the ordinary "card in use" response.
+                connection.execute(
+                    "UPDATE cards SET revoked=1, last_used_at=? "
+                    "WHERE card_hash=?",
+                    (timestamp, card_hash),
+                )
+                connection.execute(
+                    """
+                    UPDATE sessions SET ended_at=?, using_app=0
+                    WHERE card_hash=? AND ended_at IS NULL
+                    """,
+                    (timestamp, card_hash),
+                )
+                # Send the denial only after the revocation is durable; the
+                # client may immediately issue a heartbeat with its old token.
+                connection.commit()
+                self._authorization_denied("partner_device_changed")
+                return
+            if device_binding_locked:
+                self._authorization_denied("card_device_locked")
+                return
             active_sessions = connection.execute(
                 """
                 SELECT session_id, client_id FROM sessions
@@ -759,13 +821,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
             ):
                 self._authorization_denied("card_in_use")
                 return
-            bound_client_id = str(card["bound_client_id"] or "")
-            activated_at = float(card["activated_at"] or 0)
-            last_bound_at = float(card["last_bound_at"] or 0)
             rebind_cooldown = max(
                 0, int(card["rebind_cooldown_seconds"] or 0)
             )
-            binding_changed = bound_client_id != client_id
             if binding_changed and activated_at and last_bound_at:
                 retry_after = max(
                     0, int(last_bound_at + rebind_cooldown - timestamp)
@@ -1705,6 +1763,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 "server_time": timestamp,
                 "heartbeat_interval": HEARTBEAT_INTERVAL,
                 "online_window": ONLINE_WINDOW,
+                "device_rebind_enabled": bool(CARD_DEVICE_REBIND_ENABLED),
+                "default_rebind_cooldown_seconds": CARD_REBIND_COOLDOWN_SECONDS,
                 "logged_in": int(totals["logged_in"] or 0),
                 "using_now": int(totals["using_now"] or 0),
                 "seen_24h": int(totals["seen_24h"] or 0),
@@ -2036,6 +2096,24 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     (int(sold), card_id),
                 ).rowcount
             elif action == "set_rebind_cooldown":
+                if not CARD_DEVICE_REBIND_ENABLED:
+                    changed = connection.execute(
+                        """
+                        UPDATE cards SET rebind_cooldown_seconds=?
+                        WHERE card_hash=?
+                        """,
+                        (CARD_REBIND_COOLDOWN_SECONDS, card_id),
+                    ).rowcount
+                    self._json(
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            "changed": bool(changed),
+                            "cooldown_seconds": CARD_REBIND_COOLDOWN_SECONDS,
+                            "device_rebind_enabled": False,
+                        },
+                    )
+                    return
                 try:
                     cooldown_hours = float(body.get("cooldown_hours", 0) or 0)
                 except (TypeError, ValueError, OverflowError):
@@ -2170,6 +2248,7 @@ let allCards=[];
 let allFeedbacks=[];
 let visibleCardIds=[];
 let serverNow=0;
+let deviceRebindEnabled=false;
 const CARD_PAGE_SIZE=100;
 let cardPage=1;
 const selectedCardIds=new Set();
@@ -2211,7 +2290,7 @@ async function cardAction(button){
   const id=button.dataset.card;
   const action=button.dataset.action;
   if(action==='revoke'&&!confirm('停用该卡号？正在使用的客户端会退回登录页。'))return;
-  if(action==='unbind'&&!confirm('解绑该设备？重新绑定仍受当前改绑冷却限制。'))return;
+  if(action==='unbind'&&!confirm('解绑该设备？普通用户当前暂不支持自行换绑。'))return;
   if(action==='delete'){
     if(!confirm('确定永久删除卡号 '+(button.dataset.key||'')+'？\\n该卡号的在线会话会立即结束，此操作无法撤销。'))return;
     await updateCard(id,action);
@@ -2230,7 +2309,7 @@ async function cardAction(button){
     return;
   }
   if(action==='set_rebind_cooldown'){
-    const hours=Number(prompt('设置该卡号的改绑冷却小时数，0 代表允许立即改绑。',button.dataset.hours||'12'));
+    const hours=Number(prompt('设置该卡号的改绑冷却小时数。',button.dataset.hours||'168'));
     if(!Number.isFinite(hours)||hours<0)return;
     await updateCard(id,action,{cooldown_hours:hours});
     return;
@@ -2281,11 +2360,14 @@ function renderCards(){
   byId('prevCardPage').disabled=cardPage<=1;
   byId('nextCardPage').disabled=cardPage>=pageCount;
   byId('cardRows').innerHTML=pageCards.map(function(x){
+    const rebindAction=deviceRebindEnabled
+      ? '<button class="link" data-card="'+x.card_id+'" data-action="set_rebind_cooldown" data-hours="'+(x.rebind_cooldown_seconds/3600)+'">改绑设置</button> '
+      : '<span title="当前暂不支持更换电脑">改绑已关闭</span> ';
     const actions='<button class="link" data-copy="'+esc(x.card_key)+'">复制</button> '
       +'<button class="link" data-card="'+x.card_id+'" data-action="set_remark" data-remark="'+esc(x.remark||'')+'">备注</button> '
       +(x.permanent?'':'<button class="link" data-card="'+x.card_id+'" data-action="add_time">加时</button> ')
       +'<button class="link" data-card="'+x.card_id+'" data-action="set_sold" data-sold="'+(x.sold?'0':'1')+'">'+(x.sold?'改为未售':'标记已售')+'</button> '
-      +'<button class="link" data-card="'+x.card_id+'" data-action="set_rebind_cooldown" data-hours="'+(x.rebind_cooldown_seconds/3600)+'">改绑设置</button> '
+      +rebindAction
       +(x.bound_client_id?'<button class="link" data-card="'+x.card_id+'" data-action="unbind">解绑</button> ':'')
       +'<button class="link '+(x.revoked?'':'danger')+'" data-card="'+x.card_id+'" data-action="'+(x.revoked?'restore':'revoke')+'">'+(x.revoked?'恢复':'停用')+'</button> '
       +(x.deletable?'<button class="link danger" data-card="'+x.card_id+'" data-action="delete" data-key="'+esc(x.card_key)+'">删除</button>':'');
@@ -2368,6 +2450,7 @@ async function load(){
     if(!r.ok)throw new Error(r.status);
     const d=await r.json();
     serverNow=d.server_time;
+    deviceRebindEnabled=!!d.device_rebind_enabled;
     allCards=d.cards||[];
     const liveIds=new Set(allCards.map(function(x){return x.card_id}));
     Array.from(selectedCardIds).forEach(function(id){if(!liveIds.has(id))selectedCardIds.delete(id)});

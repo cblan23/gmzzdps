@@ -6,7 +6,11 @@ import base64
 import unittest
 
 from network_state import (
+    DAMAGE_TARGET_TEMPLATE_IDS,
+    HEALING_TARGET_TEMPLATE_IDS,
     NetworkPacketParser,
+    TRAINING_DUMMY_TEMPLATE_IDS,
+    is_training_dummy_template_id,
     parse_combat_entity_id,
     parse_entity_id,
     normalize_network_skill_id,
@@ -2496,6 +2500,54 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(updates, [])
         self.assertNotIn(root_pointer, parser.pointer_entities)
         self.assertNotIn(root_pointer, parser.pointer_state)
+
+    def test_damage_callback_keeps_confirmed_local_player_hp_pointer(self):
+        parser = NetworkPacketParser()
+        local_pointer = 4_141_299_136
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.self_token = SELF_TOKEN
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.token_max_hp[SELF_TOKEN] = 12_044.0
+        parser.pointer_entities[local_pointer] = PLAYER_ID
+
+        parser.process(
+            packet(
+                "OnMsgDamageSyncV2",
+                [
+                    MONSTER_ID,
+                    PLAYER_ID,
+                    8_800_744_000_002,
+                    2,
+                    2,
+                    2_209,
+                    0,
+                    2_209,
+                    False,
+                ],
+                pointer=local_pointer,
+                sequence=2,
+            )
+        )
+
+        self.assertEqual(parser.pointer_entities[local_pointer], PLAYER_ID)
+        self.assertNotIn(local_pointer, parser.root_pointers)
+
+        updates = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [9_835.0],
+                pointer=local_pointer,
+                sequence=3,
+            )
+        )
+        health = next(
+            value for kind, value in updates if kind == "actor_health"
+        )
+        self.assertEqual(health["entity_id"], PLAYER_ID)
+        self.assertEqual(health["current_hp"], 9_835.0)
+        self.assertEqual(health["max_hp"], 12_044.0)
 
     def test_current_max_hp_packet_is_retained_until_target_binding(self):
         parser = NetworkPacketParser()
@@ -6438,6 +6490,45 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(normalize_network_skill_id(89_002_557), 89_002_557)
         self.assertEqual(profession_from_skill(86_071_030), 1_200_007)
         self.assertEqual(profession_from_skill(89_007_001), 0)
+
+    def test_capture_context_marks_exact_damage_and_healing_dummies(self):
+        parser = NetworkPacketParser()
+        damage_entity = MONSTER_ID
+        healing_entity = MONSTER_ID + 1
+        parser.process_native_boss_type(
+            {
+                "entity_id": damage_entity,
+                "template_id": next(iter(DAMAGE_TARGET_TEMPLATE_IDS)),
+                "boss_type": 3,
+                "filetime_100ns": 100,
+            }
+        )
+        parser.entity_template_ids[healing_entity] = next(
+            iter(HEALING_TARGET_TEMPLATE_IDS)
+        )
+        parser.training_dummy_entities.add(healing_entity)
+        context = parser.current_capture_context()
+        self.assertEqual(
+            set(context["training_dummy_entity_ids"]),
+            {damage_entity, healing_entity},
+        )
+        self.assertTrue(context["active_target_is_training_dummy"])
+        self.assertTrue(
+            all(is_training_dummy_template_id(value) for value in TRAINING_DUMMY_TEMPLATE_IDS)
+        )
+
+    def test_capture_context_does_not_resurrect_dummy_profile_after_scene_reset(self):
+        parser = NetworkPacketParser()
+        parser.entity_profiles[MONSTER_ID] = {
+            "template_id": next(iter(DAMAGE_TARGET_TEMPLATE_IDS)),
+            "entity_type": "Boss",
+        }
+        parser.process(
+            packet("OnMsgBeforeEnterNewSpace", [], sequence=100)
+        )
+        context = parser.current_capture_context()
+        self.assertEqual(context["training_dummy_entity_ids"], [])
+        self.assertFalse(context["target_is_training_dummy"])
 
 
 if __name__ == "__main__":

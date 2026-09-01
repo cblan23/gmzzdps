@@ -3945,6 +3945,7 @@ class NetworkPacketParserTests(unittest.TestCase):
                     [5, "知幻"],
                     [6, 763_225],
                     [18, 2],
+                    [19, 231],
                     [25, 85],
                     [27, 179],
                     [33, {86_073_010: 4}],
@@ -3961,6 +3962,7 @@ class NetworkPacketParserTests(unittest.TestCase):
                     [4, 1_200_005],
                     [5, "綠鱼"],
                     [6, 660_893],
+                    [19, 229],
                     [25, 150],
                     [27, 214],
                     [33, {86_053_010: 4}],
@@ -4005,6 +4007,14 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(
             [row["deaths"] for row in summary["actors"]],
             [2, 0],
+        )
+        self.assertEqual(
+            [row["combat_seconds_total"] for row in summary["actors"]],
+            [231, 229],
+        )
+        self.assertEqual(
+            [row["combat_seconds_delta"] for row in summary["actors"]],
+            [231, 229],
         )
         self.assertEqual(
             summary["actors"][0]["skills"],

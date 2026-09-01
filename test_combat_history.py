@@ -300,6 +300,140 @@ class CombatHistoryStoreTests(unittest.TestCase):
             1,
         )
 
+    def test_late_game_settlement_replaces_wrong_shared_divisor_only(self):
+        ended_at = 1_788_270_266.376329
+        finished = record("late-team-clock", ended_at)
+        finished.update(
+            {
+                "started_at_epoch": 1_788_270_036.0627675,
+                "duration_seconds": 90.84104871749878,
+                "dps_duration_seconds": 90.0,
+                "hps_duration_seconds": 90.0,
+                "duration_source": "server_shared_clock",
+                "total_damage": 9_551_438,
+                "team_dps": 9_551_438 / 90.0,
+                "team_effective_healing": 199_227,
+                "team_hps": 199_227 / 90.0,
+                "participants": [
+                    {
+                        "actor_id": 11,
+                        "damage": 5_000_000,
+                        "dps": 5_000_000 / 90.0,
+                        "skills": [],
+                    },
+                    {
+                        "actor_id": 22,
+                        "profession_id": 1_200_002,
+                        "damage": 4_551_438,
+                        "dps": 4_551_438 / 90.0,
+                        "skills": [],
+                    },
+                ],
+                "healers": [
+                    {
+                        "actor_id": 22,
+                        "profession_id": 1_200_002,
+                        "effective_healing": 199_227,
+                        "hps": 199_227 / 90.0,
+                    }
+                ],
+                "shared_clock": {"clock_id": "stale", "accepted": True},
+                "damage_accounting": {
+                    "stage_summary_validations": [],
+                    "seen_stage_summary_ids": [],
+                },
+            }
+        )
+        self.store.save(finished)
+        summary = {
+            "summary_id": "settlement|5150109|1|team-clock",
+            "filetime_100ns": int(
+                (ended_at + 0.03) * 10_000_000
+                + 116_444_736_000_000_000
+            ),
+            "authoritative": True,
+            "completion_confirmed": True,
+            "member_count": 2,
+            "actors": [
+                {
+                    "actor_id": 11,
+                    "damage": 5_000_000,
+                    "combat_seconds_total": 231,
+                },
+                {
+                    "actor_id": 22,
+                    "profession_id": 1_200_002,
+                    "damage": 4_551_438,
+                    "effective_healing": 199_227,
+                    "healing_skills": [],
+                    "combat_seconds_total": 229,
+                },
+            ],
+        }
+
+        attached = self.store.attach_stage_summary_validation(summary)
+
+        self.assertIsNotNone(attached)
+        loaded = self.store.load_recent()[0]
+        self.assertEqual(loaded["total_damage"], 9_551_438)
+        self.assertEqual(
+            [row["damage"] for row in loaded["participants"]],
+            [5_000_000, 4_551_438],
+        )
+        self.assertEqual(loaded["duration_source"], "game_server_team_clock")
+        self.assertEqual(loaded["dps_duration_seconds"], 231.0)
+        self.assertEqual(loaded["team_dps"], 9_551_438 / 231.0)
+        self.assertEqual(loaded["team_hps"], 199_227 / 231.0)
+        self.assertFalse(loaded["shared_clock"]["accepted"])
+        self.assertEqual(
+            loaded["shared_clock"]["superseded_by"],
+            "game_server_team_clock",
+        )
+
+    def test_embedded_final_settlement_repairs_old_history_display_copy(self):
+        source = record("display-team-clock", 1_788_270_266.376329)
+        source.update(
+            {
+                "started_at_epoch": 1_788_270_036.0627675,
+                "duration_seconds": 90.84,
+                "dps_duration_seconds": 90.0,
+                "duration_source": "server_shared_clock",
+                "total_damage": 3_000,
+                "team_dps": 3_000 / 90.0,
+                "participants": [
+                    {"actor_id": 11, "damage": 1_250, "dps": 1_250 / 90.0},
+                    {"actor_id": 22, "damage": 1_750, "dps": 1_750 / 90.0},
+                ],
+                "damage_accounting": {
+                    "stage_summary_validations": [
+                        {
+                            "summary_id": "settlement|display-clock",
+                            "authoritative": True,
+                            "completion_confirmed": True,
+                            "actors": [
+                                {
+                                    "actor_id": 11,
+                                    "damage": 1_250,
+                                    "combat_seconds_total": 231,
+                                },
+                                {
+                                    "actor_id": 22,
+                                    "damage": 1_750,
+                                    "combat_seconds_total": 229,
+                                },
+                            ],
+                        }
+                    ]
+                },
+            }
+        )
+
+        restored = self.store.restore_game_server_team_clock_for_display(source)
+
+        self.assertEqual(source["dps_duration_seconds"], 90.0)
+        self.assertEqual(restored["dps_duration_seconds"], 231.0)
+        self.assertEqual(restored["team_dps"], 3_000 / 231.0)
+
     def test_existing_validation_upgrades_missing_stage_skills_safely(self):
         summary_id = "settlement|5150058|1|legacy"
         finished = record("legacy-validation", 1_788_058_851.0124204)

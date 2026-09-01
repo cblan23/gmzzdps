@@ -7,6 +7,7 @@ import json
 import os
 import re
 import uuid
+from collections import Counter
 from math import ceil
 from pathlib import Path
 
@@ -15,6 +16,51 @@ HISTORY_SCHEMA_VERSION = 1
 _SAFE_ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 _FILETIME_EPOCH_OFFSET = 116_444_736_000_000_000
 _HEALER_PROFESSION_IDS = frozenset({1_200_002})
+
+
+def authoritative_team_combat_seconds(
+    raw_actors: object,
+) -> tuple[float, str, list[int]]:
+    """Return the deterministic team clock carried by a final settlement.
+
+    Field 19 (``combat_seconds_total``) is the game's cumulative combat clock
+    for each party member.  The team clock is the upper edge of those values,
+    which every client receives in the same settlement table.  Captures show
+    one boundary case where a single member is one second above at least two
+    members on the otherwise agreed upper edge; only that exact +1 boundary is
+    collapsed.  ``combat_seconds_delta`` is used only for legacy payloads that
+    contain no cumulative values at all.
+    """
+    if not isinstance(raw_actors, (list, tuple)):
+        return 0.0, "unavailable", []
+
+    totals: list[int] = []
+    deltas: list[int] = []
+    for raw_actor in raw_actors:
+        if not isinstance(raw_actor, dict):
+            continue
+        try:
+            total = max(0, int(raw_actor.get("combat_seconds_total", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            total = 0
+        try:
+            delta = max(0, int(raw_actor.get("combat_seconds_delta", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            delta = 0
+        if total > 0:
+            totals.append(total)
+        if delta > 0:
+            deltas.append(delta)
+
+    values = totals or deltas
+    if not values:
+        return 0.0, "unavailable", []
+    source = "total" if totals else "legacy_delta"
+    counts = Counter(values)
+    maximum = max(values)
+    if counts[maximum] == 1 and counts.get(maximum - 1, 0) >= 2:
+        return float(maximum - 1), f"upper_team_consensus_{source}", values
+    return float(maximum), f"maximum_member_{source}", values
 
 
 def _parsed_profession_id(value: object) -> int:
@@ -281,6 +327,158 @@ class CombatHistoryStore:
             if actor_id > 0:
                 result[actor_id] = damage
         return result
+
+    @classmethod
+    def _apply_game_server_team_clock(
+        cls,
+        record: dict,
+        summary: dict,
+        summary_id: str,
+    ) -> tuple[dict, bool]:
+        """Apply only a final settlement clock matched by damage identity.
+
+        The settlement clock changes DPS/HPS divisors only.  Damage and
+        healing totals remain byte-for-byte sourced from the existing record.
+        No local-time tolerance is used here; the five-second rule belongs to
+        the fallback shared-clock path in the live client.
+        """
+        if (
+            not isinstance(record, dict)
+            or not isinstance(summary, dict)
+            or not bool(summary.get("authoritative"))
+            or not bool(summary.get("completion_confirmed"))
+        ):
+            return record, False
+        duration, policy, member_seconds = authoritative_team_combat_seconds(
+            summary.get("actors")
+        )
+        if duration <= 0:
+            return record, False
+
+        expected = cls._actor_damage(summary.get("actors"))
+        observed = cls._actor_damage(record.get("participants"))
+        overlap = set(expected).intersection(observed)
+        expected_total = sum(expected.values())
+        observed_total = sum(observed.values())
+        damage_tolerance = max(
+            25_000,
+            round(max(expected_total, observed_total) * 0.01),
+        )
+        if (
+            not expected
+            or not observed
+            or not overlap
+            or not set(observed).issubset(expected)
+            or abs(expected_total - observed_total) > damage_tolerance
+        ):
+            return record, False
+
+        divisor = float(max(1, int(duration)))
+        participants: list[dict] = []
+        for raw_participant in record.get("participants", []):
+            if not isinstance(raw_participant, dict):
+                continue
+            participant = dict(raw_participant)
+            try:
+                damage = max(0, int(participant.get("damage", 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                damage = 0
+            participant["dps"] = damage / divisor
+            participants.append(participant)
+
+        healers: list[dict] = []
+        raw_healers = record.get("healers", [])
+        if isinstance(raw_healers, list):
+            for raw_healer in raw_healers:
+                if not isinstance(raw_healer, dict):
+                    continue
+                healer = dict(raw_healer)
+                try:
+                    effective = max(
+                        0, int(healer.get("effective_healing", 0) or 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    effective = 0
+                healer["hps"] = effective / divisor
+                healers.append(healer)
+
+        try:
+            total_damage = max(0, int(record.get("total_damage", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            total_damage = 0
+        try:
+            team_effective = max(
+                0, int(record.get("team_effective_healing", 0) or 0)
+            )
+        except (TypeError, ValueError, OverflowError):
+            team_effective = sum(
+                max(0, int(row.get("effective_healing", 0) or 0))
+                for row in healers
+            )
+        try:
+            started_at = float(record.get("started_at_epoch", 0.0) or 0.0)
+            ended_at = float(record.get("ended_at_epoch", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            started_at = ended_at = 0.0
+        local_duration = (
+            max(1.0, ended_at - started_at)
+            if started_at > 0 and ended_at >= started_at
+            else 0.0
+        )
+
+        updated = dict(record)
+        updated.pop("_shared_clock_request", None)
+        updated["participants"] = participants
+        if isinstance(raw_healers, list):
+            updated["healers"] = healers
+        updated["duration_seconds"] = duration
+        updated["dps_duration_seconds"] = divisor
+        updated["hps_duration_seconds"] = divisor
+        updated["team_dps"] = total_damage / divisor
+        updated["team_hps"] = team_effective / divisor
+        updated["duration_source"] = "game_server_team_clock"
+        updated["game_server_team_clock"] = {
+            "summary_id": summary_id,
+            "duration_seconds": duration,
+            "policy": policy,
+            "member_seconds": sorted(member_seconds, reverse=True),
+            "local_event_duration_seconds": local_duration,
+            "difference_seconds": (
+                abs(duration - local_duration) if local_duration else None
+            ),
+            "local_comparison_used_for_acceptance": False,
+            "accepted": True,
+        }
+        shared_clock = updated.get("shared_clock")
+        if isinstance(shared_clock, dict):
+            shared_clock = dict(shared_clock)
+            shared_clock["accepted"] = False
+            shared_clock["superseded_by"] = "game_server_team_clock"
+            updated["shared_clock"] = shared_clock
+        return updated, updated != record
+
+    @classmethod
+    def restore_game_server_team_clock_for_display(cls, record: object) -> object:
+        """Repair display copies of old records that embed a final settlement."""
+        if not isinstance(record, dict):
+            return record
+        accounting = record.get("damage_accounting")
+        if not isinstance(accounting, dict):
+            return record
+        summaries = accounting.get("stage_summary_validations")
+        if not isinstance(summaries, list):
+            return record
+        restored = record
+        for summary in summaries:
+            if not isinstance(summary, dict):
+                continue
+            summary_id = str(summary.get("summary_id", "")).strip()
+            candidate, changed = cls._apply_game_server_team_clock(
+                restored, summary, summary_id
+            )
+            if changed:
+                restored = candidate
+        return restored
 
     @staticmethod
     def _apply_exact_stage_skills(
@@ -947,6 +1145,9 @@ class CombatHistoryStore:
                 )
                 healing_changed = upgraded_with_healing != upgraded
                 upgraded = upgraded_with_healing
+                upgraded, clock_changed = self._apply_game_server_team_clock(
+                    upgraded, summary, summary_id
+                )
                 next_accounting = dict(
                     upgraded.get("damage_accounting", {})
                     if isinstance(upgraded.get("damage_accounting"), dict)
@@ -958,7 +1159,7 @@ class CombatHistoryStore:
                     summary_id,
                     actor_ids,
                 )
-                if changed or healing_changed:
+                if changed or healing_changed or clock_changed:
                     upgraded["damage_accounting"] = next_accounting
                     self.save(upgraded)
                     return upgraded
@@ -1082,6 +1283,15 @@ class CombatHistoryStore:
         updated, _applied_healing_actor_ids = self._apply_exact_stage_healing(
             updated, summary, summary_id
         )
+        updated, clock_changed = self._apply_game_server_team_clock(
+            updated, summary, summary_id
+        )
+        validation["game_server_team_clock"] = {
+            "accepted": clock_changed
+            or str(updated.get("duration_source", ""))
+            == "game_server_team_clock",
+            "local_comparison_used_for_acceptance": False,
+        }
         next_accounting = dict(
             record.get("damage_accounting", {})
             if isinstance(record.get("damage_accounting"), dict)

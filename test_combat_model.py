@@ -24,6 +24,9 @@ NetworkPacketParser = MODULE["NetworkPacketParser"]
 UpdateInfo = MODULE["UpdateInfo"]
 CombatClockResult = MODULE["CombatClockResult"]
 apply_combat_clock_to_record = MODULE["apply_combat_clock_to_record"]
+authoritative_team_combat_seconds = MODULE[
+    "authoritative_team_combat_seconds"
+]
 APP_VERSION = MODULE["APP_VERSION"]
 CLIENT_BUILD = MODULE["CLIENT_BUILD"]
 PROFESSION_COLORS = MODULE["PROFESSION_COLORS"]
@@ -126,25 +129,21 @@ class CombatModelTests(unittest.TestCase):
     @staticmethod
     def _clock_ready_model(run_id: str) -> object:
         model = CombatModel(run_id=run_id)
-        model.self_id = SELF_ID
-        model.party_ids = {TEAMMATE_ID}
-        model.party_known = True
-        model.party_member_count = 2
-        model.combat_target_id = MONSTER_ID
-        model.first_damage_time = 990.0
-        model.last_damage_time = 1005.0
-        model.stats = {
-            SELF_ID: ActorStats(SELF_ID, damage=800_000),
-            TEAMMATE_ID: ActorStats(TEAMMATE_ID, damage=1_200_000),
-        }
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 800_000))
+        model.ingest(damage(15_001, TEAMMATE_ID, MONSTER_ID, 1_200_000))
         return model
 
     def test_combat_clock_identity_is_shared_without_uploading_entity_ids(self):
         first = self._clock_ready_model("clock-first")
         second = self._clock_ready_model("clock-second")
 
-        first_snapshot = first.combat_clock_snapshot(1007.0)
-        second_snapshot = second.combat_clock_snapshot(1008.0)
+        first_snapshot = first.combat_clock_snapshot(first.last_damage_time + 2.0)
+        second_snapshot = second.combat_clock_snapshot(second.last_damage_time + 3.0)
 
         self.assertIsNotNone(first_snapshot)
         self.assertIsNotNone(second_snapshot)
@@ -169,8 +168,10 @@ class CombatModelTests(unittest.TestCase):
             duration_seconds=12.0,
             server_time=512.0,
         )
-        self.assertTrue(model.apply_combat_clock(active, received_at=1005.0))
-        self.assertEqual(model.duration(1007.0), 14.0)
+        self.assertTrue(
+            model.apply_combat_clock(active, received_at=model.last_damage_time)
+        )
+        self.assertEqual(model.duration(model.last_damage_time + 2.0), 14.0)
 
         final = CombatClockResult(
             synchronized=True,
@@ -182,8 +183,13 @@ class CombatModelTests(unittest.TestCase):
             final=True,
             server_time=521.0,
         )
-        self.assertTrue(model.apply_combat_clock(final, received_at=1008.0))
-        self.assertEqual(model.duration(5000.0), 20.9)
+        model.combat_end_time = model.first_damage_time + 20.9
+        self.assertTrue(
+            model.apply_combat_clock(
+                final, received_at=model.last_damage_time + 3.0
+            )
+        )
+        self.assertEqual(model.duration(model.last_damage_time + 100.0), 20.9)
         self.assertEqual(
             before_damage,
             {actor_id: row.damage for actor_id, row in model.stats.items()},
@@ -400,6 +406,168 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(updated["healers"][0]["hps"], 5_250.0)
         self.assertNotIn("_shared_clock_request", updated)
         self.assertEqual(updated["duration_source"], "server_shared_clock")
+
+    def test_game_server_team_clock_uses_upper_consensus_or_longest_member(self):
+        duration, policy, values = authoritative_team_combat_seconds(
+            [
+                {"combat_seconds_total": value}
+                for value in (191, 190, 190, 190, 149)
+            ]
+        )
+        self.assertEqual(duration, 190.0)
+        self.assertEqual(policy, "upper_team_consensus_total")
+        self.assertEqual(values, [191, 190, 190, 190, 149])
+
+        duration, policy, _values = authoritative_team_combat_seconds(
+            [
+                {"combat_seconds_total": value}
+                for value in (202, 231, 229, 159, 180, 213)
+            ]
+        )
+        self.assertEqual(duration, 231.0)
+        self.assertEqual(policy, "maximum_member_total")
+
+        duration, policy, values = authoritative_team_combat_seconds(
+            [
+                {
+                    "combat_seconds_total": total,
+                    "combat_seconds_delta": delta,
+                }
+                for total, delta in ((231, 17), (229, 16), (213, 14))
+            ]
+        )
+        self.assertEqual(duration, 231.0)
+        self.assertEqual(policy, "maximum_member_total")
+        self.assertEqual(values, [231, 229, 213])
+
+    def test_validated_game_server_team_clock_is_the_final_dps_divisor(self):
+        model = self._clock_ready_model("game-team-clock")
+        filetime = int(
+            (model.last_damage_time + 11_644_473_600) * 10_000_000
+        )
+        accepted = model.ingest_stage_summary(
+            {
+                "summary_id": "settlement|clock-test",
+                "filetime_100ns": filetime,
+                "member_count": 2,
+                "authoritative": True,
+                "completion_confirmed": True,
+                "actors": [
+                    {
+                        "actor_id": SELF_ID,
+                        "damage": 800_000,
+                        "combat_seconds_total": 16,
+                        "combat_seconds_delta": 16,
+                    },
+                    {
+                        "actor_id": TEAMMATE_ID,
+                        "damage": 1_200_000,
+                        "combat_seconds_total": 16,
+                        "combat_seconds_delta": 16,
+                    },
+                ],
+            }
+        )
+        self.assertTrue(accepted)
+        model.combat_end_time = model.last_damage_time
+        self.assertEqual(model.duration(model.last_damage_time + 100.0), 16.0)
+
+        record = model.build_combat_record("target_defeated")
+        self.assertEqual(record["duration_source"], "game_server_team_clock")
+        self.assertEqual(record["dps_duration_seconds"], 16.0)
+        self.assertEqual(record["team_dps"], 125_000.0)
+        self.assertEqual(
+            record["game_server_team_clock"]["member_seconds"], [16, 16]
+        )
+        self.assertNotIn("_shared_clock_request", record)
+
+        stale_shared = CombatClockResult(
+            synchronized=True,
+            encounter_id=model.encounter_id,
+            clock_id="f" * 32,
+            started_at=100.0,
+            ended_at=190.0,
+            duration_seconds=90.0,
+            final=True,
+            server_time=191.0,
+        )
+        self.assertEqual(
+            apply_combat_clock_to_record(record, stale_shared), record
+        )
+
+    def test_matched_game_settlement_is_not_vetoed_by_five_second_fallback_rule(self):
+        model = self._clock_ready_model("game-team-clock-no-local-veto")
+        filetime = int(
+            (model.last_damage_time + 11_644_473_600) * 10_000_000
+        )
+        self.assertTrue(
+            model.ingest_stage_summary(
+                {
+                    "summary_id": "settlement|clock-no-local-veto",
+                    "filetime_100ns": filetime,
+                    "member_count": 2,
+                    "authoritative": True,
+                    "completion_confirmed": True,
+                    "actors": [
+                        {
+                            "actor_id": SELF_ID,
+                            "damage": 800_000,
+                            "combat_seconds_total": 30,
+                        },
+                        {
+                            "actor_id": TEAMMATE_ID,
+                            "damage": 1_200_000,
+                            "combat_seconds_total": 30,
+                        },
+                    ],
+                }
+            )
+        )
+        model.combat_end_time = model.last_damage_time
+
+        record = model.build_combat_record("target_defeated")
+
+        self.assertEqual(record["duration_source"], "game_server_team_clock")
+        self.assertEqual(record["dps_duration_seconds"], 30.0)
+        audit = record["game_server_team_clock"]
+        self.assertGreater(audit["difference_seconds"], 5.0)
+        self.assertFalse(audit["local_comparison_used_for_acceptance"])
+
+    def test_shared_clock_90_seconds_cannot_replace_230_second_event_span(self):
+        record = {
+            "encounter_id": "real-bonnie-regression",
+            "started_at_epoch": 1788270036.0627675,
+            "ended_at_epoch": 1788270266.376329,
+            "duration_seconds": 230.313561439514,
+            "dps_duration_seconds": 230.0,
+            "duration_source": "local_network_events",
+            "total_damage": 9_551_438,
+            "team_dps": 9_551_438 / 230,
+            "participants": [
+                {"actor_id": SELF_ID, "damage": 9_551_438, "dps": 9_551_438 / 230}
+            ],
+            "healers": [],
+            "_shared_clock_request": {"state": "ended"},
+        }
+        wrong = CombatClockResult(
+            synchronized=True,
+            encounter_id=record["encounter_id"],
+            clock_id="9" * 32,
+            started_at=1788270046.189268,
+            ended_at=1788270137.0303168,
+            duration_seconds=90.84104871749878,
+            final=True,
+            server_time=1788270147.0643907,
+        )
+
+        updated = apply_combat_clock_to_record(record, wrong)
+
+        self.assertEqual(updated["dps_duration_seconds"], 230.0)
+        self.assertEqual(updated["team_dps"], 9_551_438 / 230)
+        self.assertEqual(
+            updated["shared_clock_rejected"]["reason"],
+            "outside_local_event_interval_tolerance",
+        )
 
     def test_second_instance_restores_existing_window_without_starting_ui(self):
         calls = []
@@ -2300,12 +2468,12 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.encounter_id, encounter_id)
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
-    def test_v010_keeps_feedback_update_lock_and_fixed_target_scope(self):
+    def test_v011_keeps_feedback_update_lock_and_fixed_target_scope(self):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(APP_VERSION, "0.1.0")
-        self.assertEqual(CLIENT_BUILD, "0.1.0+20260901.1")
+        self.assertEqual(APP_VERSION, "0.1.1")
+        self.assertEqual(CLIENT_BUILD, "0.1.1+20260901.1")
         self.assertIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
@@ -4388,6 +4556,52 @@ class CombatModelTests(unittest.TestCase):
         self.assertFalse(model.ingest_team_stat(omitted_after_damage))
         self.assertEqual(model.stats[TEAMMATE_ID].damage, 250_000)
         self.assertEqual(model.pop_completed_combats(), [])
+
+    def test_new_pull_zero_epoch_clears_stale_counters_before_opening_damage(self):
+        """Reproduce the 1.7-second fragment observed before encounter 000023."""
+        model = CombatModel(run_id="opening-zero-epoch-reset-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID, NEARBY_ID]})
+
+        for sequence, actor_id, stale_damage in (
+            (1, TEAMMATE_ID, 136_499),
+            (2, NEARBY_ID, 127_310),
+        ):
+            stale = team_stat(sequence, actor_id, stale_damage)
+            stale["full_snapshot"] = True
+            self.assertFalse(model.ingest_team_stat(stale))
+
+        for sequence, actor_id in (
+            (3, TEAMMATE_ID),
+            (4, NEARBY_ID),
+        ):
+            zero = team_stat(sequence, actor_id, 0, server_time=1_788_182_471)
+            zero["full_snapshot"] = True
+            zero["omitted_zero"] = True
+            self.assertFalse(model.ingest_team_stat(zero))
+
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(5, SELF_ID, MONSTER_ID, 100))
+        encounter_id = model.encounter_id
+
+        first = team_stat(
+            6, TEAMMATE_ID, 32_573, server_time=1_788_182_471
+        )
+        first["full_snapshot"] = True
+        second = team_stat(
+            7, NEARBY_ID, 6_579, server_time=1_788_182_471
+        )
+        second["full_snapshot"] = True
+        self.assertTrue(model.ingest_team_stat(first))
+        self.assertTrue(model.ingest_team_stat(second))
+
+        self.assertEqual(model.encounter_id, encounter_id)
+        self.assertEqual(model.pop_completed_combats(), [])
+        self.assertEqual(model.stats[SELF_ID].damage, 100)
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 32_573)
+        self.assertEqual(model.stats[NEARBY_ID].damage, 6_579)
 
     def test_zero_baseline_survives_damage_before_delayed_boss_signal(self):
         model = CombatModel(run_id="pre-signal-common-damage-test")

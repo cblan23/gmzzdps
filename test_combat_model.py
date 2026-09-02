@@ -2468,12 +2468,12 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.encounter_id, encounter_id)
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
-    def test_v011_keeps_feedback_update_lock_and_fixed_target_scope(self):
+    def test_v012_keeps_feedback_update_lock_and_fixed_target_scope(self):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(APP_VERSION, "0.1.1")
-        self.assertEqual(CLIENT_BUILD, "0.1.1+20260901.1")
+        self.assertEqual(APP_VERSION, "0.1.2")
+        self.assertEqual(CLIENT_BUILD, "0.1.2+20260902.1")
         self.assertIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
@@ -2643,6 +2643,73 @@ class CombatModelTests(unittest.TestCase):
         window.show_damage_share = True
         window.show_critical_rate = True
         self.assertEqual(window._compact_target_width(), 340)
+
+    def test_compact_resize_survives_expand_and_restore_cycle(self):
+        class Root:
+            def __init__(self):
+                self.value = "277x166+31+47"
+
+            def geometry(self, value=None):
+                if value is not None:
+                    self.value = value
+                return self.value
+
+            @staticmethod
+            def winfo_exists():
+                return True
+
+            @staticmethod
+            def winfo_x():
+                return 31
+
+            @staticmethod
+            def winfo_y():
+                return 47
+
+            @staticmethod
+            def winfo_screenwidth():
+                return 1920
+
+            @staticmethod
+            def winfo_screenheight():
+                return 1080
+
+            @staticmethod
+            def update_idletasks():
+                return None
+
+        window = object.__new__(DpsWindow)
+        window.root = Root()
+        window.config = {
+            "compact_geometry": "277x166+31+47",
+            "geometry": "590x400+31+47",
+            "compact_layout_version": 3,
+        }
+        window.compact_mode = True
+        window.main_meter_mode = "dps"
+        window.show_total_damage = True
+        window.show_dps = True
+        window.show_damage_share = True
+        window.show_critical_rate = True
+        window.window_locked = False
+        window.closing = False
+        window.restore_geometry = {}
+        window._apply_layout_mode = lambda: None
+
+        self.assertEqual(window._initial_geometry(), "277x166+31+47")
+        with mock.patch.dict(
+            DpsWindow.toggle_compact_mode.__globals__,
+            {"save_config": lambda _config: None},
+        ):
+            window.toggle_compact_mode()
+            self.assertEqual(window.root.geometry(), "590x400+31+47")
+            window.toggle_compact_mode()
+
+        self.assertEqual(window.root.geometry(), "277x166+31+47")
+        window.root.geometry("289x177+31+47")
+        window._sync_compact_geometry_width()
+        self.assertEqual(window.config["compact_geometry"], "289x177+31+47")
+        self.assertEqual(window.root.geometry(), "289x177+31+47")
 
     def test_boss_hp_uses_one_continuous_fill_without_a_name_block(self):
         class Canvas:
@@ -3519,6 +3586,37 @@ class CombatModelTests(unittest.TestCase):
         self.assertTrue(payload["manual"])
         self.assertIsNone(payload["update"])
         self.assertIn("失败", payload["error"])
+
+    def test_available_update_is_cached_without_opening_a_window(self):
+        update = UpdateInfo(
+            available=True,
+            latest_version="0.1.2",
+            download_path="/api/v1/dps/update/download",
+            sha256="a" * 64,
+            size=1024,
+            filename="dps.exe",
+        )
+        refreshed = []
+        window = object.__new__(DpsWindow)
+        window.closing = False
+        window.update_check_in_progress = True
+        window.pending_update = None
+        window._refresh_update_page = lambda status="": refreshed.append(status)
+        window.show_backend = mock.Mock()
+
+        window._handle_update_check_result(
+            {"manual": False, "update": update, "error": ""}
+        )
+
+        self.assertIs(window.pending_update, update)
+        self.assertFalse(window.update_check_in_progress)
+        self.assertEqual(refreshed, [""])
+        window.show_backend.assert_not_called()
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("def _show_update_window", source)
+        self.assertNotIn("self.update_window", source)
 
     def test_update_download_unexpected_error_always_posts_terminal_result(self):
         class FailingLicensing:

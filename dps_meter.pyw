@@ -175,8 +175,8 @@ MONSTER_NAME_CACHE_PATH = DATA_DIR / "monster_name_cache.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
-APP_VERSION = "0.1.1"
-CLIENT_BUILD = "0.1.1+20260901.1"
+APP_VERSION = "0.1.2"
+CLIENT_BUILD = "0.1.2+20260902.1"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION}"
 UI_BRAND = APP_NAME
 BG = "#08090b"
@@ -9434,7 +9434,6 @@ class DpsWindow:
         self.feedback_submit_button: tk.Label | None = None
         self.feedback_submitting = False
         self.notice_window: tk.Frame | None = None
-        self.update_window: tk.Toplevel | None = None
         self.update_status_label: tk.Label | None = None
         self.update_summary_label: tk.Label | None = None
         self.update_action_button: tk.Label | None = None
@@ -9611,8 +9610,6 @@ class DpsWindow:
         value: object,
         fallback_x: int = 32,
         fallback_y: int = 120,
-        *,
-        fit_visible_metrics: bool = False,
     ) -> str:
         match = re.fullmatch(
             r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", str(value or "")
@@ -9626,14 +9623,12 @@ class DpsWindow:
             parsed_width = self._compact_target_width()
             parsed_height = MINI_DEFAULT_HEIGHT
             suffix = f"{int(fallback_x):+d}{int(fallback_y):+d}"
-        if fit_visible_metrics:
-            parsed_width = self._compact_target_width()
         return f"{parsed_width}x{parsed_height}{suffix}"
 
     def _initial_geometry(self) -> str:
         if self.compact_mode:
             saved = str(self.config.get("compact_geometry", ""))
-            saved = self._adaptive_compact_geometry(saved, fit_visible_metrics=True)
+            saved = self._adaptive_compact_geometry(saved)
             self.config["compact_geometry"] = saved
             return self._visible_geometry(
                 saved, MINI_DEFAULT_WIDTH, MINI_DEFAULT_HEIGHT
@@ -10133,7 +10128,7 @@ class DpsWindow:
         update = payload.get("update")
         error = str(payload.get("error", "")).strip()
         if isinstance(update, UpdateInfo) and update.available:
-            self._show_update_window(update)
+            self._cache_available_update(update)
             return
         if not manual:
             self._refresh_update_page()
@@ -10146,7 +10141,7 @@ class DpsWindow:
             f"当前已是最新版本，更新文件保存位置：{UPDATE_DIR}"
         )
 
-    def _show_update_window(self, update: UpdateInfo) -> None:
+    def _cache_available_update(self, update: UpdateInfo) -> None:
         if self.closing:
             return
         self.pending_update = update
@@ -10365,15 +10360,6 @@ class DpsWindow:
             creationflags=creation_flags,
         )
 
-    def _close_update_window(self, *, force: bool = False) -> None:
-        if self.update_downloading and not force:
-            return
-        if self.update_window is not None and self.update_window.winfo_exists():
-            self.update_window.destroy()
-        self.update_window = None
-        self.update_status_label = None
-        self.update_action_button = None
-
     def _return_to_login(self, message: str) -> None:
         if self.closing or self.authorization_resetting:
             return
@@ -10386,7 +10372,6 @@ class DpsWindow:
         self._close_skill_window()
         self._close_history_window()
         self._close_feedback_window()
-        self._close_update_window(force=True)
         self.dot.configure(fg=WARN)
         self.status_label.configure(text="正在安全停止", fg=WARN)
         self.heartbeat_stop_event.set()
@@ -11628,7 +11613,6 @@ class DpsWindow:
             "skill_window",
             "history_window",
             "feedback_window",
-            "update_window",
         ):
             window = getattr(self, attribute, None)
             if window is not None and window.winfo_exists():
@@ -11644,11 +11628,15 @@ class DpsWindow:
     def _sync_compact_geometry_width(self) -> None:
         fallback_x = self.root.winfo_x() if self.root.winfo_exists() else 32
         fallback_y = self.root.winfo_y() if self.root.winfo_exists() else 120
+        saved_geometry = self.config.get("compact_geometry", "")
+        if self.compact_mode and self.root.winfo_exists():
+            # A resize can still be in memory only.  Prefer the live compact
+            # geometry so a settings refresh cannot overwrite the user's size.
+            saved_geometry = self.root.geometry()
         geometry = self._adaptive_compact_geometry(
-            self.config.get("compact_geometry", ""),
+            saved_geometry,
             fallback_x,
             fallback_y,
-            fit_visible_metrics=True,
         )
         self.config["compact_geometry"] = geometry
         if self.compact_mode and self.root.winfo_exists():
@@ -11695,8 +11683,6 @@ class DpsWindow:
             minimum_height = (
                 MINI_MIN_HEIGHT if self.compact_mode else MAIN_MIN_HEIGHT
             )
-            if self.compact_mode:
-                width = str(self._compact_target_width())
             target_geometry = (
                 f"{max(minimum_width, int(width))}x"
                 f"{max(minimum_height, int(height))}{suffix}"
@@ -16398,7 +16384,7 @@ class DpsWindow:
         elif kind == "update_check_result":
             self._handle_update_check_result(payload)
         elif kind == "update_available" and isinstance(payload, UpdateInfo):
-            self._show_update_window(payload)
+            self._cache_available_update(payload)
         elif kind == "update_download_progress":
             self._handle_update_download_progress(payload)
         elif kind == "update_downloaded":
@@ -17396,7 +17382,6 @@ class DpsWindow:
         self._close_skill_window()
         self._close_history_window()
         self._close_feedback_window()
-        self._close_update_window(force=True)
         self.status_label.configure(
             text=self.close_status_text or "正在安全停止并退出…", fg=WARN
         )

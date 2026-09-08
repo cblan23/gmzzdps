@@ -1,29 +1,27 @@
 import struct
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from damage_hook import DamageHook
 from inline_capture import (
-    BOSS_INIT_PROLOGUE,
     BOSS_TEMPLATE_ID_OFFSET,
     BOSS_TYPE_ENTITY_ID_OFFSET,
     BOSS_TYPE_FIELD_OFFSET,
-    BOSS_TYPE_PROLOGUE,
     BOSS_TYPE_RECORD_SIZE,
     build_boss_init_stub,
     build_boss_type_stub,
+    build_template_bulk_stub,
+    build_template_id_stub,
     parse_boss_type_record,
 )
 from network_capture import (
     MESSAGE_ARGUMENT_ACK_OFFSET,
     MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET,
-    MESSAGE_ARGUMENT_SYNC_METHODS,
-    MESSAGE_ARGUMENT_SYNC_METHOD_NAMES,
     MESSAGE_ARGUMENT_SYNC_STATE_OFFSET,
     MESSAGE_COMMIT_OFFSET,
     MESSAGE_MAGIC,
-    MESSAGE_PROLOGUE,
     MESSAGE_RECORD_COUNT,
     MESSAGE_RECORDS_OFFSET,
     MESSAGE_RECORD_SIZE,
@@ -34,11 +32,46 @@ from network_capture import (
     parse_message_record,
 )
 from network_state import NetworkPacketParser
+from runtime_capability import load_runtime_profile_file, runtime_profile_hook
+
+
+RUNTIME_PROFILE = load_runtime_profile_file(
+    Path(__file__).resolve().with_name("runtime-profile.dev.json")
+)
+NETWORK_HOOK = runtime_profile_hook(RUNTIME_PROFILE, "network_message")
+BOSS_TYPE_HOOK = runtime_profile_hook(RUNTIME_PROFILE, "boss_type")
+BOSS_INIT_HOOK = runtime_profile_hook(RUNTIME_PROFILE, "boss_init")
+TEMPLATE_ID_HOOK = runtime_profile_hook(RUNTIME_PROFILE, "template_id")
+TEMPLATE_BULK_HOOK = runtime_profile_hook(RUNTIME_PROFILE, "template_bulk")
+MESSAGE_PROLOGUE = bytes(NETWORK_HOOK["prologue"])
+BOSS_TYPE_PROLOGUE = bytes(BOSS_TYPE_HOOK["prologue"])
+BOSS_INIT_PROLOGUE = bytes(BOSS_INIT_HOOK["prologue"])
+TEMPLATE_ID_PROLOGUE = bytes(TEMPLATE_ID_HOOK["prologue"])
+TEMPLATE_BULK_PROLOGUE = bytes(TEMPLATE_BULK_HOOK["prologue"])
+MESSAGE_ARGUMENT_SYNC_METHOD_SEQUENCE = tuple(
+    RUNTIME_PROFILE["protocol"]["synchronized_methods"]
+)
+MESSAGE_ARGUMENT_SYNC_METHOD_NAMES = frozenset(
+    MESSAGE_ARGUMENT_SYNC_METHOD_SEQUENCE
+)
+MESSAGE_ARGUMENT_SYNC_METHODS = tuple(
+    method.encode("ascii") for method in MESSAGE_ARGUMENT_SYNC_METHOD_SEQUENCE
+)
+
+
+def message_stub(ring: int, resume: int, **options) -> bytes:
+    return build_message_stub(
+        ring,
+        resume,
+        prologue=options.pop("prologue", MESSAGE_PROLOGUE),
+        synchronized_methods=MESSAGE_ARGUMENT_SYNC_METHODS,
+        **options,
+    )
 
 
 class BossTypeCaptureTests(unittest.TestCase):
     def test_all_synchronous_methods_fit_in_the_injected_stub(self):
-        stub = build_message_stub(0x1234_0000, 0x1400_1000)
+        stub = message_stub(0x1234_0000, 0x1400_1000)
 
         self.assertLess(len(stub), 0x1000)
 
@@ -55,7 +88,7 @@ class BossTypeCaptureTests(unittest.TestCase):
             "57 41 54 41 56 41 57 48 8b ec 48 81 ec 80 00 00 00"
         )
         resume = 0x1400_2000
-        stub = build_message_stub(
+        stub = message_stub(
             0x1234_0000,
             resume,
             prologue=secondary_prologue,
@@ -111,7 +144,7 @@ class BossTypeCaptureTests(unittest.TestCase):
         self.assertEqual(record["argument_sync_state"], 1)
 
     def test_authoritative_team_record_is_acknowledged_after_decode(self):
-        hook = NetworkMessageHook(pid=1234)
+        hook = NetworkMessageHook(profile=RUNTIME_PROFILE, pid=1234)
         hook.process = 99
         hook.ring = 0x500000
         hook.installed = True
@@ -170,7 +203,7 @@ class BossTypeCaptureTests(unittest.TestCase):
         )
 
     def test_timed_out_team_record_is_never_decoded(self):
-        hook = NetworkMessageHook(pid=1234)
+        hook = NetworkMessageHook(profile=RUNTIME_PROFILE, pid=1234)
         hook.process = 99
         hook.ring = 0x700000
         hook.installed = True
@@ -254,13 +287,13 @@ class BossTypeCaptureTests(unittest.TestCase):
         )
 
     def test_network_hook_adopts_valid_existing_capture(self):
-        hook = NetworkMessageHook(pid=1234)
+        hook = NetworkMessageHook(profile=RUNTIME_PROFILE, pid=1234)
         hook.process = 99
         hook.target = 0x140123000
         stub = 0x7FF600001000
         ring = 0x7FF600010000
         jump = build_absolute_patch(stub, len(MESSAGE_PROLOGUE))
-        stub_code = build_message_stub(
+        stub_code = message_stub(
             ring, hook.target + len(MESSAGE_PROLOGUE)
         )
         header = struct.pack(
@@ -288,6 +321,33 @@ class BossTypeCaptureTests(unittest.TestCase):
         self.assertEqual(hook.ring, ring)
         self.assertEqual(hook.next_sequence, 321)
 
+    def test_network_takeover_restores_adopted_entry_on_close(self):
+        hook = NetworkMessageHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            takeover_existing=True,
+        )
+        hook.pid = 1234
+        hook.process = 99
+        hook.target = 0x140123000
+        hook.stub = 0x7FF600001000
+        hook.ring = 0x7FF600010000
+        hook.installed = True
+        hook.adopted = True
+
+        with (
+            patch("network_capture.process_alive", return_value=True),
+            patch("network_capture.suspend_game_threads", return_value=[7]),
+            patch("network_capture.resume_threads") as resume,
+            patch("network_capture.write_code") as write,
+            patch("network_capture.read_region", return_value=MESSAGE_PROLOGUE),
+            patch("network_capture.kernel32.CloseHandle"),
+        ):
+            hook.close()
+
+        write.assert_called_once_with(99, hook.target, MESSAGE_PROLOGUE)
+        resume.assert_called_once_with([7])
+
     def test_record_keeps_component_entity_and_enum_type(self):
         sequence = 17
         filetime = 134_321_845_085_764_054
@@ -313,8 +373,17 @@ class BossTypeCaptureTests(unittest.TestCase):
         self.assertEqual(record["template_id"], 7_110_581)
 
     def test_stubs_capture_monster_template_id_from_common_component(self):
-        boss_type_stub = build_boss_type_stub(0x100000, 0x200000, 0x300000)
-        boss_init_stub = build_boss_init_stub(0x100000, 0x200000)
+        boss_type_stub = build_boss_type_stub(
+            0x100000,
+            0x200000,
+            0x300000,
+            prologue=BOSS_TYPE_PROLOGUE,
+        )
+        boss_init_stub = build_boss_init_stub(
+            0x100000,
+            0x200000,
+            prologue=BOSS_INIT_PROLOGUE,
+        )
         self.assertIn(b"\x8b\x81\x98\x01\x00\x00", boss_type_stub)
         self.assertIn(b"\x8b\x87\x98\x01\x00\x00", boss_init_stub)
 
@@ -324,6 +393,7 @@ class BossTypeCaptureTests(unittest.TestCase):
             0x0000_1234_5678_0000,
             0x0000_0001_468D_6561,
             global_address,
+            prologue=BOSS_TYPE_PROLOGUE,
         )
         displaced_prefix = BOSS_TYPE_PROLOGUE[:10]
         replay = displaced_prefix + b"\x48\xa1" + struct.pack(
@@ -339,7 +409,11 @@ class BossTypeCaptureTests(unittest.TestCase):
 
     def test_template_init_stub_captures_saved_al_and_replays_write(self):
         resume = 0x0000_0001_468D_5A15
-        stub = build_boss_init_stub(0x0000_1234_5678_0000, resume)
+        stub = build_boss_init_stub(
+            0x0000_1234_5678_0000,
+            resume,
+            prologue=BOSS_INIT_PROLOGUE,
+        )
         self.assertIn(
             b"\x48\x8b\x44\x24\x20\x0f\xb6\xc0",
             stub,
@@ -350,6 +424,193 @@ class BossTypeCaptureTests(unittest.TestCase):
                 b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
             )
         )
+
+    def test_template_id_setter_captures_new_edx_value_and_current_type(self):
+        global_address = 0x0000_0001_4E78_AC18
+        resume = 0x0000_0001_468D_7901
+        stub = build_template_id_stub(
+            0x0000_1234_5678_0000,
+            resume,
+            global_address,
+            prologue=TEMPLATE_ID_PROLOGUE,
+        )
+
+        # Current BossType comes from the same CommonComponent.  The incoming
+        # TemplateId must come from EDX, not the still-old field at +0x198.
+        self.assertIn(b"\x0f\xb6\x81\x37\x01\x00\x00", stub)
+        self.assertIn(b"\x8b\xc2\x49\x89\x43\x28", stub)
+        replay = (
+            TEMPLATE_ID_PROLOGUE[:10]
+            + b"\x48\xa1"
+            + struct.pack("<Q", global_address)
+        )
+        self.assertIn(replay, stub)
+        self.assertTrue(
+            stub.endswith(
+                b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
+            )
+        )
+
+    def test_template_bulk_captures_r8b_and_ninth_stack_argument(self):
+        resume = 0x0000_0001_468D_70B1
+        stub = build_template_bulk_stub(
+            0x0000_1234_5678_0000,
+            resume,
+            prologue=TEMPLATE_BULK_PROLOGUE,
+        )
+
+        # pushfq plus five saved registers shifts entry [rsp+0x48] to +0x78.
+        self.assertIn(b"\x41\x0f\xb6\xc0\x49\x89\x43\x20", stub)
+        self.assertIn(b"\x8b\x44\x24\x78\x49\x89\x43\x28", stub)
+        self.assertTrue(
+            stub.endswith(
+                TEMPLATE_BULK_PROLOGUE
+                + b"\xff\x25\x00\x00\x00\x00"
+                + struct.pack("<Q", resume)
+            )
+        )
+
+    def test_poll_boss_types_reads_all_four_identity_sources(self):
+        hook = DamageHook(profile=RUNTIME_PROFILE, pid=1234)
+        hook.process = 99
+        hook.boss_type_installed = True
+        hook.boss_init_installed = True
+        hook.template_id_installed = True
+        hook.template_bulk_installed = True
+        hook.boss_type_ring = 0x1000
+        hook.boss_init_ring = 0x2000
+        hook.template_id_ring = 0x3000
+        hook.template_bulk_ring = 0x4000
+        observed = []
+
+        def fake_poll(ring, next_sequence, magic, function):
+            observed.append((ring, magic, function))
+            return ([{"function": function, "component": 0}], next_sequence + 1)
+
+        with (
+            patch("damage_hook.process_alive", return_value=True),
+            patch.object(hook, "_poll_boss_ring", side_effect=fake_poll),
+        ):
+            records = hook.poll_boss_types()
+
+        self.assertEqual(len(records), 4)
+        self.assertEqual(
+            [function for _ring, _magic, function in observed],
+            [
+                "KAPI_Common_SetBossType",
+                "CommonComponent_TemplateBossType",
+                "CommonComponent_SetTemplateId",
+                "CommonComponent_BulkTemplate",
+            ],
+        )
+        self.assertEqual(hook.template_id_next_sequence, 1)
+        self.assertEqual(hook.template_bulk_next_sequence, 1)
+
+    def test_target_lookup_diagnostic_distinguishes_local_player_conflict(self):
+        hook = DamageHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            target_boss_lookup_enabled=True,
+        )
+        hook.local_player_id = 57_277_687_900_295
+
+        should_queue = hook._track_target_lookup_candidate(
+            57_288_000_000_001,
+            hook.local_player_id,
+        )
+
+        self.assertFalse(should_queue)
+        diagnostics = hook.diagnostic_snapshot()
+        self.assertEqual(diagnostics["damage_target_records"], 1)
+        self.assertEqual(diagnostics["damage_target_matches_local_player"], 1)
+        self.assertEqual(diagnostics["target_lookup_skipped_local_player"], 1)
+
+    def test_target_lookup_diagnostic_distinguishes_entity_id_ranges(self):
+        hook = DamageHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            target_boss_lookup_enabled=True,
+        )
+
+        self.assertTrue(
+            hook._track_target_lookup_candidate(1, 8_500_000_000_000)
+        )
+        self.assertTrue(
+            hook._track_target_lookup_candidate(1, 57_288_000_000_001)
+        )
+
+        diagnostics = hook.diagnostic_snapshot()
+        self.assertEqual(diagnostics["damage_target_id_mid_supported"], 1)
+        self.assertEqual(diagnostics["damage_target_id_gap"], 0)
+        self.assertEqual(diagnostics["damage_target_id_high_supported"], 1)
+        self.assertEqual(diagnostics["target_lookup_skipped_unplausible"], 0)
+
+    def test_close_restores_both_template_entry_points(self):
+        hook = DamageHook(profile=RUNTIME_PROFILE, pid=1234)
+        hook.pid = 1234
+        hook.process = 99
+        hook.template_id_target = 0x140001000
+        hook.template_bulk_target = 0x140002000
+        hook.template_id_installed = True
+        hook.template_bulk_installed = True
+
+        with (
+            patch("damage_hook.process_alive", return_value=True),
+            patch("damage_hook.suspend_process", return_value=[7]),
+            patch("damage_hook.resume_threads") as resume,
+            patch("damage_hook.write_code") as write,
+            patch(
+                "damage_hook.read_region",
+                side_effect=lambda _process, address, _size: (
+                    TEMPLATE_BULK_PROLOGUE
+                    if address == hook.template_bulk_target
+                    else TEMPLATE_ID_PROLOGUE
+                ),
+            ),
+            patch("damage_hook.kernel32.CloseHandle"),
+        ):
+            hook.close()
+
+        self.assertEqual(
+            write.call_args_list,
+            [
+                unittest.mock.call(
+                    99, hook.template_bulk_target, TEMPLATE_BULK_PROLOGUE
+                ),
+                unittest.mock.call(
+                    99, hook.template_id_target, TEMPLATE_ID_PROLOGUE
+                ),
+            ],
+        )
+        resume.assert_called_once_with([7])
+
+    def test_damage_takeover_restores_adopted_entry_on_close(self):
+        hook = DamageHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            takeover_existing=True,
+        )
+        hook.pid = 1234
+        hook.process = 99
+        hook.target = 0x140003000
+        hook.installed = True
+        hook.adopted = True
+
+        with (
+            patch("damage_hook.process_alive", return_value=True),
+            patch("damage_hook.suspend_process", return_value=[7]),
+            patch("damage_hook.resume_threads") as resume,
+            patch("damage_hook.write_code") as write,
+            patch(
+                "damage_hook.read_region",
+                return_value=hook.damage_prologue,
+            ),
+            patch("damage_hook.kernel32.CloseHandle"),
+        ):
+            hook.close()
+
+        write.assert_called_once_with(99, hook.target, hook.damage_prologue)
+        resume.assert_called_once_with([7])
 
     def test_template_record_keeps_its_capture_source(self):
         raw = struct.pack("<8Q", 1, 134_321_845_085_764_054, 2, 3, 1, 0, 4, 2)
@@ -366,7 +627,7 @@ class BossTypeCaptureTests(unittest.TestCase):
         struct.pack_into("<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET, entity_id)
         raw[BOSS_TYPE_FIELD_OFFSET] = 3
         struct.pack_into("<I", raw, BOSS_TEMPLATE_ID_OFFSET, template_id)
-        hook = DamageHook(pid=1234)
+        hook = DamageHook(profile=RUNTIME_PROFILE, pid=1234)
         hook.process = 99
         hook._iter_live_object_pointers = lambda: iter((component,))
 
@@ -380,7 +641,7 @@ class BossTypeCaptureTests(unittest.TestCase):
         self.assertTrue(updates[0]["existing_object_scan"])
 
     def test_existing_component_fallback_walks_global_objects_only_once(self):
-        hook = DamageHook(pid=1234)
+        hook = DamageHook(profile=RUNTIME_PROFILE, pid=1234)
         first_target = 4_642_860_057_279
         second_target = first_target + 1
         recovered_boss = second_target
@@ -411,7 +672,7 @@ class BossTypeCaptureTests(unittest.TestCase):
         self.assertEqual(updates[0]["entity_id"], recovered_boss)
 
     def test_target_boss_lookup_is_disabled_by_default(self):
-        hook = DamageHook(pid=1234)
+        hook = DamageHook(profile=RUNTIME_PROFILE, pid=1234)
         hook.pending_target_boss_lookups[4_642_860_057_279] = (
             time.monotonic()
         )
@@ -428,7 +689,11 @@ class BossTypeCaptureTests(unittest.TestCase):
         raw = bytearray(BOSS_TEMPLATE_ID_OFFSET + 4)
         struct.pack_into("<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET, target_id)
         raw[BOSS_TYPE_FIELD_OFFSET] = 0
-        hook = DamageHook(pid=1234, target_boss_lookup_enabled=True)
+        hook = DamageHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            target_boss_lookup_enabled=True,
+        )
         hook.process = 99
         hook._remember_common_component_record(
             {
@@ -503,7 +768,11 @@ class BossTypeCaptureTests(unittest.TestCase):
         struct.pack_into("<Q", raw, BOSS_TYPE_ENTITY_ID_OFFSET, first_target)
         raw[BOSS_TYPE_FIELD_OFFSET] = 0
         struct.pack_into("<I", raw, BOSS_TEMPLATE_ID_OFFSET, 7_107_030)
-        hook = DamageHook(pid=1234, target_boss_lookup_enabled=True)
+        hook = DamageHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            target_boss_lookup_enabled=True,
+        )
         hook.process = 99
         hook._remember_common_component_record(
             {
@@ -555,7 +824,7 @@ class BossTypeCaptureTests(unittest.TestCase):
         )
 
     def test_local_controlled_entity_refreshes_after_transformation(self):
-        hook = DamageHook(pid=1234)
+        hook = DamageHook(profile=RUNTIME_PROFILE, pid=1234)
         original_id = 57_266_949_828_970
         transformed_id = original_id + 50_000
         resolved = iter((original_id, transformed_id))

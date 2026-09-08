@@ -11,7 +11,7 @@ import json
 import math
 import struct
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from inline_capture import (
@@ -38,21 +38,16 @@ from proc_inspect import (
     read_region,
     winerror,
 )
+from runtime_capability import (
+    load_runtime_profile_file,
+    normalize_runtime_profile,
+    runtime_profile_hook,
+)
 
 
 PROCESS_VM_OPERATION = 0x0008
 PROCESS_VM_WRITE = 0x0020
 
-# doraemon::script::ScriptEntity::do_message. Its R8 argument is the decoded
-# RPC method name (MSVC std::string); the remaining arguments own the already
-# decoded message values that are subsequently pushed into Lua.
-MESSAGE_RVA = 0x0997DBD0
-MESSAGE_PROLOGUE = bytes.fromhex(
-    "48 89 5c 24 18 48 89 74 24 20 48 89 54 24 10 55"
-)
-MESSAGE_PROLOGUE_SIGNATURE = MESSAGE_PROLOGUE + bytes.fromhex(
-    "57 41 54 41 56 41 57 48 8b ec 48 81 ec 80 00 00 00"
-)
 MESSAGE_MAGIC = b"GMZZNET2"
 MESSAGE_RECORD_SIZE = 0x100
 MESSAGE_RECORD_COUNT = 4096
@@ -65,26 +60,6 @@ MESSAGE_COMMIT_OFFSET = 0xF8
 # These messages own authoritative damage or low-frequency encounter-boundary
 # values. The decoded msgpack graph is stack/arena backed and can be reused as
 # soon as do_message continues, so the hook waits for the reader to finish.
-MESSAGE_ARGUMENT_SYNC_METHODS = (
-    b"RetCommonCombatStatisticsByTeam",
-    b"RetDirtyCommonCombatStatisticsByTeam",
-    b"OnMsgReconnectOrEnter",
-    b"OnMsgDungeonReadinessCheck",
-    b"OnMsgDungeonStageSettlement",
-    b"OnMsgSyncFightMode",
-    b"OnMsgSyncCurrentMaxHp",
-    b"OnMsgUpdateStageCombatStatistics",
-    b"OnMsgSettlementCombatStatistics",
-    b"OnMsgUpdateDungeonBattleStatistics",
-    b"OnMsgUpdateDungeonTeamPlayerBattleStatistics",
-    b"RetDungeonBattleStatistics",
-    b"RetMonsterBattleStatistics",
-    b"RetNpcCombatStatisticsByTeam",
-    b"RetDirtyNpcCombatStatisticsByTeam",
-)
-MESSAGE_ARGUMENT_SYNC_METHOD_NAMES = frozenset(
-    method.decode("ascii") for method in MESSAGE_ARGUMENT_SYNC_METHODS
-)
 MESSAGE_ARGUMENT_SYNC_TIMEOUT_100NS = 2_500_000  # 250 ms hard fail-open
 MESSAGE_RING_SIZE = (
     MESSAGE_RECORDS_OFFSET + MESSAGE_RECORD_COUNT * MESSAGE_RECORD_SIZE
@@ -173,7 +148,8 @@ def build_message_stub(
     ring: int,
     resume: int,
     *,
-    prologue: bytes = MESSAGE_PROLOGUE,
+    prologue: bytes,
+    synchronized_methods: tuple[bytes, ...],
     return_address_stack_offset: int = 0x48,
 ) -> bytes:
     """Capture do_message registers and copy its decoded RPC method name."""
@@ -249,7 +225,7 @@ def build_message_stub(
 
     matched_jumps = [
         _emit_record_method_candidate(code, method)
-        for method in MESSAGE_ARGUMENT_SYNC_METHODS
+        for method in synchronized_methods
     ]
     skip_sync_state = _emit_near_branch(code, b"\xe9")
     matched = len(code)
@@ -505,8 +481,30 @@ class RemoteMsgpackReader:
 
 
 class NetworkMessageHook:
-    def __init__(self, *, pid: int | None = None):
+    def __init__(
+        self,
+        *,
+        profile: Mapping[str, object],
+        pid: int | None = None,
+        takeover_existing: bool = False,
+    ):
+        self.profile = normalize_runtime_profile(profile)
+        hook = runtime_profile_hook(self.profile, "network_message")
+        protocol = self.profile["protocol"]
+        if not isinstance(protocol, dict):
+            raise ValueError("runtime protocol profile is invalid")
+        self.rva = int(hook["rva"])
+        self.prologue = bytes(hook["prologue"])
+        self.signature = bytes(hook["signature"])
+        self.synchronized_methods = tuple(
+            str(method).encode("ascii")
+            for method in protocol["synchronized_methods"]
+        )
+        self.synchronized_method_names = frozenset(
+            method.decode("ascii") for method in self.synchronized_methods
+        )
         self.requested_pid = pid
+        self.takeover_existing = bool(takeover_existing)
         self.pid = 0
         self.base = 0
         self.process = 0
@@ -523,7 +521,7 @@ class NetworkMessageHook:
 
     def _adopt_existing(self, patch: bytes) -> bool:
         if (
-            len(patch) != len(MESSAGE_PROLOGUE)
+            len(patch) != len(self.prologue)
             or patch[:6] != b"\xff\x25\0\0\0\0"
         ):
             return False
@@ -546,7 +544,10 @@ class NetworkMessageHook:
         ):
             return False
         expected_stub = build_message_stub(
-            ring, self.target + len(MESSAGE_PROLOGUE)
+            ring,
+            self.target + len(self.prologue),
+            prologue=self.prologue,
+            synchronized_methods=self.synchronized_methods,
         )
         if read_region(self.process, stub, len(expected_stub)) != expected_stub:
             return False
@@ -564,9 +565,9 @@ class NetworkMessageHook:
         self.base, module_size, _path = find_module(
             self.pid, "C7-Win64-Shipping.exe"
         )
-        if MESSAGE_RVA + len(MESSAGE_PROLOGUE_SIGNATURE) > module_size:
+        if self.rva + len(self.signature) > module_size:
             raise RuntimeError("network message target is outside the live module")
-        self.target = self.base + MESSAGE_RVA
+        self.target = self.base + self.rva
         access = (
             PROCESS_QUERY_INFORMATION
             | PROCESS_VM_OPERATION
@@ -577,18 +578,17 @@ class NetworkMessageHook:
         if not self.process:
             raise winerror("OpenProcess(network message)")
         actual = read_region(
-            self.process, self.target, len(MESSAGE_PROLOGUE_SIGNATURE)
+            self.process, self.target, len(self.signature)
         )
-        if actual != MESSAGE_PROLOGUE_SIGNATURE:
+        if actual != self.signature:
             if actual and self._adopt_existing(
-                actual[: len(MESSAGE_PROLOGUE)]
+                actual[: len(self.prologue)]
             ):
                 return self
-            got = actual.hex(" ") if actual else "unreadable"
             self.close()
             raise RuntimeError(
-                f"network message version/signature mismatch at RVA 0x{MESSAGE_RVA:x}\n"
-                f"expected: {MESSAGE_PROLOGUE_SIGNATURE.hex(' ')}\nactual:   {got}"
+                "network message version/signature does not match the "
+                f"authorized runtime profile {self.profile['profile_id']}"
             )
         try:
             self.ring = int(
@@ -626,13 +626,16 @@ class NetworkMessageHook:
             )
             write_memory(self.process, self.ring, header)
             stub = build_message_stub(
-                self.ring, self.target + len(MESSAGE_PROLOGUE)
+                self.ring,
+                self.target + len(self.prologue),
+                prologue=self.prologue,
+                synchronized_methods=self.synchronized_methods,
             )
             write_memory(self.process, self.stub, stub)
             kernel32.FlushInstructionCache(
                 self.process, ctypes.c_void_p(self.stub), len(stub)
             )
-            patch = build_absolute_patch(self.stub, len(MESSAGE_PROLOGUE))
+            patch = build_absolute_patch(self.stub, len(self.prologue))
             suspended = suspend_game_threads(self.pid)
             try:
                 write_code(self.process, self.target, patch)
@@ -687,7 +690,7 @@ class NetworkMessageHook:
             if record is None:
                 break
             method = str(record.get("method", ""))
-            synchronized = method in MESSAGE_ARGUMENT_SYNC_METHOD_NAMES
+            synchronized = method in self.synchronized_method_names
             sync_state = int(record.get("argument_sync_state", 0) or 0)
             should_decode = decode_arguments and (
                 decode_method_filter is None or decode_method_filter(method)
@@ -729,12 +732,23 @@ class NetworkMessageHook:
         return records
 
     def close(self) -> None:
-        owned = self.installed and not self.adopted
+        owned = self.installed and (
+            not self.adopted or self.takeover_existing
+        )
         if self.process and owned and self.alive:
             suspended: list[int] = []
             try:
                 suspended = suspend_game_threads(self.pid)
-                write_code(self.process, self.target, MESSAGE_PROLOGUE)
+                write_code(self.process, self.target, self.prologue)
+                if (
+                    read_region(
+                        self.process, self.target, len(self.prologue)
+                    )
+                    != self.prologue
+                ):
+                    raise RuntimeError(
+                        "network message hook restoration verification failed"
+                    )
                 self.installed = False
             finally:
                 if suspended:
@@ -773,14 +787,20 @@ class NetworkMessageHook:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pid", type=int)
+    parser.add_argument(
+        "--profile",
+        type=Path,
+        default=Path(__file__).resolve().with_name("runtime-profile.dev.json"),
+    )
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--output", type=Path, default=Path("network_messages.jsonl"))
     parser.add_argument("--decode", action="store_true")
     parser.add_argument("--snapshots", action="store_true")
     args = parser.parse_args()
+    profile = load_runtime_profile_file(args.profile)
     deadline = time.monotonic() + max(0.1, args.seconds)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with NetworkMessageHook(pid=args.pid) as hook, args.output.open(
+    with NetworkMessageHook(profile=profile, pid=args.pid) as hook, args.output.open(
         "a", encoding="utf-8", buffering=1
     ) as output:
         print(

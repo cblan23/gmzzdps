@@ -18,13 +18,27 @@ from capture_process import (
     TEAM_STATS_MODE_DUMMY,
     TEAM_STATS_MODE_TEAM,
     TEAM_STATS_MODE_UNKNOWN,
+    TeamStatsResponseHealth,
+    authorized_team_detail_request_methods,
     collect_native_records,
     normalize_team_stats_mode,
+    passive_team_detail_request_methods,
 )
 from network_state import (
     TRAINING_DUMMY_TEMPLATE_IDS,
     is_training_dummy_template_id,
 )
+from runtime_capability import create_development_capability
+
+
+def development_capability():
+    return create_development_capability(
+        Path(__file__).resolve().with_name("runtime-profile.dev.json"),
+        session_id="1" * 32,
+        client_id="2" * 32,
+        build_id="source-development",
+        client_build="0.1.2+test",
+    )
 
 
 def _ipc_pressure_producer(output_queue, total: int, batch_size: int) -> None:
@@ -106,6 +120,146 @@ class _NativeHook:
 
 
 class CaptureProcessTests(unittest.TestCase):
+    def test_team_response_health_recovers_request_growth_without_replies(self):
+        health = TeamStatsResponseHealth(
+            timeout_seconds=20.0,
+            minimum_requests=8,
+            maximum_reinstalls=1,
+        )
+        health.set_mode(TEAM_STATS_MODE_TEAM, 100.0)
+        health.mark_hook_installed(100.0)
+        health.observe_records(
+            [{"method": "OnMsgDamageSyncV2"}], 120.0
+        )
+
+        self.assertIsNone(
+            health.assess(121.0, {"enabled": True, "request_count": 7})
+        )
+        status = {"enabled": True, "request_count": 8}
+        self.assertEqual(health.assess(121.0, status), "rearm")
+        health.mark_rearmed(121.0, status)
+
+        self.assertIsNone(
+            health.assess(140.9, {"enabled": True, "request_count": 40})
+        )
+        health.observe_native_damage([{"damage": 1}], 140.9)
+        self.assertEqual(
+            health.assess(141.0, {"enabled": True, "request_count": 41}),
+            "reinstall",
+        )
+        health.mark_reinstalled(141.0)
+        health.mark_hook_installed(141.0, preserve_recovery=True)
+        health.observe_records(
+            [{"method": "OnMsgSyncCurrentHp"}], 161.9
+        )
+
+        self.assertIsNone(
+            health.assess(162.0, {"enabled": True, "request_count": 8})
+        )
+        self.assertEqual(health.state, "unhealthy")
+        self.assertEqual(health.rearm_count, 1)
+        self.assertEqual(health.reinstall_count, 1)
+
+    def test_real_team_response_resets_the_recovery_epoch(self):
+        health = TeamStatsResponseHealth(
+            timeout_seconds=20.0,
+            minimum_requests=8,
+        )
+        health.set_mode(TEAM_STATS_MODE_TEAM, 100.0)
+        health.mark_hook_installed(100.0)
+
+        self.assertEqual(
+            health.observe_records(
+                [
+                    {"method": "OnMsgDamageSyncV2", "filetime_100ns": 111},
+                    {
+                        "method": "RetCommonCombatStatisticsByTeam",
+                        "filetime_100ns": 222,
+                    },
+                ],
+                112.0,
+            ),
+            1,
+        )
+        self.assertIsNone(
+            health.assess(125.0, {"enabled": True, "request_count": 20})
+        )
+        snapshot = health.snapshot(
+            125.0, {"enabled": True, "request_count": 20}
+        )
+        self.assertEqual(snapshot["response_health"], "healthy")
+        self.assertEqual(snapshot["response_count"], 1)
+        self.assertEqual(snapshot["last_response_filetime"], 222)
+        self.assertEqual(snapshot["last_response_age_seconds"], 13.0)
+
+    def test_team_response_health_does_not_recover_outside_combat(self):
+        health = TeamStatsResponseHealth(
+            timeout_seconds=20.0,
+            minimum_requests=8,
+        )
+        health.set_mode(TEAM_STATS_MODE_TEAM, 100.0)
+        health.mark_hook_installed(100.0)
+
+        self.assertIsNone(
+            health.assess(180.0, {"enabled": True, "request_count": 80})
+        )
+        self.assertEqual(health.rearm_count, 0)
+        self.assertEqual(health.reinstall_count, 0)
+
+    def test_parameterized_detail_requests_are_never_selected_for_active_calls(self):
+        profile = development_capability().profile
+
+        self.assertEqual(authorized_team_detail_request_methods(profile), ())
+        altered = dict(profile)
+        altered["protocol"] = dict(profile["protocol"])
+        altered["protocol"]["synchronized_methods"] = (
+            *profile["protocol"]["synchronized_methods"],
+            "ReqUnknown",
+        )
+        self.assertEqual(authorized_team_detail_request_methods(altered), ())
+
+    def test_signed_parameterized_detail_requests_are_selected_for_passive_capture(self):
+        profile = development_capability().profile
+
+        self.assertEqual(
+            passive_team_detail_request_methods(profile),
+            (
+                "ReqCommonCombatStatistics",
+                "ReqDungeonBattleStatistics",
+                "ReqMonsterBattleStatistics",
+                "ReqNpcCombatStatisticsByTeam",
+                "ReqDirtyNpcCombatStatisticsByTeam",
+            ),
+        )
+        altered = dict(profile)
+        altered["protocol"] = dict(profile["protocol"])
+        altered["protocol"]["synchronized_methods"] = (
+            "ReqUnknown",
+            "ReqNpcCombatStatisticsByTeam",
+            "ReqNpcCombatStatisticsByTeam",
+        )
+        self.assertEqual(
+            passive_team_detail_request_methods(altered),
+            ("ReqNpcCombatStatisticsByTeam",),
+        )
+
+    def test_native_diagnostic_keeps_both_template_hook_states(self):
+        sanitized = capture_module._sanitize_native_diagnostic(
+            {
+                "template_id_hook_installed": True,
+                "template_bulk_hook_installed": True,
+                "private_address": "0x12345678",
+            }
+        )
+
+        self.assertEqual(
+            sanitized,
+            {
+                "template_id_hook_installed": True,
+                "template_bulk_hook_installed": True,
+            },
+        )
+
     def _run_fake_capture_lifecycle(
         self,
         initial_mode: int,
@@ -124,7 +278,7 @@ class CaptureProcessTests(unittest.TestCase):
             pid = 4321
             adopted = False
 
-            def __init__(self):
+            def __init__(self, **_kwargs):
                 self.alive = True
 
             def install(self):
@@ -172,6 +326,7 @@ class CaptureProcessTests(unittest.TestCase):
         class TeamHook:
             def __init__(self, **_kwargs):
                 calls.append("team_construct")
+                calls.append(("team_options", dict(_kwargs)))
                 self.alive = True
                 self.enabled = True
 
@@ -191,6 +346,9 @@ class CaptureProcessTests(unittest.TestCase):
                     "last_request_filetime": 0,
                 }
 
+            def poll_requests(self):
+                return []
+
             def close(self):
                 calls.append("team_close")
                 self.alive = False
@@ -208,6 +366,11 @@ class CaptureProcessTests(unittest.TestCase):
             patch.object(capture_module, "DamageHook", NativeHook),
             patch.object(capture_module, "TeamStatsRequestHook", TeamHook),
         ):
+            capability = development_capability()
+
+            class SharedExpiry:
+                value = capability.expires_at
+
             controller = threading.Thread(
                 target=capture_module._capture_forever,
                 args=(
@@ -215,6 +378,8 @@ class CaptureProcessTests(unittest.TestCase):
                     output_queue,
                     _AliveWatchdog(),
                     target_lookup_event,
+                    capability.profile,
+                    SharedExpiry,
                     SharedMode,
                 ),
             )
@@ -226,12 +391,23 @@ class CaptureProcessTests(unittest.TestCase):
                 "fake capture connection",
             )
             for next_mode in transitions:
+                installs_before = calls.count("team_install")
+                enables_before = calls.count(("team_enabled", True))
+                disables_before = calls.count(("team_enabled", False))
                 SharedMode.value = next_mode
                 if next_mode == TEAM_STATS_MODE_TEAM:
-                    wait_for(lambda: "team_install" in calls, "team hook install")
+                    wait_for(
+                        lambda: (
+                            calls.count("team_install") > installs_before
+                            or calls.count(("team_enabled", True))
+                            > enables_before
+                        ),
+                        "team hook install or re-enable",
+                    )
                 else:
                     wait_for(
-                        lambda: ("team_enabled", False) in calls,
+                        lambda: calls.count(("team_enabled", False))
+                        > disables_before,
                         "team hook disable",
                     )
             stop_event.set()
@@ -247,7 +423,11 @@ class CaptureProcessTests(unittest.TestCase):
         return calls, messages
 
     def test_target_boss_lookup_shared_event_defaults_off_and_updates(self):
-        client = CaptureProcessClient(parent_pid=1234)
+        client = CaptureProcessClient(
+            runtime_capability=development_capability(),
+            allow_development=True,
+            parent_pid=1234,
+        )
         try:
             self.assertFalse(client.target_boss_lookup_event.is_set())
             client.set_target_boss_lookup_enabled(True)
@@ -259,7 +439,11 @@ class CaptureProcessTests(unittest.TestCase):
             client.process.close()
 
     def test_team_stats_mode_is_shared_and_legacy_default_stays_team(self):
-        client = CaptureProcessClient(parent_pid=1234)
+        client = CaptureProcessClient(
+            runtime_capability=development_capability(),
+            allow_development=True,
+            parent_pid=1234,
+        )
         try:
             self.assertEqual(client.get_team_stats_mode(), "team")
             self.assertEqual(client.set_team_stats_mode("unknown"), "unknown")
@@ -301,24 +485,36 @@ class CaptureProcessTests(unittest.TestCase):
                 )
                 self.assertFalse(connected["team_stats_hook_installed"])
 
-    def test_team_mode_installs_team_request_hook(self):
+    def test_team_mode_installs_only_stable_primary_request_hook(self):
         calls, messages = self._run_fake_capture_lifecycle(TEAM_STATS_MODE_TEAM)
 
+        self.assertIn("team_construct", calls)
         self.assertIn("team_install", calls)
         connected = next(
             payload for kind, payload in messages if kind == "connected"
         )
         self.assertTrue(connected["team_stats_hook_installed"])
         self.assertEqual(connected["team_stats_mode"], "team")
+        options = next(
+            item[1]
+            for item in calls
+            if isinstance(item, tuple) and item[0] == "team_options"
+        )
+        self.assertTrue(options["stable_primary_only"])
+        self.assertTrue(options["takeover_existing"])
+        self.assertNotIn("additional_request_methods", options)
+        self.assertNotIn("raw_lua_request_arguments", options)
+        self.assertNotIn("synchronized_methods", options)
 
-    def test_switching_from_team_to_dummy_disables_existing_request_hook(self):
+    def test_scene_transition_disables_then_reenables_same_team_hook(self):
         calls, _messages = self._run_fake_capture_lifecycle(
-            TEAM_STATS_MODE_UNKNOWN,
-            (TEAM_STATS_MODE_TEAM, TEAM_STATS_MODE_DUMMY),
+            TEAM_STATS_MODE_TEAM,
+            (TEAM_STATS_MODE_UNKNOWN, TEAM_STATS_MODE_TEAM),
         )
 
         self.assertEqual(calls.count("team_install"), 1)
         self.assertIn(("team_enabled", False), calls)
+        self.assertIn(("team_enabled", True), calls)
 
     def test_reader_can_close_without_waiting_for_queue_feeder(self):
         events: list[str] = []
@@ -534,6 +730,13 @@ class HookWorkerBatchTests(unittest.TestCase):
                 return None
 
         batch = {
+            "request_records": [
+                {
+                    "function": "outbound",
+                    "method": "ReqTargetDetail",
+                    "capture_source": "raw_outbound_rpc",
+                }
+            ],
             "native_boss_records": [
                 {
                     "function": "boss",
@@ -569,12 +772,12 @@ class HookWorkerBatchTests(unittest.TestCase):
                 ("boss", "boss"),
                 ("name", "name"),
                 ("damage", "damage"),
-                ("network", "network", False),
+                ("network", "network", True),
             ],
         )
         self.assertEqual(
             [line["function"] for line in map(__import__("json").loads, log_handle.getvalue().splitlines())],
-            ["boss", "name", "skill", "damage", "network"],
+            ["outbound", "boss", "name", "skill", "damage", "network"],
         )
 
     def test_target_boss_lookup_config_missing_defaults_off(self):

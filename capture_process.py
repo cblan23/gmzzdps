@@ -19,16 +19,22 @@ import traceback
 from damage_hook import DamageHook
 from network_capture import NetworkMessageHook
 from network_state import (
+    TEAM_STATISTICS_METHODS,
     should_decode_network_arguments,
     should_retain_network_record,
 )
 from team_stats_request_hook import TeamStatsRequestHook
+from runtime_capability import RuntimeCapability, RuntimeCapabilityError
 
 
 CAPTURE_IDLE_WAIT_SECONDS = 0.001
 CAPTURE_RETRY_WAIT_SECONDS = 0.5
 GAME_SEARCH_WAIT_SECONDS = 1.0
 TEAM_STATUS_INTERVAL_SECONDS = 1.0
+TEAM_STATS_RESPONSE_TIMEOUT_SECONDS = 20.0
+TEAM_STATS_RESPONSE_MIN_REQUESTS = 8
+TEAM_STATS_MAX_REINSTALLS_PER_SESSION = 1
+TEAM_STATS_RECOVERY_ACTIVITY_WINDOW_SECONDS = 10.0
 
 # Team snapshots are the one capture component that actively calls back into
 # the game.  Keep its lifecycle behind an explicit parent-controlled mode so
@@ -45,6 +51,299 @@ TEAM_STATS_MODE_NAMES = {
 TEAM_STATS_MODE_CODES = {
     name: code for code, name in TEAM_STATS_MODE_NAMES.items()
 }
+VERIFIED_ZERO_ARGUMENT_TEAM_DETAIL_REQUEST_METHODS: frozenset[str] = frozenset()
+PASSIVE_TEAM_DETAIL_REQUEST_METHODS = frozenset(
+    {
+        "ReqCommonCombatStatistics",
+        "ReqDungeonBattleStatistics",
+        "ReqMonsterBattleStatistics",
+        "ReqNpcCombatStatisticsByTeam",
+        "ReqDirtyNpcCombatStatisticsByTeam",
+    }
+)
+TEAM_STATS_COMBAT_ACTIVITY_METHODS = frozenset(
+    {
+        "OnMsgDamageSyncV2",
+        "OnMsgHealSyncV2",
+        "OnMsgSyncFightMode",
+        "OnMsgSyncCurrentHp",
+        "OnMsgUpdateStageCombatStatistics",
+        "OnMsgSettlementCombatStatistics",
+    }
+)
+
+
+class TeamStatsResponseHealth:
+    """Track real team-stat replies and bound recovery attempts.
+
+    A successful local ``call_server`` result only proves that the game
+    accepted the function call.  It does not prove that a team snapshot came
+    back from the server, so recovery decisions use captured response methods
+    plus the number of requests issued since the last response.
+    """
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = TEAM_STATS_RESPONSE_TIMEOUT_SECONDS,
+        minimum_requests: int = TEAM_STATS_RESPONSE_MIN_REQUESTS,
+        maximum_reinstalls: int = TEAM_STATS_MAX_REINSTALLS_PER_SESSION,
+        activity_window_seconds: float = (
+            TEAM_STATS_RECOVERY_ACTIVITY_WINDOW_SECONDS
+        ),
+    ) -> None:
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.minimum_requests = max(1, int(minimum_requests))
+        self.maximum_reinstalls = max(0, int(maximum_reinstalls))
+        self.activity_window_seconds = max(
+            1.0, float(activity_window_seconds)
+        )
+        self.mode = TEAM_STATS_MODE_UNKNOWN
+        self.hook_installed = False
+        self.active_since = 0.0
+        self.request_baseline = 0
+        self.last_request_count = 0
+        self.last_response_at = 0.0
+        self.last_response_filetime = 0
+        self.response_count = 0
+        self.last_combat_activity_at = 0.0
+        self.response_seen_in_epoch = False
+        self.response_baseline_pending = False
+        self.recovery_phase = 0
+        self.rearm_count = 0
+        self.reinstall_count = 0
+        self.state = "inactive"
+
+    @staticmethod
+    def _request_count(status: object) -> int:
+        if not isinstance(status, dict):
+            return 0
+        try:
+            return max(0, int(status.get("request_count", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def set_mode(self, mode: object, now: float) -> None:
+        normalized = normalize_team_stats_mode(
+            mode, default=TEAM_STATS_MODE_UNKNOWN
+        )
+        if normalized == self.mode:
+            return
+        self.mode = normalized
+        self.active_since = float(now)
+        self.request_baseline = self.last_request_count
+        self.response_seen_in_epoch = False
+        self.response_baseline_pending = False
+        self.recovery_phase = 0
+        self.state = (
+            "waiting_response"
+            if normalized == TEAM_STATS_MODE_TEAM and self.hook_installed
+            else "hook_missing"
+            if normalized == TEAM_STATS_MODE_TEAM
+            else "inactive"
+        )
+
+    def mark_hook_installed(
+        self,
+        now: float,
+        *,
+        request_count: int = 0,
+        preserve_recovery: bool = False,
+    ) -> None:
+        self.hook_installed = True
+        self.active_since = float(now)
+        self.request_baseline = max(0, int(request_count))
+        self.last_request_count = self.request_baseline
+        self.response_seen_in_epoch = False
+        self.response_baseline_pending = False
+        if not preserve_recovery:
+            self.recovery_phase = 0
+        self.state = (
+            "reinstalled_waiting"
+            if preserve_recovery and self.recovery_phase >= 2
+            else "waiting_response"
+            if self.mode == TEAM_STATS_MODE_TEAM
+            else "inactive"
+        )
+
+    def mark_hook_missing(self) -> None:
+        self.hook_installed = False
+        self.state = (
+            "hook_missing"
+            if self.mode == TEAM_STATS_MODE_TEAM
+            else "inactive"
+        )
+
+    def observe_records(self, records: object, now: float) -> int:
+        matched = 0
+        latest_filetime = 0
+        for record in records if isinstance(records, list) else ():
+            if not isinstance(record, dict):
+                continue
+            method = str(record.get("method", ""))
+            if method in TEAM_STATS_COMBAT_ACTIVITY_METHODS:
+                self.last_combat_activity_at = float(now)
+            if method not in TEAM_STATISTICS_METHODS:
+                continue
+            matched += 1
+            try:
+                latest_filetime = max(
+                    latest_filetime,
+                    int(record.get("filetime_100ns", 0) or 0),
+                )
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if matched:
+            self.response_count += matched
+            self.last_response_at = float(now)
+            self.last_response_filetime = max(
+                self.last_response_filetime, latest_filetime
+            )
+            self.response_seen_in_epoch = True
+            self.response_baseline_pending = True
+            self.recovery_phase = 0
+            self.state = "healthy"
+        return matched
+
+    def observe_native_damage(self, records: object, now: float) -> None:
+        for record in records if isinstance(records, list) else ():
+            if not isinstance(record, dict):
+                continue
+            try:
+                damage = int(
+                    record.get("damage", record.get("raw_damage", 0)) or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                damage = 0
+            if damage > 0:
+                self.last_combat_activity_at = float(now)
+                return
+
+    def assess(self, now: float, status: object) -> str | None:
+        request_count = self._request_count(status)
+        if request_count < self.last_request_count:
+            # A hook replaced outside this monitor starts a fresh request
+            # epoch. Do not mistake its lower counter for a stalled stream.
+            self.request_baseline = request_count
+            self.active_since = float(now)
+            self.response_seen_in_epoch = False
+            self.response_baseline_pending = False
+        self.last_request_count = request_count
+        if self.response_baseline_pending:
+            self.request_baseline = request_count
+            self.response_baseline_pending = False
+
+        if self.mode != TEAM_STATS_MODE_TEAM:
+            self.state = "inactive"
+            return None
+        if not self.hook_installed:
+            self.state = "hook_missing"
+            return None
+        enabled = bool(
+            isinstance(status, dict) and status.get("enabled", False)
+        )
+        if not enabled:
+            self.active_since = float(now)
+            self.request_baseline = request_count
+            self.state = "disabled"
+            return None
+        activity_recent = bool(
+            self.last_combat_activity_at
+            and float(now) - self.last_combat_activity_at
+            <= self.activity_window_seconds
+        )
+        if not activity_recent:
+            if self.state not in {"rearmed_waiting", "reinstalled_waiting"}:
+                self.state = (
+                    "healthy"
+                    if self.response_seen_in_epoch
+                    else "waiting_response"
+                )
+            return None
+
+        reference = (
+            self.last_response_at
+            if self.response_seen_in_epoch
+            else self.active_since
+        )
+        elapsed = max(0.0, float(now) - float(reference or now))
+        requests_since_response = max(
+            0, request_count - self.request_baseline
+        )
+        if (
+            elapsed < self.timeout_seconds
+            or requests_since_response < self.minimum_requests
+        ):
+            if self.state not in {"rearmed_waiting", "reinstalled_waiting"}:
+                self.state = (
+                    "healthy"
+                    if self.response_seen_in_epoch
+                    else "waiting_response"
+                )
+            return None
+        if self.recovery_phase == 0:
+            return "rearm"
+        if (
+            self.recovery_phase == 1
+            and self.reinstall_count < self.maximum_reinstalls
+        ):
+            return "reinstall"
+        self.state = "unhealthy"
+        return None
+
+    def mark_rearmed(self, now: float, status: object) -> None:
+        self.rearm_count += 1
+        self.recovery_phase = 1
+        self.active_since = float(now)
+        self.request_baseline = self._request_count(status)
+        self.response_seen_in_epoch = False
+        self.response_baseline_pending = False
+        self.state = "rearmed_waiting"
+
+    def mark_reinstalled(self, now: float) -> None:
+        self.reinstall_count += 1
+        self.recovery_phase = 2
+        self.active_since = float(now)
+        self.request_baseline = 0
+        self.last_request_count = 0
+        self.response_seen_in_epoch = False
+        self.response_baseline_pending = False
+        self.hook_installed = False
+        self.state = "reinstalling"
+
+    def mark_recovery_failed(self) -> None:
+        self.recovery_phase = 2
+        self.state = "recovery_failed"
+
+    def snapshot(self, now: float, status: object) -> dict[str, object]:
+        request_count = self._request_count(status)
+        response_age = (
+            max(0.0, float(now) - self.last_response_at)
+            if self.last_response_at
+            else None
+        )
+        activity_age = (
+            max(0.0, float(now) - self.last_combat_activity_at)
+            if self.last_combat_activity_at
+            else None
+        )
+        return {
+            "installed": bool(self.hook_installed),
+            "response_health": self.state,
+            "response_count": int(self.response_count),
+            "last_response_filetime": int(self.last_response_filetime),
+            "last_response_age_seconds": (
+                round(response_age, 3) if response_age is not None else None
+            ),
+            "last_combat_activity_age_seconds": (
+                round(activity_age, 3) if activity_age is not None else None
+            ),
+            "requests_since_response": max(
+                0, request_count - self.request_baseline
+            ),
+            "rearm_count": int(self.rearm_count),
+            "reinstall_count": int(self.reinstall_count),
+        }
 
 
 def normalize_team_stats_mode(
@@ -84,6 +383,49 @@ def read_team_stats_mode(
     except (AttributeError, OSError, ValueError):
         value = shared_value
     return normalize_team_stats_mode(value, default=default)
+
+
+def authorized_team_detail_request_methods(runtime_profile: object) -> tuple[str, ...]:
+    """Select only signed methods whose zero-argument shape is verified."""
+    if not isinstance(runtime_profile, dict):
+        return ()
+    protocol = runtime_profile.get("protocol")
+    if not isinstance(protocol, dict):
+        return ()
+    primary = str(protocol.get("team_stats_request_method", "")).strip()
+    methods = protocol.get("synchronized_methods", ())
+    if not isinstance(methods, (list, tuple)):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            method
+            for raw_method in methods
+            for method in (str(raw_method).strip(),)
+            if method
+            and method != primary
+            and method in VERIFIED_ZERO_ARGUMENT_TEAM_DETAIL_REQUEST_METHODS
+        )
+    )
+
+
+def passive_team_detail_request_methods(runtime_profile: object) -> tuple[str, ...]:
+    """Select signed detail requests whose natural arguments must be captured."""
+    if not isinstance(runtime_profile, dict):
+        return ()
+    protocol = runtime_profile.get("protocol")
+    if not isinstance(protocol, dict):
+        return ()
+    methods = protocol.get("synchronized_methods", ())
+    if not isinstance(methods, (list, tuple)):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            method
+            for raw_method in methods
+            for method in (str(raw_method).strip(),)
+            if method in PASSIVE_TEAM_DETAIL_REQUEST_METHODS
+        )
+    )
 
 if sys.platform == "win32":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -170,17 +512,96 @@ class ParentProcessWatchdog:
         self.handle = 0
 
 
-def _should_stop(stop_event, watchdog: ParentProcessWatchdog) -> bool:
-    return bool(stop_event.is_set() or not watchdog.is_alive())
+def _runtime_lease_active(runtime_expiry=None) -> bool:
+    if runtime_expiry is None:
+        return True
+    try:
+        expires_at = float(runtime_expiry.value)
+    except (AttributeError, TypeError, ValueError, OSError):
+        return False
+    return bool(expires_at > time.time())
+
+
+class RuntimeLeaseGate:
+    """Child-owned lease state; parent IPC can renew it only with a valid signature."""
+
+    def __init__(
+        self,
+        capability: RuntimeCapability,
+        renewal_queue,
+        revocation_value,
+        *,
+        trusted_public_keys=None,
+        allow_development: bool = False,
+    ) -> None:
+        self.capability = capability
+        self.renewal_queue = renewal_queue
+        self.revocation_value = revocation_value
+        self.trusted_public_keys = dict(trusted_public_keys or {})
+        self.allow_development = bool(allow_development)
+        self.revoked = False
+
+    def _refresh(self) -> None:
+        while not self.revoked:
+            try:
+                value = self.renewal_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                next_capability = RuntimeCapability.from_value(
+                    value,
+                    expected_session_id=self.capability.session_id,
+                    expected_client_id=self.capability.client_id,
+                    expected_build_id=self.capability.build_id,
+                    expected_client_build=self.capability.client_build,
+                    trusted_public_keys=self.trusted_public_keys,
+                    allow_development=self.allow_development,
+                )
+                if (
+                    not self.capability.same_binding(next_capability)
+                    or next_capability.lease_sequence
+                    <= self.capability.lease_sequence
+                    or next_capability.issued_at < self.capability.issued_at
+                ):
+                    raise RuntimeCapabilityError(
+                        "stale or mismatched runtime capability renewal"
+                    )
+            except RuntimeCapabilityError:
+                self.revoked = True
+                return
+            self.capability = next_capability
+
+    @property
+    def value(self) -> float:
+        try:
+            if float(self.revocation_value.value) <= 0:
+                return 0.0
+        except (AttributeError, TypeError, ValueError, OSError):
+            return 0.0
+        self._refresh()
+        return 0.0 if self.revoked else self.capability.expires_at
+
+
+def _should_stop(
+    stop_event,
+    watchdog: ParentProcessWatchdog,
+    runtime_expiry=None,
+) -> bool:
+    return bool(
+        stop_event.is_set()
+        or not watchdog.is_alive()
+        or not _runtime_lease_active(runtime_expiry)
+    )
 
 
 def _interruptible_wait(
     stop_event,
     watchdog: ParentProcessWatchdog,
     seconds: float,
+    runtime_expiry=None,
 ) -> bool:
     deadline = time.monotonic() + max(0.0, float(seconds))
-    while not _should_stop(stop_event, watchdog):
+    while not _should_stop(stop_event, watchdog, runtime_expiry):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
@@ -289,12 +710,29 @@ _NATIVE_DIAGNOSTIC_KEYS = frozenset(
         "damage_ring_records_polled",
         "damage_ring_parse_failures",
         "damage_ring_overruns",
+        "damage_target_records",
+        "damage_target_id_zero",
+        "damage_target_id_below_supported",
+        "damage_target_id_low_supported",
+        "damage_target_id_mid_supported",
+        "damage_target_id_gap",
+        "damage_target_id_high_supported",
+        "damage_target_id_above_supported",
+        "local_player_id_available_records",
+        "damage_attacker_matches_local_player",
+        "damage_target_matches_local_player",
         "boss_ring_header_reads",
         "boss_ring_header_failures",
         "boss_ring_records_polled",
         "boss_ring_parse_failures",
         "boss_ring_overruns",
         "target_lookup_candidates",
+        "target_lookup_disabled_candidates",
+        "target_lookup_skipped_unplausible",
+        "target_lookup_skipped_local_player",
+        "target_lookup_skipped_already_attempted",
+        "target_lookup_skipped_already_emitted",
+        "target_lookup_pending_reobserved",
         "target_lookup_evictions",
         "target_lookup_resolved",
         "target_lookup_timeouts",
@@ -332,6 +770,8 @@ _NATIVE_DIAGNOSTIC_KEYS = frozenset(
         "name_hook_installed",
         "boss_type_hook_installed",
         "boss_init_hook_installed",
+        "template_id_hook_installed",
+        "template_bulk_hook_installed",
         "target_boss_lookup_enabled",
         "target_lookup_pending",
         "target_lookup_attempted",
@@ -413,17 +853,24 @@ def collect_native_records_with_diagnostic(
     return captured, error, native_diagnostic_snapshot(native_hook)
 
 
-def _close_hook(output_queue, component: str, hook) -> None:
+def _close_hook(output_queue, component: str, hook) -> bool:
     if hook is None:
-        return
-    try:
-        hook.close()
-    except Exception:
-        _put(
-            output_queue,
-            "cleanup_error",
-            {"component": component, "details": traceback.format_exc()},
-        )
+        return True
+    details = ""
+    for attempt in range(3):
+        try:
+            hook.close()
+            return True
+        except Exception:
+            details = traceback.format_exc()
+            if attempt < 2:
+                time.sleep(0.05)
+    _put(
+        output_queue,
+        "cleanup_error",
+        {"component": component, "details": details},
+    )
+    return False
 
 
 def _emit_batch(
@@ -433,6 +880,7 @@ def _emit_batch(
     batch_id: int,
     game_pid: int,
     network_records: list[dict],
+    request_records: list[dict],
     native_records: dict[str, list[dict]],
     native_damage_hook_installed: bool,
     team_status: dict | None = None,
@@ -443,6 +891,7 @@ def _emit_batch(
 ) -> bool:
     has_records = bool(
         network_records
+        or request_records
         or any(native_records.get(key) for key in native_records)
     )
     if (
@@ -461,6 +910,7 @@ def _emit_batch(
             "game_pid": game_pid,
             "captured_monotonic": time.monotonic(),
             "records": network_records,
+            "request_records": request_records,
             **native_records,
             "native_damage_hook_installed": bool(
                 native_damage_hook_installed
@@ -479,10 +929,12 @@ def _capture_forever(
     output_queue,
     watchdog: ParentProcessWatchdog,
     target_boss_lookup_event,
+    runtime_profile,
+    runtime_expiry,
     team_stats_mode=None,
 ) -> None:
     session_id = 0
-    while not _should_stop(stop_event, watchdog):
+    while not _should_stop(stop_event, watchdog, runtime_expiry):
         _put(
             output_queue,
             "state",
@@ -499,7 +951,10 @@ def _capture_forever(
                 "game_pid": 0,
             },
         )
-        network_hook = NetworkMessageHook()
+        network_hook = NetworkMessageHook(
+            profile=runtime_profile,
+            takeover_existing=True,
+        )
         try:
             network_hook.install()
         except RuntimeError as exc:
@@ -507,7 +962,10 @@ def _capture_forever(
             if "process not found" in str(exc):
                 _put(output_queue, "state", {"stage": "game_not_found"})
                 _interruptible_wait(
-                    stop_event, watchdog, GAME_SEARCH_WAIT_SECONDS
+                    stop_event,
+                    watchdog,
+                    GAME_SEARCH_WAIT_SECONDS,
+                    runtime_expiry,
                 )
                 continue
             _put(
@@ -519,7 +977,9 @@ def _capture_forever(
                     "details": str(exc),
                 },
             )
-            _interruptible_wait(stop_event, watchdog, 3.0)
+            _interruptible_wait(
+                stop_event, watchdog, 3.0, runtime_expiry
+            )
             continue
         except Exception:
             _close_hook(output_queue, "network", network_hook)
@@ -532,7 +992,9 @@ def _capture_forever(
                     "details": traceback.format_exc(),
                 },
             )
-            _interruptible_wait(stop_event, watchdog, 2.0)
+            _interruptible_wait(
+                stop_event, watchdog, 2.0, runtime_expiry
+            )
             continue
 
         session_id += 1
@@ -545,12 +1007,17 @@ def _capture_forever(
         connected = False
         next_team_status_at = 0.0
         next_team_install_at = 0.0
+        team_reinstall_pending = False
         current_team_stats_mode = read_team_stats_mode(team_stats_mode)
+        team_response_health = TeamStatsResponseHealth()
+        team_response_health.set_mode(
+            current_team_stats_mode, time.monotonic()
+        )
         network_poller.start()
         try:
             def try_install_team_hook() -> None:
-                """Install only after the parent has classified a team scene."""
-                nonlocal team_hook, next_team_install_at
+                """Install the stable zero-argument team snapshot request."""
+                nonlocal team_hook, next_team_install_at, team_reinstall_pending
                 if team_hook is not None:
                     return
                 now = time.monotonic()
@@ -559,11 +1026,20 @@ def _capture_forever(
                 next_team_install_at = now + 2.0
                 try:
                     team_hook = TeamStatsRequestHook(
+                        profile=runtime_profile,
                         pid=game_pid,
                         interval=1.0,
+                        takeover_existing=True,
+                        stable_primary_only=True,
                     ).install()
+                    team_response_health.mark_hook_installed(
+                        now,
+                        preserve_recovery=team_reinstall_pending,
+                    )
+                    team_reinstall_pending = False
                 except Exception:
                     team_hook = None
+                    team_response_health.mark_hook_missing()
                     _put(
                         output_queue,
                         "diagnostic",
@@ -577,12 +1053,14 @@ def _capture_forever(
                 try_install_team_hook()
             try:
                 native_hook = DamageHook(
+                    profile=runtime_profile,
                     pid=game_pid,
                     capture_names=True,
                     capture_boss_types=True,
                     target_boss_lookup_enabled=(
                         target_boss_lookup_event.is_set()
                     ),
+                    takeover_existing=True,
                 ).install()
             except Exception:
                 _put(
@@ -595,12 +1073,14 @@ def _capture_forever(
                 )
                 try:
                     native_hook = DamageHook(
+                        profile=runtime_profile,
                         pid=game_pid,
                         capture_names=False,
                         capture_boss_types=True,
                         target_boss_lookup_enabled=(
                             target_boss_lookup_event.is_set()
                         ),
+                        takeover_existing=True,
                     ).install()
                 except Exception:
                     native_hook = None
@@ -631,7 +1111,19 @@ def _capture_forever(
                         native_hook is not None
                         and getattr(native_hook, "boss_init_installed", False)
                     ),
+                    "native_template_id_hook_installed": bool(
+                        native_hook is not None
+                        and getattr(native_hook, "template_id_installed", False)
+                    ),
+                    "native_template_bulk_hook_installed": bool(
+                        native_hook is not None
+                        and getattr(native_hook, "template_bulk_installed", False)
+                    ),
                     "team_stats_hook_installed": team_hook is not None,
+                    "team_stats_hook_adopted": bool(
+                        team_hook is not None
+                        and getattr(team_hook, "adopted", False)
+                    ),
                     "team_stats_mode": team_stats_mode_name(
                         current_team_stats_mode
                     ),
@@ -644,6 +1136,7 @@ def _capture_forever(
 
             while (
                 not _should_stop(stop_event, watchdog)
+                and _runtime_lease_active(runtime_expiry)
                 and network_hook.alive
                 and network_poller.is_alive()
             ):
@@ -655,11 +1148,15 @@ def _capture_forever(
                     if not team_hook_alive:
                         _close_hook(output_queue, "team", team_hook)
                         team_hook = None
+                        team_response_health.mark_hook_missing()
                 requested_team_stats_mode = read_team_stats_mode(
                     team_stats_mode
                 )
                 if requested_team_stats_mode != current_team_stats_mode:
                     current_team_stats_mode = requested_team_stats_mode
+                    team_response_health.set_mode(
+                        current_team_stats_mode, time.monotonic()
+                    )
                     if current_team_stats_mode == TEAM_STATS_MODE_TEAM:
                         if team_hook is not None:
                             try:
@@ -700,11 +1197,24 @@ def _capture_forever(
                     )
                 network_records = network_poller.drain_records()
                 sequence_gaps = network_poller.drain_sequence_gaps()
+                now = time.monotonic()
+                team_response_health.observe_records(network_records, now)
+                request_records: list[dict] = []
+                if team_hook is not None:
+                    try:
+                        request_records = team_hook.poll_requests()
+                    except Exception:
+                        raise RuntimeError(
+                            "outbound request capture became unreadable"
+                        ) from None
                 (
                     native_records,
                     native_error,
                     native_diagnostic,
                 ) = collect_native_records_with_diagnostic(native_hook)
+                team_response_health.observe_native_damage(
+                    native_records.get("native_records", []), now
+                )
                 native_installed = native_hook is not None
                 if native_error:
                     _put(
@@ -719,15 +1229,83 @@ def _capture_forever(
                     native_hook = None
                     native_installed = False
 
-                now = time.monotonic()
                 team_status = None
-                if team_hook is not None and now >= next_team_status_at:
-                    try:
-                        team_status = team_hook.status()
-                    except Exception:
-                        raise RuntimeError(
-                            "team-stat request state became unreadable"
-                        ) from None
+                if now >= next_team_status_at:
+                    raw_team_status: dict[str, object] = {
+                        "enabled": False,
+                        "request_count": team_response_health.last_request_count,
+                        "last_result": 0,
+                        "last_request_filetime": 0,
+                        "captured_request_count": 0,
+                        "dropped_request_count": 0,
+                    }
+                    if team_hook is not None:
+                        try:
+                            raw_team_status = team_hook.status()
+                        except Exception:
+                            raise RuntimeError(
+                                "team-stat request state became unreadable"
+                            ) from None
+                    recovery_action = team_response_health.assess(
+                        now, raw_team_status
+                    )
+                    if recovery_action == "rearm" and team_hook is not None:
+                        try:
+                            if team_hook.rearm_request_schedule():
+                                team_response_health.mark_rearmed(
+                                    now, raw_team_status
+                                )
+                                _put(
+                                    output_queue,
+                                    "diagnostic",
+                                    {
+                                        "component": "team_rearm",
+                                        "details": "response_timeout",
+                                    },
+                                )
+                            else:
+                                team_response_health.mark_recovery_failed()
+                        except Exception:
+                            team_response_health.mark_recovery_failed()
+                            _put(
+                                output_queue,
+                                "diagnostic",
+                                {
+                                    "component": "team_rearm",
+                                    "details": traceback.format_exc(),
+                                },
+                            )
+                    elif recovery_action == "reinstall" and team_hook is not None:
+                        team_response_health.mark_reinstalled(now)
+                        previous_team_hook = team_hook
+                        if _close_hook(
+                            output_queue, "team", previous_team_hook
+                        ):
+                            team_hook = None
+                            team_reinstall_pending = True
+                            next_team_install_at = 0.0
+                            try_install_team_hook()
+                            _put(
+                                output_queue,
+                                "diagnostic",
+                                {
+                                    "component": "team_reinstall",
+                                    "details": "response_timeout",
+                                },
+                            )
+                        else:
+                            team_response_health.mark_recovery_failed()
+                    if team_hook is not None:
+                        try:
+                            raw_team_status = team_hook.status()
+                        except Exception:
+                            raise RuntimeError(
+                                "team-stat request state became unreadable"
+                            ) from None
+                    raw_team_status.update(
+                        team_response_health.snapshot(now, raw_team_status)
+                    )
+                    team_status = raw_team_status
                     next_team_status_at = now + TEAM_STATUS_INTERVAL_SECONDS
 
                 if _emit_batch(
@@ -736,6 +1314,7 @@ def _capture_forever(
                     batch_id=batch_id,
                     game_pid=game_pid,
                     network_records=network_records,
+                    request_records=request_records,
                     native_records=native_records,
                     native_damage_hook_installed=native_installed,
                     team_status=team_status,
@@ -745,6 +1324,7 @@ def _capture_forever(
                         native_diagnostic
                         if (
                             network_records
+                            or request_records
                             or any(native_records.values())
                             or team_status is not None
                             or sequence_gaps
@@ -757,12 +1337,22 @@ def _capture_forever(
                 network_error = network_poller.take_error()
                 if network_error:
                     raise RuntimeError(network_error)
-                if not network_records and not any(native_records.values()):
+                if (
+                    not network_records
+                    and not request_records
+                    and not any(native_records.values())
+                ):
                     stop_event.wait(CAPTURE_IDLE_WAIT_SECONDS)
 
-            if _should_stop(stop_event, watchdog):
+            if _should_stop(stop_event, watchdog, runtime_expiry):
                 session_reason = (
-                    "stopped" if stop_event.is_set() else "parent_exited"
+                    "stopped"
+                    if stop_event.is_set()
+                    else (
+                        "runtime_capability_expired"
+                        if not _runtime_lease_active(runtime_expiry)
+                        else "parent_exited"
+                    )
                 )
             elif not network_hook.alive:
                 session_reason = "game_exited"
@@ -784,7 +1374,19 @@ def _capture_forever(
             session_reason = "capture_failed"
         finally:
             final_team_status = None
+            final_request_records: list[dict] = []
             if team_hook is not None:
+                try:
+                    final_request_records = team_hook.poll_requests()
+                except Exception:
+                    _put(
+                        output_queue,
+                        "diagnostic",
+                        {
+                            "component": "team_request_poll",
+                            "details": traceback.format_exc(),
+                        },
+                    )
                 try:
                     final_team_status = team_hook.status()
                 except Exception:
@@ -824,6 +1426,7 @@ def _capture_forever(
                 batch_id=batch_id,
                 game_pid=game_pid,
                 network_records=network_records,
+                request_records=final_request_records,
                 native_records=native_records,
                 native_damage_hook_installed=native_installed_during_final_poll,
                 team_status=final_team_status,
@@ -836,9 +1439,13 @@ def _capture_forever(
 
             # Keep the network acknowledger alive while the other game hooks
             # are restored. This prevents cleanup from creating a sync timeout.
-            _close_hook(output_queue, "team", team_hook)
-            _close_hook(output_queue, "native", native_hook)
-            network_poller.stop_and_join()
+            team_cleanup_verified = _close_hook(
+                output_queue, "team", team_hook
+            )
+            native_cleanup_verified = _close_hook(
+                output_queue, "native", native_hook
+            )
+            acknowledger_stopped = network_poller.stop_and_join()
             trailing_network_records = network_poller.drain_records()
             trailing_gaps = network_poller.drain_sequence_gaps()
             if connected and _emit_batch(
@@ -847,6 +1454,7 @@ def _capture_forever(
                 batch_id=batch_id,
                 game_pid=game_pid,
                 network_records=trailing_network_records,
+                request_records=[],
                 native_records={
                     "native_records": [],
                     "native_boss_records": [],
@@ -858,7 +1466,15 @@ def _capture_forever(
                 sequence_gaps=trailing_gaps,
             ):
                 batch_id += 1
-            _close_hook(output_queue, "network", network_hook)
+            network_cleanup_verified = _close_hook(
+                output_queue, "network", network_hook
+            )
+            cleanup_components = {
+                "team": bool(team_cleanup_verified),
+                "native": bool(native_cleanup_verified),
+                "network": bool(network_cleanup_verified),
+                "acknowledger": bool(acknowledger_stopped),
+            }
             _put(
                 output_queue,
                 "session_closed",
@@ -869,6 +1485,10 @@ def _capture_forever(
                     "network_hook_installed": False,
                     "native_damage_hook_installed": False,
                     "team_stats_hook_installed": False,
+                    "hook_cleanup_verified": all(
+                        cleanup_components.values()
+                    ),
+                    "hook_cleanup_components": cleanup_components,
                     "team_stats_mode": team_stats_mode_name(
                         current_team_stats_mode
                     ),
@@ -878,10 +1498,20 @@ def _capture_forever(
 
         if session_reason == "game_exited":
             _put(output_queue, "state", {"stage": "game_exited"})
-        if not _should_stop(stop_event, watchdog):
+        if not _should_stop(stop_event, watchdog, runtime_expiry):
             _interruptible_wait(
-                stop_event, watchdog, CAPTURE_RETRY_WAIT_SECONDS
+                stop_event,
+                watchdog,
+                CAPTURE_RETRY_WAIT_SECONDS,
+                runtime_expiry,
             )
+
+    if not _runtime_lease_active(runtime_expiry) and not stop_event.is_set():
+        _put(
+            output_queue,
+            "runtime_capability_expired",
+            {"stage": "runtime_capability_expired"},
+        )
 
 
 def capture_process_main(
@@ -889,24 +1519,56 @@ def capture_process_main(
     stop_event,
     output_queue,
     target_boss_lookup_event,
+    runtime_capability,
+    runtime_capability_queue,
+    runtime_expiry,
+    allow_development: bool = False,
+    trusted_public_keys=None,
     team_stats_mode=None,
 ) -> None:
     """Multiprocessing spawn target. This module deliberately imports no UI."""
     watchdog = ParentProcessWatchdog(parent_pid)
     parent_alive = watchdog.is_alive()
     try:
+        capability = RuntimeCapability.from_value(
+            runtime_capability,
+            trusted_public_keys=trusted_public_keys,
+            allow_development=bool(allow_development),
+        )
+        if not _runtime_lease_active(runtime_expiry):
+            raise RuntimeCapabilityError("runtime capability lease has expired")
+        runtime_lease = RuntimeLeaseGate(
+            capability,
+            runtime_capability_queue,
+            runtime_expiry,
+            trusted_public_keys=trusted_public_keys,
+            allow_development=bool(allow_development),
+        )
         priority = configure_capture_priority()
         _put(
             output_queue,
             "process_started",
-            {"pid": os.getpid(), "parent_pid": parent_pid, **priority},
+            {
+                "pid": os.getpid(),
+                "parent_pid": parent_pid,
+                "runtime_profile_id": capability.profile_id,
+                **priority,
+            },
         )
         _capture_forever(
             stop_event,
             output_queue,
             watchdog,
             target_boss_lookup_event,
+            capability.profile,
+            runtime_lease,
             team_stats_mode,
+        )
+    except RuntimeCapabilityError as exc:
+        _put(
+            output_queue,
+            "fatal",
+            f"runtime capability rejected: {exc}",
         )
     except BaseException:
         _put(output_queue, "fatal", traceback.format_exc())
@@ -936,10 +1598,20 @@ class CaptureProcessClient:
     def __init__(
         self,
         *,
+        runtime_capability,
+        allow_development: bool = False,
+        trusted_public_keys=None,
         parent_pid: int | None = None,
         target_boss_lookup_enabled: bool = False,
         team_stats_mode: object = TEAM_STATS_MODE_TEAM,
     ):
+        self.allow_development = bool(allow_development)
+        self.trusted_public_keys = dict(trusted_public_keys or {})
+        self.runtime_capability = RuntimeCapability.from_value(
+            runtime_capability,
+            trusted_public_keys=self.trusted_public_keys,
+            allow_development=self.allow_development,
+        )
         self.context = multiprocessing.get_context("spawn")
         self.stop_event = self.context.Event()
         self.target_boss_lookup_event = self.context.Event()
@@ -948,6 +1620,10 @@ class CaptureProcessClient:
         self.team_stats_mode_value = self.context.Value(
             "b", normalize_team_stats_mode(team_stats_mode)
         )
+        self.runtime_expiry_value = self.context.Value(
+            "d", self.runtime_capability.expires_at
+        )
+        self.runtime_capability_queue = self.context.Queue(maxsize=0)
         self.output_queue = self.context.Queue(maxsize=0)
         self.process = self.context.Process(
             name="GMZZCapture",
@@ -957,6 +1633,11 @@ class CaptureProcessClient:
                 self.stop_event,
                 self.output_queue,
                 self.target_boss_lookup_event,
+                self.runtime_capability.to_wire(),
+                self.runtime_capability_queue,
+                self.runtime_expiry_value,
+                self.allow_development,
+                self.trusted_public_keys,
                 self.team_stats_mode_value,
             ),
             daemon=False,
@@ -973,8 +1654,56 @@ class CaptureProcessClient:
             raise RuntimeError("capture process has already been started")
         if getattr(self, "_closed", False):
             raise RuntimeError("capture process has already been closed")
+        RuntimeCapability.from_value(
+            self.runtime_capability,
+            expected_session_id=self.runtime_capability.session_id,
+            expected_client_id=self.runtime_capability.client_id,
+            expected_build_id=self.runtime_capability.build_id,
+            expected_client_build=self.runtime_capability.client_build,
+            trusted_public_keys=self.trusted_public_keys,
+            allow_development=self.allow_development,
+        )
         self.process.start()
         self._started = True
+
+    def refresh_runtime_capability(self, value) -> float:
+        """Extend the child lease only for the same authorized runtime profile."""
+        next_capability = RuntimeCapability.from_value(
+            value,
+            expected_session_id=self.runtime_capability.session_id,
+            expected_client_id=self.runtime_capability.client_id,
+            expected_build_id=self.runtime_capability.build_id,
+            expected_client_build=self.runtime_capability.client_build,
+            trusted_public_keys=self.trusted_public_keys,
+            allow_development=self.allow_development,
+        )
+        if not self.runtime_capability.same_binding(next_capability):
+            raise RuntimeCapabilityError(
+                "runtime capability binding or profile changed"
+            )
+        if (
+            next_capability.lease_sequence
+            <= self.runtime_capability.lease_sequence
+            or next_capability.issued_at < self.runtime_capability.issued_at
+        ):
+            self.revoke_runtime_capability()
+            raise RuntimeCapabilityError(
+                "stale or replayed runtime capability was rejected"
+            )
+        try:
+            self.runtime_capability_queue.put(next_capability.to_wire())
+        except (OSError, ValueError) as exc:
+            self.revoke_runtime_capability()
+            raise RuntimeCapabilityError(
+                "runtime capability renewal could not reach capture process"
+            ) from exc
+        self.runtime_capability = next_capability
+        return next_capability.expires_at
+
+    def revoke_runtime_capability(self) -> None:
+        """Close the lease gate immediately and tell the child to clean up."""
+        self.runtime_expiry_value.value = 0.0
+        self.request_stop()
 
     def get(self, timeout: float | None = None):
         return self.output_queue.get(timeout=timeout)
@@ -1036,6 +1765,14 @@ class CaptureProcessClient:
         if getattr(self, "_closed", False):
             return
         try:
+            renewal_queue = getattr(self, "runtime_capability_queue", None)
+            if renewal_queue is not None:
+                cancel_renewal_join = getattr(
+                    renewal_queue, "cancel_join_thread", None
+                )
+                if callable(cancel_renewal_join):
+                    cancel_renewal_join()
+                renewal_queue.close()
             if not wait_for_queue:
                 cancel_join = getattr(self.output_queue, "cancel_join_thread", None)
                 if callable(cancel_join):

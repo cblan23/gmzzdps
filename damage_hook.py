@@ -6,34 +6,25 @@ from __future__ import annotations
 import ctypes
 import struct
 import time
+from collections.abc import Mapping
 
 from inline_capture import (
     BOSS_INIT_MAGIC,
-    BOSS_INIT_PROLOGUE,
-    BOSS_INIT_PROLOGUE_SIGNATURE,
-    BOSS_INIT_RVA,
     BOSS_TEMPLATE_ID_OFFSET,
     BOSS_TYPE_BOSS_VALUE,
     BOSS_TYPE_ENTITY_ID_OFFSET,
     BOSS_TYPE_FIELD_OFFSET,
     BOSS_TYPE_MAGIC,
-    BOSS_TYPE_PROLOGUE,
-    BOSS_TYPE_PROLOGUE_SIGNATURE,
     BOSS_TYPE_RECORD_COUNT,
     BOSS_TYPE_RECORD_MASK,
     BOSS_TYPE_RECORD_SIZE,
     BOSS_TYPE_RECORDS_OFFSET,
     BOSS_TYPE_RING_SIZE,
-    BOSS_TYPE_RVA,
-    DAMAGE_RVA,
     MAGIC,
     MEM_COMMIT,
     MEM_RELEASE,
     MEM_RESERVE,
-    NAME_CACHE_RVA,
     NAME_MAGIC,
-    NAME_PROLOGUE,
-    NAME_PROLOGUE_SIGNATURE,
     NAME_RECORD_COUNT,
     NAME_RECORD_MASK,
     NAME_RECORD_SIZE,
@@ -41,19 +32,21 @@ from inline_capture import (
     NAME_RING_SIZE,
     PAGE_EXECUTE_READWRITE,
     PAGE_READWRITE,
-    PROLOGUE,
-    PROLOGUE_SIGNATURE,
     RECORD_COUNT,
     RECORD_MASK,
     RECORD_SIZE,
     RECORDS_OFFSET,
     RING_SIZE,
+    TEMPLATE_BULK_MAGIC,
+    TEMPLATE_ID_MAGIC,
     build_absolute_patch,
     build_boss_init_stub,
     build_boss_type_stub,
     build_name_stub,
     build_patch,
     build_stub,
+    build_template_bulk_stub,
+    build_template_id_stub,
     parse_boss_type_record,
     parse_name_record,
     parse_record,
@@ -72,6 +65,7 @@ from proc_inspect import (
     read_region,
     winerror,
 )
+from runtime_capability import normalize_runtime_profile, runtime_profile_hook
 
 
 PROCESS_VM_OPERATION = 0x0008
@@ -81,8 +75,6 @@ PROCESS_VM_WRITE = 0x0020
 # manager keeps weak references at +0xC0 to the data-cache manager and +0xD0
 # to the entity/actor manager.  The latter's +0x128 field is the local
 # controlled entity ID used by the game's own damage routing comparisons.
-GOBJECT_CHUNKS_RVA = 0x0EC0A080
-GOBJECT_COUNT_RVA = 0x0EC0A094
 DAMAGE_DATA_CACHE_MANAGER_WEAK_OFFSET = 0xC0
 DAMAGE_ENTITY_MANAGER_WEAK_OFFSET = 0xD0
 LOCAL_ENTITY_ID_OFFSET = 0x128
@@ -107,20 +99,54 @@ class DamageHook:
     def __init__(
         self,
         *,
+        profile: Mapping[str, object],
         pid: int | None = None,
-        process_name: str = "C7-Win64-Shipping.exe",
-        module_name: str = "C7-Win64-Shipping.exe",
-        rva: int = DAMAGE_RVA,
+        process_name: str = "",
+        module_name: str = "",
         capture_names: bool = True,
         capture_boss_types: bool = True,
         target_boss_lookup_enabled: bool = False,
+        takeover_existing: bool = False,
     ):
+        self.profile = normalize_runtime_profile(profile)
+        damage_hook = runtime_profile_hook(self.profile, "damage")
+        name_hook = runtime_profile_hook(self.profile, "entity_name")
+        boss_type_hook = runtime_profile_hook(self.profile, "boss_type")
+        boss_init_hook = runtime_profile_hook(self.profile, "boss_init")
+        template_id_hook = runtime_profile_hook(self.profile, "template_id")
+        template_bulk_hook = runtime_profile_hook(
+            self.profile, "template_bulk"
+        )
+        object_table = self.profile["object_table"]
+        if not isinstance(object_table, dict):
+            raise ValueError("runtime object-table profile is invalid")
+        game_module = str(self.profile["game_module"])
+        self.rva = int(damage_hook["rva"])
+        self.damage_prologue = bytes(damage_hook["prologue"])
+        self.damage_signature = bytes(damage_hook["signature"])
+        self.name_rva = int(name_hook["rva"])
+        self.name_prologue = bytes(name_hook["prologue"])
+        self.name_signature = bytes(name_hook["signature"])
+        self.boss_type_rva = int(boss_type_hook["rva"])
+        self.boss_type_prologue = bytes(boss_type_hook["prologue"])
+        self.boss_type_signature = bytes(boss_type_hook["signature"])
+        self.boss_init_rva = int(boss_init_hook["rva"])
+        self.boss_init_prologue = bytes(boss_init_hook["prologue"])
+        self.boss_init_signature = bytes(boss_init_hook["signature"])
+        self.template_id_rva = int(template_id_hook["rva"])
+        self.template_id_prologue = bytes(template_id_hook["prologue"])
+        self.template_id_signature = bytes(template_id_hook["signature"])
+        self.template_bulk_rva = int(template_bulk_hook["rva"])
+        self.template_bulk_prologue = bytes(template_bulk_hook["prologue"])
+        self.template_bulk_signature = bytes(template_bulk_hook["signature"])
+        self.gobject_chunks_rva = int(object_table["chunks_rva"])
+        self.gobject_count_rva = int(object_table["count_rva"])
         self.requested_pid = pid
-        self.process_name = process_name
-        self.module_name = module_name
-        self.rva = rva
+        self.process_name = str(process_name or game_module)
+        self.module_name = str(module_name or game_module)
         self.capture_names = bool(capture_names)
         self.capture_boss_types = bool(capture_boss_types)
+        self.takeover_existing = bool(takeover_existing)
         self.pid = 0
         self.base = 0
         self.target = 0
@@ -157,6 +183,19 @@ class DamageHook:
         self.boss_init_installed = False
         self.boss_init_adopted = False
         self.boss_init_next_sequence = 0
+        self.template_id_target = 0
+        self.template_id_ring = 0
+        self.template_id_stub = 0
+        self.template_id_global_address = 0
+        self.template_id_installed = False
+        self.template_id_adopted = False
+        self.template_id_next_sequence = 0
+        self.template_bulk_target = 0
+        self.template_bulk_ring = 0
+        self.template_bulk_stub = 0
+        self.template_bulk_installed = False
+        self.template_bulk_adopted = False
+        self.template_bulk_next_sequence = 0
         self.pending_boss_components: dict[int, tuple[dict, float]] = {}
         self.pending_existing_boss_targets: set[int] = set()
         self.existing_boss_scan_attempted: set[int] = set()
@@ -191,12 +230,29 @@ class DamageHook:
             "damage_ring_records_polled": 0,
             "damage_ring_parse_failures": 0,
             "damage_ring_overruns": 0,
+            "damage_target_records": 0,
+            "damage_target_id_zero": 0,
+            "damage_target_id_below_supported": 0,
+            "damage_target_id_low_supported": 0,
+            "damage_target_id_mid_supported": 0,
+            "damage_target_id_gap": 0,
+            "damage_target_id_high_supported": 0,
+            "damage_target_id_above_supported": 0,
+            "local_player_id_available_records": 0,
+            "damage_attacker_matches_local_player": 0,
+            "damage_target_matches_local_player": 0,
             "boss_ring_header_reads": 0,
             "boss_ring_header_failures": 0,
             "boss_ring_records_polled": 0,
             "boss_ring_parse_failures": 0,
             "boss_ring_overruns": 0,
             "target_lookup_candidates": 0,
+            "target_lookup_disabled_candidates": 0,
+            "target_lookup_skipped_unplausible": 0,
+            "target_lookup_skipped_local_player": 0,
+            "target_lookup_skipped_already_attempted": 0,
+            "target_lookup_skipped_already_emitted": 0,
+            "target_lookup_pending_reobserved": 0,
             "target_lookup_evictions": 0,
             "target_lookup_resolved": 0,
             "target_lookup_timeouts": 0,
@@ -253,6 +309,12 @@ class DamageHook:
             "name_hook_installed": bool(self.name_installed),
             "boss_type_hook_installed": bool(self.boss_type_installed),
             "boss_init_hook_installed": bool(self.boss_init_installed),
+            "template_id_hook_installed": bool(
+                self.template_id_installed
+            ),
+            "template_bulk_hook_installed": bool(
+                self.template_bulk_installed
+            ),
             "target_boss_lookup_enabled": bool(self.target_boss_lookup_enabled),
             "target_lookup_pending": len(self.pending_target_boss_lookups),
             "target_lookup_attempted": len(self.target_boss_lookup_attempted),
@@ -277,6 +339,55 @@ class DamageHook:
             ),
         }
 
+    def _track_target_lookup_candidate(
+        self, attacker_id: int, target_id: int
+    ) -> bool:
+        """Classify one damage target and return whether lookup should queue it."""
+
+        self._diagnostic_add("damage_target_records")
+        if target_id <= 0:
+            self._diagnostic_add("damage_target_id_zero")
+        elif target_id < LOW_COMBAT_ENTITY_ID_MIN:
+            self._diagnostic_add("damage_target_id_below_supported")
+        elif target_id <= LOW_COMBAT_ENTITY_ID_MAX:
+            self._diagnostic_add("damage_target_id_low_supported")
+        elif target_id < ENTITY_ID_MIN:
+            # This range overlaps the numeric shape of skill-instance IDs,
+            # but this value came from the native callback's exact target
+            # field. Reopened game sessions have been observed assigning
+            # legitimate combat entities here.
+            self._diagnostic_add("damage_target_id_mid_supported")
+        elif target_id <= ENTITY_ID_MAX:
+            self._diagnostic_add("damage_target_id_high_supported")
+        else:
+            self._diagnostic_add("damage_target_id_above_supported")
+
+        if self.local_player_id:
+            self._diagnostic_add("local_player_id_available_records")
+            if attacker_id == self.local_player_id:
+                self._diagnostic_add("damage_attacker_matches_local_player")
+            if target_id == self.local_player_id:
+                self._diagnostic_add("damage_target_matches_local_player")
+
+        plausible = self._plausible_entity_id(target_id)
+        if not self.target_boss_lookup_enabled:
+            if plausible and target_id != self.local_player_id:
+                self._diagnostic_add("target_lookup_disabled_candidates")
+            return False
+        if not plausible:
+            self._diagnostic_add("target_lookup_skipped_unplausible")
+            return False
+        if target_id == self.local_player_id:
+            self._diagnostic_add("target_lookup_skipped_local_player")
+            return False
+        if target_id in self.target_boss_lookup_attempted:
+            self._diagnostic_add("target_lookup_skipped_already_attempted")
+            return False
+        if target_id in self.target_boss_lookup_emitted:
+            self._diagnostic_add("target_lookup_skipped_already_emitted")
+            return False
+        return True
+
     def _read_exact(self, address: int, size: int) -> bytes:
         data = read_region(self.process, address, size)
         if data is None or len(data) != size:
@@ -292,10 +403,10 @@ class DamageHook:
     def _resolve_weak_object(self, owner: int, offset: int) -> int:
         weak = self._read_exact(owner + offset, 8)
         object_index, object_serial = struct.unpack("<ii", weak)
-        object_count = self._u32(self.base + GOBJECT_COUNT_RVA)
+        object_count = self._u32(self.base + self.gobject_count_rva)
         if object_serial <= 0 or object_index < 0 or object_index >= object_count:
             return 0
-        chunks = self._u64(self.base + GOBJECT_CHUNKS_RVA)
+        chunks = self._u64(self.base + self.gobject_chunks_rva)
         chunk = self._u64(chunks + (object_index >> 16) * 8)
         if not chunk:
             return 0
@@ -356,7 +467,10 @@ class DamageHook:
         self._last_target_boss_lookup_poll = 0.0
 
     def _adopt_existing(self, patch: bytes) -> bool:
-        if len(patch) != len(PROLOGUE) or patch[:6] != b"\xff\x25\0\0\0\0":
+        if (
+            len(patch) != len(self.damage_prologue)
+            or patch[:6] != b"\xff\x25\0\0\0\0"
+        ):
             return False
         stub = struct.unpack_from("<Q", patch, 6)[0]
         stub_head = read_region(self.process, stub, 32)
@@ -377,7 +491,10 @@ class DamageHook:
         return True
 
     def _adopt_existing_name_hook(self, patch: bytes) -> bool:
-        if len(patch) != len(NAME_PROLOGUE) or patch[:6] != b"\xff\x25\0\0\0\0":
+        if (
+            len(patch) != len(self.name_prologue)
+            or patch[:6] != b"\xff\x25\0\0\0\0"
+        ):
             return False
         stub = struct.unpack_from("<Q", patch, 6)[0]
         stub_head = read_region(self.process, stub, 40)
@@ -396,7 +513,9 @@ class DamageHook:
         ):
             return False
         expected_stub = build_name_stub(
-            ring, self.name_target + len(NAME_PROLOGUE)
+            ring,
+            self.name_target + len(self.name_prologue),
+            prologue=self.name_prologue,
         )
         if read_region(self.process, stub, len(expected_stub)) != expected_stub:
             return False
@@ -409,7 +528,7 @@ class DamageHook:
 
     def _adopt_existing_boss_type_hook(self, patch: bytes) -> bool:
         if (
-            len(patch) != len(BOSS_TYPE_PROLOGUE)
+            len(patch) != len(self.boss_type_prologue)
             or patch[:6] != b"\xff\x25\0\0\0\0"
         ):
             return False
@@ -433,8 +552,9 @@ class DamageHook:
             return False
         expected_stub = build_boss_type_stub(
             ring,
-            self.boss_type_target + len(BOSS_TYPE_PROLOGUE),
+            self.boss_type_target + len(self.boss_type_prologue),
             self.boss_type_global_address,
+            prologue=self.boss_type_prologue,
         )
         if read_region(self.process, stub, len(expected_stub)) != expected_stub:
             return False
@@ -446,27 +566,26 @@ class DamageHook:
         return True
 
     def _install_boss_type_hook(self, module_size: int) -> None:
-        self.boss_type_target = self.base + BOSS_TYPE_RVA
-        if BOSS_TYPE_RVA + len(BOSS_TYPE_PROLOGUE_SIGNATURE) > module_size:
+        self.boss_type_target = self.base + self.boss_type_rva
+        if self.boss_type_rva + len(self.boss_type_signature) > module_size:
             raise RuntimeError("boss-type target RVA is outside the live module")
-        displacement = struct.unpack_from("<i", BOSS_TYPE_PROLOGUE, 13)[0]
+        displacement = struct.unpack_from("<i", self.boss_type_prologue, 13)[0]
         self.boss_type_global_address = (
-            self.boss_type_target + len(BOSS_TYPE_PROLOGUE) + displacement
+            self.boss_type_target + len(self.boss_type_prologue) + displacement
         )
         actual = read_region(
             self.process,
             self.boss_type_target,
-            len(BOSS_TYPE_PROLOGUE_SIGNATURE),
+            len(self.boss_type_signature),
         )
-        if actual != BOSS_TYPE_PROLOGUE_SIGNATURE:
+        if actual != self.boss_type_signature:
             if actual and self._adopt_existing_boss_type_hook(
-                actual[: len(BOSS_TYPE_PROLOGUE)]
+                actual[: len(self.boss_type_prologue)]
             ):
                 return
-            got = actual.hex(" ") if actual else "unreadable"
             raise RuntimeError(
-                f"boss-type version/signature mismatch at RVA 0x{BOSS_TYPE_RVA:x}\n"
-                f"expected: {BOSS_TYPE_PROLOGUE_SIGNATURE.hex(' ')}\nactual:   {got}"
+                "boss-type signature does not match the authorized runtime "
+                f"profile {self.profile['profile_id']}"
             )
 
         self.boss_type_ring = int(
@@ -504,15 +623,16 @@ class DamageHook:
         write_memory(self.process, self.boss_type_ring, header)
         stub_code = build_boss_type_stub(
             self.boss_type_ring,
-            self.boss_type_target + len(BOSS_TYPE_PROLOGUE),
+            self.boss_type_target + len(self.boss_type_prologue),
             self.boss_type_global_address,
+            prologue=self.boss_type_prologue,
         )
         write_memory(self.process, self.boss_type_stub, stub_code)
         kernel32.FlushInstructionCache(
             self.process, ctypes.c_void_p(self.boss_type_stub), len(stub_code)
         )
         patch = build_absolute_patch(
-            self.boss_type_stub, len(BOSS_TYPE_PROLOGUE)
+            self.boss_type_stub, len(self.boss_type_prologue)
         )
         suspended = suspend_process(self.pid)
         try:
@@ -526,7 +646,7 @@ class DamageHook:
 
     def _adopt_existing_boss_init_hook(self, patch: bytes) -> bool:
         if (
-            len(patch) != len(BOSS_INIT_PROLOGUE)
+            len(patch) != len(self.boss_init_prologue)
             or patch[:6] != b"\xff\x25\0\0\0\0"
         ):
             return False
@@ -549,7 +669,9 @@ class DamageHook:
         ):
             return False
         expected_stub = build_boss_init_stub(
-            ring, self.boss_init_target + len(BOSS_INIT_PROLOGUE)
+            ring,
+            self.boss_init_target + len(self.boss_init_prologue),
+            prologue=self.boss_init_prologue,
         )
         if read_region(self.process, stub, len(expected_stub)) != expected_stub:
             return False
@@ -561,23 +683,22 @@ class DamageHook:
         return True
 
     def _install_boss_init_hook(self, module_size: int) -> None:
-        self.boss_init_target = self.base + BOSS_INIT_RVA
-        if BOSS_INIT_RVA + len(BOSS_INIT_PROLOGUE_SIGNATURE) > module_size:
+        self.boss_init_target = self.base + self.boss_init_rva
+        if self.boss_init_rva + len(self.boss_init_signature) > module_size:
             raise RuntimeError("boss-init target RVA is outside the live module")
         actual = read_region(
             self.process,
             self.boss_init_target,
-            len(BOSS_INIT_PROLOGUE_SIGNATURE),
+            len(self.boss_init_signature),
         )
-        if actual != BOSS_INIT_PROLOGUE_SIGNATURE:
+        if actual != self.boss_init_signature:
             if actual and self._adopt_existing_boss_init_hook(
-                actual[: len(BOSS_INIT_PROLOGUE)]
+                actual[: len(self.boss_init_prologue)]
             ):
                 return
-            got = actual.hex(" ") if actual else "unreadable"
             raise RuntimeError(
-                f"boss-init version/signature mismatch at RVA 0x{BOSS_INIT_RVA:x}\n"
-                f"expected: {BOSS_INIT_PROLOGUE_SIGNATURE.hex(' ')}\nactual:   {got}"
+                "boss-init signature does not match the authorized runtime "
+                f"profile {self.profile['profile_id']}"
             )
 
         self.boss_init_ring = int(
@@ -615,14 +736,15 @@ class DamageHook:
         write_memory(self.process, self.boss_init_ring, header)
         stub_code = build_boss_init_stub(
             self.boss_init_ring,
-            self.boss_init_target + len(BOSS_INIT_PROLOGUE),
+            self.boss_init_target + len(self.boss_init_prologue),
+            prologue=self.boss_init_prologue,
         )
         write_memory(self.process, self.boss_init_stub, stub_code)
         kernel32.FlushInstructionCache(
             self.process, ctypes.c_void_p(self.boss_init_stub), len(stub_code)
         )
         patch = build_absolute_patch(
-            self.boss_init_stub, len(BOSS_INIT_PROLOGUE)
+            self.boss_init_stub, len(self.boss_init_prologue)
         )
         suspended = suspend_process(self.pid)
         try:
@@ -634,22 +756,218 @@ class DamageHook:
             raise RuntimeError("boss-init hook verification failed")
         self.boss_init_next_sequence = 0
 
+    def _adopt_existing_component_capture(
+        self,
+        patch: bytes,
+        *,
+        target: int,
+        prologue: bytes,
+        magic: bytes,
+        build_stub,
+    ) -> tuple[int, int, int] | None:
+        """Validate and adopt one of our already-installed field hooks."""
+
+        if (
+            len(patch) != len(prologue)
+            or patch[:6] != b"\xff\x25\0\0\0\0"
+        ):
+            return None
+        stub = struct.unpack_from("<Q", patch, 6)[0]
+        stub_head = read_region(self.process, stub, 40)
+        prefix = b"\x9c\x50\x53\x52\x41\x52\x41\x53\x49\xba"
+        if not stub_head or not stub_head.startswith(prefix):
+            return None
+        ring = struct.unpack_from("<Q", stub_head, len(prefix))[0]
+        header = read_region(self.process, ring, 40)
+        if not header or header[:8] != magic:
+            return None
+        _, write_index, capacity, record_size, saved_target = struct.unpack(
+            "<8sQQQQ", header
+        )
+        if (
+            capacity != BOSS_TYPE_RECORD_COUNT
+            or record_size != BOSS_TYPE_RECORD_SIZE
+            or saved_target != target
+        ):
+            return None
+        expected_stub = build_stub(ring, target)
+        if read_region(self.process, stub, len(expected_stub)) != expected_stub:
+            return None
+        return stub, ring, write_index
+
+    def _install_component_capture(
+        self,
+        module_size: int,
+        *,
+        rva: int,
+        prologue: bytes,
+        signature: bytes,
+        magic: bytes,
+        label: str,
+        build_stub,
+    ) -> tuple[int, int, int, bool, int]:
+        """Install a fixed-size CommonComponent field capture safely."""
+
+        target = self.base + rva
+        if rva + len(signature) > module_size:
+            raise RuntimeError(f"{label} target RVA is outside the live module")
+        actual = read_region(self.process, target, len(signature))
+        if actual != signature:
+            adopted = self._adopt_existing_component_capture(
+                (actual or b"")[: len(prologue)],
+                target=target,
+                prologue=prologue,
+                magic=magic,
+                build_stub=build_stub,
+            )
+            if adopted is not None:
+                stub, ring, write_index = adopted
+                return target, ring, stub, True, write_index
+            raise RuntimeError(
+                f"{label} signature does not match the authorized runtime "
+                f"profile {self.profile['profile_id']}"
+            )
+
+        ring = int(
+            kernel32.VirtualAllocEx(
+                self.process,
+                None,
+                BOSS_TYPE_RING_SIZE,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            )
+            or 0
+        )
+        stub = int(
+            kernel32.VirtualAllocEx(
+                self.process,
+                None,
+                0x1000,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE,
+            )
+            or 0
+        )
+        installed = False
+        try:
+            if not ring or not stub:
+                raise winerror(f"VirtualAllocEx({label})")
+            header = struct.pack(
+                "<8sQQQQ",
+                magic,
+                0,
+                BOSS_TYPE_RECORD_COUNT,
+                BOSS_TYPE_RECORD_SIZE,
+                target,
+            )
+            write_memory(self.process, ring, header)
+            stub_code = build_stub(ring, target)
+            write_memory(self.process, stub, stub_code)
+            kernel32.FlushInstructionCache(
+                self.process, ctypes.c_void_p(stub), len(stub_code)
+            )
+            patch = build_absolute_patch(stub, len(prologue))
+            suspended = suspend_process(self.pid)
+            try:
+                write_code(self.process, target, patch)
+                installed = True
+            finally:
+                resume_threads(suspended)
+            if read_region(self.process, target, len(patch)) != patch:
+                raise RuntimeError(f"{label} hook verification failed")
+            return target, ring, stub, False, 0
+        except Exception:
+            if installed and self.alive:
+                suspended = suspend_process(self.pid)
+                try:
+                    write_code(self.process, target, prologue)
+                finally:
+                    resume_threads(suspended)
+            elif self.process and self.alive:
+                if stub:
+                    kernel32.VirtualFreeEx(
+                        self.process, ctypes.c_void_p(stub), 0, MEM_RELEASE
+                    )
+                if ring:
+                    kernel32.VirtualFreeEx(
+                        self.process, ctypes.c_void_p(ring), 0, MEM_RELEASE
+                    )
+            raise
+
+    def _install_template_id_hook(self, module_size: int) -> None:
+        target = self.base + self.template_id_rva
+        displacement = struct.unpack_from(
+            "<i", self.template_id_prologue, 13
+        )[0]
+        self.template_id_global_address = (
+            target + len(self.template_id_prologue) + displacement
+        )
+
+        def stub_builder(ring: int, hook_target: int) -> bytes:
+            return build_template_id_stub(
+                ring,
+                hook_target + len(self.template_id_prologue),
+                self.template_id_global_address,
+                prologue=self.template_id_prologue,
+            )
+
+        (
+            self.template_id_target,
+            self.template_id_ring,
+            self.template_id_stub,
+            self.template_id_adopted,
+            self.template_id_next_sequence,
+        ) = self._install_component_capture(
+            module_size,
+            rva=self.template_id_rva,
+            prologue=self.template_id_prologue,
+            signature=self.template_id_signature,
+            magic=TEMPLATE_ID_MAGIC,
+            label="template-id",
+            build_stub=stub_builder,
+        )
+        self.template_id_installed = True
+
+    def _install_template_bulk_hook(self, module_size: int) -> None:
+        def stub_builder(ring: int, hook_target: int) -> bytes:
+            return build_template_bulk_stub(
+                ring,
+                hook_target + len(self.template_bulk_prologue),
+                prologue=self.template_bulk_prologue,
+            )
+
+        (
+            self.template_bulk_target,
+            self.template_bulk_ring,
+            self.template_bulk_stub,
+            self.template_bulk_adopted,
+            self.template_bulk_next_sequence,
+        ) = self._install_component_capture(
+            module_size,
+            rva=self.template_bulk_rva,
+            prologue=self.template_bulk_prologue,
+            signature=self.template_bulk_signature,
+            magic=TEMPLATE_BULK_MAGIC,
+            label="template-bulk",
+            build_stub=stub_builder,
+        )
+        self.template_bulk_installed = True
+
     def _install_name_hook(self, module_size: int) -> None:
-        self.name_target = self.base + NAME_CACHE_RVA
-        if NAME_CACHE_RVA + len(NAME_PROLOGUE_SIGNATURE) > module_size:
+        self.name_target = self.base + self.name_rva
+        if self.name_rva + len(self.name_signature) > module_size:
             raise RuntimeError("entity-name target RVA is outside the live module")
         actual = read_region(
-            self.process, self.name_target, len(NAME_PROLOGUE_SIGNATURE)
+            self.process, self.name_target, len(self.name_signature)
         )
-        if actual != NAME_PROLOGUE_SIGNATURE:
+        if actual != self.name_signature:
             if actual and self._adopt_existing_name_hook(
-                actual[: len(NAME_PROLOGUE)]
+                actual[: len(self.name_prologue)]
             ):
                 return
-            got = actual.hex(" ") if actual else "unreadable"
             raise RuntimeError(
-                f"entity-name version/signature mismatch at RVA 0x{NAME_CACHE_RVA:x}\n"
-                f"expected: {NAME_PROLOGUE_SIGNATURE.hex(' ')}\nactual:   {got}"
+                "entity-name signature does not match the authorized runtime "
+                f"profile {self.profile['profile_id']}"
             )
 
         self.name_ring = int(
@@ -686,13 +1004,15 @@ class DamageHook:
         )
         write_memory(self.process, self.name_ring, header)
         stub_code = build_name_stub(
-            self.name_ring, self.name_target + len(NAME_PROLOGUE)
+            self.name_ring,
+            self.name_target + len(self.name_prologue),
+            prologue=self.name_prologue,
         )
         write_memory(self.process, self.name_stub, stub_code)
         kernel32.FlushInstructionCache(
             self.process, ctypes.c_void_p(self.name_stub), len(stub_code)
         )
-        patch = build_absolute_patch(self.name_stub, len(NAME_PROLOGUE))
+        patch = build_absolute_patch(self.name_stub, len(self.name_prologue))
         suspended = suspend_process(self.pid)
         try:
             write_code(self.process, self.name_target, patch)
@@ -711,7 +1031,7 @@ class DamageHook:
             self.pid, self.module_name
         )
         self.target = self.base + self.rva
-        if self.rva + len(PROLOGUE_SIGNATURE) > module_size:
+        if self.rva + len(self.damage_signature) > module_size:
             raise RuntimeError("damage target RVA is outside the live module")
         access = (
             PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE
@@ -720,24 +1040,27 @@ class DamageHook:
         if not self.process:
             raise winerror("OpenProcess")
 
-        actual = read_region(self.process, self.target, len(PROLOGUE_SIGNATURE))
-        if actual != PROLOGUE_SIGNATURE:
-            if actual and self._adopt_existing(actual[: len(PROLOGUE)]):
+        actual = read_region(self.process, self.target, len(self.damage_signature))
+        if actual != self.damage_signature:
+            if actual and self._adopt_existing(
+                actual[: len(self.damage_prologue)]
+            ):
                 try:
                     if self.capture_names:
                         self._install_name_hook(module_size)
                     if self.capture_boss_types:
                         self._install_boss_type_hook(module_size)
                         self._install_boss_init_hook(module_size)
+                        self._install_template_id_hook(module_size)
+                        self._install_template_bulk_hook(module_size)
                 except Exception:
                     self.close()
                     raise
                 return self
-            got = actual.hex(" ") if actual else "unreadable"
             self.close()
             raise RuntimeError(
-                f"game version/signature mismatch at RVA 0x{self.rva:x}\n"
-                f"expected: {PROLOGUE_SIGNATURE.hex(' ')}\nactual:   {got}"
+                "damage signature does not match the authorized runtime "
+                f"profile {self.profile['profile_id']}"
             )
 
         try:
@@ -769,7 +1092,11 @@ class DamageHook:
                 "<8sQQQQ", MAGIC, 0, RECORD_COUNT, RECORD_SIZE, self.target
             )
             write_memory(self.process, self.ring, header)
-            stub_code = build_stub(self.ring, self.target + len(PROLOGUE))
+            stub_code = build_stub(
+                self.ring,
+                self.target + len(self.damage_prologue),
+                prologue=self.damage_prologue,
+            )
             write_memory(self.process, self.stub, stub_code)
             kernel32.FlushInstructionCache(
                 self.process, ctypes.c_void_p(self.stub), len(stub_code)
@@ -781,7 +1108,9 @@ class DamageHook:
                 self.installed = True
             finally:
                 resume_threads(suspended)
-            patch = read_region(self.process, self.target, len(PROLOGUE))
+            patch = read_region(
+                self.process, self.target, len(self.damage_prologue)
+            )
             if patch != build_patch(self.stub):
                 raise RuntimeError("inline hook verification failed")
             self.next_sequence = 0
@@ -790,6 +1119,8 @@ class DamageHook:
             if self.capture_boss_types:
                 self._install_boss_type_hook(module_size)
                 self._install_boss_init_hook(module_size)
+                self._install_template_id_hook(module_size)
+                self._install_template_bulk_hook(module_size)
             return self
         except Exception:
             self.close()
@@ -834,6 +1165,7 @@ class DamageHook:
             self._refresh_local_player_id(damage_manager)
             if self.local_player_id:
                 record["local_player_id"] = self.local_player_id
+            attacker_id = int(record.get("attacker_id", 0) or 0)
             target_id = int(record.get("target_id", 0) or 0)
             if (
                 self._plausible_entity_id(target_id)
@@ -845,16 +1177,12 @@ class DamageHook:
                 )
             ):
                 self.pending_existing_boss_targets.add(target_id)
-            if (
-                self.target_boss_lookup_enabled
-                and self._plausible_entity_id(target_id)
-                and target_id != self.local_player_id
-                and target_id not in self.target_boss_lookup_attempted
-                and target_id not in self.target_boss_lookup_emitted
-            ):
+            if self._track_target_lookup_candidate(attacker_id, target_id):
                 if target_id not in self.pending_target_boss_lookups:
                     self.pending_target_boss_lookups[target_id] = time.monotonic()
                     self._diagnostic_add("target_lookup_candidates")
+                else:
+                    self._diagnostic_add("target_lookup_pending_reobserved")
                 while (
                     len(self.pending_target_boss_lookups)
                     > TARGET_BOSS_LOOKUP_MAX_PENDING
@@ -869,10 +1197,11 @@ class DamageHook:
 
     @staticmethod
     def _plausible_entity_id(value: int) -> bool:
-        return bool(
-            LOW_COMBAT_ENTITY_ID_MIN <= value <= LOW_COMBAT_ENTITY_ID_MAX
-            or ENTITY_ID_MIN <= value <= ENTITY_ID_MAX
-        )
+        # Native damage and CommonComponent callbacks identify this field as
+        # an entity ID, so the numeric overlap with skill-instance IDs is not
+        # ambiguous here. The network parser keeps a stricter helper for
+        # packet positions whose meaning is not schema-confirmed.
+        return LOW_COMBAT_ENTITY_ID_MIN <= value <= ENTITY_ID_MAX
 
     @staticmethod
     def _plausible_pointer(value: int) -> bool:
@@ -1107,8 +1436,8 @@ class DamageHook:
         if track_target_lookup:
             self._diagnostic_add("target_lookup_object_table_reads")
         try:
-            object_count = self._u32(self.base + GOBJECT_COUNT_RVA)
-            chunks = self._u64(self.base + GOBJECT_CHUNKS_RVA)
+            object_count = self._u32(self.base + self.gobject_count_rva)
+            chunks = self._u64(self.base + self.gobject_chunks_rva)
         except (OSError, RuntimeError, struct.error):
             if track_target_lookup:
                 self._diagnostic_add(
@@ -1282,7 +1611,10 @@ class DamageHook:
 
     def poll_boss_types(self) -> list[dict]:
         if not self.alive or not (
-            self.boss_type_installed or self.boss_init_installed
+            self.boss_type_installed
+            or self.boss_init_installed
+            or self.template_id_installed
+            or self.template_bulk_installed
         ):
             return []
         updates: list[dict] = []
@@ -1300,6 +1632,22 @@ class DamageHook:
                 self.boss_init_next_sequence,
                 BOSS_INIT_MAGIC,
                 "CommonComponent_TemplateBossType",
+            )
+            updates.extend(records)
+        if self.template_id_installed:
+            records, self.template_id_next_sequence = self._poll_boss_ring(
+                self.template_id_ring,
+                self.template_id_next_sequence,
+                TEMPLATE_ID_MAGIC,
+                "CommonComponent_SetTemplateId",
+            )
+            updates.extend(records)
+        if self.template_bulk_installed:
+            records, self.template_bulk_next_sequence = self._poll_boss_ring(
+                self.template_bulk_ring,
+                self.template_bulk_next_sequence,
+                TEMPLATE_BULK_MAGIC,
+                "CommonComponent_BulkTemplate",
             )
             updates.extend(records)
         for record in updates:
@@ -1512,16 +1860,35 @@ class DamageHook:
         return self._read_skill_name_cache()
 
     def close(self) -> None:
-        owned_damage = self.installed and not self.adopted
-        owned_name = self.name_installed and not self.name_adopted
+        owned_damage = self.installed and (
+            not self.adopted or self.takeover_existing
+        )
+        owned_name = self.name_installed and (
+            not self.name_adopted or self.takeover_existing
+        )
         owned_boss_type = (
-            self.boss_type_installed and not self.boss_type_adopted
+            self.boss_type_installed
+            and (not self.boss_type_adopted or self.takeover_existing)
         )
         owned_boss_init = (
-            self.boss_init_installed and not self.boss_init_adopted
+            self.boss_init_installed
+            and (not self.boss_init_adopted or self.takeover_existing)
+        )
+        owned_template_id = (
+            self.template_id_installed
+            and (not self.template_id_adopted or self.takeover_existing)
+        )
+        owned_template_bulk = (
+            self.template_bulk_installed
+            and (not self.template_bulk_adopted or self.takeover_existing)
         )
         owned_any = bool(
-            owned_damage or owned_name or owned_boss_type or owned_boss_init
+            owned_damage
+            or owned_name
+            or owned_boss_type
+            or owned_boss_init
+            or owned_template_id
+            or owned_template_bulk
         )
         if (
             self.process
@@ -1530,33 +1897,88 @@ class DamageHook:
                 or self.name_installed
                 or self.boss_type_installed
                 or self.boss_init_installed
+                or self.template_id_installed
+                or self.template_bulk_installed
             )
             and self.alive
         ):
             suspended: list[int] = []
             try:
                 suspended = suspend_process(self.pid)
+                if owned_template_bulk:
+                    write_code(
+                        self.process,
+                        self.template_bulk_target,
+                        self.template_bulk_prologue,
+                    )
+                if owned_template_id:
+                    write_code(
+                        self.process,
+                        self.template_id_target,
+                        self.template_id_prologue,
+                    )
                 if owned_boss_init:
                     write_code(
                         self.process,
                         self.boss_init_target,
-                        BOSS_INIT_PROLOGUE,
+                        self.boss_init_prologue,
                     )
                 if owned_boss_type:
                     write_code(
                         self.process,
                         self.boss_type_target,
-                        BOSS_TYPE_PROLOGUE,
+                        self.boss_type_prologue,
                     )
                 if owned_name:
-                    write_code(self.process, self.name_target, NAME_PROLOGUE)
+                    write_code(
+                        self.process, self.name_target, self.name_prologue
+                    )
                 if owned_damage:
-                    write_code(self.process, self.target, PROLOGUE)
+                    write_code(
+                        self.process, self.target, self.damage_prologue
+                    )
+                restored_entries = (
+                    (
+                        owned_template_bulk,
+                        self.template_bulk_target,
+                        self.template_bulk_prologue,
+                        "template bulk",
+                    ),
+                    (
+                        owned_template_id,
+                        self.template_id_target,
+                        self.template_id_prologue,
+                        "template id",
+                    ),
+                    (
+                        owned_boss_init,
+                        self.boss_init_target,
+                        self.boss_init_prologue,
+                        "boss init",
+                    ),
+                    (
+                        owned_boss_type,
+                        self.boss_type_target,
+                        self.boss_type_prologue,
+                        "boss type",
+                    ),
+                    (owned_name, self.name_target, self.name_prologue, "name"),
+                    (owned_damage, self.target, self.damage_prologue, "damage"),
+                )
+                for should_verify, target, prologue, label in restored_entries:
+                    if should_verify and read_region(
+                        self.process, target, len(prologue)
+                    ) != prologue:
+                        raise RuntimeError(
+                            f"{label} hook restoration verification failed"
+                        )
             finally:
                 if suspended:
                     resume_threads(suspended)
         self.boss_type_installed = False
         self.boss_init_installed = False
+        self.template_id_installed = False
+        self.template_bulk_installed = False
         self.name_installed = False
         self.installed = False
         if (
@@ -1565,6 +1987,8 @@ class DamageHook:
             and not self.name_installed
             and not self.boss_type_installed
             and not self.boss_init_installed
+            and not self.template_id_installed
+            and not self.template_bulk_installed
             and self.alive
             and not owned_any
         ):
@@ -1573,6 +1997,34 @@ class DamageHook:
             # returning through that page.  Leaving those now-unreachable
             # pages allocated avoids a use-after-free; the OS releases them
             # with the game process.
+            if self.template_bulk_stub and not self.template_bulk_adopted:
+                kernel32.VirtualFreeEx(
+                    self.process,
+                    ctypes.c_void_p(self.template_bulk_stub),
+                    0,
+                    MEM_RELEASE,
+                )
+            if self.template_bulk_ring and not self.template_bulk_adopted:
+                kernel32.VirtualFreeEx(
+                    self.process,
+                    ctypes.c_void_p(self.template_bulk_ring),
+                    0,
+                    MEM_RELEASE,
+                )
+            if self.template_id_stub and not self.template_id_adopted:
+                kernel32.VirtualFreeEx(
+                    self.process,
+                    ctypes.c_void_p(self.template_id_stub),
+                    0,
+                    MEM_RELEASE,
+                )
+            if self.template_id_ring and not self.template_id_adopted:
+                kernel32.VirtualFreeEx(
+                    self.process,
+                    ctypes.c_void_p(self.template_id_ring),
+                    0,
+                    MEM_RELEASE,
+                )
             if self.boss_init_stub and not self.boss_init_adopted:
                 kernel32.VirtualFreeEx(
                     self.process,
@@ -1632,10 +2084,18 @@ class DamageHook:
         self.boss_init_ring = 0
         self.boss_init_stub = 0
         self.boss_init_installed = False
+        self.template_id_ring = 0
+        self.template_id_stub = 0
+        self.template_id_installed = False
+        self.template_bulk_ring = 0
+        self.template_bulk_stub = 0
+        self.template_bulk_installed = False
         self.adopted = False
         self.name_adopted = False
         self.boss_type_adopted = False
         self.boss_init_adopted = False
+        self.template_id_adopted = False
+        self.template_bulk_adopted = False
         self.pending_boss_components.clear()
         self.pending_existing_boss_targets.clear()
         self.existing_boss_scan_attempted.clear()

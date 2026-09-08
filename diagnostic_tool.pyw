@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import multiprocessing
 import os
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -44,6 +46,7 @@ from proc_inspect import (
     kernel32,
     snapshot,
 )
+from runtime_capability import create_development_capability
 
 
 BUNDLE_DIR = Path(__file__).resolve().parent
@@ -65,6 +68,7 @@ MONSTER_METADATA_PATH = BUNDLE_DIR / "monster_metadata.json"
 BOSS_ALLOWLIST_PATH = BUNDLE_DIR / "boss_allowlist.txt"
 CA_BUNDLE_PATH = BUNDLE_DIR / "cacert.pem"
 APP_ICON_PATH = BUNDLE_DIR / "assets" / "app_icon.ico"
+RUNTIME_PROFILE_PATH = BUNDLE_DIR / "runtime-profile.json"
 CAPTURE_SECONDS = 45.0
 CONNECT_TIMEOUT_SECONDS = 20.0
 CAPTURE_SHUTDOWN_TIMEOUT_SECONDS = 8.0
@@ -139,7 +143,7 @@ class DiagnosticWindow:
         self.root = tk.Tk()
         self.root.title(TOOL_NAME)
         self.root.configure(bg=BG)
-        self.root.geometry("560x500")
+        self.root.geometry("560x536")
         self.root.resizable(False, False)
         self.root.update_idletasks()
         self.window_dpi = configure_tk_dpi_scaling(self.root)
@@ -237,6 +241,7 @@ class DiagnosticWindow:
             ("game", "游戏进程"),
             ("network", "网络采集"),
             ("damage", "伤害采集"),
+            ("boss", "Boss 识别"),
             ("upload", "报告上传"),
         ):
             row = tk.Frame(steps, bg=BG, height=36)
@@ -455,6 +460,7 @@ class DiagnosticWindow:
         self._set_status("正在连接游戏", "running")
         self._set_step("network", "连接中", "normal")
         self._set_step("damage", "等待", "normal")
+        self._set_step("boss", "等待", "normal")
         self._set_step("upload", "等待", "normal")
         self._set_primary("取消检测", self._finish_early)
         threading.Thread(
@@ -481,21 +487,38 @@ class DiagnosticWindow:
             load_monster_metadata(MONSTER_METADATA_PATH),
             load_boss_allowlist(BOSS_ALLOWLIST_PATH),
         )
-        # Exercise the same exact target-to-CommonComponent compatibility
-        # route as the main-program switch.  Keep the unrelated active team
-        # statistics request disabled so this report isolates target identity.
-        capture = CaptureProcessClient(
-            parent_pid=os.getpid(),
-            target_boss_lookup_enabled=True,
-            team_stats_mode=TEAM_STATS_MODE_UNKNOWN,
-        )
-        self.capture_client = capture
+        capture: CaptureProcessClient | None = None
         connected_at: float | None = None
         started_at = time.monotonic()
         stop_sent = False
         stopped_message = False
         process_exit_seen_at: float | None = None
         try:
+            capability = create_development_capability(
+                RUNTIME_PROFILE_PATH,
+                session_id=secrets.token_hex(16),
+                client_id=self.client_id,
+                build_id=hashlib.sha256(
+                    f"GMZZ-Diagnostic/{TOOL_VERSION}".encode("utf-8")
+                ).hexdigest()[:32],
+                client_build=f"diagnostic-{TOOL_VERSION}",
+                lease_seconds=(
+                    CAPTURE_SECONDS
+                    + CONNECT_TIMEOUT_SECONDS
+                    + CAPTURE_SHUTDOWN_TIMEOUT_SECONDS
+                    + 60.0
+                ),
+            )
+            # Exercise every current target identity route while keeping the
+            # unrelated active team-stat request disabled.
+            capture = CaptureProcessClient(
+                runtime_capability=capability,
+                allow_development=True,
+                parent_pid=os.getpid(),
+                target_boss_lookup_enabled=True,
+                team_stats_mode=TEAM_STATS_MODE_UNKNOWN,
+            )
+            self.capture_client = capture
             capture.start()
             while True:
                 now = time.monotonic()
@@ -511,6 +534,23 @@ class DiagnosticWindow:
                             "damage_records": (
                                 analyzer.network_damage_positive
                                 + analyzer.native_positive_damage_records
+                            ),
+                            "boss_records": analyzer.native_boss_records,
+                            "boss_events": (
+                                analyzer._confirmed_boss_events()
+                                + analyzer._damage_dummy_events()
+                            ),
+                            "lookup_candidates": int(
+                                analyzer.native_diagnostic.get(
+                                    "target_lookup_candidates", 0
+                                )
+                                or 0
+                            ),
+                            "lookup_resolved": int(
+                                analyzer.native_diagnostic.get(
+                                    "target_lookup_resolved", 0
+                                )
+                                or 0
                             ),
                         },
                     )
@@ -548,7 +588,7 @@ class DiagnosticWindow:
             analyzer.handle("fatal", exc)
             self._post("capture_event", ("fatal", str(exc)))
         finally:
-            if capture.is_alive():
+            if capture is not None and capture.is_alive():
                 capture.request_stop()
                 self._post("cleanup")
                 deadline = time.monotonic() + CAPTURE_SHUTDOWN_TIMEOUT_SECONDS
@@ -573,14 +613,15 @@ class DiagnosticWindow:
                         "cleanup_error",
                         {"details": "diagnostic capture child shutdown timeout"},
                     )
-            else:
+            elif capture is not None:
                 capture.join(0)
-            try:
-                capture.close(wait_for_queue=False)
-            except Exception as exc:
-                # Cleanup must never prevent an already collected report from
-                # reaching the upload step.
-                analyzer.handle("cleanup_error", {"details": str(exc)})
+            if capture is not None:
+                try:
+                    capture.close(wait_for_queue=False)
+                except Exception as exc:
+                    # Cleanup must never prevent an already collected report
+                    # from reaching the upload step.
+                    analyzer.handle("cleanup_error", {"details": str(exc)})
             self.capture_client = None
 
         try:
@@ -645,7 +686,21 @@ class DiagnosticWindow:
                 "检测中 · 原生" if source == "native" else "检测中 · 网络",
                 "normal",
             )
-            self._set_status("请持续攻击同一个伤害木桩，不要切换目标", "running")
+            template_hooks = sum(
+                bool(payload.get(key))
+                for key in (
+                    "native_boss_type_hook_installed",
+                    "native_boss_init_hook_installed",
+                    "native_template_id_hook_installed",
+                    "native_template_bulk_hook_installed",
+                )
+            )
+            self._set_step(
+                "boss",
+                f"识别入口 {template_hooks}/4",
+                "ok" if template_hooks == 4 else "warn",
+            )
+            self._set_status("请持续攻击同一个 Boss 或伤害木桩，不要切换目标", "running")
             self._set_primary("结束并上传", self._finish_early)
         elif kind == "capture_error":
             self._set_step("network", "连接异常", "error")
@@ -669,8 +724,24 @@ class DiagnosticWindow:
                 self._set_step(
                     "damage", f"伤害 {damage}", "ok" if damage else "normal"
                 )
+                boss_records = int(payload.get("boss_records", 0))
+                boss_events = int(payload.get("boss_events", 0))
+                lookup_candidates = int(payload.get("lookup_candidates", 0))
+                lookup_resolved = int(payload.get("lookup_resolved", 0))
+                if boss_events > 0:
+                    boss_text, boss_state = "已识别", "ok"
+                elif lookup_resolved > 0:
+                    boss_text, boss_state = "已读取 · 核对中", "warn"
+                elif lookup_candidates > 0:
+                    boss_text, boss_state = f"目标反查 {lookup_candidates}", "normal"
+                elif boss_records > 0:
+                    boss_text, boss_state = f"模板记录 {boss_records}", "normal"
+                else:
+                    boss_text, boss_state = "等待目标", "normal"
+                self._set_step("boss", boss_text, boss_state)
                 self._set_status(
-                    f"持续攻击同一个伤害木桩 · 剩余 {remaining} 秒", "running"
+                    f"持续攻击同一个 Boss 或伤害木桩 · 剩余 {remaining} 秒",
+                    "running",
                 )
             elif kind == "cleanup":
                 self._set_status("正在安全恢复游戏采集函数", "running")
@@ -711,6 +782,15 @@ class DiagnosticWindow:
                 }:
                     damage_state = "error"
                 self._set_step("damage", "已分析", damage_state)
+                self._set_step(
+                    "boss",
+                    "识别正常"
+                    if code in {"capture_pipeline_ok", "damage_dummy_pipeline_ok"}
+                    else "未识别 · 已定位",
+                    "ok"
+                    if code in {"capture_pipeline_ok", "damage_dummy_pipeline_ok"}
+                    else "warn",
+                )
                 self._set_step("upload", "已完成", "ok")
                 self.report_id_var.set(diagnostic_id)
                 if not self.report_row.winfo_manager():

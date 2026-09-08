@@ -9,6 +9,7 @@ $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python = Join-Path $ProjectDir ".venv-build310\Scripts\python.exe"
 $CapstoneDll = Join-Path $ProjectDir ".venv-build310\Lib\site-packages\capstone\lib\capstone.dll"
 $SourcePath = Join-Path $ProjectDir "diagnostic_report.py"
+$RuntimeProfilePath = Join-Path $ProjectDir "runtime-profile.dev.json"
 $ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)$([char]0x95EE)$([char]0x9898)$([char]0x68C0)$([char]0x6D4B)$([char]0x5DE5)$([char]0x5177)"
 $SourceText = Get-Content -LiteralPath $SourcePath -Raw -Encoding UTF8
 $VersionMatch = [regex]::Match(
@@ -41,6 +42,9 @@ if (-not (Test-Path -LiteralPath $Python)) {
 if (-not (Test-Path -LiteralPath $CapstoneDll)) {
     throw "Capstone DLL was not found: $CapstoneDll"
 }
+if (-not (Test-Path -LiteralPath $RuntimeProfilePath -PathType Leaf)) {
+    throw "Runtime profile was not found: $RuntimeProfilePath"
+}
 New-Item -ItemType Directory -Path $OutputDirectoryPath -Force | Out-Null
 
 $env:PYTHONUTF8 = "1"
@@ -65,6 +69,7 @@ try {
         --include-data-files=assets/app_icon.ico=assets/app_icon.ico `
         --include-data-files=monster_metadata.json=monster_metadata.json `
         --include-data-files=boss_allowlist.txt=boss_allowlist.txt `
+        --include-data-files=runtime-profile.dev.json=runtime-profile.json `
         --include-data-files=cacert.pem=cacert.pem `
         --file-version=$FileVersion `
         --product-version=$FileVersion `

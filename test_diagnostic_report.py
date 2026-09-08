@@ -70,8 +70,10 @@ class DiagnosticAnalyzerTests(unittest.TestCase):
         self.assertTrue(environment["elevated"])
         self.assertTrue(environment["packaged"])
 
-    def test_detects_silent_native_hook_blocking_network_fallback(self):
-        analyzer = DiagnosticAnalyzer({})
+    def test_silent_native_hook_keeps_network_fallback_active(self):
+        analyzer = DiagnosticAnalyzer(
+            {"7100001": {"boss_type": 3, "name": "娴嬭瘯 Boss"}}
+        )
         analyzer.handle(
             "connected",
             {
@@ -86,7 +88,7 @@ class DiagnosticAnalyzerTests(unittest.TestCase):
             {
                 "records": [damage_record()],
                 "native_records": [],
-                "native_boss_records": [],
+                "native_boss_records": [native_boss_record(7_100_001, 3)],
                 "native_name_records": [],
                 "native_skill_name_records": [],
                 "native_damage_hook_installed": True,
@@ -97,13 +99,14 @@ class DiagnosticAnalyzerTests(unittest.TestCase):
 
         self.assertEqual(
             report["assessment"]["code"],
-            "native_hook_silent_network_fallback_blocked",
+            "capture_pipeline_ok",
         )
         capture = report["capture"]
         self.assertEqual(capture["network_damage_positive"], 1)
         self.assertEqual(capture["native_positive_damage_records"], 0)
-        self.assertEqual(capture["network_damage_suppressed_by_native"], 1)
-        self.assertEqual(capture["forwarded_damage_events"], 0)
+        self.assertEqual(capture["network_damage_suppressed_by_native"], 0)
+        self.assertEqual(capture["parsed_damage_events"], 1)
+        self.assertEqual(capture["forwarded_damage_events"], 1)
 
     def test_confirmed_boss_network_fallback_is_displayable(self):
         analyzer = DiagnosticAnalyzer(
@@ -446,6 +449,89 @@ class DiagnosticAnalyzerTests(unittest.TestCase):
         self.assertEqual(
             report["assessment"]["code"],
             "target_lookup_exact_component_template_zero",
+        )
+
+    def test_lookup_report_identifies_local_player_target_conflict(self):
+        analyzer = DiagnosticAnalyzer(
+            {"7100001": {"boss_type": 3, "name": "测试 Boss"}}
+        )
+        analyzer.handle(
+            "connected",
+            {
+                "game_pid": 9784,
+                "native_damage_hook_installed": True,
+                "native_boss_type_hook_installed": True,
+                "native_boss_init_hook_installed": True,
+                "native_template_id_hook_installed": True,
+                "native_template_bulk_hook_installed": True,
+                "damage_source": "native",
+            },
+        )
+        analyzer.handle(
+            "batch",
+            {
+                "records": [damage_record()],
+                "native_records": [native_damage_record()],
+                "native_boss_records": [],
+                "native_name_records": [],
+                "native_skill_name_records": [],
+                "native_damage_hook_installed": True,
+                "native_diagnostic": {
+                    "target_boss_lookup_enabled": True,
+                    "target_lookup_candidates": 0,
+                    "target_lookup_skipped_local_player": 1,
+                    "damage_target_matches_local_player": 1,
+                },
+            },
+        )
+
+        report = analyzer.finish({"elevated": True})
+
+        self.assertEqual(
+            report["assessment"]["code"],
+            "target_lookup_target_matches_local_player",
+        )
+        self.assertIn("本机角色 ID", report["assessment"]["recommended_fix"])
+        pipeline = report["capture"]["pipeline_checks"]
+        self.assertEqual(pipeline["damage_decode"]["status"], "passed")
+        self.assertEqual(pipeline["target_identity"]["status"], "failed")
+        self.assertEqual(pipeline["boss_display_gate"]["status"], "failed")
+
+    def test_lookup_report_identifies_unsupported_target_id_range(self):
+        analyzer = DiagnosticAnalyzer(
+            {"7100001": {"boss_type": 3, "name": "测试 Boss"}}
+        )
+        analyzer.handle(
+            "connected",
+            {
+                "game_pid": 9784,
+                "native_damage_hook_installed": True,
+                "damage_source": "native",
+            },
+        )
+        analyzer.handle(
+            "batch",
+            {
+                "records": [damage_record()],
+                "native_records": [native_damage_record()],
+                "native_boss_records": [],
+                "native_name_records": [],
+                "native_skill_name_records": [],
+                "native_damage_hook_installed": True,
+                "native_diagnostic": {
+                    "target_boss_lookup_enabled": True,
+                    "target_lookup_candidates": 0,
+                    "target_lookup_skipped_unplausible": 1,
+                    "damage_target_id_gap": 1,
+                },
+            },
+        )
+
+        report = analyzer.finish({"elevated": True})
+
+        self.assertEqual(
+            report["assessment"]["code"],
+            "target_lookup_target_id_range_unsupported",
         )
 
 

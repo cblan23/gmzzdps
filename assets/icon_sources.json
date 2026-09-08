@@ -81,6 +81,853 @@
     }
   },
   "skills": {
+    "80001080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001091": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001100": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001111": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001120": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001121": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001130": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001131": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001140": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001141": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001150": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001151": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001160": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001161": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001170": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001171": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001180": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001181": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001190": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001191": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001200": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001201": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001210": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001211": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001220": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001221": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001230": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001231": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001240": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001241": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001250": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001251": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001260": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001261": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001270": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001271": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80001280": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "80001281": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "80003004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/Convergence_1_7_8.Convergence_1_7_8",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/Convergence_1_7_8",
+      "package_id": "f456c7b549fe2895",
+      "size": [
+        256,
+        256
+      ],
+      "sha256": "20236ea35db9b7cc831a61a5f36a2a4db9a57d7974641c6d5163bf8ccc0c3900"
+    },
+    "80003005": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/Convergence_1_7_7.Convergence_1_7_7",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/Convergence_1_7_7",
+      "package_id": "9918154cae3a424f",
+      "size": [
+        256,
+        256
+      ],
+      "sha256": "3da0900e893427513cede83389d8652598217b2fe47f64e260f9210fb11e9b06"
+    },
+    "80003036": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13.Rogue_Common_13",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13",
+      "package_id": "d5decd88769d1328",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "01511bb14a712fd599334b3feb0ba1c4d72d42f59197e8851ca1221f6e8b2df8"
+    },
+    "80003037": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13.Rogue_Common_13",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13",
+      "package_id": "d5decd88769d1328",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "01511bb14a712fd599334b3feb0ba1c4d72d42f59197e8851ca1221f6e8b2df8"
+    },
+    "80003038": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13.Rogue_Common_13",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13",
+      "package_id": "d5decd88769d1328",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "01511bb14a712fd599334b3feb0ba1c4d72d42f59197e8851ca1221f6e8b2df8"
+    },
+    "80004017": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/3240556.3240556",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Item/Large/3240556",
+      "package_id": "e7312827c52bb9b7",
+      "size": [
+        512,
+        512
+      ],
+      "sha256": "334cb5978f116d62a69f22993196d7bff222d47fe6dfd40506e04925ba51545c"
+    },
+    "800040172": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/3240556.3240556",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Item/Large/3240556",
+      "package_id": "e7312827c52bb9b7",
+      "size": [
+        512,
+        512
+      ],
+      "sha256": "334cb5978f116d62a69f22993196d7bff222d47fe6dfd40506e04925ba51545c"
+    },
+    "80010004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Sun_Skill_10.Sun_Skill_10",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Sun_Skill_10",
+      "package_id": "cf0ce50dd8ac7a06",
+      "size": [
+        112,
+        112
+      ],
+      "sha256": "bd7d9c50570776161ec1eb6099b7583d7e2055c8ac0f53a43b5084b8926b23e4"
+    },
+    "80020001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/54.54",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/54",
+      "package_id": "9f6b130e0de91c0a",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "69effa826fdcf873db2025f883e86214da880e4cbce30c3dc3c62d0aefe98b1e"
+    },
+    "80020004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13.Utopian_Skill_13",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13",
+      "package_id": "1eb8c8e13a2a0697",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "cbab4b5d969f207c880e80dc2d49632d7a7459ad03739342cbce75db6f77a56f"
+    },
+    "80020008": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13.Utopian_Skill_13",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13",
+      "package_id": "1eb8c8e13a2a0697",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "cbab4b5d969f207c880e80dc2d49632d7a7459ad03739342cbce75db6f77a56f"
+    },
+    "80030001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05",
+      "package_id": "c3a3fd5115b20a3d",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "3f41f892c17ebf5ba2026679ef3156a057582d274830a2cb2d055e74a0b4ab54"
+    },
+    "80050001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01",
+      "package_id": "e6a5306351850916",
+      "size": [
+        188,
+        248
+      ],
+      "sha256": "186d9540ab2676b09481490a66bb41f56c299f7d98fd7502f37e157fe692d1fa"
+    },
+    "80060002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17.Warrior_Skill_17",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17",
+      "package_id": "bb59831e58000135",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "7de989e8a45be16ef371c047b82bdfced757f184988935540acc1aea67eb4097"
+    },
+    "80061040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17.Warrior_Skill_17",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17",
+      "package_id": "bb59831e58000135",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "7de989e8a45be16ef371c047b82bdfced757f184988935540acc1aea67eb4097"
+    },
+    "80061080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17.Warrior_Skill_17",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17",
+      "package_id": "bb59831e58000135",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "7de989e8a45be16ef371c047b82bdfced757f184988935540acc1aea67eb4097"
+    },
+    "80075010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11.MysteryPryer_Skill_11",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11",
+      "package_id": "60db65cf4b31a0d3",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "dc24ef97a9bf44369650bc8551b8e55faa2a61bffcb51df690e7f7732efcdb11"
+    },
+    "80075011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11.MysteryPryer_Skill_11",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11",
+      "package_id": "60db65cf4b31a0d3",
+      "size": [
+        128,
+        128
+      ],
+      "sha256": "dc24ef97a9bf44369650bc8551b8e55faa2a61bffcb51df690e7f7732efcdb11"
+    },
+    "804000001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "81001264": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2003509.2003509",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Item/Large/2003509",
+      "package_id": "b8f6630467360c52",
+      "size": [
+        400,
+        400
+      ],
+      "sha256": "11f15a8efc19b6ec4f3f975cc7caa2fe1e0585cdc37707f0598d4f301db58662"
+    },
+    "81001265": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2002100.2002100",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/Item/Large/2002100",
+      "package_id": "3397916ff5741e47",
+      "size": [
+        400,
+        400
+      ],
+      "sha256": "525425a0817a08bc930cc29d580d02bf63ca4aba209151abe4dbbaac7ddb293b"
+    },
+    "81002101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "814010009": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "82030003": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/63.63",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/63",
+      "package_id": "e4790fd96555117b",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "d689c73fa22fe1aa0c2a6161b62740467f21722c2c41d1f537d5e090fba7c340"
+    },
+    "82060010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/95.95",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/95",
+      "package_id": "a805452812aca6cc",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "7b412aa8ae8e6627838352ba14a5b184d8964669907f5a04f2d09d12e008dd11"
+    },
+    "82065030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/92.92",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/92",
+      "package_id": "74c6f91b16661a43",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "decc508a3046ff763dcdbb689f505667c7f0fbb6cf3ad1c1e1a505eec683f1be"
+    },
+    "82065040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/92.92",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/92",
+      "package_id": "74c6f91b16661a43",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "decc508a3046ff763dcdbb689f505667c7f0fbb6cf3ad1c1e1a505eec683f1be"
+    },
+    "82067090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/91.91",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/91",
+      "package_id": "91733b5be1694b42",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "220bea37d69ff78ac2fa8b7ea879c9cc72f0e3cd263eec42008ffa90a48f73c5"
+    },
+    "83310350": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "83310363": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "83310364": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "83310390": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "83310420": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "83310463": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "83310623": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
     "86000001": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill09_py_Sprite.UI_Skill_Icon_FoolSkill09_py_Sprite",
       "kind": "sprite",
@@ -7384,6 +8231,17 @@
       ],
       "sha256": "d55c9f480d64bd90d52b3860a484238e6a15ebfe317f0e43bbad7bea595e89ad"
     },
+    "87912040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
     "87912052": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Element/UI_Skill_Img_Element09.UI_Skill_Img_Element09",
       "kind": "texture",
@@ -7394,6 +8252,39 @@
         208
       ],
       "sha256": "949041bfaac885435e8a1413ce391b5ee399c8892af6721b576b93accf5b90f7"
+    },
+    "87912060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
+    },
+    "87912061": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146",
+      "package_id": "3ffb916fd46870f8",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "2c104ac1bc159b18a1fad6fd82a7a7cb635da6dbd7bbdd227fb121738d973777"
+    },
+    "87912064": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
     },
     "87912078": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_08.Seer_Skill_08",
@@ -7526,6 +8417,17 @@
         128
       ],
       "sha256": "0a97ba21a8aaab446b3ee32e66f151b49a29c861b34f6c9bc706397afadb518b"
+    },
+    "87912102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "kind": "texture",
+      "package": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147",
+      "package_id": "505e7d9038e83363",
+      "size": [
+        40,
+        40
+      ],
+      "sha256": "eaa2f1a17644582d7e61620805fe6444327654d4a76fb3ed4e3a01d8f99df479"
     },
     "87913081": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Element/UI_Skill_Img_Element09.UI_Skill_Img_Element09",
@@ -12031,6 +12933,55 @@
     }
   },
   "skill_icon_aliases": {
+    "800011802": {
+      "name": "飓风之斧",
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "source_skill_ids": [
+        "80001180",
+        "80001181"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "80020002": {
+      "name": "噩梦姿态",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_18.Utopian_Skill_18",
+      "source_skill_ids": [
+        "86025040"
+      ],
+      "reason": "客户端同名技能的唯一原图",
+      "profession_ids": [
+        1200002
+      ]
+    },
+    "80302061": {
+      "name": "先祖庇护",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Secretpartner/SecretPartner_Skill_06.SecretPartner_Skill_06",
+      "source_skill_ids": [
+        "87303080",
+        "87303081",
+        "87303082",
+        "87303083",
+        "87303084",
+        "87303085"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "820600101": {
+      "name": "衰败",
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/95.95",
+      "source_skill_ids": [
+        "82060010"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "833103901": {
+      "name": "光芒牢笼",
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "source_skill_ids": [
+        "83310390"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
     "86011021": {
       "name": "飓风斧",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_03.Bard_Skill_03",
@@ -12150,6 +13101,17 @@
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_05.Bard_Skill_05",
       "source_skill_ids": [
         "86011040"
+      ],
+      "reason": "客户端同名技能的唯一原图",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "86011051": {
+      "name": "圣光净化",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_08_02.Bard_Skill_08_02",
+      "source_skill_ids": [
+        "86011050"
       ],
       "reason": "客户端同名技能的唯一原图",
       "profession_ids": [
@@ -12325,6 +13287,7 @@
       "name": "足迹再现",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01",
       "source_skill_ids": [
+        "80050001",
         "86050050",
         "86050051",
         "86052902"
@@ -12338,6 +13301,7 @@
       "name": "足迹再现",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01",
       "source_skill_ids": [
+        "80050001",
         "86050050",
         "86050051",
         "86052902"
@@ -12351,6 +13315,7 @@
       "name": "足迹再现",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01",
       "source_skill_ids": [
+        "80050001",
         "86050050",
         "86050051",
         "86052902"
@@ -12492,6 +13457,7 @@
       "name": "足迹再现",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01",
       "source_skill_ids": [
+        "80050001",
         "86050050",
         "86050051",
         "86052902"
@@ -13015,6 +13981,8 @@
       "name": "知识漩涡",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11.MysteryPryer_Skill_11",
       "source_skill_ids": [
+        "80075010",
+        "80075011",
         "86075010"
       ],
       "reason": "客户端同名技能的唯一原图",
@@ -13026,6 +13994,8 @@
       "name": "知识漩涡",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11.MysteryPryer_Skill_11",
       "source_skill_ids": [
+        "80075010",
+        "80075011",
         "86075010"
       ],
       "reason": "客户端同名技能的唯一原图",
@@ -13814,6 +14784,22 @@
       ],
       "reason": "客户端同名技能的唯一原图"
     },
+    "87907475": {
+      "name": "血谋共舞的旗帜",
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/Convergence_1_7_7.Convergence_1_7_7",
+      "source_skill_ids": [
+        "80003005"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "87907476": {
+      "name": "血谋共舞的旗帜",
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/Convergence_1_7_7.Convergence_1_7_7",
+      "source_skill_ids": [
+        "80003005"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
     "87907487": {
       "name": "记录·牌雨",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_03.Seer_Skill_03",
@@ -13952,6 +14938,22 @@
       "source_skill_ids": [
         "87000310",
         "87910223"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "87912041": {
+      "name": "恶灵",
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "source_skill_ids": [
+        "87912040"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "87912042": {
+      "name": "恶灵",
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+      "source_skill_ids": [
+        "87912040"
       ],
       "reason": "客户端同名技能的唯一原图"
     },
@@ -14152,6 +15154,33 @@
       ],
       "reason": "客户端同名技能的唯一原图"
     },
+    "88007522": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "88007535": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "88007549": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
     "88007688": {
       "name": "冲锋",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge",
@@ -14227,6 +15256,24 @@
       ],
       "reason": "客户端同名技能的唯一原图"
     },
+    "88014311": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "88014339": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
     "88016101": {
       "name": "爪击",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01",
@@ -14240,6 +15287,15 @@
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
       "source_skill_ids": [
         "89002122"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "88016604": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
       ],
       "reason": "客户端同名技能的唯一原图"
     },
@@ -14689,6 +15745,15 @@
         "87910125",
         "89001363",
         "89103340"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "89001391": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
       ],
       "reason": "客户端同名技能的唯一原图"
     },
@@ -15299,6 +16364,28 @@
         1200001
       ]
     },
+    "89004824": {
+      "name": "秩序审判",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_10.Bard_Skill_10",
+      "source_skill_ids": [
+        "86013010"
+      ],
+      "reason": "客户端同名技能的唯一原图",
+      "profession_ids": [
+        1200001
+      ]
+    },
+    "89004825": {
+      "name": "秩序审判",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_10.Bard_Skill_10",
+      "source_skill_ids": [
+        "86013010"
+      ],
+      "reason": "客户端同名技能的唯一原图",
+      "profession_ids": [
+        1200001
+      ]
+    },
     "89004827": {
       "name": "烈阳斩",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Attack_01.Bard_Attack_01",
@@ -15901,6 +16988,15 @@
         "89005740",
         "89005745",
         "89005752"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
+    "89006223": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
       ],
       "reason": "客户端同名技能的唯一原图"
     },
@@ -16536,6 +17632,15 @@
         1200005
       ]
     },
+    "89010030": {
+      "name": "闪现",
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/FellowSkill/Sprites/UI_Skill_Icon_FellowBernadel_Wghj_Sprite.UI_Skill_Icon_FellowBernadel_Wghj_Sprite",
+      "source_skill_ids": [
+        "89002116",
+        "89002117"
+      ],
+      "reason": "客户端同名技能的唯一原图"
+    },
     "89010334": {
       "name": "冲锋",
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Morph/Morph_Skill_Knight_Charge.Morph_Skill_Knight_Charge",
@@ -16882,9 +17987,7 @@
     "86040010": null,
     "86040013": null,
     "86040014": null,
-    "86040015": null,
-    "88018168": "-1",
-    "88018568": "-1"
+    "86040015": null
   },
   "failures": [],
   "resolved_routes": {
@@ -16913,14 +18016,14 @@
   "summary": {
     "profession_metadata": 7,
     "profession_pngs": 7,
-    "skill_metadata": 928,
+    "skill_metadata": 1010,
     "client_fallback_skill_routes": 15,
-    "exact_skill_pngs": 943,
-    "alias_skill_pngs": 435,
-    "alias_profession_routes": 145,
-    "skill_pngs": 1378,
-    "unique_source_paths": 312,
-    "decoded_source_paths": 312,
+    "exact_skill_pngs": 1025,
+    "alias_skill_pngs": 456,
+    "alias_profession_routes": 149,
+    "skill_pngs": 1481,
+    "unique_source_paths": 325,
+    "decoded_source_paths": 325,
     "atlas_packages": 7,
     "failures": 0
   }

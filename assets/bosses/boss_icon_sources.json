@@ -1,0 +1,3975 @@
+{
+  "schema_version": 2,
+  "client": {
+    "root": "E:\\GMZZLauncher\\Game\\C7",
+    "asset_version": "1.2018737.2018737.Online_Shipping.Windows.Cdn",
+    "config_cache": "Saved/kscache/14/4efadcdd4c7bb254c65f6f07_2097705"
+  },
+  "audited_at": "2026-09-05T22:13:38+08:00",
+  "current_boss": null,
+  "coverage": {
+    "configured_dungeons": 32,
+    "configured_dungeon_entries": 27,
+    "configured_stage_rows": 101,
+    "unique_stage_icon_sources": 33,
+    "extracted_stage_icon_sources": 33,
+    "additional_candidate_portraits": 2,
+    "training_dummy_templates_with_client_ui_icon": 10,
+    "png_files": 36,
+    "recognized_boss_templates": 84,
+    "recognized_templates_with_icon": 83,
+    "recognized_templates_without_dedicated_icon": 1,
+    "additional_client_stage_templates": 38,
+    "ambiguous_client_stage_templates": 3
+  },
+  "history_coverage": {
+    "record_files": 23,
+    "boss_template_ids": [
+      7100208,
+      7100209,
+      7100210,
+      7100215,
+      7102403,
+      7102404,
+      7102405,
+      7103401,
+      7103402,
+      7107105,
+      7109821,
+      7115026,
+      7115040,
+      7115075
+    ],
+    "mapped_template_ids": [
+      7100208,
+      7100209,
+      7100210,
+      7100215,
+      7102403,
+      7102404,
+      7102405,
+      7103401,
+      7103402,
+      7107105,
+      7109821,
+      7115026,
+      7115040,
+      7115075
+    ],
+    "unmapped_template_ids": []
+  },
+  "requested_sets": {
+    "黑荆棘事件簿": {
+      "dungeon_ids": [
+        5100002,
+        5100003,
+        5100004,
+        5100005,
+        5100006
+      ],
+      "stage_ids": [
+        5150001,
+        5150002,
+        5150003,
+        5150005,
+        5150004
+      ],
+      "stages": [
+        {
+          "stage_id": 5150001,
+          "name": "朗伯·绞索",
+          "icon": "lambert-noose.png"
+        },
+        {
+          "stage_id": 5150002,
+          "name": "每日事件",
+          "icon": "random-stage.png"
+        },
+        {
+          "stage_id": 5150003,
+          "name": "卡尔·埃德加",
+          "icon": "karl-edgar.png"
+        },
+        {
+          "stage_id": 5150005,
+          "name": "亚巴顿",
+          "icon": "head-enemy-04.png"
+        },
+        {
+          "stage_id": 5150004,
+          "name": "洛克·金",
+          "icon": "rock-king.png"
+        }
+      ]
+    },
+    "安提哥努斯笔记": {
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "stage_ids": [
+        5150038,
+        5150039,
+        5150040,
+        5150047,
+        5150048,
+        5150049
+      ],
+      "stages": [
+        {
+          "stage_id": 5150038,
+          "name": "护送马车",
+          "icon": "head-enemy-01.png"
+        },
+        {
+          "stage_id": 5150039,
+          "name": "瑞尔比伯",
+          "icon": "head-enemy-02.png"
+        },
+        {
+          "stage_id": 5150040,
+          "name": "小丑",
+          "icon": "clown.png"
+        },
+        {
+          "stage_id": 5150047,
+          "name": "护送马车",
+          "icon": "head-enemy-01.png"
+        },
+        {
+          "stage_id": 5150048,
+          "name": "瑞尔比伯",
+          "icon": "head-enemy-02.png"
+        },
+        {
+          "stage_id": 5150049,
+          "name": "小丑",
+          "icon": "clown.png"
+        }
+      ]
+    },
+    "五月庄园·花园": {
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "stage_ids": [
+        5150050,
+        5150051,
+        5150052,
+        5150058,
+        5150059,
+        5150060
+      ],
+      "stages": [
+        {
+          "stage_id": 5150050,
+          "name": "异化猎犬",
+          "icon": "mutated-hound.png"
+        },
+        {
+          "stage_id": 5150051,
+          "name": "先祖铠甲",
+          "icon": "ancestral-knight.png"
+        },
+        {
+          "stage_id": 5150052,
+          "name": "星象仪者",
+          "icon": "astrologer.png"
+        },
+        {
+          "stage_id": 5150058,
+          "name": "异化猎犬",
+          "icon": "mutated-hound.png"
+        },
+        {
+          "stage_id": 5150059,
+          "name": "先祖铠甲",
+          "icon": "ancestral-knight.png"
+        },
+        {
+          "stage_id": 5150060,
+          "name": "星象仪者",
+          "icon": "astrologer.png"
+        }
+      ]
+    },
+    "五月庄园·城堡": {
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "stage_ids": [
+        5150053,
+        5150054,
+        5150055,
+        5150061,
+        5150062,
+        5150063
+      ],
+      "stages": [
+        {
+          "stage_id": 5150053,
+          "name": "子嗣守护",
+          "icon": "descendant-guardian.png"
+        },
+        {
+          "stage_id": 5150054,
+          "name": "一号信徒",
+          "icon": "yhxt-stage.png"
+        },
+        {
+          "stage_id": 5150055,
+          "name": "子爵夫人",
+          "icon": "viscountess.png"
+        },
+        {
+          "stage_id": 5150061,
+          "name": "子嗣守护",
+          "icon": "descendant-guardian.png"
+        },
+        {
+          "stage_id": 5150062,
+          "name": "一号信徒",
+          "icon": "yhxt-stage.png"
+        },
+        {
+          "stage_id": 5150063,
+          "name": "子爵夫人",
+          "icon": "viscountess.png"
+        }
+      ]
+    }
+  },
+  "bosses": {
+    "7100004": {
+      "name": "瑞尔·比伯",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7100008": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7100201": {
+      "name": "安西娅",
+      "icon": "anxia.png",
+      "confidence": "candidate",
+      "stage_ids": [
+        5150054,
+        5150062
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false,
+      "note": "客户端未配置独立 BossHead；使用同角色 SecretPartner 原始头像。"
+    },
+    "7100202": {
+      "name": "巴尼先生",
+      "icon": "mr-barney.png",
+      "confidence": "candidate",
+      "stage_ids": [
+        5150054,
+        5150062
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false,
+      "note": "客户端未配置独立 BossHead；使用同角色 SecretPartner 原始头像。"
+    },
+    "7100203": {
+      "name": "安西娅",
+      "icon": "anxia.png",
+      "confidence": "candidate",
+      "stage_ids": [
+        5150054,
+        5150062
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false,
+      "note": "客户端未配置独立 BossHead；使用同角色 SecretPartner 原始头像。"
+    },
+    "7100208": {
+      "name": "安西娅",
+      "icon": "anxia.png",
+      "confidence": "candidate",
+      "stage_ids": [
+        5150054,
+        5150062
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": true,
+      "note": "客户端未配置独立 BossHead；使用同角色 SecretPartner 原始头像。"
+    },
+    "7100209": {
+      "name": "巴尼先生",
+      "icon": "mr-barney.png",
+      "confidence": "candidate",
+      "stage_ids": [
+        5150054,
+        5150062
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": true,
+      "note": "客户端未配置独立 BossHead；使用同角色 SecretPartner 原始头像。"
+    },
+    "7100210": {
+      "name": "安西娅",
+      "icon": "anxia.png",
+      "confidence": "candidate",
+      "stage_ids": [
+        5150054,
+        5150062
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": true,
+      "note": "客户端未配置独立 BossHead；使用同角色 SecretPartner 原始头像。"
+    },
+    "7100215": {
+      "name": "子嗣守护",
+      "icon": "descendant-guardian.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150053,
+        5150061
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": true
+    },
+    "7100625": {
+      "name": "战争巨龙",
+      "icon": "war-dragon.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150104,
+        5150108,
+        5150111
+      ],
+      "dungeon_ids": [
+        5100067,
+        5100071,
+        5100074
+      ],
+      "observed_in_history": false
+    },
+    "7100628": {
+      "name": "战争巨龙",
+      "icon": "war-dragon.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150104,
+        5150108,
+        5150111
+      ],
+      "dungeon_ids": [
+        5100067,
+        5100071,
+        5100074
+      ],
+      "observed_in_history": false
+    },
+    "7100632": {
+      "name": "伤害木桩",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7101004": {
+      "name": "伤害木桩",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7101017": {
+      "name": "战场木桩怪",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7101018": {
+      "name": "战场小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7101025": {
+      "name": "伤害木桩(免疫位移）",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7101026": {
+      "name": "周本-瑞尔比伯",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7101027": {
+      "name": "英雄周本-瑞尔比伯",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7101029": {
+      "name": "伤害木桩(匀速移动）",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7101030": {
+      "name": "伤害木桩(闪避移动）",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7102030": {
+      "name": "瑞尔·比伯",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7102046": {
+      "name": "瑞尔·比伯",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7102047": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7102048": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7102400": {
+      "name": "星象仪者",
+      "icon": "astrologer.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150052,
+        5150060
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": false
+    },
+    "7102401": {
+      "name": "禁锢",
+      "icon": "astrologer.png",
+      "confidence": "encounter_auxiliary_shared",
+      "stage_ids": [
+        5150052,
+        5150060
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": false,
+      "note": "机制目标沿用所属首领的关卡头像。"
+    },
+    "7102402": {
+      "name": "星光守卫",
+      "icon": "astrologer.png",
+      "confidence": "encounter_auxiliary_shared",
+      "stage_ids": [
+        5150052,
+        5150060
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": false,
+      "note": "机制目标沿用所属首领的关卡头像。"
+    },
+    "7102403": {
+      "name": "星象仪者",
+      "icon": "astrologer.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150052,
+        5150060
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": true
+    },
+    "7102404": {
+      "name": "禁锢",
+      "icon": "astrologer.png",
+      "confidence": "encounter_auxiliary_shared",
+      "stage_ids": [
+        5150052,
+        5150060
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": true,
+      "note": "机制目标沿用所属首领的关卡头像。"
+    },
+    "7102405": {
+      "name": "星光守卫",
+      "icon": "astrologer.png",
+      "confidence": "encounter_auxiliary_shared",
+      "stage_ids": [
+        5150052,
+        5150060
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": true,
+      "note": "机制目标沿用所属首领的关卡头像。"
+    },
+    "7102834": {
+      "name": "瑞尔·比伯",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7102835": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7102873": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7102932": {
+      "name": "子爵夫人",
+      "icon": "viscountess.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150055,
+        5150063
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false
+    },
+    "7102936": {
+      "name": "子爵夫人-神话姿态",
+      "icon": "viscountess.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150055,
+        5150063
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false
+    },
+    "7102938": {
+      "name": "子嗣守护",
+      "icon": "descendant-guardian.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150053,
+        5150061
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false
+    },
+    "7102980": {
+      "name": "一号信徒",
+      "icon": "yhxt-stage.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150054,
+        5150062
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false
+    },
+    "7102990": {
+      "name": "子爵夫人",
+      "icon": "viscountess.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150055,
+        5150063
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false
+    },
+    "7102991": {
+      "name": "子爵夫人-神话姿态",
+      "icon": "viscountess.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150055,
+        5150063
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false
+    },
+    "7103001": {
+      "name": "瑞尔·比伯",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7103008": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7103012": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7103206": {
+      "name": "伯德温·威瑟尔",
+      "icon": "ancestral-knight.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150051,
+        5150059
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": false
+    },
+    "7103210": {
+      "name": "先祖铠甲",
+      "icon": "ancestral-knight.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150051,
+        5150059
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": false
+    },
+    "7103301": {
+      "name": "瑞尔比伯",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7103309": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7103312": {
+      "name": "小丑分身",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7103401": {
+      "name": "伯德温·威瑟尔",
+      "icon": "ancestral-knight.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150051,
+        5150059
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": true
+    },
+    "7103402": {
+      "name": "先祖铠甲",
+      "icon": "ancestral-knight.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150051,
+        5150059
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": true
+    },
+    "7106130": {
+      "name": "子爵夫人",
+      "icon": "viscountess.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150055,
+        5150063
+      ],
+      "dungeon_ids": [
+        5100047,
+        5100055
+      ],
+      "observed_in_history": false
+    },
+    "7107030": {
+      "name": "卡尔·埃德加",
+      "icon": "karl-edgar.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150003
+      ],
+      "dungeon_ids": [
+        5100004
+      ],
+      "observed_in_history": false
+    },
+    "7107081": {
+      "name": "卡尔·埃德加",
+      "icon": "karl-edgar.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150003
+      ],
+      "dungeon_ids": [
+        5100004
+      ],
+      "observed_in_history": false
+    },
+    "7107105": {
+      "name": "朗伯·绞索",
+      "icon": "lambert-noose.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150001
+      ],
+      "dungeon_ids": [
+        5100002
+      ],
+      "observed_in_history": true
+    },
+    "7107121": {
+      "name": "冰牢",
+      "icon": "lambert-noose.png",
+      "confidence": "encounter_auxiliary_shared",
+      "stage_ids": [
+        5150001
+      ],
+      "dungeon_ids": [
+        5100002
+      ],
+      "observed_in_history": false,
+      "note": "机制目标沿用所属首领的关卡头像。"
+    },
+    "7107352": {
+      "name": "亚巴顿",
+      "icon": "head-enemy-04.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150005
+      ],
+      "dungeon_ids": [
+        5100005
+      ],
+      "observed_in_history": false
+    },
+    "7107450": {
+      "name": "亚巴顿",
+      "icon": "head-enemy-04.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150005
+      ],
+      "dungeon_ids": [
+        5100005
+      ],
+      "observed_in_history": false
+    },
+    "7109004": {
+      "name": "瑞尔·比伯（精英）",
+      "icon": "head-enemy-02.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150022,
+        5150026,
+        5150039,
+        5150048
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7109005": {
+      "name": "小丑（精英）",
+      "icon": "clown.png",
+      "confidence": "stage_shared",
+      "stage_ids": [
+        5150023,
+        5150027,
+        5150040,
+        5150049
+      ],
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "observed_in_history": false
+    },
+    "7109801": {
+      "name": "异化猎犬",
+      "icon": "mutated-hound.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150050,
+        5150058
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": false
+    },
+    "7109821": {
+      "name": "异化猎犬",
+      "icon": "mutated-hound.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150050,
+        5150058
+      ],
+      "dungeon_ids": [
+        5100045,
+        5100054
+      ],
+      "observed_in_history": true
+    },
+    "7110581": {
+      "name": "洛克·金",
+      "icon": "rock-king.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150004
+      ],
+      "dungeon_ids": [
+        5100006
+      ],
+      "observed_in_history": false
+    },
+    "7110641": {
+      "name": "洛克·金·失控",
+      "icon": "rock-king.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150004
+      ],
+      "dungeon_ids": [
+        5100006
+      ],
+      "observed_in_history": false
+    },
+    "7110642": {
+      "name": "洛克·金",
+      "icon": "rock-king.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150004
+      ],
+      "dungeon_ids": [
+        5100006
+      ],
+      "observed_in_history": false
+    },
+    "7110810": {
+      "name": "“钻头”",
+      "icon": "drill-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150106,
+        5150110
+      ],
+      "dungeon_ids": [
+        5100069,
+        5100073
+      ],
+      "observed_in_history": false
+    },
+    "7110817": {
+      "name": "“钻头”",
+      "icon": "drill-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150106,
+        5150110
+      ],
+      "dungeon_ids": [
+        5100069,
+        5100073
+      ],
+      "observed_in_history": false
+    },
+    "7110820": {
+      "name": "\"剥面人\" 强尼",
+      "icon": "johnny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150103,
+        5150107
+      ],
+      "dungeon_ids": [
+        5100066,
+        5100070
+      ],
+      "observed_in_history": false
+    },
+    "7110825": {
+      "name": "\"剥面人\" 强尼",
+      "icon": "johnny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150103,
+        5150107
+      ],
+      "dungeon_ids": [
+        5100066,
+        5100070
+      ],
+      "observed_in_history": false
+    },
+    "7111001": {
+      "name": "邦尼",
+      "icon": "bunny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150105,
+        5150109
+      ],
+      "dungeon_ids": [
+        5100068,
+        5100072
+      ],
+      "observed_in_history": false
+    },
+    "7114223": {
+      "name": "伤害木桩",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7114225": {
+      "name": "伤害木桩",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7114227": {
+      "name": "伤害木桩",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7114233": {
+      "name": "伤害木桩",
+      "icon": "training-dummy.png",
+      "confidence": "client_ui_shared",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
+    },
+    "7115020": {
+      "name": "\"剥面人\" 强尼",
+      "icon": "johnny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150103,
+        5150107
+      ],
+      "dungeon_ids": [
+        5100066,
+        5100070
+      ],
+      "observed_in_history": false
+    },
+    "7115026": {
+      "name": "\"剥面人\" 强尼",
+      "icon": "johnny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150103,
+        5150107
+      ],
+      "dungeon_ids": [
+        5100066,
+        5100070
+      ],
+      "observed_in_history": true
+    },
+    "7115040": {
+      "name": "战争巨龙",
+      "icon": "war-dragon.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150104,
+        5150108,
+        5150111
+      ],
+      "dungeon_ids": [
+        5100067,
+        5100071,
+        5100074
+      ],
+      "observed_in_history": true
+    },
+    "7115041": {
+      "name": "战争巨龙",
+      "icon": "war-dragon.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150104,
+        5150108,
+        5150111
+      ],
+      "dungeon_ids": [
+        5100067,
+        5100071,
+        5100074
+      ],
+      "observed_in_history": false
+    },
+    "7115042": {
+      "name": "战争巨龙",
+      "icon": "war-dragon.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150104,
+        5150108,
+        5150111
+      ],
+      "dungeon_ids": [
+        5100067,
+        5100071,
+        5100074
+      ],
+      "observed_in_history": false
+    },
+    "7115060": {
+      "name": "邦尼",
+      "icon": "bunny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150105,
+        5150109
+      ],
+      "dungeon_ids": [
+        5100068,
+        5100072
+      ],
+      "observed_in_history": false
+    },
+    "7115075": {
+      "name": "邦尼",
+      "icon": "bunny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150105,
+        5150109
+      ],
+      "dungeon_ids": [
+        5100068,
+        5100072
+      ],
+      "observed_in_history": true
+    },
+    "7115080": {
+      "name": "“钻头”",
+      "icon": "drill-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150106,
+        5150110
+      ],
+      "dungeon_ids": [
+        5100069,
+        5100073
+      ],
+      "observed_in_history": false
+    },
+    "7115090": {
+      "name": "“钻头”",
+      "icon": "drill-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150106,
+        5150110
+      ],
+      "dungeon_ids": [
+        5100069,
+        5100073
+      ],
+      "observed_in_history": false
+    },
+    "7115300": {
+      "name": "邦尼",
+      "icon": "bunny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150105,
+        5150109
+      ],
+      "dungeon_ids": [
+        5100068,
+        5100072
+      ],
+      "observed_in_history": false
+    },
+    "7115310": {
+      "name": "邦尼",
+      "icon": "bunny-memory.png",
+      "confidence": "direct",
+      "stage_ids": [
+        5150105,
+        5150109
+      ],
+      "dungeon_ids": [
+        5100068,
+        5100072
+      ],
+      "observed_in_history": false
+    },
+    "7265156": {
+      "name": "梦境捕手",
+      "icon": null,
+      "confidence": "unavailable",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": false,
+      "note": "客户端 MonsterData.HeadInfoIcon 为空，且没有对应的 StageData.StageIcon。"
+    }
+  },
+  "client_stage_templates": {
+    "7100013": {
+      "name": "杰森",
+      "icon": "lambert-noose.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150012,
+        5150029
+      ]
+    },
+    "7100058": {
+      "name": "绯红意志",
+      "icon": "head-enemy-08.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150032
+      ]
+    },
+    "7100301": {
+      "name": "厄水巨龟",
+      "icon": "evil-water-turtle.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150070,
+        5150073
+      ]
+    },
+    "7100341": {
+      "name": "舞王狒哥",
+      "icon": "dance-king-baboon.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150071,
+        5150074
+      ]
+    },
+    "7100361": {
+      "name": "舞王狒哥",
+      "icon": "dance-king-baboon.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150071,
+        5150074
+      ]
+    },
+    "7100371": {
+      "name": "西尔维娅",
+      "icon": "sylvia.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150072,
+        5150075
+      ]
+    },
+    "7100401": {
+      "name": "厄水巨龟",
+      "icon": "evil-water-turtle.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150070,
+        5150073
+      ]
+    },
+    "7100441": {
+      "name": "舞王狒哥",
+      "icon": "dance-king-baboon.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150071,
+        5150074
+      ]
+    },
+    "7100471": {
+      "name": "西尔维娅",
+      "icon": "sylvia.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150072,
+        5150075
+      ]
+    },
+    "7100472": {
+      "name": "西尔维娅",
+      "icon": "sylvia.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150072,
+        5150075
+      ]
+    },
+    "7101021": {
+      "name": "绯红意志",
+      "icon": "head-enemy-08.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150032
+      ]
+    },
+    "7102010": {
+      "name": "泰尔",
+      "icon": "head-enemy-05.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150011,
+        5150028
+      ]
+    },
+    "7102011": {
+      "name": "史蒂夫",
+      "icon": "head-enemy-04.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150013,
+        5150030
+      ]
+    },
+    "7102033": {
+      "name": "绯红意志",
+      "icon": "head-enemy-08.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150032
+      ]
+    },
+    "7102063": {
+      "name": "绯红意志",
+      "icon": "head-enemy-08.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150032
+      ]
+    },
+    "7102096": {
+      "name": "绯红意志",
+      "icon": "head-enemy-08.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150032
+      ]
+    },
+    "7104820": {
+      "name": "佛尔思",
+      "icon": "sasriel.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150076,
+        5150079,
+        5150082
+      ]
+    },
+    "7104871": {
+      "name": "佛尔思",
+      "icon": "sasriel.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150076,
+        5150079,
+        5150082
+      ]
+    },
+    "7105900": {
+      "name": "苹果骑士",
+      "icon": "sasriel.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150087,
+        5150090
+      ]
+    },
+    "7107300": {
+      "name": "史蒂夫",
+      "icon": "head-enemy-04.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150013,
+        5150030
+      ]
+    },
+    "7108005": {
+      "name": "阿蒙分身",
+      "icon": "amon-clone.png",
+      "confidence": "reviewed_alias",
+      "stage_ids": [
+        5150042,
+        5150065,
+        5150093,
+        5150094
+      ]
+    },
+    "7108100": {
+      "name": "咕噜",
+      "icon": "goulu.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150041,
+        5150064
+      ]
+    },
+    "7108150": {
+      "name": "阿蒙分身",
+      "icon": "amon-clone.png",
+      "confidence": "reviewed_alias",
+      "stage_ids": [
+        5150042,
+        5150065,
+        5150093,
+        5150094
+      ]
+    },
+    "7108200": {
+      "name": "乌黯魔狼",
+      "icon": "dark-wolf.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150043,
+        5150066
+      ]
+    },
+    "7108250": {
+      "name": "梅迪奇残影",
+      "icon": "medici-remnant.png",
+      "confidence": "reviewed_alias",
+      "stage_ids": []
+    },
+    "7108300": {
+      "name": "米尔贡根",
+      "icon": "milgongen.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150045,
+        5150068
+      ]
+    },
+    "7108301": {
+      "name": "米尔贡根",
+      "icon": "milgongen.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150045,
+        5150068
+      ]
+    },
+    "7108350": {
+      "name": "萨斯利尔",
+      "icon": "sasriel.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150046,
+        5150069
+      ]
+    },
+    "7109100": {
+      "name": "咕噜",
+      "icon": "goulu.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150041,
+        5150064
+      ]
+    },
+    "7109200": {
+      "name": "阿蒙分身",
+      "icon": "amon-clone.png",
+      "confidence": "reviewed_alias",
+      "stage_ids": [
+        5150042,
+        5150065,
+        5150093,
+        5150094
+      ]
+    },
+    "7109400": {
+      "name": "梅迪奇残影",
+      "icon": "medici-remnant.png",
+      "confidence": "reviewed_alias",
+      "stage_ids": []
+    },
+    "7109500": {
+      "name": "米尔贡根",
+      "icon": "milgongen.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150045,
+        5150068
+      ]
+    },
+    "7109501": {
+      "name": "米尔贡根",
+      "icon": "milgongen.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150045,
+        5150068
+      ]
+    },
+    "7109600": {
+      "name": "萨斯利尔",
+      "icon": "sasriel.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150046,
+        5150069
+      ]
+    },
+    "7109900": {
+      "name": "乌黯魔狼",
+      "icon": "dark-wolf.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150043,
+        5150066
+      ]
+    },
+    "7110200": {
+      "name": "罗塞尔的残留意志",
+      "icon": "roselle-will.png",
+      "confidence": "reviewed_alias",
+      "stage_ids": []
+    },
+    "7110208": {
+      "name": "罗塞尔的残留意志",
+      "icon": "roselle-will.png",
+      "confidence": "reviewed_alias",
+      "stage_ids": []
+    },
+    "7190025": {
+      "name": "绯红意志",
+      "icon": "head-enemy-08.png",
+      "confidence": "client_stage_name",
+      "stage_ids": [
+        5150032
+      ]
+    }
+  },
+  "ambiguous_client_stage_templates": {
+    "7102034": {
+      "name": "阿蒙",
+      "icon_candidates": [
+        "head-enemy-08.png",
+        "lambert-noose.png"
+      ],
+      "reason": "同名关卡配置了不同头像，必须结合 StageId/DungeonId。"
+    },
+    "7102037": {
+      "name": "阿蒙",
+      "icon_candidates": [
+        "head-enemy-08.png",
+        "lambert-noose.png"
+      ],
+      "reason": "同名关卡配置了不同头像，必须结合 StageId/DungeonId。"
+    },
+    "7102059": {
+      "name": "阿蒙",
+      "icon_candidates": [
+        "head-enemy-08.png",
+        "lambert-noose.png"
+      ],
+      "reason": "同名关卡配置了不同头像，必须结合 StageId/DungeonId。"
+    }
+  },
+  "stage_name_index": {
+    "一号信徒": [
+      {
+        "icon": "yhxt-stage.png",
+        "stage_ids": [
+          5150054,
+          5150062
+        ]
+      }
+    ],
+    "乌黯魔狼": [
+      {
+        "icon": "dark-wolf.png",
+        "stage_ids": [
+          5150043,
+          5150066
+        ]
+      }
+    ],
+    "亚巴顿": [
+      {
+        "icon": "head-enemy-04.png",
+        "stage_ids": [
+          5150005
+        ]
+      }
+    ],
+    "佛尔思": [
+      {
+        "icon": "sasriel.png",
+        "stage_ids": [
+          5150076,
+          5150079,
+          5150082
+        ]
+      }
+    ],
+    "先祖铠甲": [
+      {
+        "icon": "ancestral-knight.png",
+        "stage_ids": [
+          5150051,
+          5150059
+        ]
+      }
+    ],
+    "卡尔·埃德加": [
+      {
+        "icon": "karl-edgar.png",
+        "stage_ids": [
+          5150003
+        ]
+      }
+    ],
+    "厄水巨龟": [
+      {
+        "icon": "evil-water-turtle.png",
+        "stage_ids": [
+          5150070,
+          5150073
+        ]
+      }
+    ],
+    "原始月亮": [
+      {
+        "icon": "head-enemy-04.png",
+        "stage_ids": [
+          5150024
+        ]
+      }
+    ],
+    "史蒂夫": [
+      {
+        "icon": "head-enemy-04.png",
+        "stage_ids": [
+          5150013,
+          5150030
+        ]
+      }
+    ],
+    "咕噜": [
+      {
+        "icon": "goulu.png",
+        "stage_ids": [
+          5150041,
+          5150064
+        ]
+      }
+    ],
+    "奥黛丽": [
+      {
+        "icon": "character-head-03.png",
+        "stage_ids": [
+          5150034
+        ]
+      },
+      {
+        "icon": "sasriel.png",
+        "stage_ids": [
+          5150078,
+          5150081,
+          5150084
+        ]
+      }
+    ],
+    "子嗣守护": [
+      {
+        "icon": "descendant-guardian.png",
+        "stage_ids": [
+          5150053,
+          5150061
+        ]
+      }
+    ],
+    "子爵夫人": [
+      {
+        "icon": "viscountess.png",
+        "stage_ids": [
+          5150055,
+          5150063
+        ]
+      }
+    ],
+    "小丑": [
+      {
+        "icon": "clown.png",
+        "stage_ids": [
+          5150023,
+          5150027,
+          5150040,
+          5150049
+        ]
+      }
+    ],
+    "小红帽与外婆": [
+      {
+        "icon": "sasriel.png",
+        "stage_ids": [
+          5150089,
+          5150092
+        ]
+      }
+    ],
+    "廷根湖": [
+      {
+        "icon": "head-enemy-05.png",
+        "stage_ids": [
+          5150020
+        ]
+      }
+    ],
+    "异化猎犬": [
+      {
+        "icon": "mutated-hound.png",
+        "stage_ids": [
+          5150050,
+          5150058
+        ]
+      }
+    ],
+    "强尼": [
+      {
+        "icon": "johnny-memory.png",
+        "stage_ids": [
+          5150103,
+          5150107
+        ]
+      }
+    ],
+    "战争巨龙": [
+      {
+        "icon": "war-dragon.png",
+        "stage_ids": [
+          5150104,
+          5150108,
+          5150111
+        ]
+      }
+    ],
+    "戴里克": [
+      {
+        "icon": "character-head-02.png",
+        "stage_ids": [
+          5150035
+        ]
+      },
+      {
+        "icon": "sasriel.png",
+        "stage_ids": [
+          5150077,
+          5150080,
+          5150083
+        ]
+      }
+    ],
+    "护送马车": [
+      {
+        "icon": "head-enemy-01.png",
+        "stage_ids": [
+          5150025,
+          5150038,
+          5150047
+        ]
+      }
+    ],
+    "救赎蔷薇": [
+      {
+        "icon": "medici-remnant.png",
+        "stage_ids": [
+          5150044,
+          5150067
+        ]
+      }
+    ],
+    "日常秘境·三": [
+      {
+        "icon": "head-enemy-01.png",
+        "stage_ids": [
+          5150086
+        ]
+      },
+      {
+        "icon": "head-enemy-02.png",
+        "stage_ids": [
+          5150085
+        ]
+      }
+    ],
+    "星象仪者": [
+      {
+        "icon": "astrologer.png",
+        "stage_ids": [
+          5150052,
+          5150060
+        ]
+      }
+    ],
+    "月亮仆从": [
+      {
+        "icon": "head-enemy-08.png",
+        "stage_ids": [
+          5150031
+        ]
+      }
+    ],
+    "朗伯·绞索": [
+      {
+        "icon": "lambert-noose.png",
+        "stage_ids": [
+          5150001
+        ]
+      }
+    ],
+    "杰森": [
+      {
+        "icon": "lambert-noose.png",
+        "stage_ids": [
+          5150012,
+          5150029
+        ]
+      }
+    ],
+    "梅林与休": [
+      {
+        "icon": "character-head-01.png",
+        "stage_ids": [
+          5150036
+        ]
+      }
+    ],
+    "每日事件": [
+      {
+        "icon": "random-stage.png",
+        "stage_ids": [
+          5150002
+        ]
+      }
+    ],
+    "泰尔": [
+      {
+        "icon": "head-enemy-05.png",
+        "stage_ids": [
+          5150011,
+          5150028
+        ]
+      }
+    ],
+    "洛克·金": [
+      {
+        "icon": "rock-king.png",
+        "stage_ids": [
+          5150004
+        ]
+      }
+    ],
+    "灰姑娘舞会": [
+      {
+        "icon": "sasriel.png",
+        "stage_ids": [
+          5150088,
+          5150091
+        ]
+      }
+    ],
+    "爬塔本白盒": [
+      {
+        "icon": "head-enemy-05.png",
+        "stage_ids": [
+          5150037
+        ]
+      }
+    ],
+    "瑞尔比伯": [
+      {
+        "icon": "head-enemy-02.png",
+        "stage_ids": [
+          5150022,
+          5150026,
+          5150039,
+          5150048
+        ]
+      }
+    ],
+    "秘境·上": [
+      {
+        "icon": "head-enemy-02.png",
+        "stage_ids": [
+          5150056
+        ]
+      }
+    ],
+    "秘境·下": [
+      {
+        "icon": "head-enemy-01.png",
+        "stage_ids": [
+          5150057
+        ]
+      }
+    ],
+    "第1层": [
+      {
+        "icon": "random-stage.png",
+        "stage_ids": [
+          5150097
+        ]
+      }
+    ],
+    "第2层": [
+      {
+        "icon": "random-stage.png",
+        "stage_ids": [
+          5150098
+        ]
+      }
+    ],
+    "第3层": [
+      {
+        "icon": "random-stage.png",
+        "stage_ids": [
+          5150099
+        ]
+      }
+    ],
+    "第4层": [
+      {
+        "icon": "random-stage.png",
+        "stage_ids": [
+          5150100
+        ]
+      }
+    ],
+    "第5层": [
+      {
+        "icon": "random-stage.png",
+        "stage_ids": [
+          5150101
+        ]
+      }
+    ],
+    "第6层": [
+      {
+        "icon": "random-stage.png",
+        "stage_ids": [
+          5150102
+        ]
+      }
+    ],
+    "米尔贡根": [
+      {
+        "icon": "milgongen.png",
+        "stage_ids": [
+          5150045,
+          5150068
+        ]
+      }
+    ],
+    "绯红意志": [
+      {
+        "icon": "head-enemy-08.png",
+        "stage_ids": [
+          5150032
+        ]
+      }
+    ],
+    "罗塞尔的意志": [
+      {
+        "icon": "roselle-will.png",
+        "stage_ids": [
+          5150095,
+          5150096,
+          5150112
+        ]
+      }
+    ],
+    "舞王狒哥": [
+      {
+        "icon": "dance-king-baboon.png",
+        "stage_ids": [
+          5150071,
+          5150074
+        ]
+      }
+    ],
+    "苹果骑士": [
+      {
+        "icon": "sasriel.png",
+        "stage_ids": [
+          5150087,
+          5150090
+        ]
+      }
+    ],
+    "萨斯利尔": [
+      {
+        "icon": "sasriel.png",
+        "stage_ids": [
+          5150046,
+          5150069
+        ]
+      }
+    ],
+    "西尔维娅": [
+      {
+        "icon": "sylvia.png",
+        "stage_ids": [
+          5150072,
+          5150075
+        ]
+      }
+    ],
+    "邦尼": [
+      {
+        "icon": "bunny-memory.png",
+        "stage_ids": [
+          5150105,
+          5150109
+        ]
+      }
+    ],
+    "钻头": [
+      {
+        "icon": "drill-memory.png",
+        "stage_ids": [
+          5150106,
+          5150110
+        ]
+      }
+    ],
+    "阿蒙": [
+      {
+        "icon": "head-enemy-08.png",
+        "stage_ids": [
+          5150033
+        ]
+      },
+      {
+        "icon": "lambert-noose.png",
+        "stage_ids": [
+          5150021
+        ]
+      }
+    ],
+    "阿蒙分身": [
+      {
+        "icon": "amon-clone.png",
+        "stage_ids": [
+          5150042,
+          5150065
+        ]
+      },
+      {
+        "icon": "sasriel.png",
+        "stage_ids": [
+          5150093,
+          5150094
+        ]
+      }
+    ]
+  },
+  "stages": {
+    "5150001": {
+      "name": "朗伯·绞索",
+      "icon": "lambert-noose.png",
+      "dungeon_ids": [
+        5100002
+      ],
+      "dungeon_names": [
+        "哀嚎黑市"
+      ]
+    },
+    "5150002": {
+      "name": "每日事件",
+      "icon": "random-stage.png",
+      "dungeon_ids": [
+        5100003
+      ],
+      "dungeon_names": [
+        "值夜模式"
+      ]
+    },
+    "5150003": {
+      "name": "卡尔·埃德加",
+      "icon": "karl-edgar.png",
+      "dungeon_ids": [
+        5100004
+      ],
+      "dungeon_names": [
+        "窥秘的角落"
+      ]
+    },
+    "5150004": {
+      "name": "洛克·金",
+      "icon": "rock-king.png",
+      "dungeon_ids": [
+        5100006
+      ],
+      "dungeon_names": [
+        "黄金之罪"
+      ]
+    },
+    "5150005": {
+      "name": "亚巴顿",
+      "icon": "head-enemy-04.png",
+      "dungeon_ids": [
+        5100005
+      ],
+      "dungeon_names": [
+        "亡者疑踪"
+      ]
+    },
+    "5150011": {
+      "name": "泰尔",
+      "icon": "head-enemy-05.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150012": {
+      "name": "杰森",
+      "icon": "lambert-noose.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150013": {
+      "name": "史蒂夫",
+      "icon": "head-enemy-04.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150020": {
+      "name": "廷根湖",
+      "icon": "head-enemy-05.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150021": {
+      "name": "阿蒙",
+      "icon": "lambert-noose.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150022": {
+      "name": "瑞尔比伯",
+      "icon": "head-enemy-02.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150023": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150024": {
+      "name": "原始月亮",
+      "icon": "head-enemy-04.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150025": {
+      "name": "护送马车",
+      "icon": "head-enemy-01.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150026": {
+      "name": "瑞尔比伯",
+      "icon": "head-enemy-02.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150027": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150028": {
+      "name": "泰尔",
+      "icon": "head-enemy-05.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150029": {
+      "name": "杰森",
+      "icon": "lambert-noose.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150030": {
+      "name": "史蒂夫",
+      "icon": "head-enemy-04.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150031": {
+      "name": "月亮仆从",
+      "icon": "head-enemy-08.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150032": {
+      "name": "绯红意志",
+      "icon": "head-enemy-08.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150033": {
+      "name": "阿蒙",
+      "icon": "head-enemy-08.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150034": {
+      "name": "奥黛丽",
+      "icon": "character-head-03.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150035": {
+      "name": "戴里克",
+      "icon": "character-head-02.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150036": {
+      "name": "梅林与休",
+      "icon": "character-head-01.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150037": {
+      "name": "爬塔本白盒",
+      "icon": "head-enemy-05.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150038": {
+      "name": "护送马车",
+      "icon": "head-enemy-01.png",
+      "dungeon_ids": [
+        5100040
+      ],
+      "dungeon_names": [
+        "安提哥努斯笔记"
+      ]
+    },
+    "5150039": {
+      "name": "瑞尔比伯",
+      "icon": "head-enemy-02.png",
+      "dungeon_ids": [
+        5100040
+      ],
+      "dungeon_names": [
+        "安提哥努斯笔记"
+      ]
+    },
+    "5150040": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "dungeon_ids": [
+        5100040
+      ],
+      "dungeon_names": [
+        "安提哥努斯笔记"
+      ]
+    },
+    "5150041": {
+      "name": "咕噜",
+      "icon": "goulu.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150042": {
+      "name": "阿蒙分身",
+      "icon": "amon-clone.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150043": {
+      "name": "乌黯魔狼",
+      "icon": "dark-wolf.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150044": {
+      "name": "救赎蔷薇",
+      "icon": "medici-remnant.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150045": {
+      "name": "米尔贡根",
+      "icon": "milgongen.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150046": {
+      "name": "萨斯利尔",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150047": {
+      "name": "护送马车",
+      "icon": "head-enemy-01.png",
+      "dungeon_ids": [
+        5100044
+      ],
+      "dungeon_names": [
+        "安提哥努斯笔记"
+      ]
+    },
+    "5150048": {
+      "name": "瑞尔比伯",
+      "icon": "head-enemy-02.png",
+      "dungeon_ids": [
+        5100044
+      ],
+      "dungeon_names": [
+        "安提哥努斯笔记"
+      ]
+    },
+    "5150049": {
+      "name": "小丑",
+      "icon": "clown.png",
+      "dungeon_ids": [
+        5100044
+      ],
+      "dungeon_names": [
+        "安提哥努斯笔记"
+      ]
+    },
+    "5150050": {
+      "name": "异化猎犬",
+      "icon": "mutated-hound.png",
+      "dungeon_ids": [
+        5100045
+      ],
+      "dungeon_names": [
+        "五月庄园·花园"
+      ]
+    },
+    "5150051": {
+      "name": "先祖铠甲",
+      "icon": "ancestral-knight.png",
+      "dungeon_ids": [
+        5100045
+      ],
+      "dungeon_names": [
+        "五月庄园·花园"
+      ]
+    },
+    "5150052": {
+      "name": "星象仪者",
+      "icon": "astrologer.png",
+      "dungeon_ids": [
+        5100045
+      ],
+      "dungeon_names": [
+        "五月庄园·花园"
+      ]
+    },
+    "5150053": {
+      "name": "子嗣守护",
+      "icon": "descendant-guardian.png",
+      "dungeon_ids": [
+        5100047
+      ],
+      "dungeon_names": [
+        "五月庄园·城堡"
+      ]
+    },
+    "5150054": {
+      "name": "一号信徒",
+      "icon": "yhxt-stage.png",
+      "dungeon_ids": [
+        5100047
+      ],
+      "dungeon_names": [
+        "五月庄园·城堡"
+      ]
+    },
+    "5150055": {
+      "name": "子爵夫人",
+      "icon": "viscountess.png",
+      "dungeon_ids": [
+        5100047
+      ],
+      "dungeon_names": [
+        "五月庄园·城堡"
+      ]
+    },
+    "5150056": {
+      "name": "秘境·上",
+      "icon": "head-enemy-02.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150057": {
+      "name": "秘境·下",
+      "icon": "head-enemy-01.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150058": {
+      "name": "异化猎犬",
+      "icon": "mutated-hound.png",
+      "dungeon_ids": [
+        5100054
+      ],
+      "dungeon_names": [
+        "五月庄园·花园"
+      ]
+    },
+    "5150059": {
+      "name": "先祖铠甲",
+      "icon": "ancestral-knight.png",
+      "dungeon_ids": [
+        5100054
+      ],
+      "dungeon_names": [
+        "五月庄园·花园"
+      ]
+    },
+    "5150060": {
+      "name": "星象仪者",
+      "icon": "astrologer.png",
+      "dungeon_ids": [
+        5100054
+      ],
+      "dungeon_names": [
+        "五月庄园·花园"
+      ]
+    },
+    "5150061": {
+      "name": "子嗣守护",
+      "icon": "descendant-guardian.png",
+      "dungeon_ids": [
+        5100055
+      ],
+      "dungeon_names": [
+        "五月庄园·城堡"
+      ]
+    },
+    "5150062": {
+      "name": "一号信徒",
+      "icon": "yhxt-stage.png",
+      "dungeon_ids": [
+        5100055
+      ],
+      "dungeon_names": [
+        "五月庄园·城堡"
+      ]
+    },
+    "5150063": {
+      "name": "子爵夫人",
+      "icon": "viscountess.png",
+      "dungeon_ids": [
+        5100055
+      ],
+      "dungeon_names": [
+        "五月庄园·城堡"
+      ]
+    },
+    "5150064": {
+      "name": "咕噜",
+      "icon": "goulu.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150065": {
+      "name": "阿蒙分身",
+      "icon": "amon-clone.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150066": {
+      "name": "乌黯魔狼",
+      "icon": "dark-wolf.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150067": {
+      "name": "救赎蔷薇",
+      "icon": "medici-remnant.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150068": {
+      "name": "米尔贡根",
+      "icon": "milgongen.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150069": {
+      "name": "萨斯利尔",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150070": {
+      "name": "厄水巨龟",
+      "icon": "evil-water-turtle.png",
+      "dungeon_ids": [
+        5100053
+      ],
+      "dungeon_names": [
+        "丰饶之树"
+      ]
+    },
+    "5150071": {
+      "name": "舞王狒哥",
+      "icon": "dance-king-baboon.png",
+      "dungeon_ids": [
+        5100053
+      ],
+      "dungeon_names": [
+        "丰饶之树"
+      ]
+    },
+    "5150072": {
+      "name": "西尔维娅",
+      "icon": "sylvia.png",
+      "dungeon_ids": [
+        5100053
+      ],
+      "dungeon_names": [
+        "丰饶之树"
+      ]
+    },
+    "5150073": {
+      "name": "厄水巨龟",
+      "icon": "evil-water-turtle.png",
+      "dungeon_ids": [
+        5100052
+      ],
+      "dungeon_names": [
+        "丰饶之树"
+      ]
+    },
+    "5150074": {
+      "name": "舞王狒哥",
+      "icon": "dance-king-baboon.png",
+      "dungeon_ids": [
+        5100052
+      ],
+      "dungeon_names": [
+        "丰饶之树"
+      ]
+    },
+    "5150075": {
+      "name": "西尔维娅",
+      "icon": "sylvia.png",
+      "dungeon_ids": [
+        5100052
+      ],
+      "dungeon_names": [
+        "丰饶之树"
+      ]
+    },
+    "5150076": {
+      "name": "佛尔思",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150077": {
+      "name": "戴里克",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150078": {
+      "name": "奥黛丽",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150079": {
+      "name": "佛尔思",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150080": {
+      "name": "戴里克",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150081": {
+      "name": "奥黛丽",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150082": {
+      "name": "佛尔思",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150083": {
+      "name": "戴里克",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150084": {
+      "name": "奥黛丽",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150085": {
+      "name": "日常秘境·三",
+      "icon": "head-enemy-02.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150086": {
+      "name": "日常秘境·三",
+      "icon": "head-enemy-01.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150087": {
+      "name": "苹果骑士",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150088": {
+      "name": "灰姑娘舞会",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150089": {
+      "name": "小红帽与外婆",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150090": {
+      "name": "苹果骑士",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150091": {
+      "name": "灰姑娘舞会",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150092": {
+      "name": "小红帽与外婆",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150093": {
+      "name": "阿蒙分身",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150094": {
+      "name": "阿蒙分身",
+      "icon": "sasriel.png",
+      "dungeon_ids": [],
+      "dungeon_names": []
+    },
+    "5150095": {
+      "name": "罗塞尔的意志",
+      "icon": "roselle-will.png",
+      "dungeon_ids": [
+        5100064
+      ],
+      "dungeon_names": [
+        "罗塞尔单BOSS团本-普通"
+      ]
+    },
+    "5150096": {
+      "name": "罗塞尔的意志",
+      "icon": "roselle-will.png",
+      "dungeon_ids": [
+        5100065
+      ],
+      "dungeon_names": [
+        "罗塞尔单BOSS团本-史诗"
+      ]
+    },
+    "5150097": {
+      "name": "第1层",
+      "icon": "random-stage.png",
+      "dungeon_ids": [
+        5100007,
+        5100008,
+        5100009,
+        5100010,
+        5100011,
+        5100012
+      ],
+      "dungeon_names": [
+        "剧院开幕",
+        "剧院中场",
+        "剧院终幕",
+        "乌托邦剧院·普通",
+        "乌托邦剧院·困难",
+        "乌托邦剧院·噩梦"
+      ]
+    },
+    "5150098": {
+      "name": "第2层",
+      "icon": "random-stage.png",
+      "dungeon_ids": [
+        5100007,
+        5100008,
+        5100009,
+        5100010,
+        5100011,
+        5100012
+      ],
+      "dungeon_names": [
+        "剧院开幕",
+        "剧院中场",
+        "剧院终幕",
+        "乌托邦剧院·普通",
+        "乌托邦剧院·困难",
+        "乌托邦剧院·噩梦"
+      ]
+    },
+    "5150099": {
+      "name": "第3层",
+      "icon": "random-stage.png",
+      "dungeon_ids": [
+        5100007,
+        5100008,
+        5100009,
+        5100010,
+        5100011,
+        5100012
+      ],
+      "dungeon_names": [
+        "剧院开幕",
+        "剧院中场",
+        "剧院终幕",
+        "乌托邦剧院·普通",
+        "乌托邦剧院·困难",
+        "乌托邦剧院·噩梦"
+      ]
+    },
+    "5150100": {
+      "name": "第4层",
+      "icon": "random-stage.png",
+      "dungeon_ids": [
+        5100007,
+        5100008,
+        5100009,
+        5100010,
+        5100011,
+        5100012
+      ],
+      "dungeon_names": [
+        "剧院开幕",
+        "剧院中场",
+        "剧院终幕",
+        "乌托邦剧院·普通",
+        "乌托邦剧院·困难",
+        "乌托邦剧院·噩梦"
+      ]
+    },
+    "5150101": {
+      "name": "第5层",
+      "icon": "random-stage.png",
+      "dungeon_ids": [
+        5100007,
+        5100008,
+        5100009,
+        5100010,
+        5100011,
+        5100012
+      ],
+      "dungeon_names": [
+        "剧院开幕",
+        "剧院中场",
+        "剧院终幕",
+        "乌托邦剧院·普通",
+        "乌托邦剧院·困难",
+        "乌托邦剧院·噩梦"
+      ]
+    },
+    "5150102": {
+      "name": "第6层",
+      "icon": "random-stage.png",
+      "dungeon_ids": [
+        5100007,
+        5100008,
+        5100009,
+        5100010,
+        5100011,
+        5100012
+      ],
+      "dungeon_names": [
+        "剧院开幕",
+        "剧院中场",
+        "剧院终幕",
+        "乌托邦剧院·普通",
+        "乌托邦剧院·困难",
+        "乌托邦剧院·噩梦"
+      ]
+    },
+    "5150103": {
+      "name": "强尼",
+      "icon": "johnny-memory.png",
+      "dungeon_ids": [
+        5100066
+      ],
+      "dungeon_names": [
+        "记忆的传承·强尼"
+      ]
+    },
+    "5150104": {
+      "name": "战争巨龙",
+      "icon": "war-dragon.png",
+      "dungeon_ids": [
+        5100067
+      ],
+      "dungeon_names": [
+        "记忆的传承·火龙"
+      ]
+    },
+    "5150105": {
+      "name": "邦尼",
+      "icon": "bunny-memory.png",
+      "dungeon_ids": [
+        5100068
+      ],
+      "dungeon_names": [
+        "记忆的传承·邦尼"
+      ]
+    },
+    "5150106": {
+      "name": "钻头",
+      "icon": "drill-memory.png",
+      "dungeon_ids": [
+        5100069
+      ],
+      "dungeon_names": [
+        "记忆的传承·钻头"
+      ]
+    },
+    "5150107": {
+      "name": "强尼",
+      "icon": "johnny-memory.png",
+      "dungeon_ids": [
+        5100070
+      ],
+      "dungeon_names": [
+        "记忆的传承·强尼"
+      ]
+    },
+    "5150108": {
+      "name": "战争巨龙",
+      "icon": "war-dragon.png",
+      "dungeon_ids": [
+        5100071
+      ],
+      "dungeon_names": [
+        "记忆的传承·火龙"
+      ]
+    },
+    "5150109": {
+      "name": "邦尼",
+      "icon": "bunny-memory.png",
+      "dungeon_ids": [
+        5100072
+      ],
+      "dungeon_names": [
+        "记忆的传承·邦尼"
+      ]
+    },
+    "5150110": {
+      "name": "钻头",
+      "icon": "drill-memory.png",
+      "dungeon_ids": [
+        5100073
+      ],
+      "dungeon_names": [
+        "记忆的传承·钻头"
+      ]
+    },
+    "5150111": {
+      "name": "战争巨龙",
+      "icon": "war-dragon.png",
+      "dungeon_ids": [
+        5100074
+      ],
+      "dungeon_names": [
+        "记忆的传承·火龙"
+      ]
+    },
+    "5150112": {
+      "name": "罗塞尔的意志",
+      "icon": "roselle-will.png",
+      "dungeon_ids": [
+        5100075
+      ],
+      "dungeon_names": [
+        "罗塞尔单BOSS团本-终局挑战"
+      ]
+    }
+  },
+  "dungeons": {
+    "5100002": {
+      "name": "哀嚎黑市",
+      "entry_ids": [
+        10
+      ],
+      "stage_ids": [
+        5150001
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/TingGenReadyBg.TingGenReadyBg"
+    },
+    "5100003": {
+      "name": "值夜模式",
+      "entry_ids": [
+        9
+      ],
+      "stage_ids": [
+        5150002
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/YZZMReadyBg.YZZMReadyBg"
+    },
+    "5100004": {
+      "name": "窥秘的角落",
+      "entry_ids": [
+        11
+      ],
+      "stage_ids": [
+        5150003
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/SQZD1ReadyBg.SQZD1ReadyBg"
+    },
+    "5100005": {
+      "name": "亡者疑踪",
+      "entry_ids": [
+        15
+      ],
+      "stage_ids": [
+        5150005
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/JQHYJReadyBg.JQHYJReadyBg"
+    },
+    "5100006": {
+      "name": "黄金之罪",
+      "entry_ids": [
+        13
+      ],
+      "stage_ids": [
+        5150004
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/TLSZReadyBg.TLSZReadyBg"
+    },
+    "5100007": {
+      "name": "剧院开幕",
+      "entry_ids": [
+        1
+      ],
+      "stage_ids": [
+        5150097,
+        5150098,
+        5150099,
+        5150100,
+        5150101,
+        5150102
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RougeReadyBg.RougeReadyBg"
+    },
+    "5100008": {
+      "name": "剧院中场",
+      "entry_ids": [
+        16
+      ],
+      "stage_ids": [
+        5150097,
+        5150098,
+        5150099,
+        5150100,
+        5150101,
+        5150102
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RougeReadyBg.RougeReadyBg"
+    },
+    "5100009": {
+      "name": "剧院终幕",
+      "entry_ids": [
+        17
+      ],
+      "stage_ids": [
+        5150097,
+        5150098,
+        5150099,
+        5150100,
+        5150101,
+        5150102
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RougeReadyBg.RougeReadyBg"
+    },
+    "5100010": {
+      "name": "乌托邦剧院·普通",
+      "entry_ids": [
+        18
+      ],
+      "stage_ids": [
+        5150097,
+        5150098,
+        5150099,
+        5150100,
+        5150101,
+        5150102
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RougeReadyBg.RougeReadyBg"
+    },
+    "5100011": {
+      "name": "乌托邦剧院·困难",
+      "entry_ids": [
+        19
+      ],
+      "stage_ids": [
+        5150097,
+        5150098,
+        5150099,
+        5150100,
+        5150101,
+        5150102
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RougeReadyBg.RougeReadyBg"
+    },
+    "5100012": {
+      "name": "乌托邦剧院·噩梦",
+      "entry_ids": [
+        20
+      ],
+      "stage_ids": [
+        5150097,
+        5150098,
+        5150099,
+        5150100,
+        5150101,
+        5150102
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RougeReadyBg.RougeReadyBg"
+    },
+    "5100040": {
+      "name": "安提哥努斯笔记",
+      "entry_ids": [
+        2
+      ],
+      "stage_ids": [
+        5150038,
+        5150039,
+        5150040
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/ATGNSReadyBg.ATGNSReadyBg"
+    },
+    "5100044": {
+      "name": "安提哥努斯笔记",
+      "entry_ids": [
+        2
+      ],
+      "stage_ids": [
+        5150047,
+        5150048,
+        5150049
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/ATGNSReadyBg.ATGNSReadyBg"
+    },
+    "5100045": {
+      "name": "五月庄园·花园",
+      "entry_ids": [
+        6
+      ],
+      "stage_ids": [
+        5150050,
+        5150051,
+        5150052
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/WYZYHYReadyBg.WYZYHYReadyBg"
+    },
+    "5100047": {
+      "name": "五月庄园·城堡",
+      "entry_ids": [
+        7
+      ],
+      "stage_ids": [
+        5150053,
+        5150054,
+        5150055
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/WYZZReadyBg.WYZZReadyBg"
+    },
+    "5100052": {
+      "name": "丰饶之树",
+      "entry_ids": [
+        8
+      ],
+      "stage_ids": [
+        5150073,
+        5150074,
+        5150075
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/JQHReadyBg.JQHReadyBg"
+    },
+    "5100053": {
+      "name": "丰饶之树",
+      "entry_ids": [
+        8
+      ],
+      "stage_ids": [
+        5150070,
+        5150071,
+        5150072
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/JQHReadyBg.JQHReadyBg"
+    },
+    "5100054": {
+      "name": "五月庄园·花园",
+      "entry_ids": [
+        6
+      ],
+      "stage_ids": [
+        5150058,
+        5150059,
+        5150060
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/WYZYHYReadyBg.WYZYHYReadyBg"
+    },
+    "5100055": {
+      "name": "五月庄园·城堡",
+      "entry_ids": [
+        7
+      ],
+      "stage_ids": [
+        5150061,
+        5150062,
+        5150063
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/WYZZReadyBg.WYZZReadyBg"
+    },
+    "5100064": {
+      "name": "罗塞尔单BOSS团本-普通",
+      "entry_ids": [
+        25
+      ],
+      "stage_ids": [
+        5150095
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RoselleReadyBg.RoselleReadyBg"
+    },
+    "5100065": {
+      "name": "罗塞尔单BOSS团本-史诗",
+      "entry_ids": [
+        25
+      ],
+      "stage_ids": [
+        5150096
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RoselleReadyBg.RoselleReadyBg"
+    },
+    "5100066": {
+      "name": "记忆的传承·强尼",
+      "entry_ids": [
+        21
+      ],
+      "stage_ids": [
+        5150103
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory1ReadyBg.Memory1ReadyBg"
+    },
+    "5100067": {
+      "name": "记忆的传承·火龙",
+      "entry_ids": [
+        22
+      ],
+      "stage_ids": [
+        5150104
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory2ReadyBg.Memory2ReadyBg"
+    },
+    "5100068": {
+      "name": "记忆的传承·邦尼",
+      "entry_ids": [
+        23
+      ],
+      "stage_ids": [
+        5150105
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory3ReadyBg.Memory3ReadyBg"
+    },
+    "5100069": {
+      "name": "记忆的传承·钻头",
+      "entry_ids": [
+        24
+      ],
+      "stage_ids": [
+        5150106
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory4ReadyBg.Memory4ReadyBg"
+    },
+    "5100070": {
+      "name": "记忆的传承·强尼",
+      "entry_ids": [
+        21
+      ],
+      "stage_ids": [
+        5150107
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory1ReadyBg.Memory1ReadyBg"
+    },
+    "5100071": {
+      "name": "记忆的传承·火龙",
+      "entry_ids": [
+        22
+      ],
+      "stage_ids": [
+        5150108
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory2ReadyBg.Memory2ReadyBg"
+    },
+    "5100072": {
+      "name": "记忆的传承·邦尼",
+      "entry_ids": [
+        23
+      ],
+      "stage_ids": [
+        5150109
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory3ReadyBg.Memory3ReadyBg"
+    },
+    "5100073": {
+      "name": "记忆的传承·钻头",
+      "entry_ids": [
+        24
+      ],
+      "stage_ids": [
+        5150110
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory4ReadyBg.Memory4ReadyBg"
+    },
+    "5100074": {
+      "name": "记忆的传承·火龙",
+      "entry_ids": [
+        26
+      ],
+      "stage_ids": [
+        5150111
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/Memory2WRReadyBg.Memory2WRReadyBg"
+    },
+    "5100075": {
+      "name": "罗塞尔单BOSS团本-终局挑战",
+      "entry_ids": [
+        27
+      ],
+      "stage_ids": [
+        5150112
+      ],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RoselleReadyBg.RoselleReadyBg"
+    },
+    "5100098": {
+      "name": "世界灾厄",
+      "entry_ids": [
+        14
+      ],
+      "stage_ids": [],
+      "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/BossReadyBg.BossReadyBg"
+    }
+  },
+  "dungeon_entries": {
+    "1": {
+      "entrance_name": "乌托邦剧院",
+      "name": "剧院开幕",
+      "dungeon_ids": [
+        5100007
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/RougeEntranceBg.RougeEntranceBg"
+    },
+    "2": {
+      "entrance_name": "安提哥努斯笔记",
+      "name": "安提哥努斯笔记",
+      "dungeon_ids": [
+        5100040,
+        5100044
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/ATGNSEntrsnceBg.ATGNSEntrsnceBg"
+    },
+    "3": {
+      "entrance_name": "神弃之地",
+      "name": "神弃之地·旷野",
+      "dungeon_ids": [
+        5100041,
+        5100042
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/SQZD1EntrsnceBg.SQZD1EntrsnceBg"
+    },
+    "4": {
+      "entrance_name": "神弃之地",
+      "name": "神弃之地·王庭",
+      "dungeon_ids": [
+        5100056,
+        5100043
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/SQZD2EntrsnceBg.SQZD2EntrsnceBg"
+    },
+    "5": {
+      "entrance_name": "敬请期待",
+      "name": "敬请期待",
+      "dungeon_ids": [
+        5100099
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/SQZD1EntrsnceBg.SQZD1EntrsnceBg"
+    },
+    "6": {
+      "entrance_name": "五月庄园",
+      "name": "五月庄园·花园",
+      "dungeon_ids": [
+        5100054,
+        5100045
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/WYZZEntrsnceBg.WYZZEntrsnceBg"
+    },
+    "7": {
+      "entrance_name": "记忆的传承",
+      "name": "五月庄园·城堡",
+      "dungeon_ids": [
+        5100055,
+        5100047
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/WYZZEntrsnceBg.WYZZEntrsnceBg"
+    },
+    "8": {
+      "entrance_name": "丰饶之树",
+      "name": "丰饶之树",
+      "dungeon_ids": [
+        5100052,
+        5100053
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/JQHEntrsnceBg.JQHEntrsnceBg"
+    },
+    "9": {
+      "entrance_name": "黑荆棘事件簿",
+      "name": "值夜模式",
+      "dungeon_ids": [
+        5100003
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/YZZMEntrsnceBg.YZZMEntrsnceBg"
+    },
+    "10": {
+      "entrance_name": "黑荆棘事件簿",
+      "name": "哀嚎黑市",
+      "dungeon_ids": [
+        5100002
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/YZZMEntrsnceBg.YZZMEntrsnceBg"
+    },
+    "11": {
+      "entrance_name": "黑荆棘事件簿",
+      "name": "窥秘的角落",
+      "dungeon_ids": [
+        5100004
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/YZZMEntrsnceBg.YZZMEntrsnceBg"
+    },
+    "12": {
+      "entrance_name": "童话故事",
+      "name": "童话故事",
+      "dungeon_ids": [
+        5100061
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/WYZYHYEntrsnceBg.WYZYHYEntrsnceBg"
+    },
+    "13": {
+      "entrance_name": "黑荆棘事件簿",
+      "name": "黄金之罪",
+      "dungeon_ids": [
+        5100006
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/YZZMEntrsnceBg.YZZMEntrsnceBg"
+    },
+    "14": {
+      "entrance_name": "世界灾厄",
+      "name": "世界灾厄",
+      "dungeon_ids": [
+        5100098
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/BossEntrsnceBg.BossEntrsnceBg"
+    },
+    "15": {
+      "entrance_name": "黑荆棘事件簿",
+      "name": "亡者疑踪",
+      "dungeon_ids": [
+        5100005
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/YZZMEntrsnceBg.YZZMEntrsnceBg"
+    },
+    "16": {
+      "entrance_name": "剧院中场",
+      "name": "剧院幕间",
+      "dungeon_ids": [
+        5100008
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/RougeEntranceBg.RougeEntranceBg"
+    },
+    "17": {
+      "entrance_name": "剧院终幕",
+      "name": "剧院终幕",
+      "dungeon_ids": [
+        5100009
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/RougeEntranceBg.RougeEntranceBg"
+    },
+    "18": {
+      "entrance_name": "乌托邦剧院",
+      "name": "乌托邦剧院·普通",
+      "dungeon_ids": [
+        5100010
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/RougeEntranceBg.RougeEntranceBg"
+    },
+    "19": {
+      "entrance_name": "乌托邦剧院",
+      "name": "乌托邦剧院·困难",
+      "dungeon_ids": [
+        5100011
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/RougeEntranceBg.RougeEntranceBg"
+    },
+    "20": {
+      "entrance_name": "乌托邦剧院",
+      "name": "乌托邦剧院·噩梦",
+      "dungeon_ids": [
+        5100012
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/RougeEntranceBg.RougeEntranceBg"
+    },
+    "21": {
+      "entrance_name": "记忆的传承",
+      "name": "记忆的传承·强尼",
+      "dungeon_ids": [
+        5100066,
+        5100070
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/Memory2EntranceBg.Memory2EntranceBg"
+    },
+    "22": {
+      "entrance_name": "记忆的传承",
+      "name": "记忆的传承·火龙",
+      "dungeon_ids": [
+        5100067,
+        5100071
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/Memory2EntranceBg.Memory2EntranceBg"
+    },
+    "23": {
+      "entrance_name": "记忆的传承",
+      "name": "记忆的传承·邦尼",
+      "dungeon_ids": [
+        5100068,
+        5100072
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/Memory2EntranceBg.Memory2EntranceBg"
+    },
+    "24": {
+      "entrance_name": "记忆的传承",
+      "name": "记忆的传承·钻头",
+      "dungeon_ids": [
+        5100069,
+        5100073
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/Memory2EntranceBg.Memory2EntranceBg"
+    },
+    "25": {
+      "entrance_name": "大帝重临",
+      "name": "大帝重临",
+      "dungeon_ids": [
+        5100064,
+        5100065
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/RoselleEntranceBg.RoselleEntranceBg"
+    },
+    "26": {
+      "entrance_name": "记忆的传承",
+      "name": "记忆的传承·噩梦",
+      "dungeon_ids": [
+        5100074
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/Memory2WREntranceBg.Memory2WREntranceBg"
+    },
+    "27": {
+      "entrance_name": "罗塞尔终局之战",
+      "name": "罗塞尔终局之战",
+      "dungeon_ids": [
+        5100075
+      ],
+      "preview_background": "/Game/Arts/UI_2/Resource/ConfigIcon/GameplayIntegration/Dungeon/RoselleEntranceBg.RoselleEntranceBg"
+    }
+  },
+  "sources": {
+    "amon-clone.png": {
+      "dimensions": "176x176",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Amon.Amon",
+      "package_id": "a782ae8df4d3da9a",
+      "source_sha256": "685a655a67372956095ef4fccda8f9a2de8a51825f8e6d157f30dd1b4f2bec3d",
+      "png_sha256": "73eccad926197959addedc674c38dac3372e1eec528f9d1ae1ae7cf6f5141d92"
+    },
+    "ancestral-knight.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Xianzuqishi.Xianzuqishi",
+      "package_id": "308fdcaa3e181ce7",
+      "source_sha256": "6ff7d3a6cb67131dbc8a79cd3ef9feee317d39cdfa498cb4b89612968dd2e69a",
+      "png_sha256": "8df156e05a0d01d5a1fa6bc5088a84e887e8bd30c56fab58930574cad6e832db"
+    },
+    "anxia.png": {
+      "dimensions": "256x256",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/SecretPartner/Large/UI_Avatar_SecretPartner_36.UI_Avatar_SecretPartner_36",
+      "package_id": "d0e8477babcb9eb5",
+      "evidence": "SecretPartnerConfigData ID 211, CardPose Secretpartner_Pose_YHXT",
+      "png_sha256": "4c6633eabbb70ad0cbba90f3e40822bf4e3b67bb8b57b31993a89f55bf8da710"
+    },
+    "astrologer.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Shenhuaguanjia.Shenhuaguanjia",
+      "package_id": "cde8c7fbb25d0c42",
+      "source_sha256": "456391292ee3a5e04c01b950a56385c6812923add82da96125b02664f760381f",
+      "png_sha256": "a78909ab3bdf0a035fe8689f6d83ad121cf3c34511d9719417ee7cafe62d7f78"
+    },
+    "bunny-memory.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Memory03.Memory03",
+      "package_id": "e6717b66463c7047",
+      "source_sha256": "b9016db607ccfeefad92e9cbbc251e783d7f2082ce5f0337d81362dcdf20c032",
+      "png_sha256": "8e740efbd621b123ea31dedf820bdb582a567f35c6cd15065970113c48e3c4a6"
+    },
+    "character-head-01.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Character/NotAtlas/Head/UI_Character_Icon_Head01.UI_Character_Icon_Head01",
+      "package_id": "ae7b97121682573e",
+      "source_sha256": "64944d6c455963adabb35e61e94ee23002e6faa3793e88f4bcdcd2bcba857921",
+      "png_sha256": "4977855429304012c192b9c52e4d746c4df6645de9be27665c6514699692e6ce"
+    },
+    "character-head-02.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Character/NotAtlas/Head/UI_Character_Icon_Head02.UI_Character_Icon_Head02",
+      "package_id": "c81dfb722e641370",
+      "source_sha256": "8171fe5248601644e362369e04b1d73af722910046bc4aaba562114d7c798336",
+      "png_sha256": "046029d9e63379d67f43eae992e5677b0201db4754a88e7f752ef3eebba3f8a6"
+    },
+    "character-head-03.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Character/NotAtlas/Head/UI_Character_Icon_Head03.UI_Character_Icon_Head03",
+      "package_id": "bdb97bbd2d92fee2",
+      "source_sha256": "49abd12aa6dabb2a81776dd78c35654109d16b9a41ed7a56f804235d4ed34563",
+      "png_sha256": "75b18c093c3b3802d2ef0e56bb2b71c52ae7993e4d6664ea70cf6273070c533e"
+    },
+    "clown.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Dungeon/NotAtlas/Head/UI_Dungeon_Icon_HeadEnemy03.UI_Dungeon_Icon_HeadEnemy03",
+      "package_id": "966c9d2bf3bb8c55",
+      "source_sha256": "301c6fd2e5edf81ad41f1c61903d3fe3a7e1a1ee2b7a74c914e0d9f29f8ddd93",
+      "png_sha256": "c381922809f6a914289d573fae56463c768e065c54c0cebf09d22f1dc9d87480"
+    },
+    "dance-king-baboon.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Wuwagfeige.Wuwagfeige",
+      "package_id": "998ea3a2d5717936",
+      "source_sha256": "63e121b18f94388f14dd5ee038d90d8f46029552cf41d41b1362e1031757f9ae",
+      "png_sha256": "aabae1601e477d56533cb126697002de093fc44458d62bb5778cf160a186f2a9"
+    },
+    "dark-wolf.png": {
+      "dimensions": "176x176",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Cotard.Cotard",
+      "package_id": "dd02058ee3ffcebf",
+      "source_sha256": "bb03a42fe7a49ce00631ce8f7dbe579474afe3604ed952022ce5afa74b1f7446",
+      "png_sha256": "25fb54b512c69c0c66f722953254d1788790739ee62181e11692b7172f1d8f99"
+    },
+    "descendant-guardian.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Zisishouhu.Zisishouhu",
+      "package_id": "346393b86636b7d5",
+      "source_sha256": "ee3de1674f7ebcd3a738620a79c1fdf675e6b5902af738d47e9bfeb47e0ac1d2",
+      "png_sha256": "3ca90520996ae6bca53cbacdf57666706f93128e9fc79e421cf07f1bcf63536c"
+    },
+    "drill-memory.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Memory04.Memory04",
+      "package_id": "0d1f15918e97571c",
+      "source_sha256": "8ae081e225417162107f025a643e7dd442c888dc0c009b8cc65a82f3ff5e43d2",
+      "png_sha256": "b49db6cbacd0794a5f8f0cc80958bb19aa75b2c68c158d3f2721c48ccdc43b9e"
+    },
+    "evil-water-turtle.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Ebingjugui.Ebingjugui",
+      "package_id": "93f92e605763871d",
+      "source_sha256": "070d68da32a22e415d607ced00e6817fb41af98fc383baedb7100f06b2fa97bb",
+      "png_sha256": "05bec078f94e39b65c6dae0484c05823b97302ce9a9889318dcc1d704c1e6e36"
+    },
+    "goulu.png": {
+      "dimensions": "176x176",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Goulu.Goulu",
+      "package_id": "ffdf97bda18096ff",
+      "source_sha256": "e173e80f05f3a27fbfe3d03f07c985bfd07fea90112f4bf1be411e43805213ac",
+      "png_sha256": "741d943ca0be770a5131a49075db5e1990e63f19c5c0c13652d9c334a1817b9a"
+    },
+    "head-enemy-01.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Dungeon/NotAtlas/Head/UI_Dungeon_Icon_HeadEnemy01.UI_Dungeon_Icon_HeadEnemy01",
+      "package_id": "82e1f89a5a2ccb28",
+      "source_sha256": "48c946d7b05f93393e952b1546164ec553d40dcff862407b748714efefb5c799",
+      "png_sha256": "73e95a23188fc2a38f8d1f687bb93e2a9497760f3c67a750c10ec5a15240eaa0"
+    },
+    "head-enemy-02.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Dungeon/NotAtlas/Head/UI_Dungeon_Icon_HeadEnemy02.UI_Dungeon_Icon_HeadEnemy02",
+      "package_id": "7e057708102d0aae",
+      "source_sha256": "2b7dfe24927dcfa5cd77daf90b639fb6749984c4085e212763caec68418187fe",
+      "png_sha256": "84402c323845b38cdee1e5c14e01226bf554a663080f8a2113ce244f6bd3db95"
+    },
+    "head-enemy-04.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Dungeon/NotAtlas/Head/UI_Dungeon_Icon_HeadEnemy04.UI_Dungeon_Icon_HeadEnemy04",
+      "package_id": "243fac4ccdb79574",
+      "source_sha256": "60688c43616cf3217549d2b001f7367a2a16fab992925df28617776db927830b",
+      "png_sha256": "bd107cd4ce53cc594336ef4180d483b2ce09d162464676e66dd86eebe0b6b687"
+    },
+    "head-enemy-05.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Dungeon/NotAtlas/Head/UI_Dungeon_Icon_HeadEnemy05.UI_Dungeon_Icon_HeadEnemy05",
+      "package_id": "973e1c10b77451cf",
+      "source_sha256": "53f7accfd0717ade61861de86f85802e688dcac1abfb9fafcfc24a6c871b99de",
+      "png_sha256": "76943b10c3b71c91bbc39750cfb7cb8a5a637499106c016543d74921e41665dd"
+    },
+    "head-enemy-08.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Dungeon/NotAtlas/Head/UI_Dungeon_Icon_HeadEnemy08.UI_Dungeon_Icon_HeadEnemy08",
+      "package_id": "be8e4dd889b71daa",
+      "source_sha256": "fa869ec2e0d6fea682dbf4a5b5b28580b1595076df47cb81e1c20d55e9666608",
+      "png_sha256": "e5c1be5be1d8e37e57d262e089d9c045db894e4791ce370baacc550c9c0b00bb"
+    },
+    "johnny-memory.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Memory01.Memory01",
+      "package_id": "adbafcb99d958160",
+      "source_sha256": "016adfbd36909b78b1b509a604b90928415ccf57ba1633d95c315ab0ff145ba5",
+      "png_sha256": "c44aebc032085b2f1f2d9f037d5d65eda9be3e7a462dfa14de15e8a383df4f30"
+    },
+    "karl-edgar.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Yuzhezhimeng.Yuzhezhimeng",
+      "package_id": "5d2a319124d7650e",
+      "source_sha256": "e7b4d748a48a61966fe19835059099a9dce67d44479891df3cd4502b4cce6959",
+      "png_sha256": "eab628a57a0c2bfd276629a7cc8c463d3df23f47645afb70744dcd072d09e7a9"
+    },
+    "lambert-noose.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/Dungeon/NotAtlas/Head/UI_Dungeon_Icon_HeadEnemy06.UI_Dungeon_Icon_HeadEnemy06",
+      "package_id": "14ac6296d28e2cff",
+      "source_sha256": "341ffb7e1fb2b268026d7aa1daad0d78907ef186c14fc33aa7efe9fabbbd4d26",
+      "png_sha256": "167d1ee0d5363b692188ecf0e5821d97edd35c57daec0d1aac1b222d26180943"
+    },
+    "medici-remnant.png": {
+      "dimensions": "176x176",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Medici.Medici",
+      "package_id": "dcc8ce79e691f0dc",
+      "source_sha256": "5b3913020b8ce860e5e3eab4bce9d1faacc3573fac6e65f2ff8fcc50d4a9fdbe",
+      "png_sha256": "1ffb8e911a20021706f8f13f4a18402563946c7ed3b81c3623c7750bf0aa6142"
+    },
+    "milgongen.png": {
+      "dimensions": "176x176",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Milgongen.Milgongen",
+      "package_id": "bee4a30e162dad8e",
+      "source_sha256": "7d764f53b971d0ee8a74c177b9897bbd856c894b1eaab99c01280d50a2ecb657",
+      "png_sha256": "e934b20807b252de39776685d3ac41308ac755a0f06bed3d7281ea5241fc3e53"
+    },
+    "mr-barney.png": {
+      "dimensions": "256x256",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/SecretPartner/Large/UI_Avatar_SecretPartner_31.UI_Avatar_SecretPartner_31",
+      "package_id": "22ee358136aa295b",
+      "evidence": "SecretPartnerConfigData ID 214, CardPose Secretpartner_Pose_YHXT02",
+      "png_sha256": "3fc67bec485ade2a24b27a76e986392a15cb1f7d9725088cf8bff211996ede30"
+    },
+    "mutated-hound.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Yihualeiquan.Yihualeiquan",
+      "package_id": "84c71dbb7c4e9476",
+      "source_sha256": "cd3d0edce42af183c8acf384391c0684fcddfb9b102a0cddf6c3dabd1014b242",
+      "png_sha256": "e3127fabbbb759b1536e09dc9e2133d380d687562562c09efb6049680bde10d8"
+    },
+    "random-stage.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Random.Random",
+      "package_id": "02809e9a0ea664c8",
+      "source_sha256": "55d0e89b346231b6d389e8bfb3684102f57829c88bee0c2ee2fb7ce0f47397b4",
+      "png_sha256": "51b693c6b1c28df9b8854f06e0a6c22eda5da3a8a37a243561ea41464a337c58"
+    },
+    "rock-king.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/RockKing.RockKing",
+      "package_id": "aa71429bdb840dd1",
+      "source_sha256": "c9f877118467cd38c106f1ebb74dfd8b2b598912a1936ec1217f79b84fe21ba9",
+      "png_sha256": "b4b4cc3c0e8e08f28a417098e618c6bc04dbbb670bee554b1ef9083abd278b33"
+    },
+    "roselle-will.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Roselle02.Roselle02",
+      "package_id": "78804a88f2ddc849",
+      "source_sha256": "6bff363e9cdcf3c427540bcfbdebac9aecad1ef8b88c7aa041730337bf44e960",
+      "png_sha256": "403eb97874c7814764ed163a3254e0d72636a865a4c549b89ce9e9db614bc46b"
+    },
+    "sasriel.png": {
+      "dimensions": "176x176",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Sasriel.Sasriel",
+      "package_id": "2e662647204d70f5",
+      "source_sha256": "30be9332590586dc1d14a6a6cfb20e694a77a440bee0b556be89cd19d4c2ca79",
+      "png_sha256": "5e0690b85e86e9d2ca1ef325c61d36df7c5a88d0e7a7b08b389e29dfecb6f730"
+    },
+    "sylvia.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Xierweiya.Xierweiya",
+      "package_id": "a5b732e488482c75",
+      "source_sha256": "96956f26e9d88195763f407147a7eba11dd0e7cf34977f4f7f88254227cbf8d1",
+      "png_sha256": "92f5a6d48735b293d1cf5b48af77199da8bee7bdbf5527b7def23c1ceccbf3f9"
+    },
+    "training-dummy.png": {
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Interact/Interact_WoodenMan.Interact_WoodenMan",
+      "dimensions": "72x72",
+      "kind": "texture",
+      "package_id": "1268472392ef78be",
+      "png_sha256": "14087a46b52adc34d259f8ca6b5a83828adcdf1d0ed13126aa06385166a9867a",
+      "evidence": "客户端木桩交互入口专用图标"
+    },
+    "viscountess.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Zijuefuren.Zijuefuren",
+      "package_id": "b645a0052707a566",
+      "source_sha256": "2b68278306ccc27a05500c8599521264fc2d686f2d8c5c53fb29ad20141dcb58",
+      "png_sha256": "3c542d09b77994b71db4348299629dc5874e9897b0597e8b4ae93a6e04f9fb5b"
+    },
+    "war-dragon.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Memory02.Memory02",
+      "package_id": "32eef8a61817793f",
+      "source_sha256": "64e075b4f1c604640badacbc993e26a3652d7d81e7fb3f9174537a525601e10b",
+      "png_sha256": "31208bcb5b4721b7ea1ddeed3331aa5c1d3fed84726f748e6c8be5ec75f3cf0f"
+    },
+    "yhxt-stage.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Yihaoxintu.Yihaoxintu",
+      "package_id": "87cc02499a63a4e4",
+      "source_sha256": "c27d875bf1165b91af195c4b859647ebffa345a71cfdcbf6ab79f3c8fd2510ec",
+      "png_sha256": "a0bcba5c9790f44abc75e04da1321176f32e92c9819aeadcd15051e116a15fdf"
+    }
+  }
+}

@@ -190,6 +190,237 @@
     }
   },
   "skills": {
+    "80001080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001081": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001091": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001100": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001110": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001111": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001120": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001121": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001130": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001131": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001140": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001141": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001150": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001151": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001160": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001161": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001170": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001171": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001180": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001181": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001190": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001191": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001200": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001201": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001210": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001211": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001220": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001221": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001230": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001231": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001240": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001241": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001250": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001251": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001260": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001261": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001270": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001271": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80001280": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "80001281": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "80003004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/Convergence_1_7_8.Convergence_1_7_8"
+    },
+    "80003005": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/Convergence_1_7_7.Convergence_1_7_7"
+    },
+    "80003036": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13.Rogue_Common_13"
+    },
+    "80003037": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13.Rogue_Common_13"
+    },
+    "80003038": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Rogue/Rogue_Common_13.Rogue_Common_13"
+    },
+    "80004017": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/3240556.3240556"
+    },
+    "800040172": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/3240556.3240556"
+    },
+    "80010004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Sun_Skill_10.Sun_Skill_10"
+    },
+    "80020001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/54.54"
+    },
+    "80020004": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13.Utopian_Skill_13"
+    },
+    "80020008": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Spectator/Utopian_Skill_13.Utopian_Skill_13"
+    },
+    "80030001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_05.Warrior_Skill_05"
+    },
+    "80050001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Apprentice/Apprentice_Attack_01.Apprentice_Attack_01"
+    },
+    "80060002": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17.Warrior_Skill_17"
+    },
+    "80061040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17.Warrior_Skill_17"
+    },
+    "80061080": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Warrior/Warrior_Skill_17.Warrior_Skill_17"
+    },
+    "80075010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11.MysteryPryer_Skill_11"
+    },
+    "80075011": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/MysteryPryer/MysteryPryer_Skill_11.MysteryPryer_Skill_11"
+    },
+    "804000001": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "81001264": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2003509.2003509"
+    },
+    "81001265": {
+      "icon_path": "/Game/Arts/UI_2/Resource/Item/Large/2002100.2002100"
+    },
+    "81002101": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "814010009": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "82030003": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/63.63"
+    },
+    "82060010": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/95.95"
+    },
+    "82065030": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/92.92"
+    },
+    "82065040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/92.92"
+    },
+    "82067090": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/91.91"
+    },
+    "83310350": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "83310363": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "83310364": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "83310390": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "83310420": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "83310463": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "83310623": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
     "86000001": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Atlas/Fool/Sprites/UI_Skill_Icon_FoolSkill09_py_Sprite.UI_Skill_Icon_FoolSkill09_py_Sprite"
     },
@@ -2381,8 +2612,20 @@
     "87912035": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Seal/Seal_Skill_1.Seal_Skill_1"
     },
+    "87912040": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
     "87912052": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Element/UI_Skill_Img_Element09.UI_Skill_Img_Element09"
+    },
+    "87912060": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
+    },
+    "87912061": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/146.146"
+    },
+    "87912064": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
     },
     "87912078": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Seer/Seer_Skill_08.Seer_Skill_08"
@@ -2419,6 +2662,9 @@
     },
     "87912089": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/Profession/Bard/Bard_Skill_04.Bard_Skill_04"
+    },
+    "87912102": {
+      "icon_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147"
     },
     "87913081": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Element/UI_Skill_Img_Element09.UI_Skill_Img_Element09"
@@ -2567,9 +2813,6 @@
     "88018164": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
     },
-    "88018168": {
-      "icon_path": "-1"
-    },
     "88018335": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/QTE/QTE_Battle_Skill_Dance01.QTE_Battle_Skill_Dance01"
     },
@@ -2590,9 +2833,6 @@
     },
     "88018564": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/Dungeon/BlackWilderness/UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03.UI_Skill_Icon_Dungeon_BlackWilderness_Cotard03"
-    },
-    "88018568": {
-      "icon_path": "-1"
     },
     "88105153": {
       "icon_path": "/Game/Arts/UI_2/Resource/Skill/NotAtlas/TextControl/UI_Skill_Icon_PickUp.UI_Skill_Icon_PickUp"

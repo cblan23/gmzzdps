@@ -28,10 +28,80 @@ KSBC2_XOR_KEY = bytes.fromhex(
     "74dbf3b4541b0355320a0275b713996c"
 )
 
-DEFAULT_CACHE = Path(
-    r"E:\GMZZLauncher\Game\C7\Saved\kscache\14\4efadcdd4c7bb254c65f6f07_2068316"
-)
-DEFAULT_ROOT_HANDLE = 0x02D209A8
+DEFAULT_CACHE_DIRECTORY = Path(r"E:\GMZZLauncher\Game\C7\Saved\kscache\14")
+DEFAULT_CACHE_PREFIX = "4efadcdd4c7bb254c65f6f07_"
+
+
+def latest_default_cache() -> Path:
+    """Select the newest client data cache while retaining an offline fallback."""
+    candidates = list(DEFAULT_CACHE_DIRECTORY.glob(f"{DEFAULT_CACHE_PREFIX}*"))
+    if candidates:
+        return max(
+            candidates,
+            key=lambda path: (
+                int(path.name.rpartition("_")[2])
+                if path.name.rpartition("_")[2].isdigit()
+                else -1,
+                path.stat().st_mtime_ns,
+            ),
+        )
+    return DEFAULT_CACHE_DIRECTORY / f"{DEFAULT_CACHE_PREFIX}2097705"
+
+
+DEFAULT_CACHE = latest_default_cache()
+DEFAULT_ROOT_HANDLE = 0x02D24456
+
+# DamageSync can append a one-digit effect variant to a BuffDataNew ID.  Each
+# alias here is accepted only after the packet ID and its client row have both
+# been observed.  This avoids the unsafe "nearby ID means the same skill" rule.
+VERIFIED_NETWORK_EFFECT_ALIASES = {
+    800_011_802: 80_001_180,
+    800_040_172: 80_004_017,
+    820_600_101: 82_060_010,
+    833_103_901: 83_310_390,
+}
+# Additional packet IDs that are real effect rows but are not listed by the
+# client's StatisticsBuffAndSkillFilterData table.
+VERIFIED_NETWORK_EFFECT_SOURCE_IDS = {
+    81_002_101,
+}
+
+# Some statistics rows deliberately omit their own icon and are only reachable
+# through a parent equipment, item, passive, or system-buff row.  These routes
+# were followed in the same decoded client cache rather than inferred from
+# nearby IDs or similar names.
+VERIFIED_CLIENT_DERIVED_ICON_PATHS = {
+    # EquipmentSpiritualityConvergenceData 105/106 -> PassiveSkill1/2.
+    80_003_004: (
+        "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/"
+        "Convergence_1_7_8.Convergence_1_7_8"
+    ),
+    80_003_005: (
+        "/Game/Arts/UI_2/Resource/ConfigIcon/Equipment/BeyonderIcon/"
+        "Convergence_1_7_7.Convergence_1_7_7"
+    ),
+    # EquipmentUniqueData 10029 shares this passive's localized suit name;
+    # its ItemNewData product 3001053 uses the puppet bracelet icon 3240556.
+    80_004_017: "/Game/Arts/UI_2/Resource/Item/Large/3240556.3240556",
+    800_040_172: "/Game/Arts/UI_2/Resource/Item/Large/3240556.3240556",
+    # The statistic packet retains only the shared potion-effect Buff ID, so
+    # use a stable directly referencing base item from ItemNewData.
+    81_001_264: "/Game/Arts/UI_2/Resource/Item/Large/2003509.2003509",
+    81_001_265: "/Game/Arts/UI_2/Resource/Item/Large/2002100.2002100",
+    # AutoBattleSettingData's common life-recovery buff has no dedicated art.
+    81_002_101: "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+    # PassiveSkillData 80001150/80001090 are the exact trigger parents.
+    87_912_040: "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+    87_912_064: "/Game/Arts/UI_2/Resource/ConfigIcon/Buff/147.147",
+}
+
+STATISTICS_SOURCE_TABLES = {
+    1: ("BuffDataNew", "BuffName", ("BuffIcon",)),
+    2: ("SkillDataNew", "Name", ("SkillIcon", "IconTexture")),
+    3: ("PassiveSkillData", "Name", ("SkillIcon", "IconTexture")),
+    4: ("NewBulletData", "Name", ("Icon", "SkillIcon")),
+    5: ("SpellFieldData", "Name", ("Icon", "SkillIcon")),
+}
 
 # Exact values recovered from the current client's localization table.  They
 # let metadata-only exports remain reproducible when the game has temporarily
@@ -205,6 +275,49 @@ def table_ref(value: object, path: str) -> int:
     return value.handle
 
 
+def discover_root_handle(
+    reader: KSBC2Reader,
+    *,
+    search_bytes: int = 4 * 1024 * 1024,
+) -> int:
+    """Locate the generated-data root table near the tail of a KSBC2 cache."""
+    required_keys = {
+        "SkillDataNew",
+        "PassiveSkillData",
+        "BuffDataNew",
+        "StatisticsBuffAndSkillFilterData",
+    }
+    data_size = len(reader.data)
+    start = max(0, data_size - max(64 * 1024, int(search_bytes)))
+    for handle in range(start, max(start, data_size - 3)):
+        try:
+            table_header = reader.u32(handle)
+            if not 0 <= table_header <= data_size - 12:
+                continue
+            key_block = reader.u32(table_header)
+            descriptor_block = reader.u32(table_header + 4)
+            value_block = reader.u32(table_header + 8)
+            if not (
+                0 <= key_block <= data_size - 13
+                and 0 <= descriptor_block < data_size
+                and 0 <= value_block < data_size
+            ):
+                continue
+            count = reader.u32(key_block + 5)
+            if not 500 <= count <= 5_000:
+                continue
+            root = reader.table_dict(handle)
+        except (KSBC2Error, UnicodeDecodeError, struct.error, ValueError):
+            continue
+        if required_keys.issubset(root) and all(
+            isinstance(root[key], TableRef) for key in required_keys
+        ):
+            return handle
+    raise KSBC2Error(
+        "could not locate the KSBC2 root table automatically; pass --root explicitly"
+    )
+
+
 def normalize_localization_id(value: object) -> int | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
@@ -232,36 +345,194 @@ def extract_lang_ref(reader: KSBC2Reader, value: object) -> LangRef | None:
     return LangRef(localization_id, namespace)
 
 
-def extract_skill_sources(reader: KSBC2Reader, root_handle: int) -> list[SkillSource]:
-    root = reader.table_dict(root_handle)
-    skill_data_new = reader.table_dict(
-        table_ref(root.get("SkillDataNew"), "root.SkillDataNew")
-    )
-    rows = reader.table_entries(
-        table_ref(skill_data_new.get("data"), "root.SkillDataNew.data")
+def extract_name_ref(
+    reader: KSBC2Reader,
+    value: object,
+    namespace: str,
+) -> LangRef | None:
+    """Decode either LangStrSplit or the numeric localization IDs used by effects."""
+    split_ref = extract_lang_ref(reader, value)
+    if split_ref is not None:
+        return split_ref
+    localization_id = normalize_localization_id(value)
+    return (
+        LangRef(localization_id, namespace)
+        if localization_id is not None
+        else None
     )
 
-    result: list[SkillSource] = []
+
+def normalized_icon_path(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    path = value.strip()
+    return path if path.startswith("/Game/") else None
+
+
+def _table_skill_sources(
+    reader: KSBC2Reader,
+    root: dict[object, object],
+    table_name: str,
+    name_field: str,
+    icon_fields: tuple[str, ...],
+) -> dict[int, SkillSource]:
+    container = reader.table_dict(
+        table_ref(root.get(table_name), f"root.{table_name}")
+    )
+    rows = reader.table_entries(
+        table_ref(container.get("data"), f"root.{table_name}.data")
+    )
+    result: dict[int, SkillSource] = {}
     for raw_skill_id, raw_row in rows:
-        if not isinstance(raw_skill_id, (int, float)) or isinstance(raw_skill_id, bool):
+        if (
+            not isinstance(raw_skill_id, (int, float))
+            or isinstance(raw_skill_id, bool)
+            or not isinstance(raw_row, TableRef)
+        ):
             continue
         skill_id = int(raw_skill_id)
-        if skill_id <= 0 or not isinstance(raw_row, TableRef):
+        if skill_id <= 0:
             continue
         row = reader.table_dict(raw_row.handle)
-        raw_name = row.get("Name")
+        raw_name = row.get(name_field)
         direct_name = raw_name.strip() if isinstance(raw_name, str) else None
-        raw_icon = row.get("SkillIcon") or row.get("IconTexture")
-        icon_path = raw_icon.strip() if isinstance(raw_icon, str) else None
-        result.append(
-            SkillSource(
-                skill_id=skill_id,
-                lang_ref=extract_lang_ref(reader, raw_name),
-                direct_name=direct_name or None,
-                icon_path=icon_path or None,
-            )
+        icon_path = next(
+            (
+                parsed_icon
+                for icon_field in icon_fields
+                for raw_icon in (row.get(icon_field),)
+                for parsed_icon in (normalized_icon_path(raw_icon),)
+                if parsed_icon
+            ),
+            None,
+        )
+        result[skill_id] = SkillSource(
+            skill_id=skill_id,
+            lang_ref=extract_name_ref(
+                reader, raw_name, f"{table_name}.{name_field}"
+            ),
+            direct_name=direct_name or None,
+            icon_path=icon_path,
         )
     return result
+
+
+def _merge_skill_source(
+    first: SkillSource | None,
+    second: SkillSource,
+) -> SkillSource:
+    if first is None:
+        return second
+    return SkillSource(
+        skill_id=second.skill_id,
+        lang_ref=first.lang_ref or second.lang_ref,
+        direct_name=first.direct_name or second.direct_name,
+        icon_path=second.icon_path or first.icon_path,
+    )
+
+
+def extract_skill_sources(reader: KSBC2Reader, root_handle: int) -> list[SkillSource]:
+    root = reader.table_dict(root_handle)
+    return list(
+        _table_skill_sources(
+            reader,
+            root,
+            "SkillDataNew",
+            "Name",
+            ("SkillIcon", "IconTexture"),
+        ).values()
+    )
+
+
+def extract_verified_effect_sources(
+    reader: KSBC2Reader,
+    root_handle: int,
+) -> tuple[list[SkillSource], list[SkillSource]]:
+    """Read passive/statistics rows and their packet-proven derived IDs."""
+    root = reader.table_dict(root_handle)
+    table_sources = {
+        table_name: _table_skill_sources(
+            reader,
+            root,
+            table_name,
+            name_field,
+            icon_fields,
+        )
+        for table_name, name_field, icon_fields in set(
+            STATISTICS_SOURCE_TABLES.values()
+        )
+    }
+
+    # Passive effects such as 空想姿态 can be emitted in healing statistics
+    # without an entry in StatisticsBuffAndSkillFilterData.
+    sources: dict[int, SkillSource] = dict(table_sources["PassiveSkillData"])
+    statistics = reader.table_dict(
+        table_ref(
+            root.get("StatisticsBuffAndSkillFilterData"),
+            "root.StatisticsBuffAndSkillFilterData",
+        )
+    )
+    filter_rows = reader.table_entries(
+        table_ref(
+            statistics.get("data"),
+            "root.StatisticsBuffAndSkillFilterData.data",
+        )
+    )
+    for raw_key, raw_row in filter_rows:
+        if not isinstance(raw_row, TableRef):
+            continue
+        row = reader.table_dict(raw_row.handle)
+        try:
+            skill_id = int(row.get("BuffID", raw_key) or 0)
+            id_type = int(row.get("IDType", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        source_spec = STATISTICS_SOURCE_TABLES.get(id_type)
+        if skill_id <= 0 or source_spec is None:
+            continue
+        table_name = source_spec[0]
+        source = table_sources[table_name].get(
+            skill_id,
+            SkillSource(skill_id, None, None, None),
+        )
+        raw_icon = row.get("Icon")
+        filter_icon = normalized_icon_path(raw_icon)
+        if filter_icon:
+            source = SkillSource(
+                skill_id=source.skill_id,
+                lang_ref=source.lang_ref,
+                direct_name=source.direct_name,
+                icon_path=filter_icon,
+            )
+        sources[skill_id] = _merge_skill_source(sources.get(skill_id), source)
+
+    for source_id in sorted(
+        set(VERIFIED_NETWORK_EFFECT_ALIASES.values())
+        | VERIFIED_NETWORK_EFFECT_SOURCE_IDS
+    ):
+        if source_id in sources:
+            continue
+        candidates = [
+            table[source_id]
+            for table in table_sources.values()
+            if source_id in table
+        ]
+        if len(candidates) != 1:
+            raise KSBC2Error(
+                f"verified effect source {source_id} is not unique in client tables"
+            )
+        sources[source_id] = candidates[0]
+
+    aliases = [
+        SkillSource(
+            skill_id=alias_id,
+            lang_ref=sources[source_id].lang_ref,
+            direct_name=sources[source_id].direct_name,
+            icon_path=None,
+        )
+        for alias_id, source_id in sorted(VERIFIED_NETWORK_EFFECT_ALIASES.items())
+    ]
+    return list(sources.values()), aliases
 
 
 def extract_profession_skill_ids(
@@ -600,14 +871,28 @@ def build_skill_metadata(
             skill_to_professions[skill_id].append(class_id)
     skill_metadata: dict[str, dict[str, object]] = {}
     for source in sources:
-        value: dict[str, object] = {}
+        value = skill_metadata.setdefault(str(source.skill_id), {})
         if source.icon_path:
             value["icon_path"] = source.icon_path
         class_ids = skill_to_professions.get(source.skill_id, [])
         if class_ids:
-            value["profession_ids"] = class_ids
-        if value:
-            skill_metadata[str(source.skill_id)] = value
+            existing_ids = value.get("profession_ids", [])
+            value["profession_ids"] = sorted(
+                {
+                    *(
+                        int(class_id)
+                        for class_id in existing_ids
+                        if isinstance(class_id, (int, float))
+                    ),
+                    *class_ids,
+                }
+            )
+        if not value:
+            skill_metadata.pop(str(source.skill_id), None)
+    for skill_id, icon_path in VERIFIED_CLIENT_DERIVED_ICON_PATHS.items():
+        skill_metadata.setdefault(str(skill_id), {}).setdefault(
+            "icon_path", icon_path
+        )
     return {
         "professions": {
             str(class_id): {
@@ -635,7 +920,11 @@ def integer(value: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
-    parser.add_argument("--root", type=integer, default=DEFAULT_ROOT_HANDLE)
+    parser.add_argument(
+        "--root",
+        type=integer,
+        help="KSBC2 root handle (auto-detected from the current cache by default)",
+    )
     parser.add_argument("--pid", type=int)
     parser.add_argument("--process", default="C7-Win64-Shipping.exe")
     parser.add_argument("--output", type=Path, default=Path("skill_names.json"))
@@ -653,15 +942,26 @@ def main() -> int:
         action="store_true",
         help="reuse the existing name catalog and only rebuild client metadata",
     )
+    parser.add_argument(
+        "--merge-existing",
+        action="store_true",
+        help="retain verified names absent from the current client export",
+    )
     args = parser.parse_args()
 
     if not args.cache.is_file():
         raise SystemExit(f"KSBC2 cache not found: {args.cache}")
 
     reader = KSBC2Reader.from_path(args.cache)
-    sources = extract_skill_sources(reader, args.root)
-    profession_skills = extract_profession_skill_ids(reader, args.root)
-    profession_sources = extract_profession_sources(reader, args.root)
+    root_handle = args.root or discover_root_handle(reader)
+    sources = extract_skill_sources(reader, root_handle)
+    effect_sources, effect_alias_sources = extract_verified_effect_sources(
+        reader, root_handle
+    )
+    name_sources = [*sources, *effect_sources, *effect_alias_sources]
+    metadata_sources = [*sources, *effect_sources]
+    profession_skills = extract_profession_skill_ids(reader, root_handle)
+    profession_sources = extract_profession_sources(reader, root_handle)
     if args.metadata_only:
         try:
             existing_names = json.loads(args.output.read_text(encoding="utf-8"))
@@ -673,7 +973,10 @@ def main() -> int:
             profession_sources, {}
         )
         metadata = build_skill_metadata(
-            sources, profession_sources, profession_skills, profession_names
+            metadata_sources,
+            profession_sources,
+            profession_skills,
+            profession_names,
         )
         write_json(args.metadata, metadata)
         print(
@@ -685,7 +988,7 @@ def main() -> int:
         return 0
     skill_localization_ids = {
         source.lang_ref.localization_id
-        for source in sources
+        for source in name_sources
         if source.lang_ref is not None
     }
     profession_localization_ids = {
@@ -709,14 +1012,32 @@ def main() -> int:
                 "existing output files were left unchanged"
             )
 
-    names, ambiguous, unresolved = choose_names(sources, candidates)
+    names, ambiguous, unresolved = choose_names(name_sources, candidates)
+    if args.merge_existing and args.output.is_file():
+        try:
+            existing_names = json.loads(args.output.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise SystemExit(f"could not merge {args.output}: {exc}") from exc
+        if not isinstance(existing_names, dict):
+            raise SystemExit(f"existing skill catalog is not valid: {args.output}")
+        names = {
+            **{
+                str(skill_id): str(name).strip()
+                for skill_id, name in existing_names.items()
+                if str(skill_id).isdigit() and str(name).strip()
+            },
+            **names,
+        }
     profession_names, unresolved_professions = choose_profession_names(
         profession_sources, candidates
     )
     write_json(args.output, names)
 
     metadata = build_skill_metadata(
-        sources, profession_sources, profession_skills, profession_names
+        metadata_sources,
+        profession_sources,
+        profession_skills,
+        profession_names,
     )
     write_json(args.metadata, metadata)
 
@@ -738,15 +1059,21 @@ def main() -> int:
         profession_missing.extend(missing)
 
     namespaces: dict[str, int] = defaultdict(int)
-    for source in sources:
+    for source in name_sources:
         if source.lang_ref:
             namespaces[source.lang_ref.namespace] += 1
     diagnostics = {
         "cache": str(args.cache),
-        "root_handle": f"0x{args.root:08x}",
+        "root_handle": f"0x{root_handle:08x}",
         "pid": pid,
-        "skill_rows": len(sources),
-        "skill_rows_with_lang_ref": sum(source.lang_ref is not None for source in sources),
+        "skill_rows": len(name_sources),
+        "skill_rows_with_lang_ref": sum(
+            source.lang_ref is not None for source in name_sources
+        ),
+        "verified_network_effect_aliases": {
+            str(alias_id): source_id
+            for alias_id, source_id in VERIFIED_NETWORK_EFFECT_ALIASES.items()
+        },
         "unique_localization_ids": len(localization_ids),
         "unique_skill_localization_ids": len(skill_localization_ids),
         "unique_profession_localization_ids": len(profession_localization_ids),
@@ -771,7 +1098,7 @@ def main() -> int:
     write_json(args.diagnostics, diagnostics)
 
     print(
-        f"skills={len(sources)} lang_refs={diagnostics['skill_rows_with_lang_ref']} "
+        f"skills={len(name_sources)} lang_refs={diagnostics['skill_rows_with_lang_ref']} "
         f"unique_lang_ids={len(localization_ids)} resolved_ids="
         f"{diagnostics['resolved_localization_ids']} exported={len(names)} "
         f"ambiguous={len(ambiguous)} unresolved={len(unresolved)}"

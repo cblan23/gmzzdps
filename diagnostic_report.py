@@ -22,8 +22,8 @@ from network_state import DAMAGE_TARGET_TEMPLATE_IDS, NetworkPacketParser
 
 
 TOOL_NAME = "叨叨诡秘问题检测工具"
-TOOL_VERSION = "1.0.3+20260901.2"
-DIAGNOSTIC_SCHEMA_VERSION = 3
+TOOL_VERSION = "1.1.0+20260904.1"
+DIAGNOSTIC_SCHEMA_VERSION = 4
 MAX_REPORTED_METHODS = 80
 MAX_REPORTED_ERRORS = 20
 MAX_REPORTED_BOSSES = 24
@@ -32,6 +32,29 @@ MAX_REPORTED_NATIVE_TEMPLATES = 32
 MAX_TRACKED_DAMAGE_TARGETS = 64
 MAX_TRACKED_NATIVE_ENTITIES = 4096
 MAX_UPLOAD_BYTES = 224 * 1024
+
+ASSESSMENT_RECOMMENDATIONS = {
+    "capture_pipeline_ok": "采集链路正常；若主程序仍无显示，继续核对主程序版本、Boss 模式与界面筛选状态。",
+    "damage_dummy_pipeline_ok": "公共采集链路正常；再对实际出问题的 Boss 运行一次检测，以验证该 Boss 模板。",
+    "game_not_connected": "确认游戏已启动且检测工具以管理员身份运行；仍失败时核对游戏进程名。",
+    "network_hook_failed": "核对当前游戏版本与运行配置中的网络 Hook 签名，并排查其他同类工具占用 Hook。",
+    "network_hook_silent": "网络 Hook 已安装但没有回调；优先核对入口签名、Hook 所有权与游戏版本。",
+    "no_damage_observed": "网络消息正常，本次未观察到伤害；让用户持续攻击同一个 Boss 或伤害木桩后重测。",
+    "native_hook_silent_network_fallback_blocked": "修复伤害源选择：原生 Hook 静默时必须继续采用网络伤害。",
+    "damage_decode_or_identity_failed": "核对伤害参数布局、实体 ID 解析与跨来源去重条件。",
+    "boss_catalog_unavailable": "把当前 Boss 模板目录正确打入检测工具并验证加载路径。",
+    "damage_target_not_confirmed": "伤害已解析但目标身份不足；核对模板 Hook、目标反查与 Boss 目录门槛。",
+    "target_lookup_not_triggered": "查看目标范围和本机角色冲突计数，修正候选目标进入反查队列的条件。",
+    "target_lookup_target_matches_local_player": "本机角色 ID 与受击目标发生冲突；修正本机实体读取偏移，或不要用该冲突作为 Boss 反查的唯一排除条件。",
+    "target_lookup_target_id_range_unsupported": "伤害目标落在当前实体 ID 范围之外；根据匿名范围计数调整实体 ID 校验规则。",
+    "target_lookup_no_common_component_class": "模板 Hook 没有提供可信 CommonComponent 类型；核对模板入口是否安装并产生记录。",
+    "target_lookup_object_table_unreadable": "更新当前游戏版本对应的 UObject 表地址或对象表布局。",
+    "target_lookup_common_component_not_indexed": "对象表可读但类型过滤未命中；核对 UClass 偏移与 CommonComponent 类型来源。",
+    "target_lookup_exact_component_template_zero": "目标组件已精确匹配但模板仍为 0；核对模板字段偏移和模板初始化时机。",
+    "target_lookup_exact_component_not_found": "对象表可读但实体无法连接；核对 CommonComponent 的实体 ID 字段偏移。",
+    "target_lookup_exact_template_not_emitted": "模板已读到但没有进入解析器；修复子进程批次传递或元数据消费顺序。",
+    "target_lookup_resolved_but_boss_rejected": "目标模板已识别；确认它确为 Boss 后补充 Boss 目录，或修正目录门槛。",
+}
 
 # Keep this list in sync with capture_process.py.  The analyzer is also used
 # directly by tests and by older diagnostic payloads, so it must enforce the
@@ -43,12 +66,29 @@ _NATIVE_DIAGNOSTIC_KEYS = frozenset(
         "damage_ring_records_polled",
         "damage_ring_parse_failures",
         "damage_ring_overruns",
+        "damage_target_records",
+        "damage_target_id_zero",
+        "damage_target_id_below_supported",
+        "damage_target_id_low_supported",
+        "damage_target_id_mid_supported",
+        "damage_target_id_gap",
+        "damage_target_id_high_supported",
+        "damage_target_id_above_supported",
+        "local_player_id_available_records",
+        "damage_attacker_matches_local_player",
+        "damage_target_matches_local_player",
         "boss_ring_header_reads",
         "boss_ring_header_failures",
         "boss_ring_records_polled",
         "boss_ring_parse_failures",
         "boss_ring_overruns",
         "target_lookup_candidates",
+        "target_lookup_disabled_candidates",
+        "target_lookup_skipped_unplausible",
+        "target_lookup_skipped_local_player",
+        "target_lookup_skipped_already_attempted",
+        "target_lookup_skipped_already_emitted",
+        "target_lookup_pending_reobserved",
         "target_lookup_evictions",
         "target_lookup_resolved",
         "target_lookup_timeouts",
@@ -86,6 +126,8 @@ _NATIVE_DIAGNOSTIC_KEYS = frozenset(
         "name_hook_installed",
         "boss_type_hook_installed",
         "boss_init_hook_installed",
+        "template_id_hook_installed",
+        "template_bulk_hook_installed",
         "target_boss_lookup_enabled",
         "target_lookup_pending",
         "target_lookup_attempted",
@@ -609,8 +651,6 @@ class DiagnosticAnalyzer:
                 self.network_damage_messages += 1
             if positive_damage:
                 self.network_damage_positive += 1
-                if native_active:
-                    self.network_damage_suppressed_by_native += 1
             try:
                 if method == "OnMsgDamageSyncV2":
                     shape, _attacker, target_id, _damage = self._network_damage_shape(
@@ -619,13 +659,20 @@ class DiagnosticAnalyzer:
                 else:
                     shape, target_id = "non_damage", 0
                 updates = self.parser.process(
-                    record, include_damage=not native_active
+                    record, include_damage=True
                 )
                 if method == "OnMsgDamageSyncV2":
                     event_payload = next(
                         (item for kind, item in updates if kind == "event"),
                         None,
                     )
+                    suppressed_by_native = bool(
+                        native_active
+                        and shape == "valid"
+                        and not isinstance(event_payload, dict)
+                    )
+                    if suppressed_by_native:
+                        self.network_damage_suppressed_by_native += 1
                     self._record_damage_shape(
                         "network",
                         shape,
@@ -636,11 +683,7 @@ class DiagnosticAnalyzer:
                             else None
                         ),
                         event_emitted=isinstance(event_payload, dict),
-                        suppressed_by_native=(
-                            native_active
-                            and shape == "valid"
-                            and not isinstance(event_payload, dict)
-                        ),
+                        suppressed_by_native=suppressed_by_native,
                     )
                 self._consume_updates(updates)
             except Exception as exc:
@@ -866,6 +909,26 @@ class DiagnosticAnalyzer:
         )
 
         if candidates <= 0:
+            skipped_local = self._native_diagnostic_int(
+                "target_lookup_skipped_local_player"
+            )
+            skipped_unplausible = self._native_diagnostic_int(
+                "target_lookup_skipped_unplausible"
+            )
+            if skipped_local > 0:
+                return {
+                    "code": "target_lookup_target_matches_local_player",
+                    "confidence": "high",
+                    "stage": "target_lookup_candidate",
+                    "summary": "伤害目标被原生层判定为本机角色，因此没有进入 Boss 反查队列。",
+                }
+            if skipped_unplausible > 0:
+                return {
+                    "code": "target_lookup_target_id_range_unsupported",
+                    "confidence": "high",
+                    "stage": "target_lookup_candidate",
+                    "summary": "伤害目标不在当前支持的实体 ID 范围内，因此没有进入 Boss 反查队列。",
+                }
             return {
                 "code": "target_lookup_not_triggered",
                 "confidence": "high",
@@ -928,11 +991,141 @@ class DiagnosticAnalyzer:
             "summary": "目标反查已执行，但本次报告尚未形成可用的精确目标模板。",
         }
 
+    def _pipeline_checks(self) -> dict[str, dict[str, object]]:
+        """Build an anonymous, stage-by-stage view of the capture path."""
+
+        connected = bool(self.connected_payload)
+        native_installed = bool(
+            self.connected_payload.get("native_damage_hook_installed")
+        )
+        template_hooks = sum(
+            bool(self.connected_payload.get(key))
+            for key in (
+                "native_boss_type_hook_installed",
+                "native_boss_init_hook_installed",
+                "native_template_id_hook_installed",
+                "native_template_bulk_hook_installed",
+            )
+        )
+        positive_damage = max(
+            self.network_damage_positive,
+            self.native_positive_damage_records,
+        )
+        displayable_damage = (
+            self._confirmed_boss_events() + self._damage_dummy_events()
+        )
+        identity_links = self._target_identity_links()
+        exact_identity_matches = max(
+            identity_links.get("native_template_exact_matches", 0),
+            identity_links.get("parser_profile_exact_matches", 0),
+            identity_links.get("confirmed_boss_exact_matches", 0),
+            identity_links.get("damage_dummy_exact_matches", 0),
+        )
+        lookup_enabled = bool(
+            self.native_diagnostic.get("target_boss_lookup_enabled")
+        )
+        lookup_candidates = self._native_diagnostic_int(
+            "target_lookup_candidates"
+        )
+        lookup_resolved = self._native_diagnostic_int("target_lookup_resolved")
+        lookup_timeouts = self._native_diagnostic_int("target_lookup_timeouts")
+
+        if (
+            self.network_damage_positive > 0
+            and self.native_positive_damage_records == 0
+        ):
+            fallback_status = (
+                "passed"
+                if self.parsed_damage_events > 0
+                and self.network_damage_suppressed_by_native == 0
+                else "blocked"
+            )
+        elif self.network_damage_suppressed_by_native > 0:
+            fallback_status = "deduplicated"
+        else:
+            fallback_status = "not_needed"
+
+        return {
+            "connection": {
+                "status": "passed" if connected else "failed",
+            },
+            "network_capture": {
+                "status": "passed" if self.network_records > 0 else "silent",
+                "records": self.network_records,
+            },
+            "native_damage_capture": {
+                "status": (
+                    "passed"
+                    if self.native_positive_damage_records > 0
+                    else "silent" if native_installed else "unavailable"
+                ),
+                "records": self.native_damage_records,
+            },
+            "network_fallback": {
+                "status": fallback_status,
+                "positive_records": self.network_damage_positive,
+            },
+            "damage_decode": {
+                "status": (
+                    "passed"
+                    if self.parsed_damage_events > 0
+                    else "failed" if positive_damage > 0 else "not_observed"
+                ),
+                "events": self.parsed_damage_events,
+            },
+            "template_hooks": {
+                "status": "available" if template_hooks > 0 else "unavailable",
+                "installed": template_hooks,
+                "records": self.native_boss_records,
+                "records_with_template_id": int(
+                    self.native_template_stats.get("records_with_template_id", 0)
+                ),
+            },
+            "target_lookup": {
+                "status": (
+                    "disabled"
+                    if not lookup_enabled
+                    else "passed"
+                    if lookup_resolved > 0
+                    else "timed_out"
+                    if lookup_timeouts > 0
+                    else "triggered"
+                    if lookup_candidates > 0
+                    else "not_triggered"
+                ),
+                "candidates": lookup_candidates,
+                "resolved": lookup_resolved,
+            },
+            "target_identity": {
+                "status": (
+                    "passed"
+                    if exact_identity_matches > 0
+                    else "failed"
+                    if self.parsed_damage_events > 0
+                    else "not_observed"
+                ),
+                "exact_matches": exact_identity_matches,
+            },
+            "boss_display_gate": {
+                "status": (
+                    "passed"
+                    if displayable_damage > 0
+                    else "failed"
+                    if self.parsed_damage_events > 0
+                    else "not_observed"
+                ),
+                "events": displayable_damage,
+            },
+        }
+
     def handle(self, kind: str, payload: object = None) -> None:
         kind = str(kind or "")
         if kind == "process_started" and isinstance(payload, dict):
             self.process_payload = {
                 "capture_process_pid": _safe_int(payload.get("pid")),
+                "runtime_profile_id": str(
+                    payload.get("runtime_profile_id", "")
+                )[:64],
                 "priority_class": str(payload.get("priority_class", ""))[:32],
                 "priority_applied": _safe_bool(payload.get("priority_applied")),
                 "main_thread_priority_applied": _safe_bool(
@@ -951,6 +1144,8 @@ class DiagnosticAnalyzer:
                 "native_name_hook_installed",
                 "native_boss_type_hook_installed",
                 "native_boss_init_hook_installed",
+                "native_template_id_hook_installed",
+                "native_template_bulk_hook_installed",
                 "team_stats_hook_installed",
                 "team_stats_mode",
                 "damage_source",
@@ -1058,6 +1253,11 @@ class DiagnosticAnalyzer:
     def finish(self, environment: dict[str, object]) -> dict[str, object]:
         self.finished_at = time.time()
         damage_targets = self._damage_target_summaries()
+        assessment = self.assessment()
+        assessment["recommended_fix"] = ASSESSMENT_RECOMMENDATIONS.get(
+            assessment.get("code", ""),
+            "根据 pipeline_checks 中第一个非通过阶段继续定位，不要仅依据管理员状态判断采集正常。",
+        )
         methods = sorted(
             self.method_counts.items(), key=lambda item: (-item[1], item[0])
         )[:MAX_REPORTED_METHODS]
@@ -1075,7 +1275,7 @@ class DiagnosticAnalyzer:
             "schema_version": DIAGNOSTIC_SCHEMA_VERSION,
             "tool": {"name": TOOL_NAME, "version": TOOL_VERSION},
             "environment": dict(environment),
-            "assessment": self.assessment(),
+            "assessment": assessment,
             "capture": {
                 "duration_seconds": round(
                     max(0.0, self.finished_at - self.started_at), 3
@@ -1113,6 +1313,7 @@ class DiagnosticAnalyzer:
                 "native_diagnostic_snapshots": self.native_diagnostic_snapshots,
                 "native_diagnostic_resets": self.native_diagnostic_resets,
                 "target_identity_links": self._target_identity_links(),
+                "pipeline_checks": self._pipeline_checks(),
                 "damage_stage_counts": _sorted_counter(self.damage_stage_counts),
                 "damage_gate_reasons": _sorted_counter(self.damage_gate_reasons),
                 "sequence_gaps": self.sequence_gaps,

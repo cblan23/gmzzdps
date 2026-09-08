@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import runpy
+import shutil
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
@@ -251,8 +252,25 @@ def main() -> int:
     parser.add_argument("--trace-actor", type=int, default=0)
     parser.add_argument("--trace-resets", action="store_true")
     parser.add_argument("--show-skills", action="store_true")
+    parser.add_argument(
+        "--start-line",
+        type=int,
+        default=0,
+        help="skip parser/model processing before this JSONL line",
+    )
     parser.add_argument("--max-line", type=int, default=0)
+    parser.add_argument(
+        "--encounter-id",
+        default="",
+        help="inspect one deterministic replay encounter id",
+    )
     parser.add_argument("--repair-history-id", default="")
+    parser.add_argument(
+        "--history-dir",
+        type=Path,
+        default=None,
+        help="history directory to use with --repair-history-id",
+    )
     parser.add_argument("--anonymous-output", type=Path)
     parser.add_argument("--anonymous-only", action="store_true")
     args = parser.parse_args()
@@ -261,9 +279,11 @@ def main() -> int:
     config = APP["load_config"]()
     identity = read_object(APP["SELF_IDENTITY_CACHE_PATH"])
     team_profiles = read_object(APP["TEAM_PROFILE_CACHE_PATH"])
+    target_identity_catalog = APP["load_target_identity_catalog"]()
     packet_parser = NetworkPacketParser(
         team_profiles,
         APP["load_monster_catalog"](),
+        target_identity_catalog=target_identity_catalog,
         remembered_self_token=str(identity.get("user_token", "")),
         allow_cached_projection_roster=True,
         boss_name_allowlist=APP["load_boss_name_allowlist"](),
@@ -271,6 +291,7 @@ def main() -> int:
     model = CombatModel(
         skill_names=APP["load_skill_catalog"](),
         runtime_skill_names=config.get("runtime_skill_names", {}),
+        target_catalog=target_identity_catalog,
         run_id=f"replay-{args.log.stem}",
         boss_only=True,
     )
@@ -280,6 +301,7 @@ def main() -> int:
         "active_boss": model.ingest_active_boss,
         "identity": model.ingest_identity,
         "actor_merge": model.merge_actor,
+        "team_actor_rebind": model.rebind_team_actors,
         "party": model.ingest_party,
         "profile": model.ingest_profile,
         "monster": model.ingest_monster,
@@ -326,6 +348,8 @@ def main() -> int:
             before_session = model.session_number
             before_target = model.combat_target_id
             before = None
+            before_taken = None
+            before_healing = None
             if (
                 kind == "team_stat"
                 and int(update.get("actor_id", 0) or 0) == args.trace_actor
@@ -337,8 +361,41 @@ def main() -> int:
                     state.accepted_damage,
                     state.baseline_snapshot_time_100ns,
                 ) if state else None
+                taken_state = model.team_taken_states.get(args.trace_actor)
+                before_taken = (
+                    taken_state.last_absolute,
+                    taken_state.baseline_absolute,
+                    taken_state.accepted_taken,
+                    taken_state.baseline_snapshot_time_100ns,
+                    taken_state.exact_for_encounter,
+                ) if taken_state else None
+                healing_state = model.team_healing_states.get(args.trace_actor)
+                before_healing = (
+                    healing_state.last_absolute,
+                    healing_state.baseline_absolute,
+                    healing_state.accepted_effective_healing,
+                    healing_state.baseline_snapshot_time_100ns,
+                    healing_state.exact_for_encounter,
+                ) if healing_state else None
             if handler is not None:
                 handler(update)
+            if (
+                kind == "life"
+                and args.trace_actor
+                and int(update.get("actor_id", 0) or 0) == args.trace_actor
+                and (update.get("explicit_transition") or update.get("dead"))
+            ):
+                print(
+                    "TRACE_LIFE "
+                    f"line={line_number} time={update.get('event_time')} "
+                    f"actor={args.trace_actor} dead={bool(update.get('dead'))} "
+                    f"confirmed={update.get('death_confirmed')} "
+                    f"combat_start={model.first_damage_time:.6f} "
+                    f"combat_end={model.combat_end_time:.6f} "
+                    f"deaths={model.member_death_counts.get(args.trace_actor, 0)} "
+                    f"revives={model.member_revive_counts.get(args.trace_actor, 0)} "
+                    f"dead_seconds={model.member_death_duration(args.trace_actor):.6f}"
+                )
             current = model.current_monster()
             current_is_drill = bool(
                 current is not None and int(current.template_id or 0) == 7_115_080
@@ -420,12 +477,36 @@ def main() -> int:
                     state.accepted_damage,
                     state.baseline_snapshot_time_100ns,
                 ) if state else None
+                taken_state = model.team_taken_states.get(args.trace_actor)
+                after_taken = (
+                    taken_state.last_absolute,
+                    taken_state.baseline_absolute,
+                    taken_state.accepted_taken,
+                    taken_state.baseline_snapshot_time_100ns,
+                    taken_state.exact_for_encounter,
+                ) if taken_state else None
+                healing_state = model.team_healing_states.get(args.trace_actor)
+                after_healing = (
+                    healing_state.last_absolute,
+                    healing_state.baseline_absolute,
+                    healing_state.accepted_effective_healing,
+                    healing_state.baseline_snapshot_time_100ns,
+                    healing_state.exact_for_encounter,
+                ) if healing_state else None
                 current = model.current_monster()
                 current_template = int(current.template_id or 0) if current else 0
                 baseline_changed = bool(
                     before is not None
                     and after is not None
                     and before[1:] != after[1:]
+                ) or bool(
+                    before_taken is not None
+                    and after_taken is not None
+                    and before_taken[1:] != after_taken[1:]
+                ) or bool(
+                    before_healing is not None
+                    and after_healing is not None
+                    and before_healing[1:] != after_healing[1:]
                 )
                 selected_trace = bool(
                     not selected_templates
@@ -437,19 +518,26 @@ def main() -> int:
                         f"line={line_number} template={current_template} "
                         f"time={update.get('event_time')} "
                         f"absolute={update.get('absolute_damage')} "
+                        f"taken={update.get('absolute_taken')} "
+                        f"healing={update.get('absolute_effective_healing')} "
                         f"omitted_zero={bool(update.get('omitted_zero'))} "
                         f"start_signal={model.encounter_start_signal_100ns} "
-                        f"before={before} after={after}"
+                        f"damage_state={before}->{after} "
+                        f"taken_state={before_taken}->{after_taken} "
+                        f"healing_state={before_healing}->{after_healing}"
                     )
                     trace_count += 1
 
     for line_count, record in iter_records(args.log):
+        if args.start_line and line_count < args.start_line:
+            continue
         if args.max_line and line_count > args.max_line:
             line_count -= 1
             break
         function = str(record.get("function", ""))
         if function in {
             "KAPI_Common_SetBossType",
+            "CommonComponent_BulkTemplate",
             "CommonComponent_ExistingBossType",
             "CommonComponent_TemplateBossType",
             "CommonComponent_TargetIdLookup",
@@ -470,7 +558,7 @@ def main() -> int:
             update_counts["name"] += 1
         else:
             apply_updates(
-                packet_parser.process(record, include_damage=False), line_count
+                packet_parser.process(record, include_damage=True), line_count
             )
 
         current_parser_boss_id = int(packet_parser.active_boss_entity_id or 0)
@@ -510,6 +598,13 @@ def main() -> int:
         if not selected_templates
         or record_template_id(record) in selected_templates
     ]
+    selected_encounter_id = str(args.encounter_id).strip()
+    if selected_encounter_id:
+        selected = [
+            record
+            for record in selected
+            if str(record.get("encounter_id", "")) == selected_encounter_id
+        ]
 
     if args.anonymous_output is not None:
         evidence = anonymous_replay_evidence(
@@ -614,6 +709,41 @@ def main() -> int:
                 f"coverage={sorted({str(row.get('coverage', '')) for row in healers})} "
                 f"response_samples={sum(int((row.get('response') or {}).get('samples', 0) or 0) for row in healers)}"
             )
+        taken_rows = [
+            row for row in record.get("damage_taken", []) if isinstance(row, dict)
+        ]
+        if taken_rows:
+            print(
+                "  TAKEN "
+                f"team={record.get('team_taken')} "
+                f"actors={len(taken_rows)} "
+                f"sources={sorted({str(row.get('source', '')) for row in taken_rows})}"
+            )
+            for row in taken_rows:
+                print(
+                    f"    actor={int(row.get('actor_id', 0) or 0)} "
+                    f"taken={row.get('taken')} share={row.get('share')}"
+                )
+        life_rows = [
+            row
+            for row in record.get("participants", [])
+            if isinstance(row, dict)
+            and (
+                int(row.get("deaths", 0) or 0)
+                or int(row.get("revives", 0) or 0)
+                or float(row.get("death_duration_seconds", 0.0) or 0.0)
+            )
+        ]
+        if life_rows:
+            print("  LIFE")
+            for row in life_rows:
+                print(
+                    f"    actor={int(row.get('actor_id', 0) or 0)} "
+                    f"deaths={int(row.get('deaths', 0) or 0)} "
+                    f"revives={int(row.get('revives', 0) or 0)} "
+                    "dead_seconds="
+                    f"{float(row.get('death_duration_seconds', 0.0) or 0.0):.3f}"
+                )
         for actor_id, damage in sorted(
             actor_damage(record).items(), key=lambda item: item[1], reverse=True
         ):
@@ -681,11 +811,18 @@ def main() -> int:
     if repair_id:
         if len(selected) != 1:
             parser.error("--repair-history-id requires exactly one selected combat")
-        history_store = CombatHistoryStore(APP["HISTORY_DIR"])
+        history_store = CombatHistoryStore(args.history_dir or APP["HISTORY_DIR"])
         history_path = history_store.directory / (
             history_store._safe_encounter_id(repair_id) + ".json"
         )
         existing = read_object(history_path)
+        backup_path: Path | None = None
+        if history_path.is_file():
+            backup_path = history_path.with_name(
+                history_path.stem + ".pre-repair.json"
+            )
+            if not backup_path.exists():
+                shutil.copy2(history_path, backup_path)
         repaired = dict(selected[0])
         repaired["encounter_id"] = repair_id
         for key in (
@@ -703,7 +840,8 @@ def main() -> int:
                 attached += 1
         print(
             f"REPAIRED encounter={repair_id} damage={repaired.get('total_damage')} "
-            f"attached_summaries={attached}"
+            f"attached_summaries={attached} "
+            f"backup={backup_path if backup_path is not None else '-'}"
         )
     return 0
 

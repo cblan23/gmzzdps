@@ -16,6 +16,7 @@ ENTITY_ID_MAX = 999_999_999_999_999
 LOW_COMBAT_ENTITY_ID_MIN = 1_000_000_000_000
 LOW_COMBAT_ENTITY_ID_MAX = 7_999_999_999_999
 MAX_PARTY_MEMBERS = 12
+PROJECTION_NAME_SUFFIX = "·投影"
 PLAYER_SKILL_MIN = 86_000_000
 PLAYER_SKILL_MAX = 87_999_999
 MAX_PROFILE_TEXT = 64
@@ -135,6 +136,10 @@ ENCOUNTER_NON_BOSS_TEMPLATE_IDS = frozenset(
 # same-name mechanics and story NPCs.
 EXPLICIT_NON_TYPE3_BOSS_TEMPLATE_IDS = frozenset(
     {
+        # MonsterData[7102980] and FacadeControlData[7900280] resolve to the
+        # client's BossHead/Yihaoxintu resource.  Keep the exception scoped to
+        # this verified encounter template; adjacent phase rows remain gated.
+        7_102_980,  # 一号信徒.
         7_107_030,  # First Karl Edgar encounter (four linked manifestations).
         7_265_156,  # Dream Catcher.
     }
@@ -150,12 +155,43 @@ SEPARATE_BOSS_ENCOUNTER_TRANSITIONS = frozenset(
         (7_110_642, 7_110_641),  # 洛克·金 -> 洛克·金·失控
     }
 )
+# Only this captured encounter is currently verified to expose two independent
+# Boss HP streams at the same time. Keep dual-target behavior template-scoped so
+# Boss-ranked adds in unrelated encounters cannot acquire a second HP bar.
+VERIFIED_SIMULTANEOUS_BOSS_TEMPLATE_GROUPS = (
+    frozenset({7_100_208, 7_100_209}),  # 安西娅 + 巴尼先生
+)
+# Some clients miss one CommonComponent template callback for this encounter.
+# These captured full-HP values may identify the missing partner only after it
+# has taken player damage beside the other verified Boss; HP alone is never a
+# general target-identity signal.
+VERIFIED_SIMULTANEOUS_BOSS_MAX_HP_BY_TEMPLATE = {
+    7_100_208: frozenset({37_590_045}),
+    7_100_209: frozenset({17_291_421}),
+}
+VERIFIED_SIMULTANEOUS_BOSS_SUCCESSORS = {
+    frozenset({7_100_208, 7_100_209}): frozenset({7_100_210}),
+}
+AUTHORITATIVE_BOSS_NAME_TEMPLATE_IDS = frozenset(
+    {7_100_208, 7_100_209, 7_100_210}
+)
 TEAM_STATISTICS_METHODS = {
     "RetCommonCombatStatisticsByTeam",
     "RetDirtyCommonCombatStatisticsByTeam",
 }
+PLAYER_DETAIL_STATISTICS_METHOD = "RetCommonCombatStatistics"
 STAGE_COMBAT_STATISTICS_METHOD = "OnMsgUpdateStageCombatStatistics"
 SETTLEMENT_COMBAT_STATISTICS_METHOD = "OnMsgSettlementCombatStatistics"
+REALTIME_DETAIL_STATISTICS_METHODS = frozenset(
+    {
+        "RetDungeonBattleStatistics",
+        "RetMonsterBattleStatistics",
+        "RetNpcCombatStatisticsByTeam",
+        "RetDirtyNpcCombatStatisticsByTeam",
+        "OnMsgUpdateDungeonBattleStatistics",
+        "OnMsgUpdateDungeonTeamPlayerBattleStatistics",
+    }
+)
 TEAM_JOIN_SUCCESS_METHODS = {
     "OnJoinGroupSuccess",
     "OnCreateGroupSuccess",
@@ -197,6 +233,14 @@ BOSS_SIGNAL_ACTIVE_WINDOW_100NS = 10 * 10_000_000
 BOSS_POINTER_HIGH_HP_FLOOR = 1_000_000.0
 SAME_TEMPLATE_BOSS_REPLACEMENT_STALE_100NS = 5 * 10_000_000
 NETWORK_ARGUMENT_MAX_DELAY_MS = 250.0
+# Native KAPI damage callbacks and their OnMsgDamageSyncV2 counterparts carry
+# the same complete event fields.  Captures from both supported clients show
+# that paired timestamps are normally identical and differ by at most 21.3 ms.
+# Keep a little scheduling margin while still making accidental cross-hit
+# matches require the same attacker, target, skill, flags, and two damage
+# amounts inside a very narrow interval.
+DAMAGE_CROSS_SOURCE_DEDUP_WINDOW_100NS = 50 * 10_000
+DAMAGE_CROSS_SOURCE_DEDUP_MAX_PENDING = 4096
 
 NETWORK_ARGUMENT_METHODS = frozenset(
     {
@@ -229,6 +273,7 @@ NETWORK_ARGUMENT_METHODS = frozenset(
         "OnMsgReconnectOrEnter",
         "OnMsgDungeonReadinessCheck",
         "OnMsgDungeonStageSettlement",
+        PLAYER_DETAIL_STATISTICS_METHOD,
         STAGE_COMBAT_STATISTICS_METHOD,
         SETTLEMENT_COMBAT_STATISTICS_METHOD,
         "OnMsgUpdateDungeonBattleStatistics",
@@ -340,11 +385,29 @@ BOSS_PHASE_NAME_GROUPS = (
         }
     ),
 )
+LONG_GAP_BOSS_PHASE_TRANSITIONS = frozenset(
+    {
+        # The four scripted opening manifestations and the final form are one
+        # daily Karl Edgar battle.  The intermission is long and the Common
+        # team counters restart, so name equality alone is not sufficient.
+        (7_107_030, 7_107_081),
+    }
+)
 BOSS_PHASE_TEMPLATE_TRANSITIONS = frozenset(
     {
         (7_103_402, 7_103_401),  # 先祖铠甲 -> 伯德温·威瑟尔
     }
-)
+) | LONG_GAP_BOSS_PHASE_TRANSITIONS
+# These exact damage skills have only one Boss-template owner in the captured
+# client evidence. They can restore an already-running Boss identity when the
+# overlay starts mid-fight and the native template callback was missed.
+UNIQUE_BOSS_DAMAGE_SKILL_TEMPLATES = {
+    88_007_440: 7_103_402,
+    88_007_442: 7_103_402,
+    88_007_445: 7_103_402,
+    88_007_446: 7_103_402,
+    88_007_453: 7_103_402,
+}
 
 
 def boss_names_share_phase(left: object, right: object) -> bool:
@@ -417,7 +480,7 @@ def parse_entity_id(value) -> int | None:
 
 
 def parse_combat_entity_id(value) -> int | None:
-    """Parse IDs from fields that explicitly carry an actor or target.
+    """Parse IDs from packet fields that can also resemble skill instances.
 
     Some game instances use 13-digit entity IDs. The gap above that range is
     deliberately excluded because 86/87-series skill instances occupy it.
@@ -432,6 +495,25 @@ def parse_combat_entity_id(value) -> int | None:
     if LOW_COMBAT_ENTITY_ID_MIN <= parsed <= LOW_COMBAT_ENTITY_ID_MAX:
         return parsed
     return parse_entity_id(parsed)
+
+
+def parse_exact_combat_entity_id(value) -> int | None:
+    """Parse a schema-confirmed actor/target field across its full range.
+
+    Reopening the overlay does not recreate the game process, and later game
+    entities can be assigned IDs in the numeric range also used by skill
+    instances. That overlap is safe only when the callback or decoded RPC
+    schema already proves that the field is an entity ID.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if LOW_COMBAT_ENTITY_ID_MIN <= parsed <= ENTITY_ID_MAX:
+        return parsed
+    return None
 
 
 def normalize_network_skill_id(value) -> int:
@@ -512,6 +594,7 @@ class NetworkPacketParser:
         team_profile_cache: dict[str, dict] | None = None,
         boss_template_catalog: dict[str, dict] | None = None,
         *,
+        target_identity_catalog: dict[str, dict] | None = None,
         remembered_self_token: str = "",
         allow_cached_projection_roster: bool = False,
         boss_name_allowlist: Iterable[str] | None = None,
@@ -544,6 +627,12 @@ class NetworkPacketParser:
         self.dungeon_context_time_100ns = 0
         self.reconnect_dungeon_candidates: tuple[int, ...] = ()
         self.stage_combat_seconds_by_actor: dict[tuple[int, str], int] = {}
+        self.player_detail_roster: tuple[str, ...] = ()
+        self.player_detail_common_damage: dict[str, int] = {}
+        self.player_detail_rows: dict[str, dict[str, object]] = {}
+        self.player_detail_actor_merges: dict[int, dict[str, object]] = {}
+        self.player_detail_generation = 0
+        self.player_detail_last_summary_signature: object = None
         self.entity_max_hp: dict[int, float] = {}
         self.entity_max_hp_time: dict[int, int] = {}
         self.entity_current_hp: dict[int, float] = {}
@@ -557,6 +646,13 @@ class NetworkPacketParser:
         self.pending_exact_damage: dict[
             int, list[tuple[int, int, int, int, bool | None]]
         ] = {}
+        self.pending_damage_stream_events: dict[
+            str, list[tuple[int, tuple[int, ...]]]
+        ] = {"native": [], "network": []}
+        self.damage_dedup_latest_time_100ns: dict[str, int] = {
+            "native": 0,
+            "network": 0,
+        }
         self.player_attackers: set[int] = set()
         self.root_pointers: set[int] = set()
         self.pointer_candidates: dict[int, tuple[int, int]] = {}
@@ -588,6 +684,8 @@ class NetworkPacketParser:
         )
         self.boss_template_catalog_enabled = boss_template_catalog is not None
         self.boss_template_catalog: dict[str, dict] = {}
+        self.target_identity_catalog: dict[str, dict] = {}
+        self.known_non_boss_template_ids: set[int] = set()
         self.healing_target_catalog: dict[str, dict] = {}
         self.boss_name_allowlist = tuple(
             dict.fromkeys(
@@ -619,6 +717,30 @@ class NetworkPacketParser:
                     )
                 ):
                     self.boss_template_catalog[str(template_id)] = dict(raw_metadata)
+        identity_catalog = (
+            target_identity_catalog
+            if isinstance(target_identity_catalog, dict)
+            else boss_template_catalog
+        )
+        if isinstance(identity_catalog, dict):
+            for raw_template_id, raw_metadata in identity_catalog.items():
+                if not isinstance(raw_metadata, dict):
+                    continue
+                try:
+                    template_id = int(raw_template_id)
+                    boss_type = int(raw_metadata.get("boss_type", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if template_id <= 0:
+                    continue
+                self.target_identity_catalog[str(template_id)] = dict(raw_metadata)
+                if (
+                    "boss_type" in raw_metadata
+                    and boss_type != HUD_BOSS_TYPE
+                    and template_id not in EXPLICIT_NON_TYPE3_BOSS_TEMPLATE_IDS
+                    and template_id not in DAMAGE_TARGET_TEMPLATE_IDS
+                ):
+                    self.known_non_boss_template_ids.add(template_id)
         self.team_profile_cache: dict[str, dict] = {}
         self.team_profile_cache_dirty = False
         self.live_team_profile_tokens: set[str] = set()
@@ -707,6 +829,8 @@ class NetworkPacketParser:
             self.active_boss_pointer = pointer
             self.active_boss_pointer_time_100ns = timestamp
         pending = self.pointer_state.pop(pointer, None)
+        if pending:
+            pending = self._known_non_boss_values(entity_id, pending)
         updates: list[tuple[str, dict]] = []
         if pointer in self.combat_mode_pointers:
             updates.append(
@@ -773,6 +897,7 @@ class NetworkPacketParser:
             return []
         entity_id = self.pointer_entities.get(pointer)
         if entity_id:
+            values = self._known_non_boss_values(entity_id, values)
             update = self._base_update(record)
             update.update(values)
             update["entity_id"] = entity_id
@@ -863,11 +988,83 @@ class NetworkPacketParser:
             and any(alias in normalized for alias in self.boss_name_allowlist)
         )
 
+    def _known_non_boss_template_id(
+        self, entity_id: int, template_id: object = 0
+    ) -> int:
+        try:
+            parsed_template_id = int(template_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            parsed_template_id = 0
+        if not parsed_template_id:
+            parsed_template_id = int(
+                self.entity_template_ids.get(int(entity_id or 0), 0) or 0
+            )
+        return (
+            parsed_template_id
+            if parsed_template_id in self.known_non_boss_template_ids
+            else 0
+        )
+
+    def _known_non_boss_values(
+        self, entity_id: int, values: dict
+    ) -> dict:
+        """Make exported non-Boss metadata authoritative over HUD guesses."""
+        template_id = self._known_non_boss_template_id(
+            entity_id, values.get("template_id", 0)
+        )
+        if not template_id:
+            return values
+        metadata = self.target_identity_catalog.get(str(template_id), {})
+        try:
+            boss_type = int(metadata.get("boss_type", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            boss_type = 0
+        sanitized = dict(values)
+        sanitized["template_id"] = template_id
+        sanitized["boss_type"] = boss_type
+        sanitized["boss_rank"] = 0
+        sanitized.pop("boss_source", None)
+        if template_id in HEALING_TARGET_TEMPLATE_IDS:
+            sanitized["entity_type"] = "TrainingDummy"
+        else:
+            sanitized["entity_type"] = "Monster"
+        return sanitized
+
+    def _demote_known_non_boss_entity(self, entity_id: int) -> None:
+        """Clear a false Boss lock without treating the ordinary unit as dead."""
+        if not entity_id:
+            return
+        template_id = self._known_non_boss_template_id(entity_id)
+        metadata = self.target_identity_catalog.get(str(template_id), {})
+        try:
+            actual_boss_type = int(metadata.get("boss_type", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            actual_boss_type = 0
+        if template_id:
+            self.entity_boss_types[entity_id] = actual_boss_type
+        self.confirmed_boss_entities.discard(entity_id)
+        self.defeated_boss_entities.discard(entity_id)
+        self.pending_exact_damage.pop(entity_id, None)
+        self.pending_entity_hits.pop(entity_id, None)
+        if self.active_boss_entity_id != entity_id:
+            return
+        self.active_boss_entity_id = None
+        self.active_boss_time_100ns = 0
+        self.active_boss_pointer = None
+        self.active_boss_pointer_time_100ns = 0
+        self.active_boss_hp_epoch = 0
+        self.active_boss_damage_epoch = 0
+        self.pending_boss_hp_drops.pop(entity_id, None)
+        self.pending_boss_hp_rises.pop(entity_id, None)
+
     def _is_excluded_boss_entity(self, entity_id: int) -> bool:
         return bool(
             entity_id
-            and int(self.entity_template_ids.get(entity_id, 0) or 0)
-            in HARD_EXCLUDED_BOSS_TEMPLATE_IDS
+            and (
+                int(self.entity_template_ids.get(entity_id, 0) or 0)
+                in HARD_EXCLUDED_BOSS_TEMPLATE_IDS
+                or self._known_non_boss_template_id(entity_id)
+            )
         )
 
     def _boss_identity_confirmed(self, entity_id: int, name: object = "") -> bool:
@@ -889,9 +1086,6 @@ class NetworkPacketParser:
         template_id: object = 0,
     ) -> str:
         """Return a real Boss name without allowing placeholders to win."""
-        incoming = plausible_name(candidate)
-        if incoming and not boss_name_is_placeholder(incoming):
-            return incoming
         try:
             parsed_template_id = int(template_id or 0)
         except (TypeError, ValueError, OverflowError):
@@ -900,13 +1094,24 @@ class NetworkPacketParser:
             parsed_template_id = int(
                 self.entity_template_ids.get(entity_id, 0) or 0
             )
+        catalog_name = plausible_name(
+            self.boss_template_catalog.get(str(parsed_template_id), {}).get(
+                "name", ""
+            )
+        )
+        if (
+            parsed_template_id in AUTHORITATIVE_BOSS_NAME_TEMPLATE_IDS
+            and catalog_name
+        ):
+            return catalog_name
+        incoming = plausible_name(candidate)
+        if incoming and not boss_name_is_placeholder(incoming):
+            return incoming
         existing_profile = self.entity_profiles.get(entity_id, {})
         for value in (
             self.runtime_entity_names.get(entity_id, ""),
             existing_profile.get("name", ""),
-            self.boss_template_catalog.get(str(parsed_template_id), {}).get(
-                "name", ""
-            ),
+            catalog_name,
         ):
             name = plausible_name(value)
             if name and not boss_name_is_placeholder(name):
@@ -924,6 +1129,8 @@ class NetworkPacketParser:
             boss_rank = int(values.get("boss_rank", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             template_id = boss_type = boss_rank = 0
+        if self._known_non_boss_template_id(entity_id, template_id):
+            return False
         entity_type = str(
             values.get("entity_type")
             or self.entity_profiles.get(entity_id, {}).get("entity_type", "")
@@ -944,6 +1151,7 @@ class NetworkPacketParser:
     def _profile_update(
         self, entity_id: int, record: dict, **values
     ) -> tuple[str, dict] | None:
+        values = self._known_non_boss_values(entity_id, values)
         raw_profile_name = values.get("name")
         profile_name = plausible_name(raw_profile_name)
         if (
@@ -979,7 +1187,13 @@ class NetworkPacketParser:
         token = self._team_token(values.get("user_token"))
         if token:
             cached_profile = self.team_profile_cache.get(token, {})
-            for key in ("name", "profession_id", "level", "role_number"):
+            for key in (
+                "name",
+                "profession_id",
+                "level",
+                "role_number",
+                "extraordinary_rating",
+            ):
                 if values.get(key) in (None, "") and cached_profile.get(key) not in (
                     None,
                     "",
@@ -1018,7 +1232,58 @@ class NetworkPacketParser:
                 parsed = 0
             if parsed:
                 result[key] = parsed
+        raw_rating = value.get("extraordinary_rating")
+        if raw_rating not in (None, ""):
+            try:
+                extraordinary_rating = int(raw_rating)
+            except (TypeError, ValueError, OverflowError):
+                extraordinary_rating = -1
+            if extraordinary_rating >= 0:
+                result["extraordinary_rating"] = extraordinary_rating
         return result
+
+    def _projection_extraordinary_rating(self, value: dict) -> int | None:
+        """Return a rating only for one exact original-name/class match."""
+        projection_name = plausible_name(value.get("name"))
+        if not projection_name.endswith(PROJECTION_NAME_SUFFIX):
+            return None
+        original_name = plausible_name(
+            projection_name[: -len(PROJECTION_NAME_SUFFIX)]
+        )
+        try:
+            profession_id = int(value.get("profession_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            profession_id = 0
+        if not original_name or not profession_id:
+            return None
+
+        matches: list[int] = []
+        for source in self.team_profile_cache.values():
+            if not isinstance(source, dict):
+                continue
+            source_name = plausible_name(source.get("name"))
+            if (
+                not source_name
+                or source_name.endswith(PROJECTION_NAME_SUFFIX)
+                or source_name != original_name
+            ):
+                continue
+            try:
+                source_profession = int(source.get("profession_id", 0) or 0)
+                rating = int(source["extraordinary_rating"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if source_profession == profession_id and rating >= 0:
+                matches.append(rating)
+        return matches[0] if len(matches) == 1 else None
+
+    def _inherit_projection_extraordinary_rating(self, value: dict) -> dict:
+        if "extraordinary_rating" in value:
+            return value
+        rating = self._projection_extraordinary_rating(value)
+        if rating is None:
+            return value
+        return {**value, "extraordinary_rating": rating}
 
     def take_team_profile_cache(self) -> dict[str, dict] | None:
         if not self.team_profile_cache_dirty:
@@ -1207,10 +1472,12 @@ class NetworkPacketParser:
         ScriptEntity stream after the overlay reconnects.
         """
         entity_id = int(self.active_boss_entity_id or 0)
-        if not parse_combat_entity_id(entity_id):
+        if not parse_exact_combat_entity_id(entity_id):
             return None
         profile = self.entity_profiles.get(entity_id, {})
         template_id = int(self.entity_template_ids.get(entity_id, 0) or 0)
+        if self._known_non_boss_template_id(entity_id, template_id):
+            return None
         max_hp = float(self.entity_max_hp.get(entity_id, 0.0) or 0.0)
         name = self._resolved_boss_name(entity_id, template_id=template_id)
         result: dict[str, object] = {
@@ -1236,7 +1503,7 @@ class NetworkPacketParser:
         """Restore only a same-process Boss identity and its confirmed max HP."""
         if not isinstance(state, dict):
             return []
-        entity_id = parse_combat_entity_id(state.get("entity_id"))
+        entity_id = parse_exact_combat_entity_id(state.get("entity_id"))
         try:
             template_id = int(state.get("template_id", 0) or 0)
             max_hp = float(state.get("max_hp", 0) or 0)
@@ -1247,6 +1514,7 @@ class NetworkPacketParser:
         if (
             not entity_id
             or template_id in HARD_EXCLUDED_BOSS_TEMPLATE_IDS
+            or self._known_non_boss_template_id(entity_id, template_id)
             or not self._valid_hp_value(max_hp, maximum=True)
         ):
             return []
@@ -1330,6 +1598,7 @@ class NetworkPacketParser:
                     "role_number": fields.get(6),
                     "profession_id": fields.get(8),
                     "level": fields.get(9),
+                    "extraordinary_rating": fields.get(27),
                 }
                 marker = fields.get(27, 0)
             elif token_at_two and plausible_name(fields.get(4)):
@@ -1338,12 +1607,18 @@ class NetworkPacketParser:
                     "profession_id": fields.get(5),
                     "level": fields.get(7),
                 }
+                if method in {
+                    "onmsgnewteamgroupapply",
+                    "onsyncnewteamgroupinvitemsg",
+                }:
+                    profile["extraordinary_rating"] = fields.get(8)
             elif token_at_zero and plausible_name(fields.get(7)):
                 profile = {
                     "name": plausible_name(fields.get(7)),
                     "role_number": fields.get(1),
                     "profession_id": fields.get(11),
                     "level": fields.get(10),
+                    "extraordinary_rating": fields.get(17),
                 }
                 marker = fields.get(17, 0)
             elif token_at_zero and plausible_name(fields.get(5)):
@@ -1369,6 +1644,7 @@ class NetworkPacketParser:
                 continue
 
             cleaned = self._clean_cached_team_profile(profile)
+            cleaned = self._inherit_projection_extraordinary_rating(cleaned)
             if not cleaned:
                 continue
             seen.add(token)
@@ -1413,6 +1689,9 @@ class NetworkPacketParser:
         corroborated_signal: bool = False,
     ) -> bool:
         timestamp = int(record.get("filetime_100ns", 0) or 0)
+        if self._known_non_boss_template_id(entity_id):
+            self._demote_known_non_boss_entity(entity_id)
+            return False
         if entity_id in self.scene_retired_boss_entities:
             if not (damage_evidence or corroborated_signal):
                 return False
@@ -1524,6 +1803,15 @@ class NetworkPacketParser:
             return False
         if not target_id:
             return False
+        if self._known_non_boss_template_id(target_id):
+            # Ordinary units can contribute damage to an already-confirmed
+            # Boss encounter, but they can never become the encounter target
+            # themselves.  This preserves legitimate add damage while failing
+            # closed when no real Boss lock exists.
+            return bool(
+                self.active_boss_entity_id
+                and self.active_boss_entity_id != target_id
+            )
         if (
             self.active_boss_entity_id is not None
             or target_id in self.confirmed_boss_entities
@@ -1537,6 +1825,68 @@ class NetworkPacketParser:
             or str(profile.get("entity_type", "")).strip()
         )
         return not identity_known
+
+    def _boss_damage_event(
+        self,
+        record: dict,
+        *,
+        attacker_id: int,
+        target_id: int,
+        skill_id: int,
+        damage: int,
+    ) -> dict | None:
+        """Return one strict Boss-to-party hit without affecting DPS parsing.
+
+        The ordinary ``event`` stream is target-oriented and feeds player DPS.
+        Boss analysis is deliberately emitted on a separate message only when
+        both sides have already been confirmed.  This helper never activates a
+        Boss, starts a fight, changes a roster, or makes an RPC request.
+        """
+
+        known_player_targets = set(self.token_actors.values())
+        party_target_confirmed = bool(
+            target_id == self.self_id
+            or target_id in self.party_ids
+            or target_id in self.actor_tokens
+            or target_id in known_player_targets
+        )
+        if not party_target_confirmed:
+            return None
+
+        source_kind = ""
+        if attacker_id in self.confirmed_boss_entities:
+            source_kind = "boss"
+        elif self._is_active_encounter_auxiliary(attacker_id):
+            source_kind = "mechanism"
+        if not source_kind or self.active_boss_entity_id is None:
+            return None
+
+        source_template_id = int(
+            self.entity_template_ids.get(attacker_id, 0) or 0
+        )
+        source_profile = self.entity_profiles.get(attacker_id, {})
+        source_name = plausible_name(
+            self.runtime_entity_names.get(attacker_id)
+        ) or plausible_name(source_profile.get("name"))
+        target_name = plausible_name(
+            self.runtime_entity_names.get(target_id)
+        ) or plausible_name(self.entity_profiles.get(target_id, {}).get("name"))
+        return {
+            **self._base_update(record),
+            "source_id": attacker_id,
+            "attacker_id": attacker_id,
+            "target_id": target_id,
+            "skill_id": skill_id,
+            "damage": damage,
+            "source_template_id": source_template_id,
+            "source_name": source_name,
+            "source_kind": source_kind,
+            "target_name": target_name,
+            "boss_source_confirmed": True,
+            "party_target_confirmed": True,
+            "active_boss_source": attacker_id == self.active_boss_entity_id,
+            "active_boss_id": int(self.active_boss_entity_id or 0),
+        }
 
     def _infer_active_encounter_auxiliary(
         self, entity_id: int, record: dict
@@ -2273,18 +2623,30 @@ class NetworkPacketParser:
                     or self._token_profession_id(token) == profession_id
                 ]
 
+                # Max HP is a volatile entity observation, not identity.  In
+                # the 20:02 capture two players had the same profession and a
+                # transient 15027 sample happened to equal the other player's
+                # roster HP, rotating their otherwise exact totals.  HP may
+                # help validate an already-unambiguous profession, but it must
+                # never choose between two same-profession tokens.
+                ambiguous_profession = bool(
+                    profession_id and len(profession_matches) > 1
+                )
+
                 max_hp = self.entity_max_hp.get(entity_id, 0.0)
                 max_hp_matches = [
                     token
                     for token in profession_matches
-                    if max_hp > 0
+                    if not ambiguous_profession
+                    and max_hp > 0
                     and abs(self.token_max_hp.get(token, -1.0) - max_hp) <= 0.5
                 ]
                 current_hp = self.entity_current_hp.get(entity_id, -1.0)
                 full_hp_matches = [
                     token
                     for token in profession_matches
-                    if current_hp > 0
+                    if not ambiguous_profession
+                    and current_hp > 0
                     and abs(self.token_max_hp.get(token, -1.0) - current_hp) <= 0.5
                 ]
 
@@ -2327,6 +2689,10 @@ class NetworkPacketParser:
         self.pending_target_hits.clear()
         self.pending_entity_hits.clear()
         self.pending_exact_damage.clear()
+        self.pending_damage_stream_events["native"].clear()
+        self.pending_damage_stream_events["network"].clear()
+        self.damage_dedup_latest_time_100ns["native"] = 0
+        self.damage_dedup_latest_time_100ns["network"] = 0
         self.pending_local_casts.clear()
         self.recent_skill_sources.clear()
         self.pending_boss_signal = None
@@ -2347,6 +2713,7 @@ class NetworkPacketParser:
         self.active_boss_damage_epoch = 0
         self.combat_mode_pointers.clear()
         self.stage_bound_tokens.clear()
+        self._clear_player_detail_statistics(clear_roster=True)
 
     def _record_combat_source(
         self,
@@ -2385,6 +2752,8 @@ class NetworkPacketParser:
                     profession_id=profession_id,
                 )
             )
+            updates.extend(self._infer_self_token_from_profile(record))
+            updates.extend(self._infer_self_token(record))
         if is_player_skill(normalized_skill_id):
             source = (normalized_skill_id, actor_id, timestamp)
             if not self.recent_skill_sources or self.recent_skill_sources[-1] != source:
@@ -2499,7 +2868,7 @@ class NetworkPacketParser:
         if (
             not entity_id
             or not actor_id
-            or not parse_combat_entity_id(entity_id)
+            or not parse_exact_combat_entity_id(entity_id)
             or actor_id == entity_id
             or actor_id in self.confirmed_boss_entities
         ):
@@ -2830,8 +3199,14 @@ class NetworkPacketParser:
         *,
         native: bool = False,
     ) -> list[tuple[str, dict]]:
-        if not parse_combat_entity_id(actor_id):
+        parsed_actor_id = (
+            parse_exact_combat_entity_id(actor_id)
+            if native
+            else parse_combat_entity_id(actor_id)
+        )
+        if parsed_actor_id is None:
             return []
+        actor_id = parsed_actor_id
         if (
             not native
             and self.self_confirmed
@@ -2910,6 +3285,79 @@ class NetworkPacketParser:
                 },
             )
         )
+        # A local actor is only useful for token identity after the current
+        # session has supplied roster evidence. These helpers are deliberately
+        # called after the explicit native/cast confirmation and never from a
+        # generic damage callback.
+        updates.extend(self._remembered_self_identity_updates(record))
+        updates.extend(self._infer_self_token_from_profile(record))
+        updates.extend(self._infer_self_token(record))
+        return updates
+
+    def _infer_boss_attacker_from_unique_skill(
+        self,
+        attacker_id: int,
+        target_id: int,
+        skill_id: int,
+        record: dict,
+    ) -> list[tuple[str, dict]]:
+        """Restore a missed Boss template from an exact, unique damage skill."""
+        template_id = int(UNIQUE_BOSS_DAMAGE_SKILL_TEMPLATES.get(skill_id, 0) or 0)
+        if not template_id or not parse_exact_combat_entity_id(attacker_id):
+            return []
+        known_player_targets = set(self.token_actors.values())
+        target_is_player = bool(
+            target_id == self.self_id
+            or target_id in self.party_ids
+            or target_id in self.actor_tokens
+            or target_id in known_player_targets
+        )
+        attacker_is_player = bool(
+            attacker_id == self.self_id
+            or attacker_id in self.party_ids
+            or attacker_id in self.actor_tokens
+            or attacker_id in known_player_targets
+        )
+        if not target_is_player or attacker_is_player:
+            return []
+        existing_template_id = int(
+            self.entity_template_ids.get(attacker_id, 0) or 0
+        )
+        if existing_template_id not in (0, template_id):
+            return []
+        metadata = self.boss_template_catalog.get(str(template_id))
+        if not isinstance(metadata, dict):
+            return []
+        try:
+            boss_type = int(metadata.get("boss_type", 0) or 0)
+            level = int(metadata.get("level", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return []
+        name = plausible_name(metadata.get("name"))
+        if boss_type != HUD_BOSS_TYPE or not name:
+            return []
+
+        party_changed = self._discard_player_classification(attacker_id)
+        self.entity_template_ids[attacker_id] = template_id
+        self.entity_boss_types[attacker_id] = HUD_BOSS_TYPE
+        self.runtime_entity_names[attacker_id] = name
+        values: dict[str, object] = {
+            "name": name,
+            "entity_type": "Boss",
+            "template_id": template_id,
+            "boss_type": HUD_BOSS_TYPE,
+            "boss_rank": 3,
+            "boss_source": "unique_damage_skill",
+        }
+        if 1 <= level <= 200:
+            values["level"] = level
+        updates: list[tuple[str, dict]] = []
+        profile = self._profile_update(attacker_id, record, **values)
+        if profile:
+            updates.append(profile)
+        self._activate_boss(attacker_id, record, corroborated_signal=True)
+        if party_changed:
+            updates.append(self._party_update(record, authoritative=False))
         return updates
 
     def _local_cast_updates(
@@ -2921,6 +3369,8 @@ class NetworkPacketParser:
         if not is_player_skill(skill_id):
             return []
         timestamp = int(record.get("filetime_100ns", 0) or 0)
+        updates: list[tuple[str, dict]] = []
+        actor_id = int(self.self_id or 0)
         recent = [
             (actor_id, source_time)
             for source_skill, actor_id, source_time in self.recent_skill_sources
@@ -2929,11 +3379,30 @@ class NetworkPacketParser:
         ]
         actors = {actor_id for actor_id, _source_time in recent}
         if len(actors) == 1:
-            return self._confirm_local_actor(next(iter(actors)), record)
-        self.pending_local_casts.append((skill_id, timestamp))
-        if len(self.pending_local_casts) > 64:
-            self.pending_local_casts = self.pending_local_casts[-32:]
-        return []
+            candidate_actor_id = next(iter(actors))
+            updates.extend(self._confirm_local_actor(candidate_actor_id, record))
+            actor_id = int(self.self_id or candidate_actor_id)
+        else:
+            self.pending_local_casts.append((skill_id, timestamp))
+            if len(self.pending_local_casts) > 64:
+                self.pending_local_casts = self.pending_local_casts[-32:]
+        try:
+            sequence = int(record.get("sequence", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            sequence = 0
+        updates.append(
+            (
+                "skill_cast",
+                {
+                    **self._base_update(record),
+                    "sequence": sequence,
+                    "actor_id": actor_id,
+                    "skill_id": skill_id,
+                    "cast_source": "local_success_response",
+                },
+            )
+        )
+        return updates
 
     def _team_join_success_updates(
         self, record: dict, args: list
@@ -2997,6 +3466,7 @@ class NetworkPacketParser:
                 role_number=fields.get(6),
                 profession_id=fields.get(8),
                 level=fields.get(9),
+                extraordinary_rating=fields.get(27),
                 user_token=token,
                 entity_type="Player",
             )
@@ -3051,9 +3521,15 @@ class NetworkPacketParser:
         left_team: bool = False,
     ) -> tuple[str, dict]:
         self.party_seen = True
+        user_tokens = set(self.party_tokens) | set(
+            self.authoritative_party_tokens
+        )
+        if self.self_token:
+            user_tokens.add(self.self_token)
         update = {
             **self._base_update(record),
             "entity_ids": sorted(self.party_ids),
+            "user_tokens": sorted(user_tokens),
             "member_count": min(MAX_PARTY_MEMBERS, self.party_member_count),
             "authoritative": authoritative,
         }
@@ -3092,6 +3568,7 @@ class NetworkPacketParser:
         self.scene_rebind_tokens.clear()
         self.party_member_count = 1 if self.self_id is not None else 0
         self.last_party_activity_100ns = 0
+        self._clear_player_detail_statistics(clear_roster=True)
 
     def _record_party_activity(self, record: dict) -> None:
         timestamp = int(record.get("filetime_100ns", 0) or 0)
@@ -3101,7 +3578,11 @@ class NetworkPacketParser:
             )
 
     def _infer_self_token(self, record: dict) -> list[tuple[str, dict]]:
-        if self.self_id is None or self.self_token is not None:
+        if (
+            self.self_id is None
+            or not self.self_confirmed
+            or self.self_token is not None
+        ):
             return []
         candidates = self.authoritative_party_tokens - self.other_party_tokens
         if len(candidates) != 1:
@@ -3111,7 +3592,11 @@ class NetworkPacketParser:
     def _infer_self_token_from_profile(
         self, record: dict
     ) -> list[tuple[str, dict]]:
-        if self.self_id is None or self.self_token is not None:
+        if (
+            self.self_id is None
+            or not self.self_confirmed
+            or self.self_token is not None
+        ):
             return []
         candidates = set(self.authoritative_party_tokens)
         if not candidates:
@@ -3172,6 +3657,7 @@ class NetworkPacketParser:
         if (
             self.self_token
             or not token
+            or token not in self.live_team_profile_tokens
             or self.self_id is None
             or not self.self_confirmed
         ):
@@ -3321,7 +3807,7 @@ class NetworkPacketParser:
         y: float
         if method == "OnMsgCreateLUnitSpellField":
             fields = direct_numeric_map(args[0])
-            target_id = parse_combat_entity_id(fields.get(17))
+            target_id = parse_exact_combat_entity_id(fields.get(17))
             position = direct_numeric_map(fields.get(9))
             try:
                 x = float(position[0])
@@ -3329,7 +3815,7 @@ class NetworkPacketParser:
             except (KeyError, TypeError, ValueError, OverflowError):
                 return []
         elif method == "OnMsgCreateBullet" and len(args) >= 13:
-            target_id = parse_combat_entity_id(args[10])
+            target_id = parse_exact_combat_entity_id(args[10])
             try:
                 x = float(args[11])
                 y = float(args[12])
@@ -3446,7 +3932,7 @@ class NetworkPacketParser:
         self, record: dict
     ) -> list[tuple[str, dict]]:
         """Promote targets from the exported Boss template allowlist."""
-        entity_id = parse_combat_entity_id(record.get("entity_id"))
+        entity_id = parse_exact_combat_entity_id(record.get("entity_id"))
         try:
             boss_type = int(record.get("boss_type", -1))
         except (TypeError, ValueError, OverflowError):
@@ -3455,8 +3941,28 @@ class NetworkPacketParser:
             template_id = int(record.get("template_id", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             template_id = 0
-        if entity_id and template_id:
-            self.entity_template_ids[entity_id] = template_id
+        was_marked_as_boss = bool(
+            entity_id
+            and (
+                entity_id == self.active_boss_entity_id
+                or entity_id in self.confirmed_boss_entities
+                or self._profile_marks_boss(
+                    entity_id, self.entity_profiles.get(entity_id, {})
+                )
+            )
+        )
+        if entity_id:
+            if template_id:
+                self.entity_template_ids[entity_id] = template_id
+            else:
+                # BossType and TemplateId are initialized by separate native
+                # paths.  A later field callback may therefore carry zero for
+                # one dimension even though that exact entity supplied it in
+                # an earlier callback.  Reuse only the same-entity cache; this
+                # never borrows identity from HP, names, or nearby targets.
+                template_id = int(
+                    self.entity_template_ids.get(entity_id, 0) or 0
+                )
             if is_training_dummy_template_id(template_id):
                 self.training_dummy_entities.add(entity_id)
                 self.last_training_dummy_entity_id = entity_id
@@ -3464,8 +3970,12 @@ class NetworkPacketParser:
                     self.last_training_dummy_time_100ns,
                     int(record.get("filetime_100ns", 0) or 0),
                 )
-        if entity_id and boss_type >= 0:
-            self.entity_boss_types[entity_id] = boss_type
+            if boss_type >= 0:
+                self.entity_boss_types[entity_id] = boss_type
+            else:
+                boss_type = int(
+                    self.entity_boss_types.get(entity_id, -1)
+                )
         # Healing dummies report boss_type=0, so they cannot go through the
         # normal Boss promotion path.  Keep this exact template-scoped branch
         # ahead of the catalog check; it supplies identity for HealSyncV2
@@ -3561,6 +4071,28 @@ class NetworkPacketParser:
             if party_changed:
                 updates.append(self._party_update(record, authoritative=False))
             return updates
+        if entity_id and self._known_non_boss_template_id(entity_id, template_id):
+            # HUD state can arrive one polling cycle before the native template
+            # callback.  Once the exact template identifies an ordinary unit,
+            # revoke that provisional Boss lock and notify the model if it had
+            # already observed the false promotion.
+            self._demote_known_non_boss_entity(entity_id)
+            if not was_marked_as_boss:
+                return []
+            metadata = self.target_identity_catalog.get(str(template_id), {})
+            try:
+                actual_boss_type = int(metadata.get("boss_type", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                actual_boss_type = 0
+            profile = self._profile_update(
+                entity_id,
+                record,
+                entity_type="Monster",
+                template_id=template_id,
+                boss_type=actual_boss_type,
+                boss_rank=0,
+            )
+            return [profile] if profile else []
         if self.boss_template_catalog_enabled:
             confirmed = template_profile is not None
         else:
@@ -3639,23 +4171,83 @@ class NetworkPacketParser:
         if method not in {
             STAGE_COMBAT_STATISTICS_METHOD,
             SETTLEMENT_COMBAT_STATISTICS_METHOD,
-        } or not args:
+        } | REALTIME_DETAIL_STATISTICS_METHODS or not args:
             return []
         settlement_method = method == SETTLEMENT_COMBAT_STATISTICS_METHOD
-        candidates = args[1:] + args[:1] if settlement_method else args[:1]
+        realtime_detail_method = method in REALTIME_DETAIL_STATISTICS_METHODS
+        if settlement_method:
+            candidates = args[1:] + args[:1]
+        elif realtime_detail_method:
+            candidates = list(walk_values(args))
+        else:
+            candidates = args[:1]
         stage: dict[int, object] = {}
+        direct_member_table = None
         for candidate in candidates:
             parsed_stage = direct_numeric_map(candidate)
-            if map_pairs(parsed_stage.get(5)):
+            raw_entries = map_pairs(parsed_stage.get(5))
+            if raw_entries and (
+                not realtime_detail_method
+                or self._valid_realtime_detail_entries(raw_entries)
+            ):
                 stage = parsed_stage
                 break
+            if realtime_detail_method:
+                candidate_entries = map_pairs(candidate)
+                if self._valid_realtime_detail_entries(candidate_entries):
+                    direct_member_table = candidate
+        if not stage and settlement_method:
+            grouped_stages: list[dict[int, object]] = []
+            seen_stage_ids: set[int] = set()
+            for candidate in candidates:
+                for raw_stage_id, member_table in map_pairs(candidate):
+                    try:
+                        stage_id = max(0, int(raw_stage_id or 0))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    member_entries = map_pairs(member_table)
+                    if (
+                        not stage_id
+                        or stage_id in seen_stage_ids
+                        or not self._valid_realtime_detail_entries(member_entries)
+                    ):
+                        continue
+                    seen_stage_ids.add(stage_id)
+                    grouped_stages.append(
+                        {
+                            0: stage_id,
+                            1: 0,
+                            2: "",
+                            3: True,
+                            5: member_table,
+                        }
+                    )
+            if grouped_stages:
+                updates: list[tuple[str, dict]] = []
+                for grouped_stage in grouped_stages:
+                    updates.extend(
+                        self._stage_combat_statistics_updates(
+                            record, [grouped_stage]
+                        )
+                    )
+                return updates
+        if not stage and direct_member_table is not None:
+            stage = {
+                0: int(self.dungeon_stage_id or 0),
+                1: int(self.dungeon_stage_phase or 0),
+                2: "",
+                3: False,
+                5: direct_member_table,
+            }
         if not stage:
             return []
         try:
             stage_id = max(0, int(stage.get(0, 0) or 0))
         except (TypeError, ValueError, OverflowError):
             stage_id = 0
-        completion_confirmed = stage.get(3) is True
+        completion_confirmed = bool(
+            not realtime_detail_method and stage.get(3) is True
+        )
         authoritative = settlement_method or completion_confirmed
         raw_entries = map_pairs(stage.get(5))
         members: list[tuple[str, int, dict[int, object]]] = []
@@ -3717,6 +4309,27 @@ class NetworkPacketParser:
 
         desired = {token: actor_id for token, actor_id, _fields in members}
         old_actors = {token: self.token_actors.get(token) for token in desired}
+        actor_rebindings = [
+            {
+                "from_actor_id": int(old_actor),
+                "to_actor_id": int(desired[token]),
+                "user_token": token,
+            }
+            for token, old_actor in old_actors.items()
+            if old_actor is not None
+            and int(old_actor) > 0
+            and int(old_actor) != int(desired[token])
+        ]
+        # Positive-to-positive corrections are state permutations, never
+        # ordinary merges.  Reject an inconsistent batch with duplicate
+        # sources instead of partially moving one person's totals.
+        if len(
+            {
+                int(binding["from_actor_id"])
+                for binding in actor_rebindings
+            }
+        ) != len(actor_rebindings):
+            actor_rebindings = []
         for token, old_actor in old_actors.items():
             if old_actor is not None and self.actor_tokens.get(old_actor) == token:
                 self.actor_tokens.pop(old_actor, None)
@@ -3731,19 +4344,35 @@ class NetworkPacketParser:
         self.scene_rebind_tokens.difference_update(desired)
 
         updates: list[tuple[str, dict]] = []
+        actor_merges: list[dict[str, object]] = []
+        if actor_rebindings:
+            updates.append(
+                (
+                    "team_actor_rebind",
+                    {
+                        **self._base_update(record),
+                        "bindings": [
+                            dict(binding) for binding in actor_rebindings
+                        ],
+                    },
+                )
+            )
         for token, actor_id, fields in members:
             if plausible_name(fields.get(5)):
                 self.live_team_profile_tokens.add(token)
             old_actor = old_actors.get(token)
             if old_actor is not None and old_actor < 0 and old_actor != actor_id:
+                actor_merge = {
+                    **self._base_update(record),
+                    "from_actor_id": old_actor,
+                    "to_actor_id": actor_id,
+                    "user_token": token,
+                }
+                actor_merges.append(dict(actor_merge))
                 updates.append(
                     (
                         "actor_merge",
-                        {
-                            **self._base_update(record),
-                            "from_actor_id": old_actor,
-                            "to_actor_id": actor_id,
-                        },
+                        actor_merge,
                     )
                 )
             self._profile_update(
@@ -3765,7 +4394,13 @@ class NetworkPacketParser:
                 "user_token": token,
                 "entity_type": "Player",
             }
-            for key in ("name", "profession_id", "level", "role_number"):
+            for key in (
+                "name",
+                "profession_id",
+                "level",
+                "role_number",
+                "extraordinary_rating",
+            ):
                 value = cached_profile.get(key)
                 if value not in (None, ""):
                     profile_snapshot[key] = value
@@ -3797,18 +4432,24 @@ class NetworkPacketParser:
                 damage = max(0, int(fields.get(6, 0) or 0))
             except (TypeError, ValueError, OverflowError):
                 damage = 0
+            try:
+                taken = max(0, int(fields.get(7, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                taken = 0
             skill_damage = direct_numeric_map(fields.get(34))
             skill_hits = direct_numeric_map(fields.get(33))
             skill_healing = direct_numeric_map(fields.get(35))
             try:
                 damage_hits = max(0, int(fields.get(27, 0) or 0))
                 critical_hits = max(0, int(fields.get(25, 0) or 0))
+                unpenetrated_hits = max(0, int(fields.get(14, 0) or 0))
                 deaths = max(0, int(fields.get(18, 0) or 0))
                 profession_id = max(0, int(fields.get(4, 0) or 0))
                 effective_healing = max(0, int(fields.get(17, 0) or 0))
             except (TypeError, ValueError, OverflowError):
                 damage_hits = 0
                 critical_hits = 0
+                unpenetrated_hits = 0
                 deaths = 0
                 profession_id = 0
                 effective_healing = 0
@@ -3832,6 +4473,9 @@ class NetworkPacketParser:
                 )
             valid_critical_counts = bool(
                 damage_hits > 0 and critical_hits <= damage_hits
+            )
+            valid_penetration_counts = bool(
+                damage_hits > 0 and unpenetrated_hits <= damage_hits
             )
             skills: list[dict[str, int]] = []
             for raw_skill_id, raw_damage in skill_damage.items():
@@ -3869,8 +4513,21 @@ class NetworkPacketParser:
                 "name": plausible_name(fields.get(5)),
                 "profession_id": profession_id,
                 "damage": damage,
+                "taken": taken,
+                "taken_present": authoritative or 7 in fields,
                 "damage_hits": damage_hits if valid_critical_counts else None,
                 "critical_hits": critical_hits if valid_critical_counts else None,
+                # Captured stage field 14 is the number of non-penetrating
+                # damage hits. Field 27 is the total damage-hit counter.
+                # Keeping both raw counts makes the displayed rate auditable.
+                "unpenetrated_hits": (
+                    unpenetrated_hits if valid_penetration_counts else None
+                ),
+                "penetration_hits": (
+                    damage_hits - unpenetrated_hits
+                    if valid_penetration_counts
+                    else None
+                ),
                 "combat_seconds_total": combat_seconds_total,
                 "combat_seconds_delta": combat_seconds_delta,
                 "skills": skills,
@@ -3882,7 +4539,9 @@ class NetworkPacketParser:
                 summary_row["deaths"] = deaths
             summary_rows.append(summary_row)
         summary_key = "|".join(str(stage.get(key, "")) for key in (0, 1, 2))
-        if authoritative:
+        if realtime_detail_method:
+            summary_key = f"realtime|{method}|{summary_key}"
+        elif authoritative:
             summary_key = f"settlement|{summary_key}"
         updates.append(
             (
@@ -3896,11 +4555,366 @@ class NetworkPacketParser:
                     "stage_token": str(stage.get(2, "") or ""),
                     "member_count": len(desired),
                     "actors": summary_rows,
+                    # This is the exact token-backed alias evidence used above,
+                    # not a name or profession match.  Keep it on the summary
+                    # so a completion table that arrives after an encounter was
+                    # archived can reconcile the same actors on disk.
+                    "actor_merges": actor_merges,
+                    "actor_rebindings": [
+                        dict(binding) for binding in actor_rebindings
+                    ],
                     "authoritative": authoritative,
                     "completion_confirmed": completion_confirmed,
+                    "realtime_detail": realtime_detail_method,
                 },
             )
         )
+        return updates
+
+    def _valid_realtime_detail_entries(
+        self, entries: list[tuple[object, object]]
+    ) -> bool:
+        """Reject unrelated/nested maps before treating them as player rows."""
+        if not 1 <= len(entries) <= MAX_PARTY_MEMBERS:
+            return False
+        detailed_rows = 0
+        for raw_token, raw_profile in entries:
+            if not self._team_token(raw_token):
+                return False
+            fields = direct_numeric_map(raw_profile)
+            if 6 not in fields:
+                return False
+            try:
+                damage = max(0, int(fields.get(6, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                return False
+            has_detail = any(
+                key in fields for key in (14, 25, 27, 33, 34, 35)
+            )
+            if has_detail:
+                detailed_rows += 1
+            skill_damage = direct_numeric_map(fields.get(34))
+            try:
+                classified_damage = sum(
+                    max(0, int(value or 0))
+                    for value in skill_damage.values()
+                )
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if classified_damage > damage:
+                return False
+        return detailed_rows > 0
+
+    def _clear_player_detail_statistics(self, *, clear_roster: bool) -> None:
+        """Drop query details at encounter or roster boundaries."""
+
+        self.player_detail_rows.clear()
+        self.player_detail_actor_merges.clear()
+        self.player_detail_last_summary_signature = None
+        self.player_detail_generation += 1
+        if clear_roster:
+            self.player_detail_roster = ()
+            self.player_detail_common_damage.clear()
+
+    def _refresh_player_detail_common_snapshot(
+        self, parsed_entries: list[tuple[str, dict[int, object]]]
+    ) -> None:
+        """Keep the exact Common totals used only to validate query details."""
+
+        roster = tuple(token for token, _fields in parsed_entries)
+        damage_by_token: dict[str, int] = {}
+        for token, fields in parsed_entries:
+            try:
+                damage_by_token[token] = max(0, int(fields.get(5, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                damage_by_token[token] = 0
+        reset_details = bool(
+            not self.player_detail_roster
+            or set(roster) != set(self.player_detail_roster)
+            or any(
+                damage < self.player_detail_common_damage.get(token, 0)
+                for token, damage in damage_by_token.items()
+                if token in self.player_detail_common_damage
+            )
+        )
+        if reset_details:
+            self._clear_player_detail_statistics(clear_roster=False)
+        self.player_detail_roster = roster
+        self.player_detail_common_damage = damage_by_token
+
+    def _player_detail_summary_updates(
+        self, record: dict
+    ) -> list[tuple[str, dict]]:
+        """Emit a team-shaped detail snapshot without any mutable totals."""
+
+        roster = self.player_detail_roster
+        if (
+            len(roster) < 2
+            or set(roster) != set(self.player_detail_common_damage)
+        ):
+            return []
+        actors: list[dict[str, object]] = []
+        matched_signature: list[object] = []
+        has_teammate_detail = False
+        for token in roster:
+            try:
+                actor_id = int(self.token_actors.get(token, 0) or 0)
+                damage = max(
+                    0, int(self.player_detail_common_damage.get(token, 0) or 0)
+                )
+            except (TypeError, ValueError, OverflowError):
+                return []
+            if actor_id <= 0:
+                # Wait until each token has its exact actor ID. This also lets
+                # archived wipes validate the complete positive actor set.
+                return []
+            actor: dict[str, object] = {
+                "actor_id": actor_id,
+                "user_token": token,
+                "damage": damage,
+            }
+            detail = self.player_detail_rows.get(token)
+            is_self = bool(
+                token == self.self_token
+                or (self.self_id is not None and actor_id == self.self_id)
+            )
+            detail_match_mode = ""
+            detail_reported_damage = 0
+            detail_classified_damage = 0
+            if isinstance(detail, dict):
+                try:
+                    detail_reported_damage = max(
+                        0, int(detail.get("damage", 0) or 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    detail_reported_damage = 0
+                for raw_skill in detail.get("skills", []):
+                    if not isinstance(raw_skill, dict):
+                        continue
+                    try:
+                        skill_id = int(raw_skill.get("skill_id", 0) or 0)
+                        skill_damage = max(
+                            0, int(raw_skill.get("damage", 0) or 0)
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if skill_id > 0:
+                        detail_classified_damage += skill_damage
+                if detail_reported_damage == damage:
+                    detail_match_mode = "exact_actor_total"
+                elif (
+                    detail_reported_damage > damage
+                    and detail_classified_damage == damage
+                ):
+                    # Some server-side aggregate damage has no skill row and
+                    # is also absent from the Common team counter.  The detail
+                    # is still safe to use when its classified skills exactly
+                    # explain the immutable Common total.
+                    detail_match_mode = "classified_skills_match_common_total"
+            if (
+                not is_self
+                and isinstance(detail, dict)
+                and int(detail.get("actor_id", 0) or 0) == actor_id
+                and bool(detail_match_mode)
+            ):
+                for key in (
+                    "skills",
+                    "damage_hits",
+                    "critical_hits",
+                    "penetration_hits",
+                ):
+                    if key in detail:
+                        value = detail[key]
+                        actor[key] = (
+                            [dict(item) for item in value if isinstance(item, dict)]
+                            if key == "skills" and isinstance(value, list)
+                            else value
+                        )
+                actor["detail_reported_damage"] = detail_reported_damage
+                actor["detail_classified_damage"] = detail_classified_damage
+                actor["detail_unclassified_damage"] = max(
+                    0, detail_reported_damage - detail_classified_damage
+                )
+                actor["detail_common_difference"] = (
+                    detail_reported_damage - damage
+                )
+                actor["detail_reconciliation"] = detail_match_mode
+                meaningful = bool(
+                    actor.get("skills")
+                    or actor.get("damage_hits") is not None
+                    or actor.get("critical_hits") is not None
+                    or actor.get("penetration_hits") is not None
+                )
+                if meaningful:
+                    has_teammate_detail = True
+                    matched_signature.append(
+                        (
+                            token,
+                            tuple(
+                                (
+                                    int(skill.get("skill_id", 0) or 0),
+                                    int(skill.get("damage", 0) or 0),
+                                    int(skill.get("hits", 0) or 0),
+                                )
+                                for skill in actor.get("skills", [])
+                                if isinstance(skill, dict)
+                            ),
+                            actor.get("damage_hits"),
+                            actor.get("critical_hits"),
+                            actor.get("penetration_hits"),
+                            detail_reported_damage,
+                            detail_match_mode,
+                        )
+                    )
+            actors.append(actor)
+        if not has_teammate_detail:
+            return []
+        signature = (
+            self.player_detail_generation,
+            tuple(
+                (token, self.player_detail_common_damage[token]) for token in roster
+            ),
+            tuple(matched_signature),
+        )
+        if signature == self.player_detail_last_summary_signature:
+            return []
+        self.player_detail_last_summary_signature = signature
+        timestamp = int(record.get("filetime_100ns", 0) or 0)
+        summary_id = (
+            f"player-detail|{self.player_detail_generation}|{timestamp}"
+        )
+        return [
+            (
+                "stage_summary",
+                {
+                    **self._base_update(record),
+                    "summary_id": summary_id,
+                    "stage_id": int(self.dungeon_stage_id or 0),
+                    "stage_phase": int(self.dungeon_stage_phase or 0),
+                    "stage_token": "",
+                    "member_count": len(roster),
+                    "actors": actors,
+                    "actor_merges": [
+                        dict(self.player_detail_actor_merges[old_actor])
+                        for old_actor in sorted(self.player_detail_actor_merges)
+                    ],
+                    "actor_rebindings": [],
+                    "authoritative": False,
+                    "completion_confirmed": False,
+                    "realtime_detail": False,
+                    "player_detail_query": True,
+                },
+            )
+        ]
+
+    def _player_detail_statistics_updates(
+        self, record: dict, args: list
+    ) -> list[tuple[str, dict]]:
+        """Parse one server-provided, token-bound player detail row."""
+
+        method = str(record.get("method", ""))
+        expected_token = ""
+        if method == PLAYER_DETAIL_STATISTICS_METHOD:
+            if not args:
+                return []
+            raw_fields = args[0]
+        elif method == "OnMsgDungeonStageSettlement":
+            if len(args) < 5 or args[1] is not True:
+                return []
+            expected_token = self._team_token(args[2])
+            raw_fields = args[4]
+        else:
+            return []
+        fields = direct_numeric_map(raw_fields)
+        token = self._team_token(fields.get(0))
+        if expected_token and token and token != expected_token:
+            return []
+        token = token or expected_token
+        if not token or token not in self.player_detail_roster:
+            return []
+        try:
+            response_actor_id = int(fields.get(1, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            response_actor_id = 0
+        if not 0 < response_actor_id <= ENTITY_ID_MAX:
+            response_actor_id = 0
+
+        updates: list[tuple[str, dict]] = []
+        old_actor = int(self.token_actors.get(token, 0) or 0)
+        if response_actor_id:
+            updates.extend(
+                self._rebind_team_actor(
+                    token,
+                    response_actor_id,
+                    record,
+                    allow_positive_rebind=True,
+                )
+            )
+            if int(self.token_actors.get(token, 0) or 0) != response_actor_id:
+                return updates
+            self.stage_bound_tokens.add(token)
+            if old_actor < 0 and old_actor != response_actor_id:
+                self.player_detail_actor_merges[old_actor] = {
+                    **self._base_update(record),
+                    "from_actor_id": old_actor,
+                    "to_actor_id": response_actor_id,
+                    "user_token": token,
+                }
+        actor_id = int(self.token_actors.get(token, 0) or 0)
+        if actor_id <= 0:
+            return updates
+
+        profile = self._profile_update(
+            actor_id,
+            record,
+            name=plausible_name(fields.get(5)),
+            profession_id=fields.get(4),
+            level=fields.get(2),
+            user_token=token,
+            entity_type="Player",
+        )
+        if profile:
+            updates.append(profile)
+        try:
+            damage = max(0, int(fields.get(6, 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            return updates
+        skill_damage = direct_numeric_map(fields.get(34))
+        skill_hits = direct_numeric_map(fields.get(33))
+        skills: list[dict[str, int]] = []
+        for raw_skill_id, raw_damage in skill_damage.items():
+            skill_id = normalize_network_skill_id(raw_skill_id)
+            try:
+                parsed_damage = max(0, int(raw_damage or 0))
+                hits = max(0, int(skill_hits.get(raw_skill_id, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if skill_id and parsed_damage > 0:
+                skills.append(
+                    {"skill_id": skill_id, "damage": parsed_damage, "hits": hits}
+                )
+        if sum(skill["damage"] for skill in skills) > damage:
+            return updates
+        detail: dict[str, object] = {
+            "actor_id": actor_id,
+            "user_token": token,
+            "damage": damage,
+            "skills": skills,
+        }
+        try:
+            damage_hits = max(0, int(fields.get(27, 0) or 0))
+            critical_hits = max(0, int(fields.get(25, 0) or 0))
+            unpenetrated_hits = max(0, int(fields.get(14, 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            damage_hits = critical_hits = unpenetrated_hits = 0
+        if damage_hits > 0 and 25 in fields and critical_hits <= damage_hits:
+            detail["damage_hits"] = damage_hits
+            detail["critical_hits"] = critical_hits
+        if damage_hits > 0 and 14 in fields and unpenetrated_hits <= damage_hits:
+            detail["damage_hits"] = damage_hits
+            detail["penetration_hits"] = damage_hits - unpenetrated_hits
+        self.player_detail_rows[token] = detail
+        updates.extend(self._player_detail_summary_updates(record))
         return updates
 
     def _generic_profile_updates(
@@ -4000,6 +5014,16 @@ class NetworkPacketParser:
                     candidate = matches[0]
             if candidate:
                 updates.extend(self._confirm_self_token(candidate, record))
+            if marker and self.self_id is not None:
+                profile = self._profile_update(
+                    self.self_id,
+                    record,
+                    extraordinary_rating=marker,
+                    user_token=self.self_token,
+                    entity_type="Player",
+                )
+                if profile:
+                    updates.append(profile)
             if self.self_token:
                 try:
                     max_hp = float(fields.get(6, 0) or 0)
@@ -4065,6 +5089,7 @@ class NetworkPacketParser:
                     role_number=fields.get(6),
                     profession_id=fields.get(8),
                     level=fields.get(9),
+                    extraordinary_rating=fields.get(27),
                     user_token=token,
                     entity_type="Player",
                 )
@@ -4168,30 +5193,24 @@ class NetworkPacketParser:
                 return []
             actor_id = self.token_actors.get(token)
             fields = direct_numeric_map(args[1])
-        elif method == "OnMsgEntityRelive":
-            token = next(
-                (
-                    candidate
-                    for value in walk_values(args)
-                    if (candidate := self._team_token(value))
-                    and (
-                        candidate == self.self_token
-                        or candidate in self.party_tokens
-                        or candidate in self.authoritative_party_tokens
-                    )
-                ),
-                "",
-            )
-            explicit_dead = False
-            if token:
-                actor_id = (
-                    self.self_id
-                    if token == self.self_token
-                    else self.token_actors.get(token)
-                )
-            else:
-                # Tokenless EntityRelive is delivered to the local entity.
-                actor_id = self.self_id
+        elif method in {"OnMsgEntityDead", "OnMsgEntityRelive"}:
+            # Both callbacks are dispatched on the affected ScriptEntity.  The
+            # token carried by EntityRelive identifies the reviver in observed
+            # traffic, so using it here attributes the revive to the wrong
+            # player.  Only an existing pointer-to-current-member binding is
+            # strong enough evidence for a life transition.
+            try:
+                pointer = int(record.get("script_entity", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                return []
+            actor_id = self.pointer_entities.get(pointer)
+            current_members = set(self.party_ids) | set(self.actor_tokens)
+            if self.self_id is not None:
+                current_members.add(self.self_id)
+            if not actor_id or actor_id not in current_members:
+                return []
+            token = self.actor_tokens.get(actor_id, "")
+            explicit_dead = method == "OnMsgEntityDead"
         else:
             return []
 
@@ -4212,7 +5231,7 @@ class NetworkPacketParser:
             **self._base_update(record),
             "actor_id": actor_id,
             "dead": bool(explicit_dead),
-            "explicit_transition": method == "OnMsgEntityRelive",
+            "explicit_transition": method in {"OnMsgEntityDead", "OnMsgEntityRelive"},
         }
         if token:
             update["user_token"] = token
@@ -4225,13 +5244,77 @@ class NetworkPacketParser:
                 pass
         if update["dead"]:
             update["death_confirmed"] = bool(
-                method in {TEAM_SELF_PROPS_METHOD, "OnUpdateTeamGroupMemberProps"}
-                and update.get("current_hp") == 0
+                method == "OnMsgEntityDead"
+                or (
+                    method
+                    in {TEAM_SELF_PROPS_METHOD, "OnUpdateTeamGroupMemberProps"}
+                    and update.get("current_hp") == 0
+                )
             )
         return [("life", update)]
 
+    def _claim_damage_stream_event(
+        self,
+        source: str,
+        timestamp: int,
+        signature: tuple[int, ...],
+    ) -> bool:
+        """Return false only for a one-to-one duplicate from the other feed."""
+
+        if source not in {"native", "network"} or timestamp <= 0:
+            return True
+        self.damage_dedup_latest_time_100ns[source] = max(
+            self.damage_dedup_latest_time_100ns[source], timestamp
+        )
+        # A capture batch stores the native and network feeds separately, then
+        # consumes all native records before all network records.  Watermarking
+        # with the newest event across both feeds would therefore discard an
+        # early native candidate before its same-batch network twin is read.
+        # Only the opposite feed can prove that a candidate is now too old.
+        for pending_source in ("native", "network"):
+            opposite_source = "network" if pending_source == "native" else "native"
+            opposite_watermark = self.damage_dedup_latest_time_100ns[opposite_source]
+            if opposite_watermark <= 0:
+                continue
+            cutoff = opposite_watermark - DAMAGE_CROSS_SOURCE_DEDUP_WINDOW_100NS
+            pending = self.pending_damage_stream_events[pending_source]
+            first_current = 0
+            while (
+                first_current < len(pending)
+                and pending[first_current][0] < cutoff
+            ):
+                first_current += 1
+            if first_current:
+                del pending[:first_current]
+
+        opposite = "network" if source == "native" else "native"
+        candidates = self.pending_damage_stream_events[opposite]
+        best_index = -1
+        best_delta = DAMAGE_CROSS_SOURCE_DEDUP_WINDOW_100NS + 1
+        for index, (candidate_time, candidate_signature) in enumerate(candidates):
+            if candidate_signature != signature:
+                continue
+            delta = abs(timestamp - candidate_time)
+            if delta <= DAMAGE_CROSS_SOURCE_DEDUP_WINDOW_100NS and delta < best_delta:
+                best_index = index
+                best_delta = delta
+        if best_index >= 0:
+            del candidates[best_index]
+            return False
+
+        pending = self.pending_damage_stream_events[source]
+        pending.append((timestamp, signature))
+        if len(pending) > DAMAGE_CROSS_SOURCE_DEDUP_MAX_PENDING:
+            del pending[:-DAMAGE_CROSS_SOURCE_DEDUP_MAX_PENDING // 2]
+        return True
+
     def _damage_updates(
-        self, record: dict, args: list, *, infer_identity: bool = True
+        self,
+        record: dict,
+        args: list,
+        *,
+        infer_identity: bool = True,
+        include_event: bool = True,
     ) -> list[tuple[str, dict]]:
         if len(args) < 9:
             return []
@@ -4239,12 +5322,41 @@ class NetworkPacketParser:
             attacker_id = int(args[0])
             target_id = int(args[1])
             raw_skill_id = int(args[2])
+            arg5 = int(args[3])
+            arg6 = int(args[4])
             raw_damage = int(args[5])
+            arg8 = int(args[6])
             damage = int(args[7])
+            arg10 = bool(args[8])
         except (TypeError, ValueError, OverflowError):
             return []
         if not attacker_id or not target_id or damage <= 0:
             return []
+        method = str(record.get("method", ""))
+        source = (
+            "native"
+            if method == "KAPI_HandleDamageSyncV2"
+            else "network" if method == "OnMsgDamageSyncV2" else ""
+        )
+        timestamp = int(record.get("filetime_100ns", 0) or 0)
+        skill_id = normalize_network_skill_id(raw_skill_id)
+        damage_signature = (
+            attacker_id,
+            target_id,
+            skill_id,
+            arg5,
+            arg6,
+            raw_damage,
+            arg8,
+            damage,
+            int(arg10),
+        )
+        emit_damage_event = bool(
+            include_event
+            and self._claim_damage_stream_event(
+                source, timestamp, damage_signature
+            )
+        )
         pointer = int(record.get("script_entity", 0) or 0)
         confirmed_local_pointer = bool(
             pointer
@@ -4265,14 +5377,17 @@ class NetworkPacketParser:
             self.pointer_entities.pop(pointer, None)
             self.pointer_state.pop(pointer, None)
         self.recent_target_id = target_id
-        timestamp = int(record.get("filetime_100ns", 0) or 0)
         self.recent_target_time_100ns = timestamp
         if target_id == self.active_boss_entity_id:
             self.active_boss_damage_epoch = max(
                 self.active_boss_damage_epoch, timestamp
             )
-        skill_id = normalize_network_skill_id(raw_skill_id)
         updates: list[tuple[str, dict]] = []
+        updates.extend(
+            self._infer_boss_attacker_from_unique_skill(
+                attacker_id, target_id, skill_id, record
+            )
+        )
         if target_id in self.confirmed_boss_entities:
             self._activate_boss(target_id, record, damage_evidence=True)
         else:
@@ -4301,21 +5416,11 @@ class NetworkPacketParser:
         player_skill = is_player_skill(skill_id)
         if player_skill and not confirmed_non_player:
             self.player_attackers.add(attacker_id)
-        if infer_identity and player_skill and not confirmed_non_player:
-            if self.self_id is None and len(self.player_attackers) == 1:
-                self.self_id = attacker_id
-                self.self_confirmed = False
-                updates.append(
-                    (
-                        "identity",
-                        {
-                            **self._base_update(record),
-                            "entity_id": attacker_id,
-                            "tentative": True,
-                        },
-                    )
-                )
-                updates.extend(self._infer_self_token(record))
+        # Network damage is shared team traffic.  The first attacker observed
+        # after capture starts is frequently a teammate, especially around a
+        # public training dummy, and therefore can never establish local
+        # identity.  Local identity comes only from the native hook, an exact
+        # local-cast correlation, or an authoritative one-member roster.
         if not confirmed_non_player:
             updates.extend(
                 self._record_combat_source(record, attacker_id, skill_id)
@@ -4329,7 +5434,8 @@ class NetworkPacketParser:
                 self._infer_active_encounter_auxiliary(target_id, record)
             )
         if (
-            str(record.get("method", ""))
+            emit_damage_event
+            and method
             in {"OnMsgDamageSyncV2", "KAPI_HandleDamageSyncV2"}
             and (
                 target_id == self.active_boss_entity_id
@@ -4343,42 +5449,56 @@ class NetworkPacketParser:
                     attacker_id,
                     skill_id,
                     damage,
-                    int(args[3]) == 2,
+                    arg5 == 2,
                 )
             )
             if len(pending) > 4096:
                 del pending[:-2048]
-        event = {
-            **self._base_update(record),
-            "function": "OnMsgDamageSyncV2/network",
-            "attacker_id": attacker_id,
-            "target_id": target_id,
-            "active_boss": target_id == self.active_boss_entity_id,
-            "player_attacker": (
-                False
-                if confirmed_non_player
-                else True if known_player_attacker else None
-            ),
-            "party_attacker": (
-                False
-                if confirmed_non_player
-                else self._party_attacker_classification(attacker_id, skill_id)
-            ),
-            "arg4_u64": raw_skill_id // 10_000 if raw_skill_id >= 1_000_000_000_000 else raw_skill_id,
-            "skill_id": skill_id,
-            "damage_source": "network_exact",
-            "provisional_damage": False,
-            "arg5_i32": int(args[3]),
-            "critical": int(args[3]) == 2,
-            "arg6_i32": int(args[4]),
-            "arg7_i32": raw_damage,
-            "arg8_i32": int(args[6]),
-            "arg9_i32": damage,
-            "arg10_bool": bool(args[8]),
-            "raw_damage": raw_damage,
-            "damage": damage,
-        }
-        updates.append(("event", event))
+        if emit_damage_event:
+            boss_damage_event = self._boss_damage_event(
+                record,
+                attacker_id=attacker_id,
+                target_id=target_id,
+                skill_id=skill_id,
+                damage=damage,
+            )
+            if boss_damage_event is not None:
+                updates.append(("boss_damage_event", boss_damage_event))
+        if emit_damage_event:
+            event = {
+                **self._base_update(record),
+                "function": "OnMsgDamageSyncV2/network",
+                "attacker_id": attacker_id,
+                "target_id": target_id,
+                "active_boss": target_id == self.active_boss_entity_id,
+                "player_attacker": (
+                    False
+                    if confirmed_non_player
+                    else True if known_player_attacker else None
+                ),
+                "party_attacker": (
+                    False
+                    if confirmed_non_player
+                    else self._party_attacker_classification(attacker_id, skill_id)
+                ),
+                "arg4_u64": raw_skill_id // 10_000 if raw_skill_id >= 1_000_000_000_000 else raw_skill_id,
+                "skill_id": skill_id,
+                "damage_source": f"{source}_exact" if source else "network_exact",
+                "provisional_damage": False,
+                "arg5_i32": arg5,
+                "critical": arg5 == 2,
+                # Live capture validation: arg5 == 1 is a non-penetrating
+                # hit; all other observed damage-hit values are penetrating.
+                "penetrating": arg5 != 1,
+                "arg6_i32": arg6,
+                "arg7_i32": raw_damage,
+                "arg8_i32": arg8,
+                "arg9_i32": damage,
+                "arg10_bool": arg10,
+                "raw_damage": raw_damage,
+                "damage": damage,
+            }
+            updates.append(("event", event))
         return updates
 
     def _team_statistics_updates(
@@ -4407,6 +5527,8 @@ class NetworkPacketParser:
         updates: list[tuple[str, dict]] = []
         entry_tokens = {token for token, _fields in parsed_entries}
         full_snapshot = method == "RetCommonCombatStatisticsByTeam"
+        if full_snapshot:
+            self._refresh_player_detail_common_snapshot(parsed_entries)
         authoritative = full_snapshot
         if not self.party_seen and len(parsed_entries) >= 1:
             authoritative = True
@@ -4417,23 +5539,43 @@ class NetworkPacketParser:
         unknown_tokens = [
             token for token, _fields in parsed_entries if token not in self.token_actors
         ]
-        if self.self_id is not None and self.self_token is None:
+        if (
+            full_snapshot
+            and self.self_token is not None
+            and self.self_token not in entry_tokens
+        ):
+            replacement_self_token = self._replacement_self_token_from_snapshot(
+                parsed_entries
+            )
+            if replacement_self_token:
+                updates.extend(
+                    self._confirm_self_token(replacement_self_token, record)
+                )
+        if self.self_token is None:
             self_candidate = ""
             if len(parsed_entries) == 1:
-                self_candidate = parsed_entries[0][0]
-            elif len(unknown_tokens) == 1:
-                self_candidate = unknown_tokens[0]
-            else:
+                # A one-row Common team snapshot identifies the local token
+                # by protocol semantics. It does not identify the physical
+                # actor that happened to attack first, so let the token keep a
+                # stable provisional actor until native/local-cast evidence
+                # supplies that separate mapping.
+                if self.self_id is None or self.self_confirmed:
+                    self_candidate = parsed_entries[0][0]
+            elif self.self_id is not None and self.self_confirmed:
+                if len(unknown_tokens) == 1:
+                    self_candidate = unknown_tokens[0]
                 known_self_name = plausible_name(
                     self.entity_profiles.get(self.self_id, {}).get("name")
                 )
-                matching = [
-                    token
-                    for token, fields in parsed_entries
-                    if known_self_name and plausible_name(fields.get(4)) == known_self_name
-                ]
-                if len(matching) == 1:
-                    self_candidate = matching[0]
+                if not self_candidate:
+                    matching = [
+                        token
+                        for token, fields in parsed_entries
+                        if known_self_name
+                        and plausible_name(fields.get(4)) == known_self_name
+                    ]
+                    if len(matching) == 1:
+                        self_candidate = matching[0]
             if self_candidate:
                 updates.extend(self._confirm_self_token(self_candidate, record))
             else:
@@ -4458,33 +5600,59 @@ class NetworkPacketParser:
             )
             if profile:
                 updates.append(profile)
-            # Dirty snapshots omit field 5 when a member did not change. A
-            # full Common snapshot, however, omits the same field only for a
-            # zero value. Emit that zero so the model can establish an exact
-            # pre-pull baseline before the member's first damaging update.
+            # Dirty snapshots independently omit unchanged damage (5),
+            # damage-taken (6), and effective healing (7). A Common snapshot
+            # omits any of these fields only when its value is zero, so emit
+            # all three zero baselines there.
             omitted_zero = 5 not in fields
-            if omitted_zero and not full_snapshot:
+            taken_omitted_zero = 6 not in fields
+            healing_omitted_zero = 7 not in fields
+            has_damage = not omitted_zero or full_snapshot
+            has_taken = not taken_omitted_zero or full_snapshot
+            has_healing = not healing_omitted_zero or full_snapshot
+            if not has_damage and not has_taken and not has_healing:
                 continue
-            try:
-                absolute_damage = max(0, int(fields.get(5, 0) or 0))
-            except (TypeError, ValueError, OverflowError):
-                absolute_damage = 0
             try:
                 server_time = max(0, int(fields.get(10, 0) or 0))
             except (TypeError, ValueError, OverflowError):
                 server_time = 0
+            team_stat = {
+                **self._base_update(record),
+                "actor_id": actor_id,
+                "user_token": token,
+                "server_time": server_time,
+                "full_snapshot": full_snapshot,
+            }
+            if full_snapshot:
+                team_stat["team_tokens"] = sorted(entry_tokens)
+            if has_damage:
+                try:
+                    team_stat["absolute_damage"] = max(
+                        0, int(fields.get(5, 0) or 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    team_stat["absolute_damage"] = 0
+                team_stat["omitted_zero"] = omitted_zero
+            if has_taken:
+                try:
+                    team_stat["absolute_taken"] = max(
+                        0, int(fields.get(6, 0) or 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    team_stat["absolute_taken"] = 0
+                team_stat["taken_omitted_zero"] = taken_omitted_zero
+            if has_healing:
+                try:
+                    team_stat["absolute_effective_healing"] = max(
+                        0, int(fields.get(7, 0) or 0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    team_stat["absolute_effective_healing"] = 0
+                team_stat["healing_omitted_zero"] = healing_omitted_zero
             updates.append(
                 (
                     "team_stat",
-                    {
-                        **self._base_update(record),
-                        "actor_id": actor_id,
-                        "user_token": token,
-                        "absolute_damage": absolute_damage,
-                        "server_time": server_time,
-                        "omitted_zero": omitted_zero,
-                        "full_snapshot": full_snapshot,
-                    },
+                    team_stat,
                 )
             )
 
@@ -4511,9 +5679,78 @@ class NetworkPacketParser:
                 if self.party_ids:
                     self._record_party_activity(record)
                 updates.append(self._party_update(record, authoritative=True))
+        if full_snapshot:
+            updates.extend(self._player_detail_summary_updates(record))
         return updates
 
-    def process_native_damage(self, record: dict) -> list[tuple[str, dict]]:
+    def _replacement_self_token_from_snapshot(
+        self,
+        parsed_entries: list[tuple[str, dict[int, object]]],
+    ) -> str:
+        """Resolve a new local character after an in-process role switch.
+
+        A full Common snapshot always contains the current local character. If
+        the previously confirmed token is absent, the game has replaced that
+        role without replacing the process. Keep ambiguous multiplayer cases
+        unresolved rather than assigning a teammate as the local player.
+        """
+        if (
+            not parsed_entries
+            or self.self_token is None
+            or self.self_token in {token for token, _fields in parsed_entries}
+        ):
+            return ""
+        if len(parsed_entries) == 1:
+            return parsed_entries[0][0]
+        if self.self_id is None or not self.self_confirmed:
+            return ""
+
+        actor_matches = [
+            token
+            for token, _fields in parsed_entries
+            if self.token_actors.get(token) == self.self_id
+        ]
+        if len(actor_matches) == 1:
+            return actor_matches[0]
+
+        known_self_name = plausible_name(
+            self.runtime_entity_names.get(self.self_id)
+        ) or plausible_name(self.entity_profiles.get(self.self_id, {}).get("name"))
+        if known_self_name:
+            name_matches = [
+                token
+                for token, fields in parsed_entries
+                if plausible_name(fields.get(4)) == known_self_name
+            ]
+            if len(name_matches) == 1:
+                return name_matches[0]
+
+        profession_id = int(
+            self.actor_profession_hints.get(self.self_id, 0) or 0
+        )
+        if profession_id:
+            profession_matches = []
+            for token, fields in parsed_entries:
+                try:
+                    candidate_profession = int(fields.get(3, 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if candidate_profession == profession_id:
+                    profession_matches.append(token)
+            if len(profession_matches) == 1:
+                return profession_matches[0]
+
+        previous_teammates = set(self.party_tokens) | set(self.other_party_tokens)
+        new_tokens = [
+            token
+            for token, _fields in parsed_entries
+            if token not in previous_teammates
+        ]
+        return new_tokens[0] if len(new_tokens) == 1 else ""
+
+    def process_native_damage(
+        self, record: dict, *, include_damage: bool = True
+    ) -> list[tuple[str, dict]]:
         try:
             args = [
                 int(record["attacker_id"]),
@@ -4532,7 +5769,9 @@ class NetworkPacketParser:
         native_record["method"] = "KAPI_HandleDamageSyncV2"
         native_record["script_entity"] = 0
         updates: list[tuple[str, dict]] = []
-        local_player_id = parse_combat_entity_id(record.get("local_player_id"))
+        local_player_id = parse_exact_combat_entity_id(
+            record.get("local_player_id")
+        )
         if local_player_id:
             updates.extend(
                 self._confirm_local_actor(
@@ -4542,7 +5781,12 @@ class NetworkPacketParser:
                 )
             )
         updates.extend(
-            self._damage_updates(native_record, args, infer_identity=False)
+            self._damage_updates(
+                native_record,
+                args,
+                infer_identity=False,
+                include_event=include_damage,
+            )
         )
         return updates
 
@@ -4592,7 +5836,7 @@ class NetworkPacketParser:
                 visible_entity_ids: list[int] = []
                 if len(args) > 1:
                     for raw_entity_id, _descriptor in map_pairs(args[1]):
-                        entity_id = parse_combat_entity_id(raw_entity_id)
+                        entity_id = parse_exact_combat_entity_id(raw_entity_id)
                         if entity_id:
                             visible_entity_ids.append(entity_id)
                 # A real full refresh carries the scene ID followed by an object
@@ -4646,7 +5890,9 @@ class NetworkPacketParser:
                     )
                 )
                 target_id = (
-                    parse_combat_entity_id(args[10]) if len(args) > 10 else None
+                    parse_exact_combat_entity_id(args[10])
+                    if len(args) > 10
+                    else None
                 )
                 updates.extend(
                     self._record_entity_hit(target_id, actor_id, args[0], record)
@@ -4665,9 +5911,9 @@ class NetworkPacketParser:
                         record, actor_id, fields.get(2, 0), bind_pointer=True
                     )
                 )
-                target_id = parse_combat_entity_id(
+                target_id = parse_exact_combat_entity_id(
                     fields.get(17)
-                ) or parse_combat_entity_id(fields.get(6))
+                ) or parse_exact_combat_entity_id(fields.get(6))
                 updates.extend(
                     self._record_entity_hit(
                         target_id, actor_id, fields.get(2, 0), record
@@ -4680,7 +5926,7 @@ class NetworkPacketParser:
                     self._record_combat_source(record, actor_id, args[2])
                 )
                 if len(args) >= 5:
-                    target_id = parse_combat_entity_id(args[1])
+                    target_id = parse_exact_combat_entity_id(args[1])
                     skill_id = normalize_network_skill_id(args[2])
                     try:
                         attempted_healing = int(args[3])
@@ -4772,21 +6018,24 @@ class NetworkPacketParser:
                     self._record_combat_source(record, actor_id, args[0])
                 )
                 target_id = (
-                    parse_combat_entity_id(args[1]) if len(args) > 1 else None
+                    parse_exact_combat_entity_id(args[1])
+                    if len(args) > 1
+                    else None
                 )
                 updates.extend(
                     self._record_entity_hit(target_id, actor_id, args[0], record)
                 )
 
         if method == "OnMsgDamageSyncV2":
-            damage_updates = self._damage_updates(record, args)
             updates.extend(
-                damage_updates
-                if include_damage
-                else [item for item in damage_updates if item[0] != "event"]
+                self._damage_updates(
+                    record,
+                    args,
+                    include_event=include_damage,
+                )
             )
         elif method == "OnMsgBeatenSyncV2" and len(args) >= 2:
-            target_id = parse_combat_entity_id(args[1])
+            target_id = parse_exact_combat_entity_id(args[1])
             if target_id:
                 timestamp = int(record.get("filetime_100ns", 0) or 0)
                 self.recent_target_id = target_id
@@ -4812,8 +6061,8 @@ class NetworkPacketParser:
                     )
                     updates.extend(self._record_combat_source(record, actor_id))
         elif method == "OnMsgAddBuffNew" and len(args) >= 3:
-            target_id = parse_combat_entity_id(args[1])
-            source_id = parse_combat_entity_id(args[2])
+            target_id = parse_exact_combat_entity_id(args[1])
+            source_id = parse_exact_combat_entity_id(args[2])
             if (
                 pointer
                 and pointer not in self.root_pointers
@@ -4828,7 +6077,7 @@ class NetworkPacketParser:
                     int(record.get("filetime_100ns", 0) or 0),
                 )
         elif method == "OnMsgActorBuffStateSync" and len(args) >= 3:
-            entity_id = parse_combat_entity_id(args[2])
+            entity_id = parse_exact_combat_entity_id(args[2])
             timestamp = int(record.get("filetime_100ns", 0) or 0)
             if (
                 pointer not in self.pointer_entities
@@ -5228,6 +6477,7 @@ class NetworkPacketParser:
                         updates.append(update)
 
         updates.extend(self._stage_combat_statistics_updates(record, args))
+        updates.extend(self._player_detail_statistics_updates(record, args))
         updates.extend(self._cache_token_profiles(record, args))
         updates.extend(self._scene_updates(record, args))
         updates.extend(self._known_target_profile_updates(record, args))

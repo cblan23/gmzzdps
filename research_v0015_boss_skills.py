@@ -153,7 +153,7 @@ def scan_logs(
 
                     if not method:
                         continue
-                    parser.process(record, include_damage=False)
+                    parser.process(record, include_damage=True)
                     args = arguments(record)
                     if method == "OnMsgDamageSyncV2" and len(args) >= 8:
                         attacker_id = integer(args[0])

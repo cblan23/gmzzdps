@@ -4084,7 +4084,8 @@
     "7102980": {
       "boss_type": 1,
       "level": 67,
-      "localization_id": 752067564295680
+      "localization_id": 752067564295680,
+      "name": "一号信徒"
     },
     "7102981": {
       "boss_type": 1,

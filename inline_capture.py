@@ -34,6 +34,7 @@ from proc_inspect import (
     snapshot,
     winerror,
 )
+from runtime_capability import load_runtime_profile_file, runtime_profile_hook
 
 
 PROCESS_VM_OPERATION = 0x0008
@@ -48,11 +49,6 @@ PAGE_READWRITE = 0x04
 PAGE_EXECUTE_READWRITE = 0x40
 STILL_ACTIVE = 259
 
-DAMAGE_RVA = 0x06733B00
-PROLOGUE = bytes.fromhex("4c 89 44 24 18 48 89 54 24 10 55 53 56 57")
-PROLOGUE_SIGNATURE = PROLOGUE + bytes.fromhex(
-    "41 54 41 55 41 56 41 57 48 8d 6c 24 e8 48 81 ec 18 01 00 00"
-)
 RECORD_SIZE = 0x80
 RECORD_COUNT = 4096
 RECORD_MASK = RECORD_COUNT - 1
@@ -60,13 +56,6 @@ RECORDS_OFFSET = 0x100
 RING_SIZE = RECORDS_OFFSET + RECORD_COUNT * RECORD_SIZE
 MAGIC = b"GMZZDPS1"
 
-NAME_CACHE_RVA = 0x0672D7C0
-NAME_PROLOGUE = bytes.fromhex(
-    "4c 8b dc 49 89 53 10 53 57 48 83 ec 68 49 8d 43 10"
-)
-NAME_PROLOGUE_SIGNATURE = NAME_PROLOGUE + bytes.fromhex(
-    "49 89 4b 20 49 89 43 18 49 8b d8 48 8b 05 35 d4 05 08"
-)
 NAME_MAGIC = b"GMZZNAM1"
 NAME_RECORD_SIZE = 0x100
 NAME_RECORD_COUNT = 1024
@@ -78,13 +67,6 @@ NAME_RING_SIZE = NAME_RECORDS_OFFSET + NAME_RECORD_COUNT * NAME_RECORD_SIZE
 # EntityId at +0x58.  BossType is an enum byte at +0x137: 3 is Boss while
 # 0xff is the uninitialised/invalid sentinel, so it must not be treated as a
 # generic truthy flag.
-BOSS_TYPE_RVA = 0x068D6550
-BOSS_TYPE_PROLOGUE = bytes.fromhex(
-    "48 89 5c 24 20 57 48 83 ec 50 48 8b 05 b7 46 eb 07"
-)
-BOSS_TYPE_PROLOGUE_SIGNATURE = BOSS_TYPE_PROLOGUE + bytes.fromhex(
-    "0f b6 da 48 8b f9 88 54 24 68 48 89 4c 24 60"
-)
 BOSS_TYPE_MAGIC = b"GMZZBOS1"
 BOSS_TYPE_RECORD_SIZE = 0x40
 BOSS_TYPE_RECORD_COUNT = 1024
@@ -101,14 +83,9 @@ BOSS_TYPE_BOSS_VALUE = 3
 # CommonComponent template/application path. Unlike SetBossType, this executes
 # when an entity's already-serialized component data is applied, which covers
 # dungeon bosses whose BossType flag is initialized directly from a template.
-BOSS_INIT_RVA = 0x068D5A02
-BOSS_INIT_PROLOGUE = bytes.fromhex(
-    "88 87 37 01 00 00 8b 85 18 01 00 00 48 89 8f 28 01 00 00"
-)
-BOSS_INIT_PROLOGUE_SIGNATURE = BOSS_INIT_PROLOGUE + bytes.fromhex(
-    "48 8d 8f 48 01 00 00 89 87 3c 01 00 00"
-)
 BOSS_INIT_MAGIC = b"GMZZBIN1"
+TEMPLATE_ID_MAGIC = b"GMZZTID1"
+TEMPLATE_BULK_MAGIC = b"GMZZTBK1"
 
 
 class THREADENTRY32(ctypes.Structure):
@@ -170,7 +147,7 @@ kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes
 kernel32.GetExitCodeProcess.restype = wintypes.BOOL
 
 
-def build_stub(ring: int, resume: int) -> bytes:
+def build_stub(ring: int, resume: int, *, prologue: bytes) -> bytes:
     code = bytearray()
     code += b"\x9c"  # pushfq
     code += b"\x50\x53\x52\x41\x52\x41\x53"  # push rax,rbx,rdx,r10,r11
@@ -216,7 +193,7 @@ def build_stub(ring: int, resume: int) -> bytes:
 
     # Restore scratch state and execute exactly the 14 displaced bytes.
     code += b"\x41\x5b\x41\x5a\x5a\x5b\x58\x9d"
-    code += PROLOGUE
+    code += bytes(prologue)
     code += b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
     return bytes(code)
 
@@ -232,7 +209,7 @@ def build_absolute_patch(stub: int, length: int) -> bytes:
     return jump + b"\x90" * (length - len(jump))
 
 
-def build_name_stub(ring: int, resume: int) -> bytes:
+def build_name_stub(ring: int, resume: int, *, prologue: bytes) -> bytes:
     """Capture (manager, EntityId, FString*) at CacheEntityName entry."""
     code = bytearray()
     code += b"\x9c"  # pushfq
@@ -296,13 +273,17 @@ def build_name_stub(ring: int, resume: int) -> bytes:
     code += b"\x49\x8b\x03\x48\xff\xc0"
     code += b"\x49\x89\x83\xf8\x00\x00\x00"  # commit
     code += b"\x41\x5b\x41\x5a\x41\x58\x5a\x5b\x58\x9d"
-    code += NAME_PROLOGUE
+    code += bytes(prologue)
     code += b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
     return bytes(code)
 
 
 def build_boss_type_stub(
-    ring: int, resume: int, boss_type_global_address: int
+    ring: int,
+    resume: int,
+    boss_type_global_address: int,
+    *,
+    prologue: bytes,
 ) -> bytes:
     """Capture CommonComponent, EntityId, and the requested BossType value."""
     code = bytearray()
@@ -335,13 +316,15 @@ def build_boss_type_stub(
     code += b"\x41\x5b\x41\x5a\x5a\x5b\x58\x9d"
     # The displaced prologue ends in a RIP-relative load. Re-encode that load
     # with its absolute address because the stub lives outside the module.
-    code += BOSS_TYPE_PROLOGUE[:10]
+    code += bytes(prologue)[:10]
     code += b"\x48\xa1" + struct.pack("<Q", boss_type_global_address)
     code += b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
     return bytes(code)
 
 
-def build_boss_init_stub(ring: int, resume: int) -> bytes:
+def build_boss_init_stub(
+    ring: int, resume: int, *, prologue: bytes
+) -> bytes:
     """Capture BossType while serialized CommonComponent data is applied."""
     code = bytearray()
     code += b"\x9c"  # pushfq
@@ -372,7 +355,101 @@ def build_boss_init_stub(ring: int, resume: int) -> bytes:
     code += b"\x48\xff\xc3\x49\x89\x5b\x38"  # commit
 
     code += b"\x41\x5b\x41\x5a\x5a\x5b\x58\x9d"
-    code += BOSS_INIT_PROLOGUE
+    code += bytes(prologue)
+    code += b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
+    return bytes(code)
+
+
+def build_template_id_stub(
+    ring: int,
+    resume: int,
+    template_global_address: int,
+    *,
+    prologue: bytes,
+) -> bytes:
+    """Capture a single CommonComponent TemplateId assignment.
+
+    The setter receives ``(CommonComponent*, uint32 TemplateId)`` in RCX/RDX.
+    Reading BossType from the same component at this point complements the
+    BossType setter: whichever field is assigned second produces a complete
+    identity tuple without guessing from names, HP, or nearby entities.
+    """
+
+    code = bytearray()
+    code += b"\x9c"
+    code += b"\x50\x53\x52\x41\x52\x41\x53"
+    code += b"\x49\xba" + struct.pack("<Q", ring)
+    code += b"\xb8\x01\x00\x00\x00"
+    code += b"\xf0\x49\x0f\xc1\x42\x08"
+    code += b"\x48\x89\xc3"
+    code += b"\x25" + struct.pack("<I", BOSS_TYPE_RECORD_MASK)
+    code += b"\x48\xc1\xe0\x06"
+    code += b"\x4d\x8d\x9c\x02" + struct.pack(
+        "<I", BOSS_TYPE_RECORDS_OFFSET
+    )
+    code += b"\x49\x89\x1b"
+    code += b"\x49\x89\x4b\x10"
+    code += b"\x48\x8b\x81" + struct.pack("<I", BOSS_TYPE_ENTITY_ID_OFFSET)
+    code += b"\x49\x89\x43\x18"
+    code += b"\x0f\xb6\x81" + struct.pack("<I", BOSS_TYPE_FIELD_OFFSET)
+    code += b"\x49\x89\x43\x20"
+    code += b"\x8b\xc2\x49\x89\x43\x28"
+    code += b"\x48\x8b\x44\x24\x30\x49\x89\x43\x30"
+
+    code += b"\x41\xba\x00\x00\xfe\x7f"
+    retry = len(code)
+    code += b"\x41\x8b\x42\x18\x41\x8b\x52\x14\x41\x3b\x42\x1c"
+    code += b"\x75" + bytes([(retry - (len(code) + 2)) & 0xFF])
+    code += b"\x48\xc1\xe0\x20\x48\x09\xd0\x49\x89\x43\x08"
+    code += b"\x48\xff\xc3\x49\x89\x5b\x38"
+
+    code += b"\x41\x5b\x41\x5a\x5a\x5b\x58\x9d"
+    # The displaced setter prologue ends in a RIP-relative global load.
+    code += bytes(prologue)[:10]
+    code += b"\x48\xa1" + struct.pack("<Q", template_global_address)
+    code += b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
+    return bytes(code)
+
+
+def build_template_bulk_stub(
+    ring: int, resume: int, *, prologue: bytes
+) -> bytes:
+    """Capture the generated bulk CommonComponent assignment arguments.
+
+    The current build passes BossType in R8B and TemplateId as argument nine
+    at entry ``[rsp+0x48]``.  Six saved qwords move that stack argument to
+    ``[rsp+0x78]`` while the trace runs.
+    """
+
+    code = bytearray()
+    code += b"\x9c"
+    code += b"\x50\x53\x52\x41\x52\x41\x53"
+    code += b"\x49\xba" + struct.pack("<Q", ring)
+    code += b"\xb8\x01\x00\x00\x00"
+    code += b"\xf0\x49\x0f\xc1\x42\x08"
+    code += b"\x48\x89\xc3"
+    code += b"\x25" + struct.pack("<I", BOSS_TYPE_RECORD_MASK)
+    code += b"\x48\xc1\xe0\x06"
+    code += b"\x4d\x8d\x9c\x02" + struct.pack(
+        "<I", BOSS_TYPE_RECORDS_OFFSET
+    )
+    code += b"\x49\x89\x1b"
+    code += b"\x49\x89\x4b\x10"
+    code += b"\x48\x8b\x81" + struct.pack("<I", BOSS_TYPE_ENTITY_ID_OFFSET)
+    code += b"\x49\x89\x43\x18"
+    code += b"\x41\x0f\xb6\xc0\x49\x89\x43\x20"
+    code += b"\x8b\x44\x24\x78\x49\x89\x43\x28"
+    code += b"\x48\x8b\x44\x24\x30\x49\x89\x43\x30"
+
+    code += b"\x41\xba\x00\x00\xfe\x7f"
+    retry = len(code)
+    code += b"\x41\x8b\x42\x18\x41\x8b\x52\x14\x41\x3b\x42\x1c"
+    code += b"\x75" + bytes([(retry - (len(code) + 2)) & 0xFF])
+    code += b"\x48\xc1\xe0\x20\x48\x09\xd0\x49\x89\x43\x08"
+    code += b"\x48\xff\xc3\x49\x89\x5b\x38"
+
+    code += b"\x41\x5b\x41\x5a\x5a\x5b\x58\x9d"
+    code += bytes(prologue)
     code += b"\xff\x25\x00\x00\x00\x00" + struct.pack("<Q", resume)
     return bytes(code)
 
@@ -596,23 +673,38 @@ def main() -> int:
     parser.add_argument("--pid", type=int)
     parser.add_argument("--process", default="C7-Win64-Shipping.exe")
     parser.add_argument("--module", default="C7-Win64-Shipping.exe")
-    parser.add_argument("--rva", type=lambda x: int(x, 0), default=DAMAGE_RVA)
+    parser.add_argument(
+        "--profile",
+        type=Path,
+        default=Path(__file__).resolve().with_name("runtime-profile.dev.json"),
+    )
+    parser.add_argument("--rva", type=lambda x: int(x, 0))
     parser.add_argument("--output", type=Path, default=Path("damage_inline.jsonl"))
     parser.add_argument("--hits", type=int, default=12)
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--show-stub", action="store_true")
     args = parser.parse_args()
 
+    profile = load_runtime_profile_file(args.profile)
+    damage_hook = runtime_profile_hook(profile, "damage")
+    damage_rva = int(args.rva or damage_hook["rva"])
+    damage_prologue = bytes(damage_hook["prologue"])
+    damage_signature = bytes(damage_hook["signature"])
+
     if args.show_stub:
-        stub = build_stub(0x123456780000, 0x140001234)
+        stub = build_stub(
+            0x123456780000,
+            0x140001234,
+            prologue=damage_prologue,
+        )
         print(f"stub size: {len(stub)} bytes")
         print(disassemble(stub, 0x123456789000))
         return 0
 
     pid = args.pid or find_pid(args.process)
     base, module_size, module_path = find_module(pid, args.module)
-    target = base + args.rva
-    if args.rva + len(PROLOGUE_SIGNATURE) > module_size:
+    target = base + damage_rva
+    if damage_rva + len(damage_signature) > module_size:
         raise SystemExit("target RVA is outside module")
     access = PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE
     process = kernel32.OpenProcess(access, False, pid)
@@ -625,12 +717,12 @@ def main() -> int:
     suspended: list[int] = []
     hit_count = 0
     try:
-        actual = read_region(process, target, len(PROLOGUE_SIGNATURE))
-        if actual != PROLOGUE_SIGNATURE:
+        actual = read_region(process, target, len(damage_signature))
+        if actual != damage_signature:
             got = actual.hex(" ") if actual else "unreadable"
             raise RuntimeError(
-                f"version/signature mismatch at RVA 0x{args.rva:x}\n"
-                f"expected: {PROLOGUE_SIGNATURE.hex(' ')}\nactual:   {got}"
+                f"version/signature mismatch at RVA 0x{damage_rva:x}\n"
+                f"expected: {damage_signature.hex(' ')}\nactual:   {got}"
             )
 
         ring = int(
@@ -652,11 +744,15 @@ def main() -> int:
 
         header = struct.pack("<8sQQQQ", MAGIC, 0, RECORD_COUNT, RECORD_SIZE, target)
         write_memory(process, ring, header)
-        stub = build_stub(ring, target + len(PROLOGUE))
+        stub = build_stub(
+            ring,
+            target + len(damage_prologue),
+            prologue=damage_prologue,
+        )
         write_memory(process, stub_address, stub)
         kernel32.FlushInstructionCache(process, ctypes.c_void_p(stub_address), len(stub))
         patch = build_patch(stub_address)
-        if len(patch) != len(PROLOGUE):
+        if len(patch) != len(damage_prologue):
             raise AssertionError("absolute jump must exactly cover displaced prologue")
 
         suspended = suspend_process(pid)
@@ -712,7 +808,7 @@ def main() -> int:
             try:
                 suspended = suspend_process(pid)
                 try:
-                    write_code(process, target, PROLOGUE)
+                    write_code(process, target, damage_prologue)
                     installed = False
                 finally:
                     resume_threads(suspended)

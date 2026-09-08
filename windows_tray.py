@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import queue
 import sys
 import threading
 from ctypes import wintypes
@@ -25,8 +26,10 @@ WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
 WM_CONTEXTMENU = 0x007B
+WM_HOTKEY = 0x0312
 WM_APP = 0x8000
 WM_TRAY_CALLBACK = WM_APP + 37
+WM_CONFIGURE_HOTKEY = WM_APP + 38
 
 NIM_ADD = 0x00000000
 NIM_DELETE = 0x00000002
@@ -46,7 +49,11 @@ TPM_RETURNCMD = 0x0100
 
 CMD_SHOW = 1001
 CMD_EXIT = 1002
+CMD_RESTORE_WINDOW = 1003
 TRAY_ICON_ID = 1
+HOTKEY_ID_PRIMARY = 1
+HOTKEY_ID_SECONDARY = 2
+MOD_NOREPEAT = 0x4000
 
 
 class GUID(ctypes.Structure):
@@ -189,6 +196,15 @@ user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 user32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
 user32.RegisterWindowMessageW.restype = wintypes.UINT
 user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+user32.RegisterHotKey.argtypes = [
+    wintypes.HWND,
+    ctypes.c_int,
+    wintypes.UINT,
+    wintypes.UINT,
+]
+user32.RegisterHotKey.restype = wintypes.BOOL
+user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.UnregisterHotKey.restype = wintypes.BOOL
 
 shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 shell32.Shell_NotifyIconW.restype = wintypes.BOOL
@@ -221,6 +237,11 @@ class WindowsTrayIcon:
         self._wndproc = WNDPROC(self._window_proc)
         self._nid: NOTIFYICONDATAW | None = None
         self._taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
+        self._hotkey_requests: queue.Queue[
+            tuple[int, int, threading.Event, list[bool], threading.Lock]
+        ] = queue.Queue()
+        self._active_hotkey_id = 0
+        self._hotkey: tuple[int, int] = (0, 0)
 
     def _emit(self, action: str) -> None:
         try:
@@ -237,6 +258,12 @@ class WindowsTrayIcon:
             return
         try:
             user32.AppendMenuW(menu, MF_STRING, CMD_SHOW, "显示窗口")
+            user32.AppendMenuW(
+                menu,
+                MF_STRING,
+                CMD_RESTORE_WINDOW,
+                "恢复窗口",
+            )
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(menu, MF_STRING, CMD_EXIT, "退出")
             user32.SetForegroundWindow(hwnd)
@@ -251,6 +278,8 @@ class WindowsTrayIcon:
             )
             if command == CMD_SHOW:
                 self._emit("tray_restore")
+            elif command == CMD_RESTORE_WINDOW:
+                self._emit("tray_restore_window")
             elif command == CMD_EXIT:
                 self._emit("tray_exit")
         finally:
@@ -262,6 +291,51 @@ class WindowsTrayIcon:
             and shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(self._nid))
         )
 
+    def _apply_hotkey(self, modifiers: int, virtual_key: int) -> bool:
+        requested = (int(modifiers), int(virtual_key))
+        if requested == self._hotkey:
+            return True
+        if not requested[1]:
+            if self._active_hotkey_id:
+                user32.UnregisterHotKey(self.hwnd, self._active_hotkey_id)
+            self._active_hotkey_id = 0
+            self._hotkey = (0, 0)
+            return True
+
+        candidate_id = (
+            HOTKEY_ID_SECONDARY
+            if self._active_hotkey_id == HOTKEY_ID_PRIMARY
+            else HOTKEY_ID_PRIMARY
+        )
+        if not user32.RegisterHotKey(
+            self.hwnd,
+            candidate_id,
+            requested[0] | MOD_NOREPEAT,
+            requested[1],
+        ):
+            return False
+        if self._active_hotkey_id:
+            user32.UnregisterHotKey(self.hwnd, self._active_hotkey_id)
+        self._active_hotkey_id = candidate_id
+        self._hotkey = requested
+        return True
+
+    def _process_hotkey_request(self) -> None:
+        while True:
+            try:
+                modifiers, virtual_key, completed, result, request_lock = (
+                    self._hotkey_requests.get_nowait()
+                )
+            except queue.Empty:
+                return
+            with request_lock:
+                if completed.is_set():
+                    continue
+                try:
+                    result.append(self._apply_hotkey(modifiers, virtual_key))
+                finally:
+                    completed.set()
+
     def _window_proc(self, hwnd, message, wparam, lparam):
         if message == self._taskbar_created:
             self._add_icon()
@@ -272,6 +346,16 @@ class WindowsTrayIcon:
                 self._emit("tray_restore")
             elif mouse_message in (WM_RBUTTONUP, WM_CONTEXTMENU):
                 self._show_menu(hwnd)
+            return 0
+        if message == WM_CONFIGURE_HOTKEY:
+            self._process_hotkey_request()
+            return 0
+        if (
+            message == WM_HOTKEY
+            and self._active_hotkey_id
+            and int(wparam) == self._active_hotkey_id
+        ):
+            self._emit("hotkey_toggle_visibility")
             return 0
         if message == WM_CLOSE:
             user32.DestroyWindow(hwnd)
@@ -349,6 +433,10 @@ class WindowsTrayIcon:
             self._error = exc
             self._ready.set()
         finally:
+            if self._active_hotkey_id and self.hwnd:
+                user32.UnregisterHotKey(self.hwnd, self._active_hotkey_id)
+            self._active_hotkey_id = 0
+            self._hotkey = (0, 0)
             if self._nid is not None:
                 shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
             if self._owns_icon and self.hicon:
@@ -370,6 +458,33 @@ class WindowsTrayIcon:
         if self._error:
             raise RuntimeError(f"system tray icon initialization failed: {self._error}")
         return self
+
+    def set_hotkey(self, modifiers: int, virtual_key: int) -> bool:
+        """Register a replacement global hotkey without dropping a valid one."""
+
+        if not modifiers and not virtual_key and not self.alive:
+            return True
+        if not self.alive:
+            return False
+        if threading.current_thread() is self._thread:
+            return self._apply_hotkey(modifiers, virtual_key)
+        completed = threading.Event()
+        result: list[bool] = []
+        request_lock = threading.Lock()
+        self._hotkey_requests.put(
+            (int(modifiers), int(virtual_key), completed, result, request_lock)
+        )
+        if not user32.PostMessageW(self.hwnd, WM_CONFIGURE_HOTKEY, 0, 0):
+            with request_lock:
+                result.append(False)
+                completed.set()
+            return False
+        if not completed.wait(2.0):
+            with request_lock:
+                if not completed.is_set():
+                    result.append(False)
+                    completed.set()
+        return bool(result and result[0])
 
     def stop(self) -> None:
         hwnd = self.hwnd

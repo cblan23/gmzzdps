@@ -28,6 +28,8 @@ CombatModel = MODULE["CombatModel"]
 DpsWindow = MODULE["DpsWindow"]
 ActorStats = MODULE["ActorStats"]
 MonsterStats = MODULE["MonsterStats"]
+enrage_marker_row_index = MODULE["enrage_marker_row_index"]
+enrage_marker_ratio = MODULE["enrage_marker_ratio"]
 TeamDamageState = MODULE["TeamDamageState"]
 TeamTakenState = MODULE["TeamTakenState"]
 TeamHealingState = MODULE["TeamHealingState"]
@@ -51,6 +53,8 @@ APP_VERSION = MODULE["APP_VERSION"]
 CLIENT_BUILD = MODULE["CLIENT_BUILD"]
 TEAM_RATING_PREVIEW_AVAILABLE = MODULE["TEAM_RATING_PREVIEW_AVAILABLE"]
 MAIN_MIN_HEIGHT = MODULE["MAIN_MIN_HEIGHT"]
+MAIN_SUMMARY_BASE_HEIGHT = MODULE["MAIN_SUMMARY_BASE_HEIGHT"]
+MONSTER_HP_ROW_HEIGHT = MODULE["MONSTER_HP_ROW_HEIGHT"]
 HISTORY_DETAIL_MIN_CONTENT_HEIGHT = MODULE[
     "HISTORY_DETAIL_MIN_CONTENT_HEIGHT"
 ]
@@ -80,6 +84,7 @@ toggle_hotkey_from_tk_event = MODULE["toggle_hotkey_from_tk_event"]
 membership_label_for_card_tier = MODULE["membership_label_for_card_tier"]
 membership_badge_for_card_tier = MODULE["membership_badge_for_card_tier"]
 membership_availability_text = MODULE["membership_availability_text"]
+membership_contract_text = MODULE["membership_contract_text"]
 format_duration = MODULE["format_duration"]
 format_response_time = MODULE["format_response_time"]
 format_overheal_rate = MODULE["format_overheal_rate"]
@@ -87,6 +92,9 @@ format_team_health_number = MODULE["format_team_health_number"]
 format_team_health_percent = MODULE["format_team_health_percent"]
 normalize_extraordinary_rating = MODULE["normalize_extraordinary_rating"]
 format_extraordinary_rating = MODULE["format_extraordinary_rating"]
+team_average_extraordinary_rating = MODULE[
+    "team_average_extraordinary_rating"
+]
 healing_coverage_label = MODULE["healing_coverage_label"]
 dps_duration_seconds = MODULE["dps_duration_seconds"]
 relative_damage_bar_ratio = MODULE["relative_damage_bar_ratio"]
@@ -192,6 +200,24 @@ class CombatModelTests(unittest.TestCase):
         model.ingest(damage(1, SELF_ID, MONSTER_ID, 800_000))
         model.ingest(damage(15_001, TEAMMATE_ID, MONSTER_ID, 1_200_000))
         return model
+
+    def test_enrage_countdown_edge_is_encounter_scoped(self):
+        model = CombatModel(run_id="enrage-phase-edge")
+        payload = {
+            "signal": "Set_MUS_B_WYZY_Boss_GuanJia_Stage2",
+            "filetime_100ns": BASE_FILETIME,
+        }
+        self.assertTrue(model.ingest_enrage_countdown(payload))
+        self.assertFalse(model.ingest_enrage_countdown(dict(payload)))
+        self.assertEqual(
+            model.enrage_countdown_signal,
+            "Set_MUS_B_WYZY_Boss_GuanJia_Stage2",
+        )
+        self.assertEqual(model.enrage_countdown_start_100ns, BASE_FILETIME)
+
+        model.reset(keep_identity=True, archive_reason="manual_reset")
+        self.assertEqual(model.enrage_countdown_signal, "")
+        self.assertEqual(model.enrage_countdown_start_100ns, 0)
 
     def test_local_cast_log_deduplicates_packets_but_keeps_repeat_casts(self):
         model = CombatModel(run_id="local-cast-log")
@@ -2370,10 +2396,10 @@ class CombatModelTests(unittest.TestCase):
 
     def test_membership_label_follows_server_card_tier(self):
         self.assertEqual(membership_label_for_card_tier("partner"), "莫雪的小伙伴")
-        self.assertEqual(membership_label_for_card_tier("monthly"), "VVVVVIP用户")
-        self.assertEqual(membership_label_for_card_tier("weekly"), "VIP用户")
-        self.assertEqual(membership_label_for_card_tier("normal"), "尊贵的用户")
-        self.assertEqual(membership_label_for_card_tier("unknown"), "尊贵的用户")
+        self.assertEqual(membership_label_for_card_tier("monthly"), "VVVVIP")
+        self.assertEqual(membership_label_for_card_tier("weekly"), "VIP")
+        self.assertEqual(membership_label_for_card_tier("normal"), "普通")
+        self.assertEqual(membership_label_for_card_tier("unknown"), "普通")
         self.assertEqual(membership_badge_for_card_tier("partner"), "小伙伴")
         self.assertEqual(membership_badge_for_card_tier("monthly"), "VVVVIP")
         self.assertEqual(membership_badge_for_card_tier("weekly"), "VIP")
@@ -2408,6 +2434,51 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertEqual(membership_availability_text("partner", expires_at), "长期可用")
         self.assertEqual(membership_availability_text("normal", None), "本次可用")
+        self.assertEqual(
+            membership_contract_text("monthly", expires_at),
+            "同行契约至：2026-09-04 13:14:15",
+        )
+        self.assertEqual(
+            membership_contract_text("partner", expires_at),
+            "同行契约：长期可用",
+        )
+
+    def test_backend_sidebar_connection_copy_follows_capture_state(self):
+        class Label:
+            def __init__(self, **options):
+                self.options = dict(options)
+
+            def winfo_exists(self):
+                return True
+
+            def cget(self, key):
+                return self.options.get(key, "")
+
+            def configure(self, **options):
+                self.options.update(options)
+
+        window = object.__new__(DpsWindow)
+        window.backend_connection_dot = Label(fg="")
+        window.backend_connection_label = Label(text="", fg="")
+
+        window.connected = False
+        window.capture_started = False
+        window._sync_backend_sidebar_status()
+        self.assertEqual(
+            window.backend_connection_label.options["text"], "尚未连接游戏"
+        )
+
+        window.capture_started = True
+        window._sync_backend_sidebar_status()
+        self.assertEqual(
+            window.backend_connection_label.options["text"], "等待连接游戏"
+        )
+
+        window.connected = True
+        window._sync_backend_sidebar_status()
+        self.assertEqual(
+            window.backend_connection_label.options["text"], "已连接游戏"
+        )
 
     @unittest.skipUnless(sys.platform == "win32", "requires native Windows HWNDs")
     def test_window_lock_is_written_to_real_tk_top_level_handle(self):
@@ -2688,7 +2759,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn("7110616", catalog)
         self.assertNotIn("7113014", catalog)
         self.assertIn("7110641", catalog)
-        self.assertIn("7110642", catalog)
+        self.assertNotIn("7110642", catalog)
         for template_id in ("7100215", "7102938"):
             self.assertIn(template_id, catalog)
             self.assertEqual(catalog[template_id]["name"], "子嗣守护")
@@ -5433,44 +5504,61 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(history[0]["total_damage"], 300_000)
         self.assertEqual(history[0]["monster"]["name"], "伯德温·威瑟尔")
 
-    def test_lost_control_lokin_starts_a_separate_encounter(self):
-        model = CombatModel(run_id="lokin-separate-encounter-test")
+    def test_lost_control_lokin_opening_counter_epoch_stays_one_encounter(self):
+        model = CombatModel(run_id="lokin-opening-counter-rebase-test")
         model.ingest_identity({"entity_id": SELF_ID})
-        for entity_id, template_id, name, max_hp in (
-            (MONSTER_ID, 7_110_642, "洛克·金", 600_551),
-            (SECOND_MONSTER_ID, 7_110_641, "洛克·金·失控", 2_161_985),
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID],
+                "member_count": 2,
+                "authoritative": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "template_id": 7_110_641,
+                "name": "洛克·金·失控",
+                "entity_type": "Boss",
+                "boss_type": 3,
+                "boss_rank": 3,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 2_161_985,
+                "max_hp": 2_161_985,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        for sequence, actor_id, previous_total in (
+            (1, SELF_ID, 3_700_000),
+            (2, TEAMMATE_ID, 1_400_000),
         ):
-            model.ingest_profile(
-                {
-                    "entity_id": entity_id,
-                    "template_id": template_id,
-                    "name": name,
-                    "entity_type": "Boss",
-                    "boss_type": 3,
-                    "boss_rank": 3,
-                }
+            snapshot = team_stat(
+                sequence, actor_id, previous_total, server_time=100
             )
-            model.ingest_monster(
-                {
-                    "entity_id": entity_id,
-                    "current_hp": max_hp,
-                    "max_hp": max_hp,
-                    "filetime_100ns": BASE_FILETIME,
-                }
-            )
+            model.ingest_team_stat(snapshot)
 
-        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100_000))
-        first_encounter_id = model.encounter_id
-        model.ingest(damage(2, SELF_ID, SECOND_MONSTER_ID, 250_000))
+        model.ingest(damage(3, SELF_ID, MONSTER_ID, 1_000))
+        encounter_id = model.encounter_id
+        started_at = model.first_damage_time
+        model.ingest_team_stat(team_stat(4, SELF_ID, 3_750_000, server_time=100))
+        self.assertEqual(model.stats[SELF_ID].damage, 50_000)
 
-        self.assertNotEqual(model.encounter_id, first_encounter_id)
-        self.assertEqual(model.combat_target_id, SECOND_MONSTER_ID)
-        self.assertEqual(model.current_monster().name, "洛克·金·失控")
-        self.assertEqual(model.stats[SELF_ID].damage, 250_000)
-        previous = model.pop_completed_combats()
-        self.assertEqual(len(previous), 1)
-        self.assertEqual(previous[0]["monster"]["template_id"], 7_110_642)
-        self.assertEqual(previous[0]["total_damage"], 100_000)
+        model.ingest_team_stat(team_stat(5, SELF_ID, 40_000, server_time=200))
+        model.ingest_team_stat(
+            team_stat(6, TEAMMATE_ID, 70_000, server_time=200)
+        )
+
+        self.assertEqual(model.encounter_id, encounter_id)
+        self.assertEqual(model.first_damage_time, started_at)
+        self.assertEqual(model.combat_target_id, MONSTER_ID)
+        self.assertEqual(model.pop_completed_combats(), [])
+        self.assertEqual(model.stats[SELF_ID].damage, 40_000)
+        self.assertEqual(model.stats[TEAMMATE_ID].damage, 70_000)
+        self.assertEqual(model.build_combat_record("test")["total_damage"], 110_000)
 
     def test_same_scene_full_refresh_archives_and_clears_combat(self):
         model = CombatModel(run_id="same-scene-refresh-test")
@@ -5568,7 +5656,7 @@ class CombatModelTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertEqual(APP_VERSION, "0.2.2")
-        self.assertEqual(CLIENT_BUILD, "0.2.2+20260908.1")
+        self.assertEqual(CLIENT_BUILD, "0.2.2+20260909.1")
         self.assertNotIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
@@ -5604,7 +5692,7 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertIn("self.body, bg=BG, height=MAIN_SUMMARY_BASE_HEIGHT", source)
         self.assertIn("height=MONSTER_HP_ROW_HEIGHT,\n            bg=BG,", source)
-        self.assertIn("+ row_height * (row_count - 1)", source)
+        self.assertIn("+ MONSTER_HP_ROW_HEIGHT * (row_count - 1)", source)
         self.assertIn("height=28,\n            bg=BG,", source)
         self.assertIn(
             "self.rows_canvas = tk.Canvas(\n            self.table_panel,\n            bg=BG,",
@@ -5655,10 +5743,8 @@ class CombatModelTests(unittest.TestCase):
         self.assertIn("MINI_DEFAULT_HEIGHT = 118", source)
         self.assertIn('tags=("compact_restore", "compact_restore_bg")', source)
         self.assertNotIn('text="当前身份"', source)
-        self.assertIn(
-            "membership_label_for_card_tier(self.licensing.session.card_tier)",
-            source,
-        )
+        self.assertIn("membership_badge = membership_label_for_card_tier(", source)
+        self.assertIn("self.licensing.session.card_tier", source)
         self.assertNotIn('identity_icon = self.icons.toolbar("user"', source)
         self.assertIn('self.root.bind("<MouseWheel>", self._scroll_main, add="+")', source)
         self.assertIn("self._dismiss_compact_auxiliary_windows()", source)
@@ -7609,6 +7695,19 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(full["bounds"][2] - full["bounds"][0], 92)
         self.assertGreaterEqual(full["name_width"], 70)
 
+        ai = window._main_rating_badge_layout(
+            name_x=38,
+            name_limit=220,
+            top=0,
+            row_height=32,
+            compact=False,
+            identity_label="人机",
+        )
+        self.assertIsNotNone(ai)
+        self.assertTrue(ai["compact"])
+        self.assertLess(ai["bounds"][2] - ai["bounds"][0], 60)
+        self.assertGreater(ai["name_width"], full["name_width"])
+
         narrow = window._main_rating_badge_layout(
             name_x=31,
             name_limit=134,
@@ -7620,6 +7719,29 @@ class CombatModelTests(unittest.TestCase):
         self.assertTrue(narrow["compact"])
         self.assertEqual(narrow["bounds"][2] - narrow["bounds"][0], 44)
         self.assertGreaterEqual(narrow["name_width"], 48)
+
+        inline = window._main_rating_badge_layout(
+            name_x=38,
+            name_limit=220,
+            top=0,
+            row_height=32,
+            compact=False,
+            displayed_name_width=42,
+        )
+        self.assertIsNotNone(inline)
+        self.assertEqual(inline["bounds"][0], 38 + 42 + 6)
+        self.assertEqual(inline["bounds"][2] - inline["bounds"][0], 92)
+
+        long_name = window._main_rating_badge_layout(
+            name_x=38,
+            name_limit=220,
+            top=0,
+            row_height=32,
+            compact=False,
+            displayed_name_width=500,
+        )
+        self.assertIsNotNone(long_name)
+        self.assertEqual(long_name["bounds"][2], 220 - 5)
 
         class Canvas:
             def __init__(self):
@@ -7642,6 +7764,15 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertEqual(canvas.texts[-1], "41.8k")
 
+        window._draw_main_rating_badge(
+            canvas,
+            rating=41_820,
+            layout=narrow,
+            actor_tag="actor:2",
+            identity_label="人机",
+        )
+        self.assertEqual(canvas.texts[-1], "人机")
+
         window.show_extraordinary_rating = False
         self.assertFalse(
             window._main_extraordinary_rating_visible(rating_preview=False)
@@ -7661,10 +7792,19 @@ class CombatModelTests(unittest.TestCase):
                 self.self_id = SELF_ID
                 self.friend_order = [SELF_ID, TEAMMATE_ID]
                 self.party_member_count = 2
+                self.party_active = True
                 self.non_player_actor_ids = set()
                 self.entity_extraordinary_ratings = {
                     SELF_ID: 37_000,
                     TEAMMATE_ID: 41_820,
+                }
+                self.entity_professions = {
+                    SELF_ID: 1_200_001,
+                    TEAMMATE_ID: 1_200_002,
+                }
+                self.entity_names = {
+                    SELF_ID: "本机玩家",
+                    TEAMMATE_ID: "评分队友",
                 }
                 self.members = {SELF_ID, TEAMMATE_ID}
                 self.started = False
@@ -7679,19 +7819,11 @@ class CombatModelTests(unittest.TestCase):
 
             def actor_profession_id(self, actor_id):
                 self.profession_lookups += 1
-                return {
-                    SELF_ID: 1_200_001,
-                    TEAMMATE_ID: 1_200_002,
-                    NEARBY_ID: 1_200_003,
-                }.get(actor_id, 0)
+                return self.entity_professions.get(actor_id, 0)
 
             def display_name(self, actor_id):
                 self.name_lookups += 1
-                return {
-                    SELF_ID: "本机玩家",
-                    TEAMMATE_ID: "评分队友",
-                    NEARBY_ID: "新进队员",
-                }.get(actor_id, "")
+                return self.entity_names.get(actor_id, "")
 
         window = object.__new__(DpsWindow)
         window.model = Model()
@@ -7718,7 +7850,8 @@ class CombatModelTests(unittest.TestCase):
         window.model.members.add(NEARBY_ID)
         window.model.friend_order.append(NEARBY_ID)
         window.model.party_member_count = 3
-        window._invalidate_team_rating_preview_rows()
+        window.model.entity_professions[NEARBY_ID] = 1_200_003
+        window.model.entity_names[NEARBY_ID] = "新进队员"
         joined_rows = window._team_rating_preview_rows()
         self.assertEqual(
             [row["actor_id"] for row in joined_rows],
@@ -7728,14 +7861,113 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(window.model.name_lookups, 3)
 
         window.model.entity_extraordinary_ratings[TEAMMATE_ID] = 42_100
-        window._invalidate_team_rating_preview_rows(TEAMMATE_ID)
         refreshed_rows = window._team_rating_preview_rows()
         self.assertEqual(refreshed_rows[1]["extraordinary_rating"], 42_100)
         self.assertEqual(window.model.profession_lookups, 4)
         self.assertEqual(window.model.name_lookups, 4)
 
+        window.model.entity_names[TEAMMATE_ID] = "评分队友·投影"
+        ai_rows = window._team_rating_preview_rows()
+        self.assertTrue(ai_rows[1]["is_ai"])
+        self.assertTrue(
+            window._main_actor_is_ai(TEAMMATE_ID, ai_rows[1])
+        )
+
+        window.model.members = {SELF_ID}
+        window.model.friend_order = [SELF_ID]
+        window.model.party_member_count = 1
+        window.model.party_active = False
+        self.assertFalse(window._team_rating_preview_active())
+        window.model.party_active = True
+        self.assertTrue(window._team_rating_preview_active())
+        self.assertEqual(
+            [row["actor_id"] for row in window._team_rating_preview_rows()],
+            [SELF_ID],
+        )
+
         window.model.started = True
         self.assertFalse(window._team_rating_preview_active())
+
+    def test_combat_model_tracks_single_member_team_activity(self):
+        model = CombatModel()
+        model.ingest_identity({"entity_id": SELF_ID})
+
+        self.assertTrue(
+            model.ingest_party(
+                {
+                    "entity_ids": [],
+                    "member_count": 1,
+                    "in_team": True,
+                }
+            )
+        )
+        self.assertTrue(model.party_active)
+        self.assertEqual(model.party_member_count, 1)
+
+        self.assertTrue(
+            model.ingest_party(
+                {
+                    "entity_ids": [],
+                    "member_count": 0,
+                    "authoritative": True,
+                    "left_team": True,
+                    "in_team": False,
+                }
+            )
+        )
+        self.assertFalse(model.party_active)
+
+    def test_team_rating_preview_keeps_overview_and_boss_banner(self):
+        class Widget:
+            def __init__(self):
+                self.manager = "pack"
+                self.options = {}
+
+            def winfo_manager(self):
+                return self.manager
+
+            def pack_forget(self):
+                self.manager = ""
+
+            def pack(self, **options):
+                self.manager = "pack"
+                self.options.update(options)
+
+            def configure(self, **options):
+                self.options.update(options)
+
+        window = object.__new__(DpsWindow)
+        window.compact_mode = False
+        window.team_rating_preview_layout_active = False
+        window._monster_hp_row_count = 2
+        window.summary = Widget()
+        window.summary.options["height"] = (
+            MAIN_SUMMARY_BASE_HEIGHT + MONSTER_HP_ROW_HEIGHT
+        )
+        window.metric_frame = Widget()
+        window.monster_hp_canvas = Widget()
+        window.table_panel = Widget()
+        header_redraws = []
+        window._draw_main_header = lambda: header_redraws.append(True)
+
+        window._sync_team_rating_preview_layout(True)
+        self.assertEqual(window.summary.winfo_manager(), "pack")
+        self.assertEqual(window.metric_frame.winfo_manager(), "pack")
+        self.assertEqual(window.monster_hp_canvas.winfo_manager(), "pack")
+        self.assertEqual(
+            window.summary.options["height"],
+            MAIN_SUMMARY_BASE_HEIGHT + MONSTER_HP_ROW_HEIGHT,
+        )
+
+        window._sync_team_rating_preview_layout(False)
+        self.assertEqual(window.summary.winfo_manager(), "pack")
+        self.assertEqual(window.metric_frame.winfo_manager(), "pack")
+        self.assertEqual(window.monster_hp_canvas.winfo_manager(), "pack")
+        self.assertEqual(
+            window.summary.options["height"],
+            MAIN_SUMMARY_BASE_HEIGHT + MONSTER_HP_ROW_HEIGHT,
+        )
+        self.assertEqual(len(header_redraws), 2)
 
     def test_team_rating_preview_invalidates_only_changed_member_profile(self):
         class Model:
@@ -8038,6 +8270,188 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(window.summary.configured, [{"height": 76}])
         self.assertEqual(len(window.monster_hp_canvas.texts), 1)
 
+    def test_first_believer_forecast_marker_moves_from_barney_to_anxia(self):
+        barney = MonsterStats(
+            MONSTER_ID,
+            name="巴尼先生",
+            template_id=7_100_209,
+            current_hp=10,
+            max_hp=100,
+        )
+        anxia = MonsterStats(
+            SECOND_MONSTER_ID,
+            name="安西娅",
+            template_id=7_100_208,
+            current_hp=70,
+            max_hp=100,
+        )
+
+        self.assertEqual(
+            enrage_marker_row_index([anxia, barney], anxia.entity_id), 1
+        )
+
+        barney.current_hp = 0
+        barney.death_confirmed = True
+        self.assertEqual(
+            enrage_marker_row_index([anxia, barney], barney.entity_id), 0
+        )
+
+    def test_enrage_marker_moves_from_right_to_left_with_countdown(self):
+        prediction = type(
+            "Prediction",
+            (),
+            {"enrage_seconds": 480.0, "time_to_enrage_seconds": 480.0},
+        )()
+        self.assertEqual(enrage_marker_ratio(prediction), 1.0)
+        prediction.time_to_enrage_seconds = 240.0
+        self.assertEqual(enrage_marker_ratio(prediction), 0.5)
+        prediction.time_to_enrage_seconds = 0.0
+        self.assertEqual(enrage_marker_ratio(prediction), 0.0)
+
+    def test_enrage_marker_respects_a_late_phase_hp_baseline(self):
+        prediction = type(
+            "Prediction",
+            (),
+            {
+                "enrage_seconds": 300.0,
+                "time_to_enrage_seconds": 300.0,
+                "schedule_start_hp_percent": 70.0,
+            },
+        )()
+        self.assertEqual(enrage_marker_ratio(prediction), 0.7)
+        prediction.time_to_enrage_seconds = 150.0
+        self.assertEqual(enrage_marker_ratio(prediction), 0.35)
+
+    def test_ready_enrage_marker_floats_above_centered_unchanged_hp_bar(self):
+        class Font:
+            @staticmethod
+            def measure(text):
+                return len(text) * 6
+
+        class Canvas:
+            def __init__(self):
+                self.configured = []
+                self.rectangles = []
+                self.texts = []
+                self.lines = []
+                self.polygons = []
+
+            @staticmethod
+            def delete(*_args):
+                return None
+
+            @staticmethod
+            def winfo_width():
+                return 500
+
+            def configure(self, **kwargs):
+                self.configured.append(kwargs)
+
+            def create_rectangle(self, *args, **kwargs):
+                self.rectangles.append((args, kwargs))
+
+            def create_text(self, *args, **kwargs):
+                self.texts.append((args, kwargs))
+
+            def create_line(self, *args, **kwargs):
+                self.lines.append((args, kwargs))
+
+            def create_polygon(self, *args, **kwargs):
+                self.polygons.append((args, kwargs))
+
+        monster = MonsterStats(
+            MONSTER_ID,
+            name="测试 Boss",
+            template_id=7_100_001,
+            level=60,
+            boss_rank=3,
+            current_hp=50,
+            max_hp=100,
+            observed_max_hp=100,
+        )
+        prediction = type(
+            "Prediction",
+            (),
+            {
+                "state": "normal",
+                "message": "正常 · +0:24",
+                "calculating": False,
+                "enrage_seconds": 120.0,
+                "time_to_enrage_seconds": 60.0,
+                "schedule_start_hp_percent": 100.0,
+            },
+        )()
+        window = object.__new__(DpsWindow)
+        window.monster_hp_canvas = Canvas()
+        window.summary = Canvas()
+        window.model = type(
+            "Model",
+            (),
+            {
+                "current_bosses": lambda _self: [monster],
+                "_monster_rank": lambda _self, value: value.boss_rank,
+                "combat_target_id": MONSTER_ID,
+                "active_target_id": MONSTER_ID,
+            },
+        )()
+        window.enrage_prediction = prediction
+        window.enrage_prediction_visible = True
+        window._monster_hp_row_count = 1
+        window._monster_hp_prediction_spacing = 0
+        window._fit_main_actor_name = lambda value, _width: value
+        window._ui_font = lambda _role: Font()
+
+        window._draw_monster_hp()
+
+        self.assertEqual(window.monster_hp_canvas.configured, [{"height": 44}])
+        self.assertEqual(window.summary.configured, [{"height": 84}])
+        track = window.monster_hp_canvas.rectangles[0][0]
+        label = window.monster_hp_canvas.rectangles[2][0]
+        status = window.monster_hp_canvas.texts[-1][0]
+        self.assertEqual((track[1], track[3]), (11, 41))
+        self.assertEqual((label[1], label[3]), (0, 13))
+        self.assertEqual(status[1], 26)
+        self.assertEqual(status[1], (track[1] + track[3]) // 2)
+        self.assertEqual(len(window.monster_hp_canvas.lines), 1)
+        self.assertEqual(len(window.monster_hp_canvas.polygons), 1)
+
+        first_label_width = label[2] - label[0]
+        prediction.message = "危险 · -8:08"
+        window._draw_monster_hp()
+        second_label = window.monster_hp_canvas.rectangles[-1][0]
+        self.assertEqual(second_label[2] - second_label[0], first_label_width)
+
+    def test_first_believer_successor_overrides_stale_barney_marker(self):
+        stale_barney = MonsterStats(
+            MONSTER_ID,
+            name="巴尼先生",
+            template_id=7_100_209,
+            current_hp=10,
+            max_hp=100,
+        )
+        successor_anxia = MonsterStats(
+            SECOND_MONSTER_ID,
+            name="安西娅",
+            template_id=7_100_210,
+            current_hp=100,
+            max_hp=100,
+        )
+
+        self.assertEqual(
+            enrage_marker_row_index(
+                [stale_barney, successor_anxia], stale_barney.entity_id
+            ),
+            1,
+        )
+
+    def test_other_dual_boss_marker_follows_active_target(self):
+        first = MonsterStats(MONSTER_ID, name="Boss A", template_id=1)
+        second = MonsterStats(SECOND_MONSTER_ID, name="Boss B", template_id=2)
+
+        self.assertEqual(
+            enrage_marker_row_index([first, second], second.entity_id), 1
+        )
+
     def test_main_columns_include_configurable_dps_in_expected_order(self):
         window = object.__new__(DpsWindow)
         window.show_total_damage = True
@@ -8122,17 +8536,17 @@ class CombatModelTests(unittest.TestCase):
         ]
         self.assertIn("frame.grid_remove()", settings_source)
 
-    def test_backend_sidebar_uses_branded_anime_art_and_native_copy(self):
+    def test_backend_sidebar_uses_starry_art_anonymous_identity_and_tier_copy(self):
         project = Path(__file__).parent
         source = (project / "dps_meter.pyw").read_text(encoding="utf-8")
         build_source = (project / "build_exe.ps1").read_text(encoding="utf-8")
 
         self.assertIn(
-            'SIDEBAR_ART_PATH = ASSET_DIR / "sidebar_anime_ocean_v1.png"',
+            'SIDEBAR_ART_PATH = ASSET_DIR / "sidebar_starry_swing_v2.png"',
             source,
         )
         self.assertIn(
-            'SIDEBAR_AVATAR_PATH = ASSET_DIR / "sidebar_avatar_orange_v1.png"',
+            'SIDEBAR_AVATAR_PATH = ASSET_DIR / "sidebar_nightwalker_avatar_v2.png"',
             source,
         )
         self.assertIn("def sidebar_art(", source)
@@ -8145,30 +8559,40 @@ class CombatModelTests(unittest.TestCase):
         ]
         self.assertNotIn("brand_mark", sidebar_source)
         self.assertNotIn('text="叨叨诡秘"', sidebar_source)
-        self.assertIn("self.icons.sidebar_avatar(44)", sidebar_source)
-        self.assertIn("membership_badge_for_card_tier(", sidebar_source)
+        self.assertIn("self.icons.sidebar_avatar(52)", sidebar_source)
+        self.assertIn('text="匿名"', sidebar_source)
+        self.assertNotIn('text="修改"', sidebar_source)
+        self.assertIn("membership_label_for_card_tier(", sidebar_source)
+        self.assertIn("membership_contract_text(", sidebar_source)
+        self.assertIn('text="回到主窗口"', sidebar_source)
+        self.assertNotIn('text="⌃  收起"', sidebar_source)
+        self.assertIn("self._sync_backend_sidebar_status()", source)
+        self.assertIn('("statistics", "analytics", "数据统计", False)', sidebar_source)
+        self.assertIn('("upload", "peak", "巅峰记录", False)', sidebar_source)
         self.assertNotIn('text="筹备"', source)
         self.assertIn('text="记录每一次战斗"', source)
         self.assertIn('text="让数据说话"', source)
-        self.assertIn('button, "#0a2228", "#dff4f3", selected=True', source)
+        self.assertIn('button, "#07323a", "#e5ffff", selected=True', source)
         self.assertIn(
-            "assets/sidebar_anime_ocean_v1.png=assets/sidebar_anime_ocean_v1.png",
+            "assets/sidebar_starry_swing_v2.png=assets/sidebar_starry_swing_v2.png",
             build_source,
         )
         self.assertIn(
-            "assets/sidebar_avatar_orange_v1.png=assets/sidebar_avatar_orange_v1.png",
+            "assets/sidebar_nightwalker_avatar_v2.png=assets/sidebar_nightwalker_avatar_v2.png",
             build_source,
         )
-        art_path = project / "assets" / "sidebar_anime_ocean_v1.png"
+        art_path = project / "assets" / "sidebar_starry_swing_v2.png"
         self.assertTrue(art_path.is_file())
         with Image.open(art_path) as image:
-            self.assertGreater(image.height, image.width)
-            self.assertGreaterEqual(image.width, 900)
-        avatar_path = project / "assets" / "sidebar_avatar_orange_v1.png"
+            self.assertGreater(image.width, image.height)
+            self.assertGreaterEqual(image.width, 1500)
+            self.assertGreaterEqual(image.height, 1000)
+        avatar_path = project / "assets" / "sidebar_nightwalker_avatar_v2.png"
         self.assertTrue(avatar_path.is_file())
         with Image.open(avatar_path) as image:
             self.assertEqual(image.width, image.height)
             self.assertGreaterEqual(image.width, 1000)
+            self.assertIn("A", image.mode)
 
     def test_backend_page_switch_closes_active_dropdown_popup(self):
         class Owner:
@@ -8402,8 +8826,13 @@ class CombatModelTests(unittest.TestCase):
         self.assertIn('("dps", "DPS伤害设置")', source)
         self.assertIn('("hps", "HPS治疗设置")', source)
         self.assertIn('("dt", "DT承伤设置")', source)
+        self.assertIn('("boss", "BOSS首领设置")', source)
         self.assertIn('settings_section("DT承伤设置")', source)
+        self.assertIn('settings_section("BOSS首领设置")', source)
         self.assertIn('("显示总承伤", self.settings_show_taken_var)', source)
+        self.assertIn(
+            '("显示已归类伤害", self.settings_show_boss_damage_var)', source
+        )
         for label in ("DPS伤害", "HPS治疗", "DT承伤", "BOSS首领"):
             self.assertIn(f'"{label}"', source)
         self.assertEqual(source.count('text="QQ群:1094925831 165966739"'), 2)
@@ -8529,6 +8958,93 @@ class CombatModelTests(unittest.TestCase):
         window.show_hps = False
         self.assertEqual(window._enabled_healing_metrics(), ())
         self.assertEqual(set(window._main_columns(620)), {"name_limit"})
+
+    def test_boss_columns_follow_independent_visibility_settings(self):
+        window = object.__new__(DpsWindow)
+        window.compact_mode = False
+        window.main_meter_mode = "boss"
+        window.show_boss_damage = True
+        window.show_boss_share = True
+        window.show_boss_hits = True
+        window.show_boss_max_hit = True
+
+        columns = window._main_columns(720)
+        self.assertLess(columns["boss_damage"], columns["boss_share"])
+        self.assertLess(columns["boss_share"], columns["boss_hits"])
+        self.assertLess(columns["boss_hits"], columns["boss_max_hit"])
+
+        window.show_boss_share = False
+        window.show_boss_hits = False
+        reduced = window._main_columns(720)
+        self.assertIn("boss_damage", reduced)
+        self.assertNotIn("boss_share", reduced)
+        self.assertNotIn("boss_hits", reduced)
+        self.assertIn("boss_max_hit", reduced)
+
+    def test_boss_settings_apply_to_live_columns(self):
+        class Variable:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        window = object.__new__(DpsWindow)
+        window.ui_font_size = 14
+        window.compact_mode = False
+        for name in (
+            "settings_font_size_var",
+            "settings_opacity_var",
+            "settings_target_boss_lookup_var",
+            "settings_show_names_var",
+            "settings_show_damage_var",
+            "settings_show_dps_var",
+            "settings_show_share_var",
+            "settings_show_critical_var",
+            "settings_show_penetration_var",
+            "settings_keep_dps_bars_opaque_var",
+            "settings_show_extraordinary_rating_var",
+            "settings_team_rating_preview_var",
+            "settings_boss_enrage_prediction_var",
+            "settings_show_deaths_var",
+            "settings_show_revives_var",
+            "settings_show_death_duration_var",
+            "settings_show_taken_var",
+            "settings_show_taken_share_var",
+            "settings_show_effective_healing_var",
+            "settings_show_hps_var",
+            "settings_show_overheal_rate_var",
+        ):
+            setattr(window, name, None)
+        window.settings_show_boss_damage_var = Variable(False)
+        window.settings_show_boss_share_var = Variable(True)
+        window.settings_show_boss_hits_var = Variable(False)
+        window.settings_show_boss_max_hit_var = Variable(True)
+        window._team_rating_preview_active = lambda: False
+        window._sync_team_rating_preview_layout = mock.Mock()
+        window._sync_compact_geometry_width = mock.Mock()
+        window._main_minimum_width = lambda: 430
+        window.root = mock.Mock()
+        window._configure_ui_fonts = mock.Mock()
+        window._sync_action_buttons = mock.Mock()
+        window._draw_main_header = mock.Mock()
+        window._draw_main_rows = mock.Mock()
+        window._schedule_main_content_overlay_sync = mock.Mock()
+        window._draw_history_participant_header = mock.Mock()
+        window._render_history_selection = mock.Mock()
+        window._save_preferences = mock.Mock()
+
+        window._save_ui_settings()
+
+        self.assertFalse(window.show_boss_damage)
+        self.assertTrue(window.show_boss_share)
+        self.assertFalse(window.show_boss_hits)
+        self.assertTrue(window.show_boss_max_hit)
+        self.assertEqual(window._enabled_boss_metrics(), (
+            "boss_share",
+            "boss_max_hit",
+        ))
+        window._save_preferences.assert_called_once_with()
 
     def test_transparency_overlay_redraws_empty_message_without_black_mask(self):
         class Canvas:
@@ -14105,6 +14621,43 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.build_combat_record()["participants"][0]["deaths"], 1)
         self.assertEqual(model.encounter_team_size, 1)
 
+    def test_token_proven_actor_merge_clears_previous_occupant_rating(self):
+        model = CombatModel()
+        provisional_actor = -781_628_999_061_186_694
+        real_actor = TEAMMATE_ID + 120
+        model.ingest_profile(
+            {
+                "entity_id": provisional_actor,
+                "name": "incoming-player",
+                "profession_id": 1_200_006,
+                "entity_type": "Player",
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": real_actor,
+                "name": "previous-player",
+                "profession_id": 1_200_003,
+                "extraordinary_rating": 88_888,
+                "entity_type": "Player",
+            }
+        )
+
+        self.assertTrue(
+            model.merge_actor(
+                {
+                    "from_actor_id": provisional_actor,
+                    "to_actor_id": real_actor,
+                    "user_token": "exact-team-member-token",
+                    "replace_profile": True,
+                }
+            )
+        )
+
+        self.assertEqual(model.display_name(real_actor), "incoming-player")
+        self.assertEqual(model.actor_profession_id(real_actor), 1_200_006)
+        self.assertNotIn(real_actor, model.entity_extraordinary_ratings)
+
     def test_boss_zero_hp_waits_for_idle_confirmation(self):
         model = CombatModel(run_id="boss-death-test")
         model.ingest_identity({"entity_id": SELF_ID})
@@ -16437,6 +16990,141 @@ class CombatModelTests(unittest.TestCase):
         summary = build_history_summary(record)
         self.assertEqual(summary["extraordinary_rating"], 63_268)
 
+    def test_team_average_extraordinary_rating_ignores_missing_values(self):
+        self.assertEqual(
+            team_average_extraordinary_rating(
+                [
+                    {"extraordinary_rating": 63_268},
+                    {"extraordinary_rating": 54_817},
+                    {},
+                    {"extraordinary_rating": None},
+                    {
+                        "name": "莫雪·投影",
+                        "extraordinary_rating": 99_999,
+                    },
+                ]
+            ),
+            (59_043, 2, 4),
+        )
+        average, rated_count, team_size = team_average_extraordinary_rating(
+            [{}, {"extraordinary_rating": None}]
+        )
+        self.assertIsNone(average)
+        self.assertEqual((rated_count, team_size), (0, 2))
+        self.assertEqual(format_extraordinary_rating(average), "--")
+        self.assertEqual(
+            team_average_extraordinary_rating(
+                [
+                    {"name": "投影甲·投影", "extraordinary_rating": 80_000},
+                    {
+                        "name": "兼容旧记录",
+                        "is_ai": True,
+                        "extraordinary_rating": 90_000,
+                    },
+                ]
+            ),
+            (None, 0, 0),
+        )
+
+    def test_history_detail_all_tabs_show_team_average_rating(self):
+        class Label:
+            def __init__(self):
+                self.options = {}
+
+            def configure(self, **options):
+                self.options.update(options)
+
+        record = {
+            "participants": [
+                {"extraordinary_rating": 63_268},
+                {"extraordinary_rating": 54_817},
+                {},
+                {
+                    "name": "队员·投影",
+                    "extraordinary_rating": 99_999,
+                },
+            ]
+        }
+        window = object.__new__(DpsWindow)
+        window.history_page_mode = "detail"
+        window.history_total_value = None
+        window.history_dps_value = None
+        window.history_team_value = None
+        window.history_duration_value = None
+        window.history_my_value = Label()
+        window.history_my_value._caption_label = Label()
+        window.history_my_value._subtitle_label = Label()
+
+        for mode in ("dps", "hps", "dt", "boss_damage"):
+            with self.subTest(mode=mode):
+                window._sync_history_detail_metric_copy(
+                    healing_mode=mode == "hps",
+                    taken_mode=mode == "dt",
+                    boss_mode=mode == "boss_damage",
+                )
+                window._update_history_team_average_rating(record)
+                self.assertEqual(
+                    window.history_my_value._caption_label.options["text"],
+                    "队伍平均非凡评分",
+                )
+                self.assertEqual(
+                    window.history_my_value.options["text"], "59,043"
+                )
+                self.assertEqual(
+                    window.history_my_value._subtitle_label.options["text"],
+                    "真人评分 2 / 3 人",
+                )
+
+        window._update_history_team_average_rating(
+            {"participants": [{}, {"extraordinary_rating": None}]}
+        )
+        self.assertEqual(window.history_my_value.options["text"], "--")
+        self.assertEqual(
+            window.history_my_value._subtitle_label.options["text"],
+            "真人评分 0 / 2 人",
+        )
+
+    def test_history_detail_labels_projection_rating_as_ai(self):
+        class Label:
+            def __init__(self):
+                self.options = {}
+
+            def configure(self, **options):
+                self.options.update(options)
+
+        window = object.__new__(DpsWindow)
+        window.professions = {}
+        window.history_player_name_label = None
+        window.history_player_rank_label = None
+        window.history_player_rating_label = Label()
+        window.history_player_icon_label = None
+        window.history_player_primary_label = None
+        window.history_player_primary_caption = None
+        window.history_player_stat_labels = {}
+        window.history_player_share_canvas = None
+        window.history_detail_label = None
+        projection = {
+            "actor_id": TEAMMATE_ID,
+            "name": "莫雪·投影",
+            "extraordinary_rating": 77_897,
+            "damage": 100,
+            "dps": 100,
+            "share": 1.0,
+        }
+
+        window._render_history_player_summary(
+            {"duration_seconds": 1.0, "total_damage": 100},
+            [projection],
+            projection,
+            healing_mode=False,
+            taken_mode=False,
+        )
+
+        self.assertEqual(
+            window.history_player_rating_label.options["text"],
+            "非凡评分 人机",
+        )
+
     def test_pending_teammate_detail_does_not_invent_unclassified_skill(self):
         pending = {
             "damage": 1_368_000,
@@ -16724,6 +17412,94 @@ class CombatModelTests(unittest.TestCase):
         window._draw_history_list.assert_called_once_with()
         window._render_history_snapshot.assert_called_once_with()
         window._draw_history_snapshot_trend.assert_called_once_with()
+
+    def test_history_privacy_controls_match_browser_and_detail_layouts(self):
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        browser_source = source[
+            source.index("    def _build_history_browser_view(") : source.index(
+                "    def _build_history_list_panel("
+            )
+        ]
+        field_source = source[
+            source.index("    def _build_history_list_panel(") : source.index(
+                "    def _history_field_visible("
+            )
+        ]
+        detail_source = source[
+            source.index("    def _build_history_detail_view(") : source.index(
+                "    def _history_detail_metric_card("
+            )
+        ]
+
+        self.assertNotIn(
+            'actions, "隐藏名称", self._toggle_history_names', browser_source
+        )
+        self.assertNotIn(
+            'actions, "隐藏名称", self._toggle_history_names', detail_source
+        )
+        privacy_index = field_source.index('            "隐藏名称",')
+        character_index = field_source.index('            ("character", "角色名称"),')
+        self.assertLess(privacy_index, character_index)
+        self.assertIn("command=self._history_privacy_field_changed", field_source)
+        team_heading_index = detail_source.index(
+            "self.history_team_heading_label.pack"
+        )
+        detail_privacy_index = detail_source.index(
+            "self.history_detail_privacy_control = ModernCheckboxControl("
+        )
+        team_subtitle_index = detail_source.index(
+            "self.history_team_subtitle_label = tk.Label("
+        )
+        self.assertLess(team_heading_index, detail_privacy_index)
+        self.assertLess(detail_privacy_index, team_subtitle_index)
+        self.assertIn('            "隐藏名称",', detail_source)
+        self.assertIn("command=self._history_privacy_field_changed", detail_source)
+
+    def test_history_detail_privacy_control_is_hidden_only_for_boss_tab(self):
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+
+        class Control:
+            def __init__(self):
+                self.manager = "pack"
+                self.pack_options = None
+
+            def winfo_manager(self):
+                return self.manager
+
+            def pack_forget(self):
+                self.manager = ""
+
+            def pack(self, **options):
+                self.manager = "pack"
+                self.pack_options = options
+
+        window = object.__new__(DpsWindow)
+        window.history_detail_privacy_control = Control()
+        window.history_meter_mode = "boss_damage"
+
+        window._sync_history_detail_privacy_control()
+        self.assertEqual(window.history_detail_privacy_control.manager, "")
+
+        for mode in ("dps", "hps", "dt"):
+            window.history_meter_mode = mode
+            window._sync_history_detail_privacy_control()
+            self.assertEqual(window.history_detail_privacy_control.manager, "pack")
+            self.assertEqual(
+                window.history_detail_privacy_control.pack_options,
+                {"side": "left", "padx": (0, 8), "pady": 17},
+            )
+            window.history_detail_privacy_control.pack_forget()
+
+        sync_source = source[
+            source.index("    def _sync_history_meter_tabs(") : source.index(
+                "    def _set_history_meter_mode("
+            )
+        ]
+        self.assertIn("self._sync_history_detail_privacy_control()", sync_source)
 
     def test_boss_history_tab_is_enabled_while_future_items_stay_disabled(self):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(

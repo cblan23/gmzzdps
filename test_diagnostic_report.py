@@ -62,6 +62,47 @@ def native_damage_record(sequence: int = 1) -> dict:
 
 
 class DiagnosticAnalyzerTests(unittest.TestCase):
+    def test_team_status_refreshes_runtime_hook_state_and_response_health(self):
+        analyzer = DiagnosticAnalyzer()
+        analyzer.handle(
+            "connected",
+            {
+                "game_pid": 9784,
+                "team_stats_hook_installed": False,
+                "team_stats_mode": "unknown",
+            },
+        )
+        analyzer.handle(
+            "batch",
+            {
+                "team_status": {
+                    "installed": True,
+                    "enabled": True,
+                    "adopted": False,
+                    "request_count": 24,
+                    "last_result": 1,
+                    "last_request_filetime": 134_321_845_000_000_000,
+                    "response_health": "healthy",
+                    "response_count": 4,
+                    "last_response_filetime": 134_321_844_990_000_000,
+                    "requests_since_response": 1,
+                    "rearm_count": 1,
+                    "reinstall_count": 0,
+                }
+            },
+        )
+
+        report = analyzer.finish({"elevated": True})
+
+        self.assertTrue(
+            report["capture"]["connection"]["team_stats_hook_installed"]
+        )
+        status = report["capture"]["team_status"]
+        self.assertTrue(status["installed"])
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["response_health"], "healthy")
+        self.assertEqual(status["response_count"], 4)
+
     def test_environment_collection_supports_build_python(self):
         environment = diagnostic_environment(elevated=True, packaged=True)
 

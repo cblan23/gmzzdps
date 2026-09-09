@@ -35,6 +35,7 @@ TEAM_STATS_RESPONSE_TIMEOUT_SECONDS = 20.0
 TEAM_STATS_RESPONSE_MIN_REQUESTS = 8
 TEAM_STATS_MAX_REINSTALLS_PER_SESSION = 1
 TEAM_STATS_RECOVERY_ACTIVITY_WINDOW_SECONDS = 10.0
+TEAM_STATS_NEW_ACTIVITY_EPOCH_GAP_SECONDS = 60.0
 
 # Team snapshots are the one capture component that actively calls back into
 # the game.  Keep its lifecycle behind an explicit parent-controlled mode so
@@ -91,12 +92,19 @@ class TeamStatsResponseHealth:
         activity_window_seconds: float = (
             TEAM_STATS_RECOVERY_ACTIVITY_WINDOW_SECONDS
         ),
+        activity_epoch_gap_seconds: float = (
+            TEAM_STATS_NEW_ACTIVITY_EPOCH_GAP_SECONDS
+        ),
     ) -> None:
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.minimum_requests = max(1, int(minimum_requests))
         self.maximum_reinstalls = max(0, int(maximum_reinstalls))
         self.activity_window_seconds = max(
             1.0, float(activity_window_seconds)
+        )
+        self.activity_epoch_gap_seconds = max(
+            self.activity_window_seconds,
+            float(activity_epoch_gap_seconds),
         )
         self.mode = TEAM_STATS_MODE_UNKNOWN
         self.hook_installed = False
@@ -107,11 +115,13 @@ class TeamStatsResponseHealth:
         self.last_response_filetime = 0
         self.response_count = 0
         self.last_combat_activity_at = 0.0
+        self.combat_activity_epoch_at = 0.0
         self.response_seen_in_epoch = False
         self.response_baseline_pending = False
         self.recovery_phase = 0
         self.rearm_count = 0
         self.reinstall_count = 0
+        self.data_incomplete = False
         self.state = "inactive"
 
     @staticmethod
@@ -135,13 +145,12 @@ class TeamStatsResponseHealth:
         self.response_seen_in_epoch = False
         self.response_baseline_pending = False
         self.recovery_phase = 0
-        self.state = (
-            "waiting_response"
-            if normalized == TEAM_STATS_MODE_TEAM and self.hook_installed
-            else "hook_missing"
-            if normalized == TEAM_STATS_MODE_TEAM
-            else "inactive"
-        )
+        if normalized != TEAM_STATS_MODE_TEAM:
+            self.state = "inactive"
+        elif self.hook_installed:
+            self.state = "waiting_response"
+        else:
+            self.state = "hook_missing"
 
     def mark_hook_installed(
         self,
@@ -158,16 +167,17 @@ class TeamStatsResponseHealth:
         self.response_baseline_pending = False
         if not preserve_recovery:
             self.recovery_phase = 0
-        self.state = (
-            "reinstalled_waiting"
-            if preserve_recovery and self.recovery_phase >= 2
-            else "waiting_response"
-            if self.mode == TEAM_STATS_MODE_TEAM
-            else "inactive"
-        )
+        if preserve_recovery and self.recovery_phase >= 2:
+            self.state = "reinstalled_waiting"
+        elif self.mode == TEAM_STATS_MODE_TEAM:
+            self.state = "waiting_response"
+        else:
+            self.state = "inactive"
 
     def mark_hook_missing(self) -> None:
         self.hook_installed = False
+        if self.mode == TEAM_STATS_MODE_TEAM:
+            self.data_incomplete = True
         self.state = (
             "hook_missing"
             if self.mode == TEAM_STATS_MODE_TEAM
@@ -182,7 +192,7 @@ class TeamStatsResponseHealth:
                 continue
             method = str(record.get("method", ""))
             if method in TEAM_STATS_COMBAT_ACTIVITY_METHODS:
-                self.last_combat_activity_at = float(now)
+                self._mark_combat_activity(now)
             if method not in TEAM_STATISTICS_METHODS:
                 continue
             matched += 1
@@ -202,8 +212,19 @@ class TeamStatsResponseHealth:
             self.response_seen_in_epoch = True
             self.response_baseline_pending = True
             self.recovery_phase = 0
+            self.data_incomplete = False
             self.state = "healthy"
         return matched
+
+    def _mark_combat_activity(self, now: float) -> None:
+        timestamp = float(now)
+        if (
+            not self.last_combat_activity_at
+            or timestamp - self.last_combat_activity_at
+            > self.activity_epoch_gap_seconds
+        ):
+            self.combat_activity_epoch_at = timestamp
+        self.last_combat_activity_at = timestamp
 
     def observe_native_damage(self, records: object, now: float) -> None:
         for record in records if isinstance(records, list) else ():
@@ -216,7 +237,7 @@ class TeamStatsResponseHealth:
             except (TypeError, ValueError, OverflowError):
                 damage = 0
             if damage > 0:
-                self.last_combat_activity_at = float(now)
+                self._mark_combat_activity(now)
                 return
 
     def assess(self, now: float, status: object) -> str | None:
@@ -264,7 +285,7 @@ class TeamStatsResponseHealth:
         reference = (
             self.last_response_at
             if self.response_seen_in_epoch
-            else self.active_since
+            else max(self.active_since, self.combat_activity_epoch_at)
         )
         elapsed = max(0.0, float(now) - float(reference or now))
         requests_since_response = max(
@@ -294,6 +315,7 @@ class TeamStatsResponseHealth:
     def mark_rearmed(self, now: float, status: object) -> None:
         self.rearm_count += 1
         self.recovery_phase = 1
+        self.data_incomplete = True
         self.active_since = float(now)
         self.request_baseline = self._request_count(status)
         self.response_seen_in_epoch = False
@@ -303,6 +325,7 @@ class TeamStatsResponseHealth:
     def mark_reinstalled(self, now: float) -> None:
         self.reinstall_count += 1
         self.recovery_phase = 2
+        self.data_incomplete = True
         self.active_since = float(now)
         self.request_baseline = 0
         self.last_request_count = 0
@@ -313,6 +336,7 @@ class TeamStatsResponseHealth:
 
     def mark_recovery_failed(self) -> None:
         self.recovery_phase = 2
+        self.data_incomplete = True
         self.state = "recovery_failed"
 
     def snapshot(self, now: float, status: object) -> dict[str, object]:
@@ -330,6 +354,7 @@ class TeamStatsResponseHealth:
         return {
             "installed": bool(self.hook_installed),
             "response_health": self.state,
+            "data_incomplete": bool(self.data_incomplete),
             "response_count": int(self.response_count),
             "last_response_filetime": int(self.last_response_filetime),
             "last_response_age_seconds": (
@@ -1275,7 +1300,10 @@ def _capture_forever(
                                     "details": traceback.format_exc(),
                                 },
                             )
-                    elif recovery_action == "reinstall" and team_hook is not None:
+                    elif (
+                        recovery_action == "reinstall"
+                        and team_hook is not None
+                    ):
                         team_response_health.mark_reinstalled(now)
                         previous_team_hook = team_hook
                         if _close_hook(

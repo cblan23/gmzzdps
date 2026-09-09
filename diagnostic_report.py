@@ -222,7 +222,7 @@ class DiagnosticAnalyzer:
         self.forwarded_damage_events = 0
         self.filtered_damage_events = 0
         self.team_stat_updates = 0
-        self.team_status: dict[str, int] = {}
+        self.team_status: dict[str, object] = {}
         self.bosses: dict[tuple[int, str], dict[str, object]] = {}
         self.native_entity_templates: dict[int, dict[str, object]] = {}
         self.native_template_counts: Counter[tuple[int, int]] = Counter()
@@ -694,12 +694,41 @@ class DiagnosticAnalyzer:
         team_status = payload.get("team_status")
         if isinstance(team_status, dict):
             self.team_status = {
+                "installed": _safe_bool(team_status.get("installed")),
+                "enabled": _safe_bool(team_status.get("enabled")),
+                "adopted": _safe_bool(team_status.get("adopted")),
                 "request_count": _safe_int(team_status.get("request_count")),
                 "last_result": _safe_int(team_status.get("last_result")),
                 "last_request_filetime": _safe_int(
                     team_status.get("last_request_filetime")
                 ),
+                "response_health": str(
+                    team_status.get("response_health", "") or ""
+                )[:48],
+                "response_count": _safe_int(
+                    team_status.get("response_count")
+                ),
+                "last_response_filetime": _safe_int(
+                    team_status.get("last_response_filetime")
+                ),
+                "requests_since_response": _safe_int(
+                    team_status.get("requests_since_response")
+                ),
+                "rearm_count": _safe_int(
+                    team_status.get("rearm_count")
+                ),
+                "reinstall_count": _safe_int(
+                    team_status.get("reinstall_count")
+                ),
             }
+            if "installed" in team_status:
+                self.connected_payload["team_stats_hook_installed"] = (
+                    self.team_status["installed"]
+                )
+            if "adopted" in team_status:
+                self.connected_payload["team_stats_hook_adopted"] = (
+                    self.team_status["adopted"]
+                )
 
     def _damage_target_summaries(self) -> list[dict[str, object]]:
         selected = list(self.damage_targets.items())[-MAX_REPORTED_DAMAGE_TARGETS:]
@@ -1147,6 +1176,7 @@ class DiagnosticAnalyzer:
                 "native_template_id_hook_installed",
                 "native_template_bulk_hook_installed",
                 "team_stats_hook_installed",
+                "team_stats_hook_adopted",
                 "team_stats_mode",
                 "damage_source",
             )

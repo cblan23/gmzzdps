@@ -230,7 +230,34 @@ class TeamStatsRequestHookTests(unittest.TestCase):
                 (hook.process, hook.state + 0x08, struct.pack("<Q", 1)),
             ],
         )
-        sleep.assert_called_once_with(0.01)
+        sleep.assert_called_once_with(0.35)
+
+    def test_rearm_reenables_hook_when_clock_write_fails(self):
+        hook = TeamStatsRequestHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            stable_primary_only=True,
+        )
+        hook.process = 99
+        hook.state = 0x7FF6_0010_0000
+        hook.installed = True
+        writes: list[tuple[int, bytes]] = []
+
+        def fake_write(_process: int, address: int, value: bytes) -> None:
+            writes.append((address, value))
+            if address == hook.state + STATE_LAST_REQUEST_OFFSET:
+                raise RuntimeError("clock write failed")
+
+        with (
+            patch.object(hook_module, "process_alive", return_value=True),
+            patch.object(hook_module.time, "sleep"),
+            patch.object(hook_module, "write_memory", side_effect=fake_write),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "clock write failed"):
+                hook.rearm_request_schedule()
+
+        self.assertEqual(writes[0], (hook.state + 0x08, struct.pack("<Q", 0)))
+        self.assertEqual(writes[-1], (hook.state + 0x08, struct.pack("<Q", 1)))
 
     def test_string_descriptor_discovery_requires_name_and_lua_type(self):
         integer_descriptor = 0x3200_1000

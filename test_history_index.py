@@ -170,8 +170,9 @@ class HistoryIndexTests(unittest.TestCase):
     def test_team_stats_response_failure_marks_history_partial(self):
         record = self.record("team-response-failure")
         record["capture_pipeline_at_archive"] = {
-            "team_stats_mode": "team",
-            "team_stats_response_health": "unhealthy",
+            "team_stats_mode": "unknown",
+            "team_stats_response_health": "inactive",
+            "team_stats_data_incomplete": True,
         }
 
         summary = build_history_summary(record, self.catalog)

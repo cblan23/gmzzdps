@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "state_hold_seconds": 3,
+    "safe_margin_seconds": 30,
+    "critical_margin_seconds": 10
+  },
+  "encounters": [
+    {
+      "id": "karl_edgar",
+      "display_name": "卡尔·埃德加",
+      "template_ids": [7107030, 7107081],
+      "enrage_seconds": 300
+    },
+    {
+      "id": "lambert_noose",
+      "display_name": "朗伯·绞索",
+      "template_ids": [7107105],
+      "enrage_seconds": 180
+    },
+    {
+      "id": "rock_king",
+      "display_name": "洛克·金·失控",
+      "template_ids": [7110641],
+      "enrage_seconds": 240
+    },
+    {
+      "id": "abaddon",
+      "display_name": "亚巴顿",
+      "template_ids": [7107352, 7107450],
+      "enrage_seconds": 300
+    },
+    {
+      "id": "ray_biber",
+      "display_name": "瑞尔比伯",
+      "template_ids": [7102834],
+      "enrage_seconds": 360
+    },
+    {
+      "id": "joker",
+      "display_name": "小丑",
+      "template_ids": [7102873],
+      "enrage_seconds": 360
+    },
+    {
+      "id": "mutated_hound",
+      "display_name": "异化猎犬",
+      "template_ids": [7109821],
+      "enrage_seconds": 480
+    },
+    {
+      "id": "ancestral_armor",
+      "display_name": "先祖铠甲",
+      "template_ids": [7103402, 7103401],
+      "enrage_seconds": 480
+    },
+    {
+      "id": "astrologer",
+      "display_name": "星象仪者",
+      "template_ids": [7102403],
+      "enrage_seconds": 300,
+      "countdown_start_signal": "Set_MUS_B_WYZY_Boss_GuanJia_Stage2",
+      "first_sample_is_baseline": true
+    },
+    {
+      "id": "descendant_guardian",
+      "display_name": "子嗣守护",
+      "template_ids": [7100215],
+      "enrage_seconds": 480
+    },
+    {
+      "id": "first_believer",
+      "display_name": "一号信徒",
+      "template_ids": [7100208, 7100209, 7100210],
+      "enrage_seconds": 480,
+      "hp_slots": [
+        {
+          "id": "anxia",
+          "template_ids": [7100210],
+          "max_hp": 37590045
+        },
+        {
+          "id": "barney",
+          "template_ids": [7100209],
+          "max_hp": 17291421,
+          "complete_when_templates": [7100210]
+        }
+      ]
+    },
+    {
+      "id": "viscountess",
+      "display_name": "子爵夫人",
+      "template_ids": [7102990, 7102991],
+      "enrage_seconds": 480
+    }
+  ],
+  "configuration_note": "仅使用已实测确认的普通难度模板；未配置 Boss 不展示预测。预测只比较当前战斗时间与 Boss 血量进度，不读取或计算团队 DPS。"
+}

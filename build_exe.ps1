@@ -309,6 +309,7 @@ foreach ($Name in @(
     "skill_names.json",
     "skill_metadata.json",
     "monster_metadata.json",
+    "boss_enrage_config.json",
     "boss_allowlist.txt",
     "cacert.pem"
 )) {
@@ -391,8 +392,8 @@ try {
         "--include-package=capstone",
         "--include-data-files=$CapstoneDll=capstone/lib/capstone.dll",
         "--include-data-files=assets/app_logo.png=assets/app_logo.png",
-        "--include-data-files=assets/sidebar_anime_ocean_v1.png=assets/sidebar_anime_ocean_v1.png",
-        "--include-data-files=assets/sidebar_avatar_orange_v1.png=assets/sidebar_avatar_orange_v1.png",
+        "--include-data-files=assets/sidebar_starry_swing_v2.png=assets/sidebar_starry_swing_v2.png",
+        "--include-data-files=assets/sidebar_nightwalker_avatar_v2.png=assets/sidebar_nightwalker_avatar_v2.png",
         "--include-data-files=assets/professions/*.png=assets/professions/",
         "--include-data-files=assets/skills/*.png=assets/skills/",
         "--include-data-files=assets/bosses/*.png=assets/bosses/",
@@ -402,6 +403,7 @@ try {
         "--include-data-files=skill_names.json=skill_names.json",
         "--include-data-files=skill_metadata.json=skill_metadata.json",
         "--include-data-files=monster_metadata.json=monster_metadata.json",
+        "--include-data-files=boss_enrage_config.json=boss_enrage_config.json",
         "--include-data-files=boss_allowlist.txt=boss_allowlist.txt",
         "--include-data-files=cacert.pem=cacert.pem",
         "--include-data-files=$IdentityPath=_release_identity.json",

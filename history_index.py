@@ -733,10 +733,9 @@ def build_history_summary(
     team_response_health = _text(
         capture_pipeline.get("team_stats_response_health")
     )
-    if (
-        _text(capture_pipeline.get("team_stats_mode")).casefold() == "team"
-        and team_response_health
-        in {
+    team_stream_incomplete = bool(
+        capture_pipeline.get("team_stats_data_incomplete", False)
+    ) or team_response_health in {
             "hook_missing",
             "rearmed_waiting",
             "reinstalling",
@@ -744,6 +743,9 @@ def build_history_summary(
             "recovery_failed",
             "unhealthy",
         }
+    if (
+        (team_size or 0) > 1
+        and team_stream_incomplete
     ):
         missing.append("team_stats_stream")
 

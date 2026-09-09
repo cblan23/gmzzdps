@@ -1725,27 +1725,30 @@ class TeamStatsRequestHook:
         )
 
     def rearm_request_schedule(
-        self, *, filetime_100ns: int | None = None
+        self,
+        *,
+        filetime_100ns: int | None = None,
+        settle_seconds: float = 0.35,
     ) -> bool:
         """Shift the existing request cadence without issuing an extra RPC."""
 
         if not self.installed or not self.alive:
             return False
-        timestamp = (
-            int(filetime_100ns)
-            if filetime_100ns is not None
-            else time.time_ns() // 100 + 116_444_736_000_000_000
-        )
-        timestamp = max(1, timestamp)
         self.set_enabled(False)
         try:
             # Let any entry that observed the previous enabled flag finish its
-            # timestamp claim before the new cadence is published.
-            time.sleep(0.01)
+            # timestamp claim, and deliberately move off the old one-second
+            # phase. Original game RPCs and the network reader keep running.
+            time.sleep(min(1.0, max(0.01, float(settle_seconds))))
+            timestamp = (
+                int(filetime_100ns)
+                if filetime_100ns is not None
+                else time.time_ns() // 100 + 116_444_736_000_000_000
+            )
             write_memory(
                 self.process,
                 self.state + STATE_LAST_REQUEST_OFFSET,
-                struct.pack("<Q", timestamp),
+                struct.pack("<Q", max(1, timestamp)),
             )
         finally:
             self.set_enabled(True)

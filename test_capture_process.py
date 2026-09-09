@@ -129,11 +129,14 @@ class CaptureProcessTests(unittest.TestCase):
         health.set_mode(TEAM_STATS_MODE_TEAM, 100.0)
         health.mark_hook_installed(100.0)
         health.observe_records(
-            [{"method": "OnMsgDamageSyncV2"}], 120.0
+            [{"method": "OnMsgDamageSyncV2"}], 100.0
         )
 
         self.assertIsNone(
             health.assess(121.0, {"enabled": True, "request_count": 7})
+        )
+        health.observe_records(
+            [{"method": "OnMsgSyncCurrentHp"}], 120.9
         )
         status = {"enabled": True, "request_count": 8}
         self.assertEqual(health.assess(121.0, status), "rearm")
@@ -167,6 +170,12 @@ class CaptureProcessTests(unittest.TestCase):
         )
         health.set_mode(TEAM_STATS_MODE_TEAM, 100.0)
         health.mark_hook_installed(100.0)
+        health.mark_rearmed(110.0, {"enabled": True, "request_count": 10})
+        self.assertTrue(
+            health.snapshot(
+                110.0, {"enabled": True, "request_count": 10}
+            )["data_incomplete"]
+        )
 
         self.assertEqual(
             health.observe_records(
@@ -191,6 +200,7 @@ class CaptureProcessTests(unittest.TestCase):
         self.assertEqual(snapshot["response_count"], 1)
         self.assertEqual(snapshot["last_response_filetime"], 222)
         self.assertEqual(snapshot["last_response_age_seconds"], 13.0)
+        self.assertFalse(snapshot["data_incomplete"])
 
     def test_team_response_health_does_not_recover_outside_combat(self):
         health = TeamStatsResponseHealth(
@@ -205,6 +215,28 @@ class CaptureProcessTests(unittest.TestCase):
         )
         self.assertEqual(health.rearm_count, 0)
         self.assertEqual(health.reinstall_count, 0)
+
+    def test_first_combat_activity_starts_its_own_response_grace_period(self):
+        health = TeamStatsResponseHealth(
+            timeout_seconds=20.0,
+            minimum_requests=8,
+        )
+        health.set_mode(TEAM_STATS_MODE_TEAM, 100.0)
+        health.mark_hook_installed(100.0)
+        health.observe_records(
+            [{"method": "OnMsgDamageSyncV2"}], 180.0
+        )
+
+        self.assertIsNone(
+            health.assess(180.0, {"enabled": True, "request_count": 80})
+        )
+        health.observe_records(
+            [{"method": "OnMsgSyncCurrentHp"}], 199.9
+        )
+        self.assertEqual(
+            health.assess(200.0, {"enabled": True, "request_count": 100}),
+            "rearm",
+        )
 
     def test_parameterized_detail_requests_are_never_selected_for_active_calls(self):
         profile = development_capability().profile
@@ -495,6 +527,19 @@ class CaptureProcessTests(unittest.TestCase):
         )
         self.assertTrue(connected["team_stats_hook_installed"])
         self.assertEqual(connected["team_stats_mode"], "team")
+        live_statuses = [
+            payload["team_status"]
+            for kind, payload in messages
+            if kind == "batch"
+            and isinstance(payload, dict)
+            and isinstance(payload.get("team_status"), dict)
+            and "installed" in payload["team_status"]
+        ]
+        self.assertTrue(live_statuses)
+        self.assertTrue(live_statuses[0]["installed"])
+        self.assertEqual(
+            live_statuses[0]["response_health"], "waiting_response"
+        )
         options = next(
             item[1]
             for item in calls

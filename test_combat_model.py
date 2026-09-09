@@ -8574,11 +8574,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertIn('text="让数据说话"', source)
         self.assertIn('button, "#07323a", "#e5ffff", selected=True', source)
         self.assertIn(
-            "assets/sidebar_starry_swing_v2.png=assets/sidebar_starry_swing_v2.png",
-            build_source,
-        )
-        self.assertIn(
-            "assets/sidebar_nightwalker_avatar_v2.png=assets/sidebar_nightwalker_avatar_v2.png",
+            "assets/*.png=assets/",
             build_source,
         )
         art_path = project / "assets" / "sidebar_starry_swing_v2.png"

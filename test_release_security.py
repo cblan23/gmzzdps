@@ -38,6 +38,10 @@ class ReleaseSecurityTests(unittest.TestCase):
             build_script,
         )
         self.assertIn(
+            '"--include-data-files=assets/*.png=assets/"',
+            build_script,
+        )
+        self.assertIn(
             '"--include-data-files=assets/professions/*.png=assets/professions/"',
             build_script,
         )

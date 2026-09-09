@@ -1157,7 +1157,7 @@ class MonitorServerTests(unittest.TestCase):
             )
         self.assertEqual(status, 403)
         self.assertEqual(in_use["error"], "card_in_use")
-        self.assertIn("请先在原设备完全退出程序", in_use["message"])
+        self.assertEqual(in_use["message"], "已在原设备登录过")
 
         with mock.patch.object(monitor, "now_epoch", return_value=first_bound_at):
             status, ended = self.request(
@@ -1596,7 +1596,7 @@ class MonitorServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 403)
         self.assertEqual(denied["error"], "card_in_use")
-        self.assertIn("请先在原设备完全退出程序", denied["message"])
+        self.assertEqual(denied["message"], "已在原设备登录过")
 
         status, heartbeat = self.request(
             "/api/v1/dps/session/heartbeat",

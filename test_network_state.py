@@ -16,6 +16,7 @@ from network_state import (
     parse_entity_id,
     normalize_network_skill_id,
     profession_from_skill,
+    is_ai_team_token,
     stable_team_actor_id,
     should_decode_network_arguments,
 )
@@ -27,6 +28,7 @@ MONSTER_POINTER = 65_551_962_096
 SELF_TOKEN = "AQAAAOwNKLYHAAAA"
 TEAMMATE_TOKEN = "AQAAAOwN0ga-AAAA"
 TEAMMATE_ROLE_NUMBER = 816_158_215_660
+NAMED_AI_TOKEN = "aqFyZFqM2Vv1Z3Uy"
 
 
 def packet(method: str, arguments: list, *, pointer: int = 1, sequence: int = 1) -> dict:
@@ -41,6 +43,43 @@ def packet(method: str, arguments: list, *, pointer: int = 1, sequence: int = 1)
 
 
 class NetworkPacketParserTests(unittest.TestCase):
+    def test_named_ai_token_is_exported_without_projection_suffix(self):
+        self.assertTrue(is_ai_team_token(NAMED_AI_TOKEN))
+        self.assertFalse(is_ai_team_token(TEAMMATE_TOKEN))
+        named_ai_name = "\u6069\u9edb\u4e3d\u5b89"
+
+        parser = NetworkPacketParser()
+        updates = parser.process(
+            packet(
+                "OnMsgOtherJoinTeamGroup",
+                [
+                    0,
+                    57_423_175_876_976,
+                    {
+                        "$map": [
+                            [2, NAMED_AI_TOKEN],
+                            [5, named_ai_name],
+                            [6, TEAMMATE_ROLE_NUMBER],
+                            [8, 1_200_003],
+                            [9, 69],
+                        ]
+                    },
+                ],
+                sequence=30,
+            )
+        )
+
+        profiles = [value for kind, value in updates if kind == "profile"]
+        self.assertTrue(any(row.get("is_ai") is True for row in profiles))
+        self.assertTrue(
+            any(row.get("name") == named_ai_name for row in profiles)
+        )
+        actor_id = parser.token_actors[NAMED_AI_TOKEN]
+        self.assertEqual(
+            parser.entity_profiles[actor_id]["name"], named_ai_name
+        )
+        self.assertTrue(parser.entity_profiles[actor_id]["is_ai"])
+
     def test_local_cast_success_emits_exact_active_cast_event(self):
         parser = NetworkPacketParser()
         parser.self_id = PLAYER_ID

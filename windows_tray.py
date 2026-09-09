@@ -223,6 +223,8 @@ class WindowsTrayIcon:
         title: str,
         icon_path: str | Path,
         callback: Callable[[str], None],
+        *,
+        class_prefix: str = "GMZZDpsTray_",
     ):
         self.title = str(title)[:127]
         self.icon_path = Path(icon_path)
@@ -230,7 +232,8 @@ class WindowsTrayIcon:
         self.hwnd = 0
         self.hicon = 0
         self._owns_icon = False
-        self._class_name = f"GMZZDpsTray_{os.getpid()}_{id(self):x}"
+        safe_prefix = str(class_prefix or "GMZZDpsTray_")[:96]
+        self._class_name = f"{safe_prefix}{os.getpid()}_{id(self):x}"
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._error: BaseException | None = None

@@ -3,6 +3,7 @@ param(
     [string]$OutputFilename = "",
     [string]$BuildId = "",
     [string]$RuntimeProfileId = "",
+    [switch]$NpcapVariant,
     [switch]$OfficialRelease,
     [switch]$ProtectedRelease,
     [string]$CapabilitySigningKeyId = "",
@@ -62,7 +63,19 @@ $ClientBuildMatch = [regex]::Match(
 if (-not $VersionMatch.Success -or -not $ClientBuildMatch.Success) {
     throw "APP_VERSION or CLIENT_BUILD was not found in $SourcePath"
 }
-$AppVersion = $VersionMatch.Groups["version"].Value
+$SourceAppVersion = $VersionMatch.Groups["version"].Value
+$AppVersion = if ($NpcapVariant) {
+    $BaseVersionMatch = [regex]::Match(
+        $SourceAppVersion,
+        '^(?<numeric>\d+(?:\.\d+){2,3})'
+    )
+    if (-not $BaseVersionMatch.Success) {
+        throw "NpcapVariant could not derive a numeric source version"
+    }
+    "$($BaseVersionMatch.Groups['numeric'].Value)n"
+} else {
+    $SourceAppVersion
+}
 $ClientBuild = $ClientBuildMatch.Groups["build"].Value
 $DisplayVersionMatch = [regex]::Match(
     $AppVersion,
@@ -102,6 +115,8 @@ if ($DisplayVersionSuffix) {
 $FileVersion = $FileVersionParts -join '.'
 $OutputName = if ($OutputFilename) {
     [System.IO.Path]::GetFileName($OutputFilename)
+} elseif ($NpcapVariant) {
+    "$ProductName-Dps-Logs-Npcap-v$AppVersion.exe"
 } else {
     "$ProductName-Dps-Logs-v$AppVersion.exe"
 }
@@ -194,15 +209,31 @@ New-Item -ItemType Directory -Path $TemporaryDirectory -Force | Out-Null
 # The development profile is intentionally the only repository file that may
 # contain concrete hook entry points.  A regression that writes them back into
 # a compiled client module must fail before Nuitka starts.
-$CompiledCaptureSources = @(
+$CompiledCaptureSourceNames = @(
     "dps_meter.pyw",
-    "capture_process.py",
-    "network_capture.py",
-    "inline_capture.py",
-    "damage_hook.py",
-    "team_stats_request_hook.py",
+    "capture_backend.py",
     "runtime_capability.py"
-) | ForEach-Object { Join-Path $ProjectDir $_ }
+)
+if ($NpcapVariant) {
+    $CompiledCaptureSourceNames += @(
+        "npcap_capture_process.py",
+        "npcap_protocol.py",
+        "npcap_key_state.py",
+        "npcap_rc4_decode.py",
+        "npcap_shadow_capture.py",
+        "proc_inspect.py"
+    )
+} else {
+    $CompiledCaptureSourceNames += @(
+        "capture_process.py",
+        "network_capture.py",
+        "inline_capture.py",
+        "damage_hook.py",
+        "team_stats_request_hook.py"
+    )
+}
+$CompiledCaptureSources = $CompiledCaptureSourceNames |
+    ForEach-Object { Join-Path $ProjectDir $_ }
 $ForbiddenCaptureLiterals = @(
     "0x0997DBD0",
     "0x09A5AD40",
@@ -327,6 +358,29 @@ if (-not $ProtectedRelease) {
         Target = "runtime-profile.dev.json"
     }
 }
+$CaptureVariantPath = $null
+if ($NpcapVariant) {
+    $CaptureVariantPath = Join-Path $TemporaryDirectory "_capture_variant.json"
+    $CaptureVariant = [ordered]@{
+        schema_version = 1
+        backend = "npcap"
+        display_version = $AppVersion
+        data_directory = "GMZZDpsMeterNpcap"
+        mutex_name = "Local\DaodaoMysteryDpsLogsNpcap"
+        tray_class_prefix = "GMZZDpsNpcapTray_"
+        packet_capture = "npcap"
+        packet_transmit_functions_loaded = $false
+        server_requests_added = 0
+        game_process_access = "query_and_read_only"
+    }
+    Write-Utf8NoBom $CaptureVariantPath (
+        $CaptureVariant | ConvertTo-Json -Depth 5
+    )
+    $ResourceFiles += [pscustomobject]@{
+        Source = $CaptureVariantPath
+        Target = "_capture_variant.json"
+    }
+}
 $ResourceFiles += [pscustomobject]@{
     Source = $CapstoneDll
     Target = "capstone/lib/capstone.dll"
@@ -386,6 +440,7 @@ try {
         "--nofollow-import-to=pytest",
         "--nofollow-import-to=unittest",
         "--nofollow-import-to=*.tests",
+        "--report=$TemporaryDirectory\nuitka-report.xml",
         "--output-dir=$OutputDirectoryPath",
         "--output-filename=$OutputName",
         "--windows-icon-from-ico=assets/app_icon.ico",
@@ -412,6 +467,36 @@ try {
         "--copyright=$ProductName",
         "dps_meter.pyw"
     )
+    $BackendArguments = if ($NpcapVariant) {
+        @(
+            "--include-module=npcap_capture_process",
+            "--include-module=npcap_protocol",
+            "--include-module=npcap_key_state",
+            "--include-module=npcap_rc4_decode",
+            "--include-module=npcap_shadow_capture",
+            "--include-package=msgpack",
+            "--include-package=zstandard",
+            "--nofollow-import-to=capture_process",
+            "--nofollow-import-to=damage_hook",
+            "--nofollow-import-to=network_capture",
+            "--nofollow-import-to=inline_capture",
+            "--nofollow-import-to=team_stats_request_hook"
+        )
+    } else {
+        @("--include-module=capture_process")
+    }
+    $NuitkaArguments = @(
+        $NuitkaArguments[0..($NuitkaArguments.Count - 2)]
+        $BackendArguments
+        $NuitkaArguments[-1]
+    )
+    if ($NpcapVariant) {
+        $NuitkaArguments = @(
+            $NuitkaArguments[0..($NuitkaArguments.Count - 2)]
+            "--include-data-files=$CaptureVariantPath=_capture_variant.json"
+            $NuitkaArguments[-1]
+        )
+    }
     if (-not $ProtectedRelease) {
         $NuitkaArguments = @(
             $NuitkaArguments[0..($NuitkaArguments.Count - 2)]
@@ -422,6 +507,24 @@ try {
     & $Python @NuitkaArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Nuitka build failed with exit code $LASTEXITCODE"
+    }
+    if ($NpcapVariant) {
+        $NuitkaReportText = Get-Content -LiteralPath (
+            Join-Path $TemporaryDirectory "nuitka-report.xml"
+        ) -Raw -Encoding UTF8
+        $ForbiddenNpcapModules = @(
+            "capture_process",
+            "damage_hook",
+            "network_capture",
+            "inline_capture",
+            "team_stats_request_hook"
+        )
+        foreach ($ModuleName in $ForbiddenNpcapModules) {
+            $ModulePattern = '<module\s+name="' + [regex]::Escape($ModuleName) + '"'
+            if ($NuitkaReportText -match $ModulePattern) {
+                throw "Npcap build unexpectedly contains hook module: $ModuleName"
+            }
+        }
     }
 
     $OutputPath = Join-Path $OutputDirectoryPath $OutputName
@@ -480,6 +583,7 @@ try {
         runtime_profile_id = $RuntimeProfileId
         official = [bool]$OfficialRelease
         protected = [bool]$ProtectedRelease
+        capture_backend = $(if ($NpcapVariant) { "npcap" } else { "legacy" })
         capability_signing_key_id = $CapabilitySigningKeyId
         capability_public_keys = $CapabilityPublicKeys
         filename = $OutputName

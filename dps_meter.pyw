@@ -47,7 +47,13 @@ from boss_enrage import (
     EnragePrediction,
     load_boss_enrage_catalog,
 )
-from capture_process import (
+from capture_backend import (
+    CAPTURE_BACKEND_NAME,
+    CAPTURE_DATA_DIRECTORY,
+    CAPTURE_DISPLAY_VERSION,
+    CAPTURE_MUTEX_NAME,
+    CAPTURE_TRAY_CLASS_PREFIX,
+    IS_NPCAP_BACKEND,
     CaptureProcessClient,
     TEAM_STATS_MODE_DUMMY,
     TEAM_STATS_MODE_NAMES,
@@ -201,12 +207,21 @@ APP_EXECUTABLE_PATH = resolve_program_path(
 APP_DIR = APP_EXECUTABLE_PATH.parent if IS_FROZEN else BUNDLE_DIR
 SHARED_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", APP_DIR)) / "GMZZDpsMeter"
 DATA_DIR = (
-    SHARED_DATA_DIR
+    (
+        Path(os.environ.get("LOCALAPPDATA", APP_DIR))
+        / (CAPTURE_DATA_DIRECTORY or "GMZZDpsMeterNpcap")
+        if IS_NPCAP_BACKEND
+        else SHARED_DATA_DIR
+    )
     if IS_FROZEN
     else APP_DIR
 )
 CONFIG_PATH = DATA_DIR / "dps_config.json"
-SHARED_CONFIG_PATH = SHARED_DATA_DIR / "dps_config.json"
+SHARED_CONFIG_PATH = (
+    SHARED_DATA_DIR / "dps_config.json"
+    if IS_NPCAP_BACKEND
+    else CONFIG_PATH
+)
 DEVICE_ID_PATH = SHARED_DATA_DIR / "device_id"
 SKILL_NAMES_PATH = BUNDLE_DIR / "skill_names.json"
 SKILL_METADATA_PATH = BUNDLE_DIR / "skill_metadata.json"
@@ -230,6 +245,8 @@ UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
 APP_VERSION = "0.2.2"
+if CAPTURE_DISPLAY_VERSION:
+    APP_VERSION = CAPTURE_DISPLAY_VERSION
 CLIENT_BUILD = "0.2.2+20260909.1"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -1553,6 +1570,14 @@ def load_config() -> dict:
     try:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
+        if IS_NPCAP_BACKEND and SHARED_CONFIG_PATH != CONFIG_PATH:
+            try:
+                value = json.loads(
+                    SHARED_CONFIG_PATH.read_text(encoding="utf-8")
+                )
+                return dict(value) if isinstance(value, dict) else {}
+            except (OSError, ValueError, TypeError):
+                pass
         return {}
 
 
@@ -2576,6 +2601,7 @@ class CombatModel:
         self.entity_names: dict[int, str] = {}
         self.entity_professions: dict[int, int] = {}
         self.entity_extraordinary_ratings: dict[int, int] = {}
+        self.entity_ai_states: dict[int, bool] = {}
         self.target_catalog: dict[str, dict] = {
             str(template_id): dict(metadata)
             for template_id, metadata in (target_catalog or {}).items()
@@ -3755,6 +3781,12 @@ class CombatModel:
             ),
             tuple(
                 sorted(
+                    (actor_id, self.entity_ai_states.get(actor_id))
+                    for actor_id in member_ids
+                )
+            ),
+            tuple(
+                sorted(
                     (
                         actor_id,
                         int(state.get("sample_count", 0) or 0),
@@ -4038,6 +4070,7 @@ class CombatModel:
                     "extraordinary_rating": self.entity_extraordinary_ratings.get(
                         actor_id
                     ),
+                    "is_ai": self.actor_is_ai(actor_id),
                     "hps": effective / divisor if divisor else 0.0,
                     "total_healing": total,
                     "effective_healing": effective,
@@ -4424,6 +4457,7 @@ class CombatModel:
         for mapping in (
             self.entity_professions,
             self.entity_extraordinary_ratings,
+            self.entity_ai_states,
             self.team_damage_states,
             self.team_taken_states,
             self.team_healing_states,
@@ -5792,6 +5826,7 @@ class CombatModel:
             rows.append(
                 {
                     "actor_id": actor_id,
+                    "is_ai": self.actor_is_ai(actor_id),
                     "taken": taken,
                     "source": source,
                 }
@@ -6580,6 +6615,7 @@ class CombatModel:
                     else None,
                     self.display_name(actor_id),
                     self.entity_extraordinary_ratings.get(actor_id),
+                    self.entity_ai_states.get(actor_id),
                     tuple(
                         sorted(
                             (
@@ -6989,6 +7025,7 @@ class CombatModel:
                 "extraordinary_rating": self.entity_extraordinary_ratings.get(
                     int(row["actor_id"])
                 ),
+                "is_ai": self.actor_is_ai(int(row["actor_id"])),
             }
             for index, row in enumerate(taken_rows)
         ]
@@ -7076,6 +7113,7 @@ class CombatModel:
                     "extraordinary_rating": self.entity_extraordinary_ratings.get(
                         actor_id
                     ),
+                    "is_ai": self.actor_is_ai(actor_id),
                     "damage": actor.damage,
                     "dps": actor.damage / dps_duration,
                     "share": actor.damage / total_damage if total_damage else 0.0,
@@ -8585,24 +8623,34 @@ class CombatModel:
             for raw_actor in update.get("actors", [])
             if isinstance(raw_actor, dict)
         ]
-        profession_metadata_changed = False
+        profile_metadata_changed = False
         for raw_actor in raw_summary_actors:
             try:
                 actor_id = int(raw_actor.get("actor_id", 0) or 0)
             except (TypeError, ValueError, OverflowError):
                 continue
+            if actor_id <= 0:
+                continue
+            if "is_ai" in raw_actor:
+                is_ai = bool(raw_actor.get("is_ai"))
+                if (
+                    actor_id not in self.entity_ai_states
+                    or self.entity_ai_states[actor_id] != is_ai
+                ):
+                    self.entity_ai_states[actor_id] = is_ai
+                    profile_metadata_changed = True
             profession_id = _parsed_profession_id(
                 raw_actor.get("profession_id", 0)
             )
-            if actor_id <= 0 or not profession_id:
+            if not profession_id:
                 continue
             if self.entity_professions.get(actor_id) != profession_id:
                 self.entity_professions[actor_id] = profession_id
-                profession_metadata_changed = True
+                profile_metadata_changed = True
             if profession_id not in HEALER_PROFESSION_IDS:
                 if self.stage_healing_snapshots.pop(actor_id, None) is not None:
-                    profession_metadata_changed = True
-        if profession_metadata_changed:
+                    profile_metadata_changed = True
+        if profile_metadata_changed:
             self.healing_revision += 1
             self.healing_summary_cache_key = None
             self.healing_summary_cache = None
@@ -9725,6 +9773,36 @@ class CombatModel:
         ):
             changed |= move_values(mapping)
 
+        def move_token_profile_values(mapping: dict) -> bool:
+            sentinel = object()
+            relevant_ids = sources | targets
+            before = {
+                actor_id: mapping.get(actor_id, sentinel)
+                for actor_id in relevant_ids
+            }
+            captured = {
+                source: mapping[source]
+                for source, _target, _token in bindings
+                if source in mapping
+            }
+            for actor_id in relevant_ids:
+                mapping.pop(actor_id, None)
+            for source, target, _token in bindings:
+                if source in captured:
+                    mapping[target] = captured[source]
+            after = {
+                actor_id: mapping.get(actor_id, sentinel)
+                for actor_id in relevant_ids
+            }
+            return before != after
+
+        # Ratings and synthetic-member identity belong to the team token, not
+        # to the physical actor slot corrected by the stage snapshot.
+        changed |= move_token_profile_values(
+            self.entity_extraordinary_ratings
+        )
+        changed |= move_token_profile_values(self.entity_ai_states)
+
         if changed:
             self.healing_revision += 1
             self.healing_summary_cache_key = None
@@ -9830,6 +9908,18 @@ class CombatModel:
             and new_actor not in self.entity_extraordinary_ratings
         ):
             self.entity_extraordinary_ratings[new_actor] = old_extraordinary_rating
+            changed = True
+        old_ai_state = self.entity_ai_states.pop(old_actor, None)
+        if replace_profile:
+            if old_ai_state is not None:
+                if self.entity_ai_states.get(new_actor) != old_ai_state:
+                    self.entity_ai_states[new_actor] = old_ai_state
+                    changed = True
+            elif new_actor in self.entity_ai_states:
+                self.entity_ai_states.pop(new_actor, None)
+                changed = True
+        elif old_ai_state is not None and new_actor not in self.entity_ai_states:
+            self.entity_ai_states[new_actor] = old_ai_state
             changed = True
 
         old_life_time = self.member_life_times.pop(old_actor, 0)
@@ -10390,6 +10480,14 @@ class CombatModel:
         if profession_id and self.entity_professions.get(entity_id) != profession_id:
             self.entity_professions[entity_id] = profession_id
             changed = True
+        if "is_ai" in update:
+            is_ai = bool(update.get("is_ai"))
+            if (
+                entity_id not in self.entity_ai_states
+                or self.entity_ai_states[entity_id] != is_ai
+            ):
+                self.entity_ai_states[entity_id] = is_ai
+                changed = True
         try:
             extraordinary_rating = int(update["extraordinary_rating"])
         except (KeyError, TypeError, ValueError, OverflowError):
@@ -11599,6 +11697,11 @@ class CombatModel:
         if actor_id == self.self_id:
             return self.local_player_name
         return ""
+
+    def actor_is_ai(self, actor_id: int) -> bool:
+        if actor_id in self.entity_ai_states:
+            return bool(self.entity_ai_states[actor_id])
+        return self.display_name(actor_id).endswith(PROJECTION_NAME_SUFFIX)
 
     def display_target_name(self, entity_id: int) -> str:
         if not entity_id:
@@ -15061,6 +15164,8 @@ class HookWorker(threading.Thread):
         self.diagnostics: dict[str, object] = {
             "stage": "created",
             "process_found": False,
+            "capture_backend": CAPTURE_BACKEND_NAME,
+            "npcap_capture_active": False,
             "network_hook_installed": False,
             "network_hook_adopted": False,
             "native_damage_hook_installed": False,
@@ -15911,6 +16016,12 @@ class HookWorker(threading.Thread):
                         capture_process_priority_applied=bool(
                             payload.get("priority_applied", False)
                         ),
+                        capture_backend=str(
+                            payload.get("capture_backend", CAPTURE_BACKEND_NAME)
+                        ),
+                        npcap_capture_active=bool(
+                            payload.get("npcap_capture_active", False)
+                        ),
                     )
                 elif kind == "state" and isinstance(payload, dict):
                     stage = str(payload.get("stage", ""))
@@ -15941,7 +16052,13 @@ class HookWorker(threading.Thread):
                     self._update_diagnostics(
                         stage="capturing",
                         process_found=True,
-                        network_hook_installed=True,
+                        capture_backend=str(
+                            payload.get("capture_backend", CAPTURE_BACKEND_NAME)
+                        ),
+                        npcap_capture_active=bool(
+                            payload.get("npcap_capture_active", False)
+                        ),
+                        network_hook_installed=not IS_NPCAP_BACKEND,
                         network_hook_adopted=bool(
                             payload.get("network_hook_adopted", False)
                         ),
@@ -15960,6 +16077,9 @@ class HookWorker(threading.Thread):
                             and connected_team_mode == "team"
                         ),
                         team_stats_response_health=(
+                            "passive_npcap"
+                            if IS_NPCAP_BACKEND
+                            else
                             "waiting_response"
                             if connected_team_installed
                             and connected_team_mode == "team"
@@ -16055,6 +16175,7 @@ class HookWorker(threading.Thread):
                             else {}
                         ),
                         damage_source="none",
+                        npcap_capture_active=False,
                     )
                 elif kind == "fatal":
                     self._update_diagnostics(stage="fatal")
@@ -16111,6 +16232,7 @@ class HookWorker(threading.Thread):
                 team_stats_hook_enabled=False,
                 team_stats_response_health="inactive",
                 damage_source="none",
+                npcap_capture_active=False,
                 capture_process_pid=0,
             )
             self.emit("stopped", None)
@@ -17238,6 +17360,9 @@ class DpsWindow:
                     APP_NAME,
                     APP_ICON_PATH,
                     lambda action: self.control_messages.put((action, None)),
+                    class_prefix=(
+                        CAPTURE_TRAY_CLASS_PREFIX or "GMZZDpsTray_"
+                    ),
                 ).start()
             except Exception:
                 pass
@@ -19165,6 +19290,7 @@ class DpsWindow:
         self.model.entity_names.clear()
         self.model.entity_professions.clear()
         self.model.entity_extraordinary_ratings.clear()
+        self.model.entity_ai_states.clear()
         self.model.local_player_name = ""
         self._flush_combat_history(force=True)
         self.capture_started = False
@@ -38240,15 +38366,20 @@ class DpsWindow:
         names = getattr(model, "entity_names", {})
         professions = getattr(model, "entity_professions", {})
         ratings = getattr(model, "entity_extraordinary_ratings", {})
+        ai_states = getattr(model, "entity_ai_states", {})
         name = names.get(actor_id) if isinstance(names, dict) else None
         profession_id = (
             professions.get(actor_id) if isinstance(professions, dict) else None
         )
         rating = ratings.get(actor_id) if isinstance(ratings, dict) else None
+        ai_state = (
+            ai_states.get(actor_id) if isinstance(ai_states, dict) else None
+        )
         return (
             str(name or ""),
             int(profession_id or 0),
             normalize_extraordinary_rating(rating),
+            ai_state,
         )
 
     @staticmethod
@@ -38274,7 +38405,7 @@ class DpsWindow:
             "profession_id": int(model.actor_profession_id(actor_id) or 0),
             "extraordinary_rating": self._main_extraordinary_rating(actor_id),
             "display_name": display_name,
-            "is_ai": self._team_member_is_ai_name(display_name),
+            "is_ai": self._main_actor_is_ai(actor_id),
         }
         profile_cache[actor_id] = profile
         return profile
@@ -38591,6 +38722,9 @@ class DpsWindow:
     def _main_actor_is_ai(self, actor_id: int, row: object = None) -> bool:
         if isinstance(row, dict) and "is_ai" in row:
             return bool(row.get("is_ai"))
+        ai_states = getattr(self.model, "entity_ai_states", {})
+        if isinstance(ai_states, dict) and actor_id in ai_states:
+            return bool(ai_states[actor_id])
         names = getattr(self.model, "entity_names", {})
         name = names.get(actor_id, "") if isinstance(names, dict) else ""
         return self._team_member_is_ai_name(name)
@@ -40875,9 +41009,17 @@ class DpsWindow:
                         "采集组件仍在安全退出；请关闭游戏，关闭后将自动继续更新。"
                     )
                 elif elapsed >= CAPTURE_PROCESS_SLOW_SHUTDOWN_SECONDS:
-                    text = "正在确认所有采集 Hook 已恢复，请勿强制结束程序…"
+                    text = (
+                        "正在等待 Npcap 采集停止，请勿强制结束程序…"
+                        if IS_NPCAP_BACKEND
+                        else "正在确认所有采集 Hook 已恢复，请勿强制结束程序…"
+                    )
                 else:
-                    text = "正在安全停止采集并恢复 Hook…"
+                    text = (
+                        "正在停止 Npcap 采集…"
+                        if IS_NPCAP_BACKEND
+                        else "正在安全停止采集并恢复 Hook…"
+                    )
                 self.status_label.configure(text=text, fg=WARN)
                 if self.update_status_label is not None:
                     self.update_status_label.configure(text=text, fg=WARN)
@@ -40911,8 +41053,13 @@ class DpsWindow:
                 self.pending_update_install = None
                 messagebox.showerror(
                     "更新已取消",
-                    "无法确认所有采集 Hook 已安全恢复。为避免队友 DPS 和 DT 丢失，"
-                    "本次不会强制安装。请先关闭游戏，再重新打开程序进行更新。",
+                    (
+                        "无法确认 Npcap 采集已经安全停止。本次不会强制安装，"
+                        "请先关闭游戏，再重新打开程序进行更新。"
+                        if IS_NPCAP_BACKEND
+                        else "无法确认所有采集 Hook 已安全恢复。为避免队友 DPS 和 DT 丢失，"
+                        "本次不会强制安装。请先关闭游戏，再重新打开程序进行更新。"
+                    ),
                     parent=self.root,
                 )
             else:
@@ -40976,12 +41123,22 @@ def verify_official_runtime() -> None:
 
 
 def main() -> None:
-    instance_guard = SingleInstanceGuard()
+    instance_guard = (
+        SingleInstanceGuard(CAPTURE_MUTEX_NAME)
+        if CAPTURE_MUTEX_NAME
+        else SingleInstanceGuard()
+    )
     try:
         verify_official_runtime()
         instance_guard.acquire()
         if instance_guard.already_running:
-            activate_existing_instance(attempts=20)
+            if CAPTURE_TRAY_CLASS_PREFIX:
+                activate_existing_instance(
+                    attempts=20,
+                    tray_class_prefix=CAPTURE_TRAY_CLASS_PREFIX,
+                )
+            else:
+                activate_existing_instance(attempts=20)
             return
         # Select process DPI awareness before Tk creates its first HWND.
         enable_windows_dpi_awareness()

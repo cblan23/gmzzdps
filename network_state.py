@@ -209,6 +209,8 @@ TEAM_MEMBERS_JOIN_METHOD = "OnMsgMembersJoinTeam"
 TEAM_OTHER_MEMBER_TOKEN_METHODS = {
     "OnSyncTeamGroupPropsForceRefresh",
 }
+PENDING_TEAM_RATING_TTL_100NS = 60 * 10_000_000
+MAX_PENDING_TEAM_RATINGS = MAX_PARTY_MEMBERS * 2
 TEAM_MEMBER_LEAVE_MARKERS = (
     "otherleaveteam",
     "otherquitteam",
@@ -593,6 +595,23 @@ def stable_team_actor_id(token: str, role_number: object = 0) -> int:
     return -(token_number or 1)
 
 
+def is_ai_team_token(value: object) -> bool:
+    """Return whether a team token uses the game's synthetic-member form."""
+
+    if not isinstance(value, str):
+        return False
+    try:
+        encoded = value.strip().encode("ascii")
+        decoded = base64.urlsafe_b64decode(
+            encoded + b"=" * ((-len(encoded)) % 4)
+        )
+    except (UnicodeEncodeError, ValueError):
+        return False
+    # Captured account-backed tokens are 12 bytes beginning with 0x01;
+    # projection and named companion tokens are 12 bytes beginning with 0x6A.
+    return len(decoded) == 12 and decoded[0] == 0x6A
+
+
 class NetworkPacketParser:
     """Stateful parser for packets captured after decrypt and RPC decoding."""
 
@@ -631,6 +650,7 @@ class NetworkPacketParser:
         self.actor_tokens: dict[int, str] = {}
         self.token_max_hp: dict[str, float] = {}
         self.team_profile_markers: dict[str, int] = {}
+        self.pending_team_ratings: dict[str, tuple[int, int]] = {}
         self.self_profile_marker = 0
         self.readiness_expected_members = 0
         self.readiness_tokens: set[str] = set()
@@ -1200,6 +1220,7 @@ class NetworkPacketParser:
             values.setdefault("boss_rank", 3)
         token = self._team_token(values.get("user_token"))
         if token:
+            values["is_ai"] = is_ai_team_token(token)
             cached_profile = self.team_profile_cache.get(token, {})
             for key in (
                 "name",
@@ -2160,6 +2181,124 @@ class NetworkPacketParser:
         self.actor_tokens[actor_id] = token
         return actor_id
 
+    def _team_token_is_live(self, token: str) -> bool:
+        return bool(
+            token
+            and (
+                token == self.self_token
+                or token in self.party_tokens
+                or token in self.authoritative_party_tokens
+                or token in self.other_party_tokens
+            )
+        )
+
+    def _unbind_team_token(self, token: str) -> int | None:
+        actor_id = self.token_actors.pop(token, None)
+        if actor_id is not None and self.actor_tokens.get(actor_id) == token:
+            self.actor_tokens.pop(actor_id, None)
+        return actor_id
+
+    def _available_provisional_actor_id(self, token: str) -> int:
+        cached_profile = self.team_profile_cache.get(token, {})
+        candidate = stable_team_actor_id(
+            token, cached_profile.get("role_number", 0)
+        )
+        if self.actor_tokens.get(candidate) in (None, token):
+            return candidate
+        candidate = stable_team_actor_id(token)
+        while self.actor_tokens.get(candidate) not in (None, token):
+            candidate -= 1
+        return candidate
+
+    def _displace_team_actor_binding(
+        self,
+        actor_id: int,
+        replacement_token: str,
+        record: dict,
+    ) -> tuple[list[tuple[str, dict]], bool]:
+        """Free an exact local actor without dropping a live teammate.
+
+        Native local-player evidence is stronger than an older projection or
+        scene binding. A displaced current member keeps a provisional row and
+        its token-backed profile until its own live actor is observed.
+        """
+
+        existing_token = self.actor_tokens.get(actor_id, "")
+        if not existing_token or existing_token == replacement_token:
+            return [], False
+        live = self._team_token_is_live(existing_token)
+        self.actor_tokens.pop(actor_id, None)
+        if self.token_actors.get(existing_token) == actor_id:
+            self.token_actors.pop(existing_token, None)
+        self.stage_bound_tokens.discard(existing_token)
+
+        party_changed = False
+        updates: list[tuple[str, dict]] = []
+        if live:
+            provisional_actor = self._available_provisional_actor_id(
+                existing_token
+            )
+            self.token_actors[existing_token] = provisional_actor
+            self.actor_tokens[provisional_actor] = existing_token
+            self.scene_rebind_tokens.add(existing_token)
+            if actor_id in self.party_ids:
+                self.party_ids.discard(actor_id)
+                if provisional_actor != self.self_id:
+                    self.party_ids.add(provisional_actor)
+                party_changed = True
+            cached_update = self._profile_update(
+                provisional_actor,
+                record,
+                user_token=existing_token,
+                entity_type="Player",
+                **self.team_profile_cache.get(existing_token, {}),
+            )
+            if cached_update:
+                updates.append(cached_update)
+        elif actor_id in self.party_ids:
+            self.party_ids.discard(actor_id)
+            party_changed = True
+        return updates, party_changed
+
+    def _prune_pending_team_ratings(self, timestamp: int) -> None:
+        if timestamp > 0:
+            for token, (_rating, recorded_at) in list(
+                self.pending_team_ratings.items()
+            ):
+                if (
+                    recorded_at > 0
+                    and timestamp >= recorded_at
+                    and timestamp - recorded_at > PENDING_TEAM_RATING_TTL_100NS
+                ):
+                    self.pending_team_ratings.pop(token, None)
+        while len(self.pending_team_ratings) > MAX_PENDING_TEAM_RATINGS:
+            oldest = next(iter(self.pending_team_ratings))
+            self.pending_team_ratings.pop(oldest, None)
+
+    def _remember_pending_team_rating(
+        self, token: str, rating: int, record: dict
+    ) -> None:
+        timestamp = int(record.get("filetime_100ns", 0) or 0)
+        self._prune_pending_team_ratings(timestamp)
+        self.pending_team_ratings.pop(token, None)
+        self.pending_team_ratings[token] = (rating, timestamp)
+        self._prune_pending_team_ratings(timestamp)
+
+    def _confirmed_team_rating(
+        self, token: str, value: object, record: dict
+    ) -> int | None:
+        try:
+            rating = int(value or 0)
+        except (TypeError, ValueError, OverflowError):
+            rating = 0
+        if rating > 0:
+            self.pending_team_ratings.pop(token, None)
+            return rating
+        timestamp = int(record.get("filetime_100ns", 0) or 0)
+        self._prune_pending_team_ratings(timestamp)
+        pending = self.pending_team_ratings.pop(token, None)
+        return pending[0] if pending is not None else None
+
     def _is_confirmed_non_player_actor(self, actor_id: int) -> bool:
         return bool(
             actor_id
@@ -2251,13 +2390,24 @@ class NetworkPacketParser:
         allow_positive_rebind: bool = False,
     ) -> list[tuple[str, dict]]:
         old_actor = self.token_actors.get(token)
+        self_token = token == self.self_token
+        native_self_rebind = bool(
+            allow_positive_rebind
+            and self_token
+            and self.native_self_id == actor_id
+        )
         if (
             old_actor == actor_id
             or not actor_id
             or self._is_confirmed_non_player_actor(actor_id)
         ):
             return []
-        if token in self.stage_bound_tokens and old_actor is not None and old_actor > 0:
+        if (
+            token in self.stage_bound_tokens
+            and old_actor is not None
+            and old_actor > 0
+            and not native_self_rebind
+        ):
             # Stage combat statistics provide the exact live actor ID. HP and
             # profession matching are only fallbacks before that packet arrives.
             return []
@@ -2271,22 +2421,31 @@ class NetworkPacketParser:
             # single matching class/HP value cannot prove it should be replaced
             # by another positive actor and previously caused names to rotate.
             return []
-        self_token = token == self.self_token
         if (
             old_actor is not None
             and old_actor > 0
             and old_actor in self.combat_source_actors
+            and not native_self_rebind
         ):
             return []
+        updates: list[tuple[str, dict]] = []
+        party_changed = False
         existing_token = self.actor_tokens.get(actor_id)
         if existing_token and existing_token != token:
-            return []
-        updates: list[tuple[str, dict]] = []
+            if not native_self_rebind:
+                return []
+            displaced, displaced_party_changed = (
+                self._displace_team_actor_binding(actor_id, token, record)
+            )
+            updates.extend(displaced)
+            party_changed |= displaced_party_changed
         if old_actor is not None:
-            self.actor_tokens.pop(old_actor, None)
+            if self.actor_tokens.get(old_actor) == token:
+                self.actor_tokens.pop(old_actor, None)
             if old_actor in self.party_ids:
                 self.party_ids.remove(old_actor)
                 self.party_ids.add(actor_id)
+                party_changed = True
             updates.append(
                 (
                     "actor_merge",
@@ -2349,7 +2508,8 @@ class NetworkPacketParser:
             )
         elif token in self.party_tokens and actor_id != self.self_id:
             self.party_ids.add(actor_id)
-        if updates:
+            party_changed = True
+        if updates or party_changed:
             updates.append(self._party_update(record, authoritative=False))
         return updates
 
@@ -2390,7 +2550,8 @@ class NetworkPacketParser:
             plausible_name(profile.get("name")) for profile in current_profiles
         ]
         if current_names and all(
-            name and "投影" in name for name in current_names
+            name and (is_ai_team_token(token) or "投影" in name)
+            for token, name in zip(ordered_tokens, current_names)
         ):
             return [dict(profile) for profile in current_profiles]
         if not self.allow_cached_projection_roster:
@@ -2411,7 +2572,15 @@ class NetworkPacketParser:
         for token, profile in self.team_profile_cache.items():
             name = plausible_name(profile.get("name"))
             key = self._ordered_team_token_key(token)
-            if not name or "投影" not in name or key is None or len(key) < 9:
+            if (
+                not name
+                or (
+                    not is_ai_team_token(token)
+                    and "投影" not in name
+                )
+                or key is None
+                or len(key) < 9
+            ):
                 continue
             groups.setdefault((key[:3], key[4:9]), []).append(
                 (key, dict(profile))
@@ -2525,7 +2694,8 @@ class NetworkPacketParser:
         projection_tokens = {
             token
             for token in roster_tokens
-            if "投影"
+            if is_ai_team_token(token)
+            or "投影"
             in plausible_name(self.team_profile_cache.get(token, {}).get("name"))
         }
         if len(projection_tokens) < 2:
@@ -3463,7 +3633,7 @@ class NetworkPacketParser:
             fields = direct_numeric_map(node)
             token = self._team_token(fields.get(2))
             name = plausible_name(fields.get(5))
-            if not token or token in seen or not name:
+            if not token or token in seen:
                 continue
             seen.add(token)
             members.append((token, name, fields))
@@ -3486,8 +3656,11 @@ class NetworkPacketParser:
                 self.scene_rebind_tokens.discard(stale_token)
                 self.token_max_hp.pop(stale_token, None)
                 self.team_profile_markers.pop(stale_token, None)
+                self.pending_team_ratings.pop(stale_token, None)
                 if stale_actor is not None:
                     self.party_ids.discard(stale_actor)
+                if stale_token != self.self_token:
+                    self._unbind_team_token(stale_token)
             self.explicit_party_roster_seen = True
             self.authoritative_party_tokens = set(seen)
 
@@ -3522,12 +3695,11 @@ class NetworkPacketParser:
                 max_hp = 0.0
             if max_hp > 0:
                 self.token_max_hp[token] = max_hp
-            try:
-                marker = int(fields.get(27, 0) or 0)
-            except (TypeError, ValueError, OverflowError):
-                marker = 0
-            if marker:
-                self.team_profile_markers[token] = marker
+            rating = self._confirmed_team_rating(
+                token, fields.get(27), record
+            )
+            if rating is not None:
+                self.team_profile_markers[token] = rating
             profile = self._profile_update(
                 actor_id,
                 record,
@@ -3535,7 +3707,7 @@ class NetworkPacketParser:
                 role_number=fields.get(6),
                 profession_id=fields.get(8),
                 level=fields.get(9),
-                extraordinary_rating=fields.get(27),
+                extraordinary_rating=rating,
                 user_token=token,
                 entity_type="Player",
             )
@@ -3646,6 +3818,13 @@ class NetworkPacketParser:
 
     def _clear_party_roster(self) -> None:
         self_max_hp = self.token_max_hp.get(self.self_token or "")
+        preserved_self_token = self.self_token or ""
+        for token in list(self.token_actors):
+            if token != preserved_self_token:
+                self._unbind_team_token(token)
+        for actor_id, token in list(self.actor_tokens.items()):
+            if token != preserved_self_token or actor_id != self.self_id:
+                self.actor_tokens.pop(actor_id, None)
         self.party_ids.clear()
         self.party_tokens.clear()
         self.authoritative_party_tokens.clear()
@@ -3657,6 +3836,7 @@ class NetworkPacketParser:
             if self_max_hp is not None:
                 self.token_max_hp[self.self_token] = self_max_hp
         self.team_profile_markers.clear()
+        self.pending_team_ratings.clear()
         self.live_team_profile_tokens.clear()
         self.stage_bound_tokens.clear()
         self.scene_rebind_tokens.clear()
@@ -3785,20 +3965,27 @@ class NetworkPacketParser:
             if actor_id is None:
                 actor_id = self._bind_team_token(token, stable_team_actor_id(token))
             self.self_id = actor_id
+        updates: list[tuple[str, dict]] = []
+        party_changed = False
         previous_self_token = self.self_token
         if previous_self_token and previous_self_token != token:
-            if self.token_actors.get(previous_self_token) == self.self_id:
-                self.token_actors.pop(previous_self_token, None)
-            if self.actor_tokens.get(self.self_id) == previous_self_token:
-                self.actor_tokens.pop(self.self_id, None)
+            previous_actor = self._unbind_team_token(previous_self_token)
+            if previous_actor in self.party_ids:
+                self.party_ids.discard(previous_actor)
+                party_changed = True
             self.party_tokens.discard(previous_self_token)
             self.authoritative_party_tokens.discard(previous_self_token)
             self.other_party_tokens.discard(previous_self_token)
+            self.pending_team_ratings.pop(previous_self_token, None)
         old_actor = self.token_actors.get(token)
-        party_changed = False
-        updates: list[tuple[str, dict]] = []
+        displaced, displaced_party_changed = self._displace_team_actor_binding(
+            self.self_id, token, record
+        )
+        updates.extend(displaced)
+        party_changed |= displaced_party_changed
         if old_actor is not None and old_actor != self.self_id:
-            self.actor_tokens.pop(old_actor, None)
+            if self.actor_tokens.get(old_actor) == token:
+                self.actor_tokens.pop(old_actor, None)
             if old_actor in self.party_ids:
                 self.party_ids.remove(old_actor)
                 party_changed = True
@@ -3838,6 +4025,7 @@ class NetworkPacketParser:
         self.actor_tokens[self.self_id] = token
         self.self_token = token
         self.remembered_self_token = token
+        self.pending_team_ratings.pop(token, None)
         if self.explicit_party_roster_seen:
             self.authoritative_party_tokens.add(token)
         cached_profile = self.team_profile_cache.get(token, {})
@@ -4514,6 +4702,7 @@ class NetworkPacketParser:
                 "level",
                 "role_number",
                 "extraordinary_rating",
+                "is_ai",
             ):
                 value = cached_profile.get(key)
                 if value not in (None, ""):
@@ -4649,6 +4838,7 @@ class NetworkPacketParser:
             summary_row: dict[str, object] = {
                 "actor_id": actor_id,
                 "user_token": token,
+                "is_ai": is_ai_team_token(token),
                 "name": plausible_name(fields.get(5)),
                 "profession_id": profession_id,
                 "damage": damage,
@@ -5176,19 +5366,21 @@ class NetworkPacketParser:
         if method == "OnUpdateTeamGroupMemberProps" and len(args) >= 2:
             token = self._team_token(args[0])
             fields = direct_numeric_map(args[1])
+            try:
+                rating = int(fields.get(11, 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                rating = 0
+            if not token or token == self.self_token or rating <= 0:
+                return updates
             current_tokens = set(self.party_tokens)
             if not self.explicit_party_roster_seen:
                 current_tokens.update(self.authoritative_party_tokens)
             if self.self_token:
                 current_tokens.add(self.self_token)
-            if not token or token == self.self_token or token not in current_tokens:
+            if token not in current_tokens:
+                self._remember_pending_team_rating(token, rating, record)
                 return updates
-            try:
-                rating = int(fields.get(11, 0) or 0)
-            except (TypeError, ValueError, OverflowError):
-                rating = 0
-            if rating <= 0:
-                return updates
+            self.pending_team_ratings.pop(token, None)
             actor_id = self.token_actors.get(token)
             if actor_id is None:
                 actor_id = self._bind_team_token(token, stable_team_actor_id(token))
@@ -5220,6 +5412,18 @@ class NetworkPacketParser:
                 self.party_tokens.add(token)
                 self.party_ids.add(actor_id)
                 self.team_group_active = True
+                rating = self._confirmed_team_rating(token, None, record)
+                if rating is not None:
+                    self.team_profile_markers[token] = rating
+                profile = self._profile_update(
+                    actor_id,
+                    record,
+                    extraordinary_rating=rating,
+                    user_token=token,
+                    entity_type="Player",
+                )
+                if profile:
+                    updates.append(profile)
                 self._refresh_party_member_count()
                 self._record_party_activity(record)
                 if changed or not self.party_seen:
@@ -5250,11 +5454,15 @@ class NetworkPacketParser:
                 if not token:
                     continue
                 joined = True
+                self.live_team_profile_tokens.add(token)
                 actor_id = self.token_actors.get(token)
                 if actor_id is None:
                     actor_id = self._bind_team_token(
                         token, stable_team_actor_id(token, fields.get(6))
                     )
+                rating = self._confirmed_team_rating(
+                    token, fields.get(27), record
+                )
                 profile = self._profile_update(
                     actor_id,
                     record,
@@ -5262,7 +5470,7 @@ class NetworkPacketParser:
                     role_number=fields.get(6),
                     profession_id=fields.get(8),
                     level=fields.get(9),
-                    extraordinary_rating=fields.get(27),
+                    extraordinary_rating=rating,
                     user_token=token,
                     entity_type="Player",
                 )
@@ -5274,12 +5482,8 @@ class NetworkPacketParser:
                     max_hp = 0.0
                 if max_hp > 0:
                     self.token_max_hp[token] = max_hp
-                try:
-                    marker = int(fields.get(27, 0) or 0)
-                except (TypeError, ValueError, OverflowError):
-                    marker = 0
-                if marker:
-                    self.team_profile_markers[token] = marker
+                if rating is not None:
+                    self.team_profile_markers[token] = rating
                 if token == self.self_token:
                     continue
                 changed |= (
@@ -5309,11 +5513,14 @@ class NetworkPacketParser:
 
         if any(marker in folded for marker in TEAM_MEMBER_LEAVE_MARKERS):
             self._mark_explicit_party_roster()
+            known_tokens = set(self.token_actors) | set(
+                self.pending_team_ratings
+            )
             token = next(
                 (
                     parsed
                     for value in walk_values(args)
-                    if (parsed := self._team_token(value)) in self.token_actors
+                    if (parsed := self._team_token(value)) in known_tokens
                 ),
                 "",
             )
@@ -5328,9 +5535,12 @@ class NetworkPacketParser:
             self.scene_rebind_tokens.discard(token)
             self.token_max_hp.pop(token, None)
             self.team_profile_markers.pop(token, None)
+            self.pending_team_ratings.pop(token, None)
             if actor_id in self.party_ids:
                 self.party_ids.remove(actor_id)
                 changed = True
+            if token and token != self.self_token:
+                self._unbind_team_token(token)
             if changed:
                 self._refresh_party_member_count()
                 self._record_party_activity(record)
@@ -5998,6 +6208,21 @@ class NetworkPacketParser:
         args = self._args(record)
         pointer = int(record.get("script_entity", 0) or 0)
         updates: list[tuple[str, dict]] = []
+
+        # Hook records identify the target ScriptEntity by its process
+        # pointer, which is later bound to an entity ID by scene data.  The
+        # passive Npcap wire record already carries that stable entity ID.
+        # Bind only explicitly tagged Npcap records so the established hook
+        # path and all of its pointer lifecycle rules remain unchanged.
+        if str(record.get("capture_source", "")).casefold() == "npcap":
+            try:
+                network_entity_id = int(
+                    record.get("network_entity_id", pointer) or 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                network_entity_id = 0
+            if pointer and network_entity_id:
+                self.pointer_entities[pointer] = network_entity_id
 
         self._record_boss_signal(record, args)
         updates.extend(self._enrage_countdown_updates(record, args))

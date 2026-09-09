@@ -199,6 +199,10 @@ class HistoryIndexTests(unittest.TestCase):
             ("瑞尔·比伯", "安提哥努斯笔记"),
             ("异化猎犬", "五月庄园·花园"),
             ("子嗣守护", "五月庄园·城堡"),
+            ('"剥面人" 强尼', "记忆的传承"),
+            ("“钻头”", "记忆的传承"),
+            ("邦尼", "记忆的传承"),
+            ("战争巨龙", "记忆的传承"),
             ("伤害木桩", "木桩"),
         )
         for index, (boss_name, dungeon_name) in enumerate(cases):
@@ -247,6 +251,40 @@ class HistoryIndexTests(unittest.TestCase):
         summary = build_history_summary(record, self.catalog)
 
         self.assertEqual(summary["dungeon_name"], "五月庄园·城堡")
+
+    def test_generic_memory_label_uses_boss_identity_to_separate_old_castle(self):
+        old_castle = self.record("battle-generic-old-castle")
+        old_castle.pop("dungeon_id")
+        old_castle.pop("dungeon_stage_id")
+        old_castle["dungeon_name"] = "记忆的传承"
+        old_castle["monster"] = {
+            "entity_id": 99,
+            "template_id": 0,
+            "name": "一号信徒",
+            "boss_type": 3,
+        }
+        old_castle["targets"] = [dict(old_castle["monster"])]
+
+        memory = self.record("battle-current-memory")
+        memory.pop("dungeon_id")
+        memory.pop("dungeon_stage_id")
+        memory["dungeon_name"] = "记忆的传承"
+        memory["monster"] = {
+            "entity_id": 100,
+            "template_id": 0,
+            "name": '"剥面人" 强尼',
+            "boss_type": 3,
+        }
+        memory["targets"] = [dict(memory["monster"])]
+
+        old_castle_summary = build_history_summary(old_castle, self.catalog)
+        memory_summary = build_history_summary(memory, self.catalog)
+
+        self.assertEqual(
+            old_castle_summary["dungeon_name"], "五月庄园·城堡"
+        )
+        self.assertEqual(memory_summary["dungeon_name"], "记忆的传承")
+        self.assertEqual(memory_summary["boss_name"], "强尼")
 
     def test_newer_boss_validated_stage_replaces_stale_encounter_stage(self):
         record = self.record("battle-stale-stage")

@@ -13562,6 +13562,11 @@ class CombatModelTests(unittest.TestCase):
         actor_a = 57_207_359_270_029
         actor_b = 57_270_710_244_165
         model.entity_names = {actor_a: "player-a", actor_b: "player-b"}
+        model.entity_extraordinary_ratings = {
+            actor_a: 61_000,
+            actor_b: 72_000,
+        }
+        model.entity_ai_states = {actor_a: False, actor_b: True}
         model.team_damage_states = {
             actor_a: TeamDamageState(
                 actor_a,
@@ -13651,6 +13656,14 @@ class CombatModelTests(unittest.TestCase):
             physical_event_actors,
         )
         self.assertEqual(model.entity_names, {actor_a: "player-a", actor_b: "player-b"})
+        self.assertEqual(
+            model.entity_extraordinary_ratings,
+            {actor_a: 72_000, actor_b: 61_000},
+        )
+        self.assertEqual(
+            model.entity_ai_states,
+            {actor_a: True, actor_b: False},
+        )
 
     def test_actor_merge_keeps_earliest_unanswered_hp_drop(self):
         model = CombatModel(run_id="healing-response-actor-merge")
@@ -14342,6 +14355,72 @@ class CombatModelTests(unittest.TestCase):
             "未归类伤害",
         )
 
+    def test_midfight_join_leave_and_rejoin_keeps_one_live_damage_row(self):
+        model = CombatModel(run_id="midfight-roster-change-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID],
+                "member_count": 2,
+                "authoritative": True,
+                "in_team": True,
+            }
+        )
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID, NEARBY_ID],
+                "member_count": 3,
+                "authoritative": False,
+                "in_team": True,
+                "filetime_100ns": BASE_FILETIME + 5 * 10_000_000,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": NEARBY_ID,
+                "name": "late-member",
+                "extraordinary_rating": 52_000,
+                "is_ai": False,
+                "entity_type": "Player",
+            }
+        )
+        first_snapshot = team_stat(5001, NEARBY_ID, 300)
+        first_snapshot["full_snapshot"] = True
+        self.assertTrue(model.ingest_team_stat(first_snapshot))
+        self.assertEqual(model.stats[NEARBY_ID].damage, 300)
+
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID],
+                "member_count": 2,
+                "authoritative": False,
+                "in_team": True,
+                "filetime_100ns": BASE_FILETIME + 6 * 10_000_000,
+            }
+        )
+        self.assertEqual(model.stats[NEARBY_ID].damage, 300)
+
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID, NEARBY_ID],
+                "member_count": 3,
+                "authoritative": False,
+                "in_team": True,
+                "filetime_100ns": BASE_FILETIME + 7 * 10_000_000,
+            }
+        )
+        self.assertTrue(model.ingest_team_stat(team_stat(7001, NEARBY_ID, 450)))
+        self.assertEqual(model.stats[NEARBY_ID].damage, 450)
+        self.assertEqual(
+            [row.actor_id for row in model.current_stats()].count(NEARBY_ID),
+            1,
+        )
+
     def test_inferred_teammate_damage_survives_party_exit_and_archives(self):
         model = CombatModel(run_id="party-exit-test")
         model.ingest_identity({"entity_id": SELF_ID})
@@ -14626,6 +14705,7 @@ class CombatModelTests(unittest.TestCase):
                 "entity_id": provisional_actor,
                 "name": "incoming-player",
                 "profession_id": 1_200_006,
+                "is_ai": True,
                 "entity_type": "Player",
             }
         )
@@ -14635,6 +14715,7 @@ class CombatModelTests(unittest.TestCase):
                 "name": "previous-player",
                 "profession_id": 1_200_003,
                 "extraordinary_rating": 88_888,
+                "is_ai": False,
                 "entity_type": "Player",
             }
         )
@@ -14653,6 +14734,8 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.display_name(real_actor), "incoming-player")
         self.assertEqual(model.actor_profession_id(real_actor), 1_200_006)
         self.assertNotIn(real_actor, model.entity_extraordinary_ratings)
+        self.assertTrue(model.actor_is_ai(real_actor))
+        self.assertNotIn(provisional_actor, model.entity_ai_states)
 
     def test_boss_zero_hp_waits_for_idle_confirmation(self):
         model = CombatModel(run_id="boss-death-test")
@@ -17021,6 +17104,92 @@ class CombatModelTests(unittest.TestCase):
             ),
             (None, 0, 0),
         )
+
+    def test_named_ai_state_flows_to_all_meter_rows_and_history(self):
+        model = CombatModel(run_id="named-ai-profile-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID],
+                "member_count": 2,
+                "authoritative": True,
+                "in_team": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": SELF_ID,
+                "name": "local-player",
+                "profession_id": 1_200_003,
+                "extraordinary_rating": 60_000,
+                "is_ai": False,
+                "entity_type": "Player",
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": TEAMMATE_ID,
+                "name": "named-companion",
+                "profession_id": 1_200_002,
+                "extraordinary_rating": 90_000,
+                "is_ai": True,
+                "entity_type": "Player",
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "name": "test-boss",
+                "entity_type": "Boss",
+                "boss_rank": 3,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 200))
+        model.ingest(damage(2, TEAMMATE_ID, MONSTER_ID, 100))
+        self.assertTrue(
+            model.ingest_heal(
+                healing(
+                    BASE_FILETIME + 30_000,
+                    TEAMMATE_ID,
+                    SELF_ID,
+                    total=80,
+                    effective=60,
+                )
+            )
+        )
+
+        self.assertTrue(model.actor_is_ai(TEAMMATE_ID))
+        taken_row = next(
+            row
+            for row in model.current_taken_rows()
+            if row["actor_id"] == TEAMMATE_ID
+        )
+        self.assertTrue(taken_row["is_ai"])
+        healer_row = next(
+            row
+            for row in model.healing_summary(duration=1.0)["healers"]
+            if row["actor_id"] == TEAMMATE_ID
+        )
+        self.assertTrue(healer_row["is_ai"])
+
+        record = model.build_combat_record("test")
+        self.assertIsNotNone(record)
+        participant = next(
+            row
+            for row in record["participants"]
+            if row["actor_id"] == TEAMMATE_ID
+        )
+        self.assertTrue(participant["is_ai"])
+        self.assertEqual(
+            team_average_extraordinary_rating(record["participants"]),
+            (60_000, 1, 1),
+        )
+
+        window = object.__new__(DpsWindow)
+        window.model = model
+        preview = window._team_rating_preview_profile(TEAMMATE_ID)
+        self.assertTrue(preview["is_ai"])
+        self.assertTrue(window._main_actor_is_ai(TEAMMATE_ID, preview))
 
     def test_history_detail_all_tabs_show_team_average_rating(self):
         class Label:

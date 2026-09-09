@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 
-HISTORY_INDEX_SCHEMA_VERSION = 9
+HISTORY_INDEX_SCHEMA_VERSION = 10
 HISTORY_INDEX_FILENAME = "history-index.sqlite3"
 
 RESULT_DEFEATED = "defeated"
@@ -67,20 +67,35 @@ HISTORY_DUNGEON_BOSSES = {
         "亚巴顿",
     ),
     "安提哥努斯笔记": ("瑞尔比伯", "小丑"),
-    "五月庄园": ("异化猎犬", "先祖铠甲", "星象仪者"),
-    "记忆的传承": ("子嗣守护", "一号信徒", "子爵夫人"),
+    "五月庄园": (
+        "异化猎犬",
+        "先祖铠甲",
+        "星象仪者",
+        "子嗣守护",
+        "一号信徒",
+        "子爵夫人",
+    ),
+    "记忆的传承": ("强尼", "钻头", "邦尼", "战争巨龙"),
     "木桩": (),
 }
 HISTORY_DUNGEON_ALIASES = {
     "黑荆棘事件簿": ("黑荆棘事件簿", "黑荆棘"),
     "安提哥努斯笔记": ("安提哥努斯笔记",),
-    "五月庄园": ("五月庄园", "五月庄园·花园"),
-    # Keep the old incorrect label as an alias so existing history remains
-    # searchable after the display name correction.
+    # The old client-facing castle label said "记忆的传承·城堡". Keep it
+    # searchable under 五月庄园 without mixing in the newer memory stages.
+    "五月庄园": (
+        "五月庄园",
+        "五月庄园·花园",
+        "五月庄园·城堡",
+        "记忆的传承·城堡",
+    ),
     "记忆的传承": (
         "记忆的传承",
-        "记忆的传承·城堡",
-        "五月庄园·城堡",
+        "记忆的传承·强尼",
+        "记忆的传承·火龙",
+        "记忆的传承·邦尼",
+        "记忆的传承·钻头",
+        "记忆的传承·噩梦",
     ),
     "木桩": ("木桩",),
 }
@@ -91,10 +106,22 @@ HISTORY_BOSS_ALIASES = {
         "周本-瑞尔比伯",
         "英雄周本-瑞尔比伯",
     ),
+    "强尼": (
+        "强尼",
+        '"剥面人" 强尼',
+        "“剥面人” 强尼",
+        "剥面人·强尼",
+    ),
+    "钻头": ("钻头", '"钻头"', "“钻头”"),
 }
 _HISTORY_DUNGEON_DISPLAY_NAMES = {
     "五月庄园": "五月庄园·花园",
-    "记忆的传承": "五月庄园·城堡",
+    "记忆的传承": "记忆的传承",
+}
+_HISTORY_BOSS_DUNGEON_DISPLAY_NAMES = {
+    "子嗣守护": "五月庄园·城堡",
+    "一号信徒": "五月庄园·城堡",
+    "子爵夫人": "五月庄园·城堡",
 }
 _HISTORY_BOSS_CANONICAL_NAMES = {
     alias.casefold(): canonical
@@ -168,6 +195,9 @@ def _inferred_history_dungeon_name(boss_names: Iterable[object]) -> str:
     }
     if any("木桩" in name for name in names):
         return "木桩"
+    for boss_name, dungeon_name in _HISTORY_BOSS_DUNGEON_DISPLAY_NAMES.items():
+        if boss_name.casefold() in names:
+            return dungeon_name
     for dungeon_name, configured_bosses in HISTORY_DUNGEON_BOSSES.items():
         if any(boss.casefold() in names for boss in configured_bosses):
             return _HISTORY_DUNGEON_DISPLAY_NAMES.get(dungeon_name, dungeon_name)
@@ -381,9 +411,12 @@ class DungeonCatalog:
         explicit_name = _text(
             record.get("dungeon_name", dungeon.get("name"))
         )
-        dungeon_name = explicit_name or _text(dungeon_metadata.get("name"))
-        if dungeon_name in {"记忆的传承", "记忆的传承·城堡"}:
+        metadata_name = _text(dungeon_metadata.get("name"))
+        dungeon_name = explicit_name or metadata_name
+        if dungeon_name == "记忆的传承·城堡":
             dungeon_name = "五月庄园·城堡"
+        elif dungeon_name == "记忆的传承" and metadata_name:
+            dungeon_name = metadata_name
         stage_name = _text(record.get("stage_name", stage.get("name")))
         if not stage_name and stage_id > 0:
             stage_metadata = self.stages.get(stage_id, {})
@@ -657,10 +690,20 @@ def build_history_summary(
     dungeon = catalog.resolve(record, boss_template_ids)
     boss_names = [row["name"] for row in bosses if _text(row.get("name"))]
     primary_boss = bosses[0] if bosses else {}
-    if not _text(dungeon.get("dungeon_name")):
-        dungeon["dungeon_name"] = _inferred_history_dungeon_name(boss_names)
-        if dungeon["dungeon_name"]:
+    inferred_dungeon_name = _inferred_history_dungeon_name(boss_names)
+    resolved_dungeon_name = _text(dungeon.get("dungeon_name"))
+    if not resolved_dungeon_name:
+        dungeon["dungeon_name"] = inferred_dungeon_name
+        if inferred_dungeon_name:
             dungeon["source"] = "boss_mapping"
+    elif (
+        resolved_dungeon_name == "记忆的传承"
+        and inferred_dungeon_name == "五月庄园·城堡"
+    ):
+        # Older records used the entrance label for the castle wing. Boss
+        # identity separates those records from the newer memory stages.
+        dungeon["dungeon_name"] = inferred_dungeon_name
+        dungeon["source"] = "boss_mapping_correction"
     if not _text(dungeon.get("stage_name")):
         dungeon["stage_name"] = _text(primary_boss.get("name"))
     participant, healer, taken, identity_source = _self_rows(record)

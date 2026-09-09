@@ -57,7 +57,9 @@ class SingleInstanceGuard:
         self.close()
 
 
-def activate_existing_instance(attempts: int = 5) -> bool:
+def activate_existing_instance(
+    attempts: int = 5, *, tray_class_prefix: str = TRAY_CLASS_PREFIX
+) -> bool:
     """Ask an existing client's tray window to restore its main window."""
     if sys.platform != "win32":
         return False
@@ -87,7 +89,7 @@ def activate_existing_instance(attempts: int = 5) -> bool:
             class_name = ctypes.create_unicode_buffer(160)
             if get_class_name(hwnd, class_name, len(class_name)) <= 0:
                 return True
-            if not class_name.value.startswith(TRAY_CLASS_PREFIX):
+            if not class_name.value.startswith(str(tray_class_prefix)):
                 return True
             found = bool(
                 post_message(

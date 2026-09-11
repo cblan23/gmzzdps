@@ -41,6 +41,11 @@ from runtime_capability import (
 )
 
 
+def profile_character_token(role_number: int) -> str:
+    value = b"\x01\x00\x00\x00" + int(role_number).to_bytes(8, "little")
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
 class QuietMonitorHandler(monitor.MonitorHandler):
     def log_message(self, format_string: str, *args) -> None:
         del format_string, args
@@ -56,6 +61,7 @@ class MonitorServerTests(unittest.TestCase):
         self.original_combat_clock_cleanup_state = (
             monitor._COMBAT_CLOCK_CLEANUP_STATE
         )
+        self.original_profile_hmac_key_cache = monitor._PROFILE_HMAC_KEY_CACHE
         self.original_rollback_metadata_path = monitor.ROLLBACK_METADATA_PATH
         self.original_rollback_backup_path = monitor.ROLLBACK_BACKUP_PATH
         monitor.PARTNER_CARD_KEY = "partner-test-key"
@@ -86,6 +92,7 @@ class MonitorServerTests(unittest.TestCase):
         monitor.CAPABILITY_SIGNING_PRIVATE_KEY_PATH = self.capability_key_path
         monitor._CAPABILITY_SIGNING_KEY_CACHE = None
         monitor._COMBAT_CLOCK_CLEANUP_STATE = None
+        monitor._PROFILE_HMAC_KEY_CACHE = None
         monitor.initialize_database()
         self.server = monitor.MonitorServer(("127.0.0.1", 0), QuietMonitorHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -104,6 +111,7 @@ class MonitorServerTests(unittest.TestCase):
         monitor._COMBAT_CLOCK_CLEANUP_STATE = (
             self.original_combat_clock_cleanup_state
         )
+        monitor._PROFILE_HMAC_KEY_CACHE = self.original_profile_hmac_key_cache
         monitor.ROLLBACK_METADATA_PATH = self.original_rollback_metadata_path
         monitor.ROLLBACK_BACKUP_PATH = self.original_rollback_backup_path
 
@@ -238,6 +246,8 @@ class MonitorServerTests(unittest.TestCase):
                 )
         self.assertEqual(str(raised.exception), SYSTEM_TIME_SYNC_MESSAGE)
         self.assertNotIn("runtime capability", str(raised.exception))
+        self.assertIn("请先校准系统时间", str(raised.exception))
+        self.assertIn("立即同步", str(raised.exception))
 
     def test_non_clock_runtime_capability_error_uses_plain_login_message(self):
         gateway = ServerLicensingGateway(
@@ -305,6 +315,362 @@ class MonitorServerTests(unittest.TestCase):
                 self.assertEqual(len(card_key), 30)
                 self.assertNotIn("-", card_key)
         return value["cards"]
+
+    def start_card_session(self, client_id: str, *, app_version: str = "0.2.3") -> dict:
+        card_key = self.create_card()[0]
+        status, value = self.request(
+            "/api/v1/dps/session/start",
+            method="POST",
+            body={
+                "client_id": client_id,
+                "app_version": app_version,
+                "card_key": card_key,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(value["authorized"])
+        return value
+
+    @staticmethod
+    def profile_encounter_payload(first: str, second: str, uploader: str) -> dict:
+        return {
+            "client_encounter_id": "http-profile-battle-1",
+            "started_at_epoch": 1_800_000_000.0,
+            "ended_at_epoch": 1_800_000_120.0,
+            "duration_seconds": 120.0,
+            "dungeon_id": 50,
+            "stage_id": 5001,
+            "difficulty": "normal",
+            "boss_name": "接口测试首领",
+            "boss_template_ids": [7_100_208],
+            "result": "defeated",
+            "archive_reason": "target_defeated",
+            "completion_confirmed": True,
+            "data_completeness": "complete",
+            "team_size": 2,
+            "team_total_damage": 3_000_000,
+            "participants": [
+                {
+                    "character_id": first,
+                    "is_uploader": uploader == first,
+                    "game_character_name": "夜行者" if uploader == first else "不应公开甲",
+                    "profession_id": 1,
+                    "damage": 2_000_000,
+                    "dps": 16666.67,
+                },
+                {
+                    "character_id": second,
+                    "is_uploader": uploader == second,
+                    "game_character_name": "审判者" if uploader == second else "不应公开乙",
+                    "profession_id": 2,
+                    "damage": 1_000_000,
+                    "dps": 8333.33,
+                },
+            ],
+        }
+
+    def test_profile_and_upload_routes_require_active_card_session(self):
+        character_id = profile_character_token(8001)
+        status, value = self.request(
+            "/api/v1/dps/profile/resolve",
+            method="POST",
+            body={"character_id": character_id},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(value["error"], "invalid_session")
+
+    def test_unlinked_character_upload_route_supports_anonymous_and_user_id_modes(self):
+        first = profile_character_token(8051)
+        second = profile_character_token(8052)
+        session = self.start_card_session("d" * 32)
+        token = session["access_token"]
+        encounter = self.profile_encounter_payload(first, second, first)
+
+        status, anonymous = self.request(
+            "/api/v1/dps/encounters/upload",
+            method="POST",
+            token=token,
+            body={
+                "character_id": first,
+                "public_mode": "anonymous",
+                "character_name": "夜行者",
+                "encounter": encounter,
+            },
+        )
+        self.assertEqual(status, 200)
+        encounter_id = anonymous["encounter_id"]
+        status, public = self.request(
+            f"/api/v1/dps/public/encounters/{encounter_id}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            public["encounter"]["participants"][0]["display_name"],
+            "匿名玩家01",
+        )
+
+        status, displayed = self.request(
+            "/api/v1/dps/encounters/upload",
+            method="POST",
+            token=token,
+            body={
+                "character_id": first,
+                "public_mode": "character",
+                "character_name": "夜行者",
+                "encounter": encounter,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(displayed["duplicate_upload"])
+        self.assertEqual(displayed["encounter_id"], encounter_id)
+        status, public = self.request(
+            f"/api/v1/dps/public/encounters/{encounter_id}"
+        )
+        self.assertEqual(status, 200)
+        participant = public["encounter"]["participants"][0]
+        self.assertEqual(participant["display_name"], "夜行者")
+        self.assertEqual(participant["public_mode"], "character")
+        self.assertEqual(participant["profile_id"], "")
+
+        connection = sqlite3.connect(monitor.DATABASE_PATH)
+        try:
+            upload_profile_id = connection.execute(
+                "SELECT profile_id FROM uploads WHERE upload_id=?",
+                (displayed["upload_id"],),
+            ).fetchone()[0]
+            profile_count = connection.execute(
+                "SELECT COUNT(*) FROM profiles"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertIsNone(upload_profile_id)
+        self.assertEqual(profile_count, 0)
+
+    def test_upload_route_rejects_non_victories_and_training_dummies(self):
+        first = profile_character_token(8061)
+        second = profile_character_token(8062)
+        token = self.start_card_session("e" * 32)["access_token"]
+
+        failed = self.profile_encounter_payload(first, second, first)
+        failed["result"] = "failed"
+        failed["completion_confirmed"] = False
+        status, value = self.request(
+            "/api/v1/dps/encounters/upload",
+            method="POST",
+            token=token,
+            body={
+                "character_id": first,
+                "public_mode": "anonymous",
+                "character_name": "夜行者",
+                "encounter": failed,
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(value["error"], "UPLOAD_VICTORY_REQUIRED")
+
+        dummy = self.profile_encounter_payload(first, second, first)
+        dummy["boss_name"] = "伤害木桩"
+        dummy["boss_template_ids"] = [7_114_223]
+        status, value = self.request(
+            "/api/v1/dps/encounters/upload",
+            method="POST",
+            token=token,
+            body={
+                "character_id": first,
+                "public_mode": "anonymous",
+                "character_name": "夜行者",
+                "encounter": dummy,
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(value["error"], "UPLOAD_TRAINING_DUMMY_NOT_ALLOWED")
+        connection = sqlite3.connect(monitor.DATABASE_PATH)
+        try:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM encounters").fetchone()[0],
+                0,
+            )
+        finally:
+            connection.close()
+
+    def test_profile_upload_http_flow_merges_sources_and_keeps_teammates_private(self):
+        first = profile_character_token(8101)
+        second = profile_character_token(8102)
+        session_a = self.start_card_session("a" * 32)
+        session_b = self.start_card_session("b" * 32)
+        token_a = session_a["access_token"]
+        token_b = session_b["access_token"]
+
+        status, unresolved = self.request(
+            "/api/v1/dps/profile/resolve",
+            method="POST",
+            token=token_a,
+            body={"character_id": first, "character_name": "夜行者"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(unresolved["status"], "UNLINKED")
+
+        status, reserved = self.request(
+            "/api/v1/dps/profile/nickname/check",
+            method="POST",
+            token=token_a,
+            body={"character_id": first, "nickname": "官方"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(reserved["status"], "RESERVED")
+
+        status, created_a = self.request(
+            "/api/v1/dps/profile/create",
+            method="POST",
+            token=token_a,
+            body={
+                "character_id": first,
+                "nickname": "接口甲",
+                "character_name": "夜行者",
+                "profession_id": 1,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(created_a["created"])
+        status, created_b = self.request(
+            "/api/v1/dps/profile/create",
+            method="POST",
+            token=token_b,
+            body={
+                "character_id": second,
+                "nickname": "接口乙",
+                "character_name": "审判者",
+                "profession_id": 2,
+            },
+        )
+        self.assertEqual(status, 200)
+
+        status, uploaded_a = self.request(
+            "/api/v1/dps/encounters/upload",
+            method="POST",
+            token=token_a,
+            body={
+                "character_id": first,
+                "public_mode": "nickname",
+                "character_name": "夜行者",
+                "encounter": self.profile_encounter_payload(first, second, first),
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(uploaded_a["statistics_status"], "included")
+        self.assertEqual(uploaded_a["ranking_status"], "eligible")
+        encounter_id = uploaded_a["encounter_id"]
+
+        status, public_first = self.request(
+            f"/api/v1/dps/public/encounters/{encounter_id}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [row["display_name"] for row in public_first["encounter"]["participants"]],
+            ["接口甲", "匿名玩家02"],
+        )
+        self.assertNotIn("不应公开乙", json.dumps(public_first, ensure_ascii=False))
+
+        status, uploaded_b = self.request(
+            "/api/v1/dps/encounters/upload",
+            method="POST",
+            token=token_b,
+            body={
+                "character_id": second,
+                "public_mode": "character",
+                "character_name": "审判者",
+                "encounter": self.profile_encounter_payload(first, second, second),
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(uploaded_b["encounter_id"], encounter_id)
+        self.assertEqual(uploaded_b["upload_source_count"], 2)
+        self.assertFalse(uploaded_b["created_encounter"])
+
+        status, public_second = self.request(
+            f"/api/v1/dps/public/encounters/{encounter_id}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [row["display_name"] for row in public_second["encounter"]["participants"]],
+            ["接口甲", "审判者"],
+        )
+        serialized = json.dumps(public_second, ensure_ascii=False)
+        self.assertNotIn(first, serialized)
+        self.assertNotIn(second, serialized)
+        self.assertNotIn("character_hash", serialized)
+
+        status, renamed = self.request(
+            "/api/v1/dps/profile/rename",
+            method="POST",
+            token=token_a,
+            body={"character_id": first, "nickname": "接口甲新"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            renamed["profile"]["profile_id"], created_a["profile"]["profile_id"]
+        )
+        status, public_renamed = self.request(
+            f"/api/v1/dps/public/encounters/{encounter_id}"
+        )
+        self.assertEqual(
+            public_renamed["encounter"]["participants"][0]["display_name"],
+            "接口甲新",
+        )
+
+        status, uploads = self.request(
+            "/api/v1/dps/profile/uploads",
+            method="POST",
+            token=token_a,
+            body={"character_id": first, "scope": "profile"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(uploads["uploads"]), 1)
+        status, statistics = self.request("/api/v1/dps/public/statistics")
+        self.assertEqual(status, 200)
+        self.assertEqual(statistics["statistics"]["encounters"], 1)
+        status, leaderboard = self.request("/api/v1/dps/public/leaderboards")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(leaderboard["leaderboards"]), 2)
+        status, performance = self.request(
+            "/api/v1/dps/public/performance?boss=drill&metric=dps"
+            "&rating_basis=extraordinary&min_rating=0&max_rating=200000"
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(performance["ok"])
+        self.assertEqual(performance["performance"]["source"], "real_uploads")
+        self.assertEqual(performance["performance"]["selection"]["boss"], "drill")
+
+        connection = sqlite3.connect(monitor.DATABASE_PATH)
+        try:
+            database_dump = "\n".join(connection.iterdump())
+        finally:
+            connection.close()
+        self.assertNotIn(first, database_dump)
+        self.assertNotIn(second, database_dump)
+
+    def test_gateway_preserves_profile_validation_error_codes(self):
+        card_key = self.create_card()[0]
+        gateway = ServerLicensingGateway(self.base_url, "c" * 32, "0.2.3")
+        session = gateway.sign_in_card(card_key)
+        character_id = profile_character_token(8201)
+        checked = gateway.check_upload_nickname(session, character_id, "叨叨")
+        self.assertEqual(checked.status, "RESERVED")
+        self.assertEqual(checked.error, "NICKNAME_RESERVED")
+        created = gateway.create_upload_profile(
+            session,
+            character_id,
+            "网关用户",
+            character_name="猎人",
+            profession_id=3,
+        )
+        self.assertTrue(created.accepted)
+        resolved = gateway.resolve_upload_profile(session, character_id)
+        self.assertEqual(resolved.profile.profile_id, created.profile.profile_id)
+        gateway.sign_out(session)
 
     def test_trial_claim_creates_bound_two_hour_card_and_gateway_parses_it(self):
         client_id = "a" * 32
@@ -2713,6 +3079,29 @@ class MonitorServerTests(unittest.TestCase):
             ServerLicensingGateway(
                 "http://example.invalid", "e" * 32, "0.0.1", timeout=2
             )
+
+    def test_profile_upload_deployment_includes_module_and_large_route(self):
+        root = Path(__file__).resolve().parent
+        deploy_script = (root / "server" / "deploy_monitor.sh").read_text(
+            encoding="utf-8"
+        )
+        nginx = (root / "server" / "daodao-domain.conf").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("profile_upload.py", deploy_script)
+        self.assertIn(
+            '"$STAGE_DIR/profile_upload.py" "$APP_DIR/profile_upload.py"',
+            deploy_script,
+        )
+        self.assertIn(
+            'GMZZ_PROFILE_HMAC_KEY_PATH "$DATA_DIR/profile-character-hmac.key"',
+            deploy_script,
+        )
+        self.assertIn(
+            "location = /api/v1/dps/encounters/upload", nginx
+        )
+        self.assertIn("client_max_body_size 16m", nginx)
+        self.assertGreaterEqual(monitor.MAX_UPLOAD_BODY_BYTES, 16 * 1024 * 1024)
 
 
 if __name__ == "__main__":

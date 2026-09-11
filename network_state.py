@@ -19,7 +19,22 @@ MAX_PARTY_MEMBERS = 12
 PROJECTION_NAME_SUFFIX = "·投影"
 PLAYER_SKILL_MIN = 86_000_000
 PLAYER_SKILL_MAX = 87_999_999
+MAX_COMBAT_AMOUNT = (1 << 63) - 1
 MAX_PROFILE_TEXT = 64
+
+
+def parse_combat_amount(value: object) -> int | None:
+    """Reject invalid/wrapped counters without manufacturing a zero reset."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and (not math.isfinite(value) or value < 0):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if 0 <= parsed <= MAX_COMBAT_AMOUNT else None
+
 POINTER_BIND_WINDOW_100NS = 20_000_000
 GUILD_SCENE_ID = 5_200_021
 GUILD_HIT_DUMMY_POSITION = (2626.044386, 13530.408447)
@@ -393,6 +408,7 @@ BOSS_PHASE_NAME_GROUPS = (
             normalize_boss_name("伯德温·威瑟尔"),
         }
     ),
+    frozenset({normalize_boss_name('子爵夫人'), normalize_boss_name('子爵夫人-神话姿态')}),
 )
 LONG_GAP_BOSS_PHASE_TRANSITIONS = frozenset(
     {
@@ -405,6 +421,7 @@ LONG_GAP_BOSS_PHASE_TRANSITIONS = frozenset(
 BOSS_PHASE_TEMPLATE_TRANSITIONS = frozenset(
     {
         (7_103_402, 7_103_401),  # 先祖铠甲 -> 伯德温·威瑟尔
+        (7_102_990, 7_102_991),  # 子爵夫人 -> 神话姿态, same encounter.
     }
 ) | LONG_GAP_BOSS_PHASE_TRANSITIONS
 # These exact damage skills have only one Boss-template owner in the captured
@@ -650,6 +667,11 @@ class NetworkPacketParser:
         self.actor_tokens: dict[int, str] = {}
         self.token_max_hp: dict[str, float] = {}
         self.team_profile_markers: dict[str, int] = {}
+        # Ratings published by OnUpdateTeamGroup*Props are live property
+        # updates.  Keep them separate from roster/profile snapshots so a
+        # delayed join packet carrying an older rating cannot roll a player
+        # back after their score has changed.
+        self.live_team_property_ratings: dict[str, int] = {}
         self.pending_team_ratings: dict[str, tuple[int, int]] = {}
         self.self_profile_marker = 0
         self.readiness_expected_members = 0
@@ -669,6 +691,9 @@ class NetworkPacketParser:
         self.player_detail_last_summary_signature: object = None
         self.entity_max_hp: dict[int, float] = {}
         self.entity_max_hp_time: dict[int, int] = {}
+        self.entity_max_hp_pointers: dict[int, int] = {}
+        self.invalid_combat_values = 0
+        self.confirmed_pointer_owners: dict[int, int] = {}
         self.entity_current_hp: dict[int, float] = {}
         self.entity_current_hp_time: dict[int, int] = {}
         self.pending_boss_hp_drops: dict[int, tuple[float, float, int]] = {}
@@ -815,16 +840,32 @@ class NetworkPacketParser:
         }
 
     def _bind_pointer(
-        self, pointer: int, entity_id: int, record: dict
+        self, pointer: int, entity_id: int, record: dict, *, owner_confirmed: bool = False
     ) -> list[tuple[str, dict]]:
         if not pointer or not entity_id or pointer in self.root_pointers:
             return []
+        confirmed_owner = self.confirmed_pointer_owners.get(pointer)
+        if confirmed_owner is not None and confirmed_owner != entity_id and not owner_confirmed:
+            return []
+        updates: list[tuple[str, dict]] = []
         existing_entity_id = self.pointer_entities.get(pointer)
         if existing_entity_id is not None and existing_entity_id != entity_id:
             # ActorBuffStateSync carries a buff source, not necessarily the
             # ScriptEntity owner. Never let it replace a pointer that already
             # has stronger spell/damage evidence.
-            return []
+            if not owner_confirmed:
+                return []
+            # A newly spawned unit can reuse the previous unit's address.
+            # Explicit self-owned spawn data replaces only pointer ownership;
+            # never transfer the previous entity's HP or player statistics.
+            self.pointer_entities.pop(pointer, None)
+            self.pointer_state.pop(pointer, None)
+            self.pending_target_hits.pop(pointer, None)
+            if self.active_boss_pointer == pointer:
+                self.active_boss_pointer = None
+                self.active_boss_pointer_time_100ns = 0
+        if owner_confirmed:
+            self.confirmed_pointer_owners[pointer] = entity_id
         if (
             entity_id == self.active_boss_entity_id
             and self.active_boss_pointer not in (None, pointer)
@@ -832,9 +873,23 @@ class NetworkPacketParser:
             # A ScriptEntity has one authoritative HP stream. Reusing cached
             # state from another pointer is how an add's HP used to overwrite
             # the locked Boss midway through an encounter.
-            self.pointer_candidates.pop(pointer, None)
-            self.pointer_state.pop(pointer, None)
-            return []
+            if not owner_confirmed:
+                self.pointer_candidates.pop(pointer, None)
+                self.pointer_state.pop(pointer, None)
+                return []
+            # A later exact owner beats an earlier hit-timing guess. Forget
+            # the guessed health so an add cannot pin the real Boss at 0 HP.
+            previous_pointer = self.active_boss_pointer
+            if self.pointer_entities.get(previous_pointer) == entity_id:
+                self.pointer_entities.pop(previous_pointer, None)
+            self.active_boss_pointer = None
+            self.active_boss_pointer_time_100ns = 0
+            for cache in (self.entity_current_hp, self.entity_current_hp_time,
+                          self.entity_max_hp, self.entity_max_hp_time, self.entity_max_hp_pointers):
+                cache.pop(entity_id, None)
+            self.pending_boss_hp_drops.pop(entity_id, None)
+            self.pending_boss_hp_rises.pop(entity_id, None)
+            updates.append(('monster', {**self._base_update(record), 'entity_id': entity_id, 'hp_source_reset': True}))
         pending_state = self.pointer_state.get(pointer)
         if entity_id == self.active_boss_entity_id and pending_state:
             try:
@@ -865,7 +920,6 @@ class NetworkPacketParser:
         pending = self.pointer_state.pop(pointer, None)
         if pending:
             pending = self._known_non_boss_values(entity_id, pending)
-        updates: list[tuple[str, dict]] = []
         if pointer in self.combat_mode_pointers:
             updates.append(
                 (
@@ -905,6 +959,7 @@ class NetworkPacketParser:
                     max_hp = max(max_hp, self.entity_max_hp.get(entity_id, 0.0))
                 self.entity_max_hp[entity_id] = max_hp
                 self.entity_max_hp_time.setdefault(entity_id, timestamp)
+                self.entity_max_hp_pointers[entity_id] = pointer
             if int(pending.get("boss_type", 0) or 0) == HUD_BOSS_TYPE:
                 self._activate_boss(entity_id, record)
         updates.extend(self._team_hp_bindings(record))
@@ -921,7 +976,7 @@ class NetworkPacketParser:
             elapsed = timestamp - candidate_time
             if candidate_id != entity_id or not 0 <= elapsed <= POINTER_BIND_WINDOW_100NS:
                 continue
-            updates.extend(self._bind_pointer(pointer, entity_id, record))
+            updates.extend(self._bind_pointer(pointer, entity_id, record, owner_confirmed=True))
         return updates
 
     def _pointer_update(
@@ -1682,6 +1737,9 @@ class NetworkPacketParser:
             cleaned = self._inherit_projection_extraordinary_rating(cleaned)
             if not cleaned:
                 continue
+            live_rating = self.live_team_property_ratings.get(token)
+            if live_rating is not None and live_rating > 0:
+                cleaned["extraordinary_rating"] = live_rating
             seen.add(token)
             self.live_team_profile_tokens.add(token)
             cached = self.team_profile_cache.get(token, {})
@@ -1691,7 +1749,7 @@ class NetworkPacketParser:
                 self.team_profile_cache[token] = merged
                 self.team_profile_cache_dirty = True
             try:
-                parsed_marker = int(marker or 0)
+                parsed_marker = int(live_rating or marker or 0)
             except (TypeError, ValueError, OverflowError):
                 parsed_marker = 0
             if parsed_marker:
@@ -2291,13 +2349,19 @@ class NetworkPacketParser:
             rating = int(value or 0)
         except (TypeError, ValueError, OverflowError):
             rating = 0
-        if rating > 0:
-            self.pending_team_ratings.pop(token, None)
-            return rating
         timestamp = int(record.get("filetime_100ns", 0) or 0)
         self._prune_pending_team_ratings(timestamp)
         pending = self.pending_team_ratings.pop(token, None)
-        return pending[0] if pending is not None else None
+        if pending is not None and pending[0] > 0:
+            # A dedicated property update can arrive just before the roster
+            # packet which proves that the token is in the current party.  It
+            # is fresher than the rating embedded in that roster snapshot.
+            self.live_team_property_ratings[token] = pending[0]
+            return pending[0]
+        live_rating = self.live_team_property_ratings.get(token)
+        if live_rating is not None and live_rating > 0:
+            return live_rating
+        return rating if rating > 0 else None
 
     def _is_confirmed_non_player_actor(self, actor_id: int) -> bool:
         return bool(
@@ -2400,6 +2464,7 @@ class NetworkPacketParser:
             old_actor == actor_id
             or not actor_id
             or self._is_confirmed_non_player_actor(actor_id)
+            or (actor_id == self.self_id and self.self_confirmed and not self_token)
         ):
             return []
         if (
@@ -2725,6 +2790,10 @@ class NetworkPacketParser:
         for profession_id, tokens in tokens_by_profession.items():
             actors = actors_by_profession.get(profession_id, [])
             if len(tokens) == 1 and len(actors) == 1:
+                if self.self_confirmed and (self.self_id or 0) > 0 and (
+                    (actors[0] == self.self_id) != (tokens[0] == self.self_token)
+                ):
+                    continue
                 bindings[tokens[0]] = actors[0]
         if len(bindings) < 2 or all(
             self.token_actors.get(token) == actor_id
@@ -2888,12 +2957,14 @@ class NetworkPacketParser:
         self.scene_rebind_tokens = set(self.party_tokens)
         self.scene_rebind_tokens.discard(self.self_token or "")
         self.pointer_entities.clear()
+        self.confirmed_pointer_owners.clear()
         self.pointer_state.clear()
         self.pointer_candidates.clear()
         self.recent_target_id = None
         self.recent_target_time_100ns = 0
         self.entity_max_hp.clear()
         self.entity_max_hp_time.clear()
+        self.entity_max_hp_pointers.clear()
         self.entity_current_hp.clear()
         self.entity_current_hp_time.clear()
         self.pending_boss_hp_drops.clear()
@@ -3140,6 +3211,9 @@ class NetworkPacketParser:
         candidate = self.pointer_candidates.get(pointer)
         if candidate is not None and candidate[0] != boss_id:
             return False
+        confirmed_owner = self.confirmed_pointer_owners.get(pointer)
+        if confirmed_owner is not None:
+            return confirmed_owner == boss_id
         pending = self.pointer_state.get(pointer, {})
         try:
             pending_max_hp = float(pending.get("max_hp", 0) or 0)
@@ -3656,6 +3730,7 @@ class NetworkPacketParser:
                 self.scene_rebind_tokens.discard(stale_token)
                 self.token_max_hp.pop(stale_token, None)
                 self.team_profile_markers.pop(stale_token, None)
+                self.live_team_property_ratings.pop(stale_token, None)
                 self.pending_team_ratings.pop(stale_token, None)
                 if stale_actor is not None:
                     self.party_ids.discard(stale_actor)
@@ -3756,6 +3831,15 @@ class NetworkPacketParser:
             or self.self_token == token
         ):
             return []
+        # Readiness args[4] can be 1 for a ready-check subgroup even when two
+        # real players enter a projection dungeon together. An existing live
+        # multiplayer roster is stronger identity evidence than that count:
+        # the first teammate accepting must not become the local character.
+        if self.team_group_active and (
+            self.party_member_count > 1
+            or len(self.authoritative_party_tokens) > 1
+        ):
+            return []
         return self._confirm_self_token(token, record)
 
     def _party_update(
@@ -3836,6 +3920,7 @@ class NetworkPacketParser:
             if self_max_hp is not None:
                 self.token_max_hp[self.self_token] = self_max_hp
         self.team_profile_markers.clear()
+        self.live_team_property_ratings.clear()
         self.pending_team_ratings.clear()
         self.live_team_profile_tokens.clear()
         self.stage_bound_tokens.clear()
@@ -3859,7 +3944,10 @@ class NetworkPacketParser:
             or self.self_token is not None
         ):
             return []
-        candidates = self.authoritative_party_tokens - self.other_party_tokens
+        candidates = {
+            token for token in self.authoritative_party_tokens - self.other_party_tokens
+            if not is_ai_team_token(token)
+        }
         if len(candidates) != 1:
             return []
         return self._confirm_self_token(next(iter(candidates)), record)
@@ -3873,7 +3961,20 @@ class NetworkPacketParser:
             or self.self_token is not None
         ):
             return []
-        candidates = set(self.authoritative_party_tokens)
+        candidates = {
+            token for token in self.authoritative_party_tokens
+            if not is_ai_team_token(token)
+        }
+        # Mid-fight capture may have received only the projection membership
+        # notifications. The live team-stat roster still includes the player.
+        # Admit that sole human only with the local class evidence below; do
+        # not use older disk profiles or remote-member notifications as self.
+        live_humans = {
+            token for token in self.live_team_profile_tokens
+            if not is_ai_team_token(token) and token not in self.other_party_tokens
+        }
+        if not candidates and len(live_humans) == 1:
+            candidates = live_humans
         if not candidates:
             return []
         if self.self_profile_marker:
@@ -3960,6 +4061,10 @@ class NetworkPacketParser:
     def _confirm_self_token(
         self, token: str, record: dict
     ) -> list[tuple[str, dict]]:
+        # Projection tokens are never local players, even if class, rating,
+        # name or HP happens to match an observation of the local entity.
+        if not token or is_ai_team_token(token):
+            return []
         if self.self_id is None:
             actor_id = self.token_actors.get(token)
             if actor_id is None:
@@ -3976,6 +4081,7 @@ class NetworkPacketParser:
             self.party_tokens.discard(previous_self_token)
             self.authoritative_party_tokens.discard(previous_self_token)
             self.other_party_tokens.discard(previous_self_token)
+            self.live_team_property_ratings.pop(previous_self_token, None)
             self.pending_team_ratings.pop(previous_self_token, None)
         old_actor = self.token_actors.get(token)
         displaced, displaced_party_changed = self._displace_team_actor_binding(
@@ -5345,6 +5451,8 @@ class NetworkPacketParser:
             if candidate:
                 updates.extend(self._confirm_self_token(candidate, record))
             if marker and self.self_id is not None:
+                if self.self_token:
+                    self.live_team_property_ratings[self.self_token] = marker
                 profile = self._profile_update(
                     self.self_id,
                     record,
@@ -5381,6 +5489,7 @@ class NetworkPacketParser:
                 self._remember_pending_team_rating(token, rating, record)
                 return updates
             self.pending_team_ratings.pop(token, None)
+            self.live_team_property_ratings[token] = rating
             actor_id = self.token_actors.get(token)
             if actor_id is None:
                 actor_id = self._bind_team_token(token, stable_team_actor_id(token))
@@ -5535,6 +5644,7 @@ class NetworkPacketParser:
             self.scene_rebind_tokens.discard(token)
             self.token_max_hp.pop(token, None)
             self.team_profile_markers.pop(token, None)
+            self.live_team_property_ratings.pop(token, None)
             self.pending_team_ratings.pop(token, None)
             if actor_id in self.party_ids:
                 self.party_ids.remove(actor_id)
@@ -5718,9 +5828,31 @@ class NetworkPacketParser:
             arg6 = int(args[4])
             raw_damage = int(args[5])
             arg8 = int(args[6])
-            damage = int(args[7])
+            reported_damage = int(args[7])
             arg10 = bool(args[8])
         except (TypeError, ValueError, OverflowError):
+            return []
+        damage = reported_damage
+        target_template_id = int(
+            self.entity_template_ids.get(target_id, 0) or 0
+        )
+        raw_damage_fallback = bool(
+            damage <= 0
+            and raw_damage > 0
+            and target_template_id not in HEALING_TARGET_TEMPLATE_IDS
+            and (
+                target_id in self.training_dummy_entities
+                or target_template_id in DAMAGE_TARGET_TEMPLATE_IDS
+            )
+        )
+        if raw_damage_fallback:
+            # The live damage-dummy stream can legitimately send arg9 as zero
+            # while arg7 continues to carry the exact applied hit. Restrict
+            # this compatibility path to explicit damage-dummy identities so
+            # an immune/shielded raid hit is never turned into fake damage.
+            damage = raw_damage
+        if parse_combat_amount(damage) is None:
+            self.invalid_combat_values += 1
             return []
         if not attacker_id or not target_id or damage <= 0:
             return []
@@ -5885,10 +6017,13 @@ class NetworkPacketParser:
                 "arg6_i32": arg6,
                 "arg7_i32": raw_damage,
                 "arg8_i32": arg8,
-                "arg9_i32": damage,
+                "arg9_i32": reported_damage,
                 "arg10_bool": arg10,
                 "raw_damage": raw_damage,
                 "damage": damage,
+                "damage_fallback": (
+                    "training_dummy_raw" if raw_damage_fallback else ""
+                ),
             }
             updates.append(("event", event))
         return updates
@@ -5921,6 +6056,9 @@ class NetworkPacketParser:
         full_snapshot = method == "RetCommonCombatStatisticsByTeam"
         if full_snapshot:
             self._refresh_player_detail_common_snapshot(parsed_entries)
+            updates.extend(
+                self._remembered_self_snapshot_updates(record, parsed_entries)
+            )
         authoritative = bool(
             not self.explicit_party_roster_seen
             and (full_snapshot or (not self.party_seen and len(parsed_entries) >= 1))
@@ -6036,30 +6174,19 @@ class NetworkPacketParser:
                     if current_roster_tokens is not None
                     else entry_tokens
                 )
-            if has_damage:
-                try:
-                    team_stat["absolute_damage"] = max(
-                        0, int(fields.get(5, 0) or 0)
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    team_stat["absolute_damage"] = 0
-                team_stat["omitted_zero"] = omitted_zero
-            if has_taken:
-                try:
-                    team_stat["absolute_taken"] = max(
-                        0, int(fields.get(6, 0) or 0)
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    team_stat["absolute_taken"] = 0
-                team_stat["taken_omitted_zero"] = taken_omitted_zero
-            if has_healing:
-                try:
-                    team_stat["absolute_effective_healing"] = max(
-                        0, int(fields.get(7, 0) or 0)
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    team_stat["absolute_effective_healing"] = 0
-                team_stat["healing_omitted_zero"] = healing_omitted_zero
+            for present, key, metric, omitted, flag in (
+                (has_damage, 5, 'absolute_damage', omitted_zero, 'omitted_zero'),
+                (has_taken, 6, 'absolute_taken', taken_omitted_zero, 'taken_omitted_zero'),
+                (has_healing, 7, 'absolute_effective_healing', healing_omitted_zero, 'healing_omitted_zero'),
+            ):
+                if not present:
+                    continue
+                amount = parse_combat_amount(fields.get(key, 0))
+                if amount is None:
+                    self.invalid_combat_values += 1
+                    continue
+                team_stat[metric] = amount
+                team_stat[flag] = omitted
             updates.append(
                 (
                     "team_stat",
@@ -6093,6 +6220,46 @@ class NetworkPacketParser:
         if full_snapshot:
             updates.extend(self._player_detail_summary_updates(record))
         return updates
+
+    def _remembered_self_snapshot_updates(
+        self,
+        record: dict,
+        parsed_entries: list[tuple[str, dict[int, object]]],
+    ) -> list[tuple[str, dict]]:
+        """Restore the same-process local character from a live full snapshot.
+
+        The cached token is never sufficient by itself. The server response
+        must contain that exact token and its live name and profession must
+        both match the previously network-confirmed profile. This lets an
+        overlay started mid-fight recover the uploader without allowing a
+        locally edited cache to claim another member in the snapshot.
+        """
+        token = self.remembered_self_token
+        if self.self_token or not token:
+            return []
+        fields = next(
+            (value for candidate, value in parsed_entries if candidate == token),
+            None,
+        )
+        if fields is None:
+            return []
+        cached = self.team_profile_cache.get(token, {})
+        live_name = plausible_name(fields.get(4))
+        cached_name = plausible_name(cached.get("name"))
+        try:
+            live_profession = int(fields.get(3, 0) or 0)
+            cached_profession = int(cached.get("profession_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return []
+        if (
+            not live_name
+            or live_name != cached_name
+            or not live_profession
+            or live_profession != cached_profession
+        ):
+            return []
+        self.live_team_profile_tokens.add(token)
+        return self._confirm_self_token(token, record)
 
     def _replacement_self_token_from_snapshot(
         self,
@@ -6470,7 +6637,13 @@ class NetworkPacketParser:
                 if pointer and pointer not in self.root_pointers:
                     self.pointer_candidates[pointer] = (target_id, timestamp)
         elif method == "OnMsgEndureExitHit" and args:
+            # Two live layouts are in circulation. The compact form starts
+            # with actor_id; the expanded form starts with a hit/effect ID and
+            # places actor_id in slot 1. Only accept an exact combat entity ID
+            # from either slot so unrelated numeric fields cannot bind HP.
             actor_id = self._parse_known_player_actor_id(args[0])
+            if not actor_id and len(args) > 1:
+                actor_id = self._parse_known_player_actor_id(args[1])
             target_id = self.pointer_entities.get(pointer)
             if actor_id:
                 self._record_target_hit(pointer, actor_id, record)
@@ -6539,7 +6712,7 @@ class NetworkPacketParser:
                     self.pointer_state.pop(pointer, None)
                 else:
                     timestamp = int(record.get("filetime_100ns", 0) or 0)
-                    candidate = self.pointer_candidates.pop(pointer, None)
+                    candidate = self.pointer_candidates.get(pointer)
                     if candidate is not None:
                         target_id, candidate_time = candidate
                         elapsed = timestamp - candidate_time
@@ -6547,6 +6720,8 @@ class NetworkPacketParser:
                             updates.extend(
                                 self._bind_pointer(pointer, target_id, record)
                             )
+                        else:
+                            self.pointer_candidates.pop(pointer, None)
                     if self._stale_player_pointer_matches_active_boss(
                         pointer, current_hp, timestamp
                     ):
@@ -6559,6 +6734,13 @@ class NetworkPacketParser:
                         )
                         observed_player_max_hp = float(
                             self.entity_max_hp.get(stale_actor, 0.0) or 0.0
+                        )
+                        recovered_boss_max_hp = (
+                            observed_player_max_hp
+                            if self.entity_max_hp_pointers.get(stale_actor) == pointer
+                            and observed_player_max_hp >= current_hp
+                            and observed_player_max_hp >= BOSS_POINTER_HIGH_HP_FLOOR
+                            else 0.0
                         )
                         if (
                             expected_player_hp <= 0
@@ -6582,6 +6764,11 @@ class NetworkPacketParser:
                                 values.pop(stale_actor, None)
                                 times.pop(stale_actor, None)
                         self.pointer_state.pop(pointer, None)
+                        self.entity_max_hp_pointers.pop(stale_actor, None)
+                        if recovered_boss_max_hp > 0:
+                            # Preserve exact MaxHp from this same verified
+                            # stream when correcting its temporary ownership.
+                            self.pointer_state[pointer] = {'max_hp': recovered_boss_max_hp}
                         updates.extend(
                             self._bind_pointer(
                                 pointer,
@@ -6783,6 +6970,7 @@ class NetworkPacketParser:
                             self.entity_current_hp[entity_id] = values["current_hp"]
                             self.entity_current_hp_time[entity_id] = timestamp
                         if values.get("max_hp", 0) > 0:
+                            self.entity_max_hp_pointers[entity_id] = pointer
                             if entity_id == self.active_boss_entity_id:
                                 self.entity_max_hp[entity_id] = max(
                                     values["max_hp"],
@@ -6816,6 +7004,7 @@ class NetworkPacketParser:
                         self._pointer_update(pointer, {"max_hp": max_hp}, record)
                     )
                     if entity_id and max_hp > 0:
+                        self.entity_max_hp_pointers[entity_id] = pointer
                         if entity_id == self.active_boss_entity_id:
                             self.entity_max_hp[entity_id] = max(
                                 max_hp, self.entity_max_hp.get(entity_id, 0.0)

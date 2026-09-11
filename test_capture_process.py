@@ -6,6 +6,7 @@ import io
 import multiprocessing
 import queue
 import runpy
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -296,12 +297,15 @@ class CaptureProcessTests(unittest.TestCase):
         self,
         initial_mode: int,
         transitions: tuple[int, ...] = (),
+        *,
+        detach_once: bool = False,
     ) -> tuple[list[object], list[tuple[str, object]]]:
         """Exercise the child controller without opening a game process."""
         calls: list[object] = []
         output_queue: queue.Queue = queue.Queue()
         stop_event = threading.Event()
         target_lookup_event = threading.Event()
+        team_hooks: list[object] = []
 
         class SharedMode:
             value = initial_mode
@@ -361,6 +365,8 @@ class CaptureProcessTests(unittest.TestCase):
                 calls.append(("team_options", dict(_kwargs)))
                 self.alive = True
                 self.enabled = True
+                self.attached = True
+                team_hooks.append(self)
 
             def install(self):
                 calls.append("team_install")
@@ -369,6 +375,14 @@ class CaptureProcessTests(unittest.TestCase):
             def set_enabled(self, enabled):
                 self.enabled = bool(enabled)
                 calls.append(("team_enabled", self.enabled))
+
+            def rearm_request_schedule(self, **kwargs):
+                calls.append(("team_rearm", dict(kwargs)))
+                return True
+
+            def is_attached(self):
+                calls.append("team_attachment_check")
+                return self.attached
 
             def status(self):
                 return {
@@ -422,6 +436,14 @@ class CaptureProcessTests(unittest.TestCase):
                 ),
                 "fake capture connection",
             )
+            if detach_once:
+                self.assertTrue(team_hooks)
+                installs_before = calls.count("team_install")
+                team_hooks[-1].attached = False
+                wait_for(
+                    lambda: calls.count("team_install") > installs_before,
+                    "detached team hook reinstall",
+                )
             for next_mode in transitions:
                 installs_before = calls.count("team_install")
                 enables_before = calls.count(("team_enabled", True))
@@ -560,6 +582,24 @@ class CaptureProcessTests(unittest.TestCase):
         self.assertEqual(calls.count("team_install"), 1)
         self.assertIn(("team_enabled", False), calls)
         self.assertIn(("team_enabled", True), calls)
+        self.assertIn(("team_rearm", {"settle_seconds": 0.05}), calls)
+
+    def test_detached_team_hook_is_reinstalled_without_restarting_capture(self):
+        calls, messages = self._run_fake_capture_lifecycle(
+            TEAM_STATS_MODE_TEAM,
+            detach_once=True,
+        )
+
+        self.assertEqual(calls.count("network_install"), 1)
+        self.assertEqual(calls.count("team_install"), 2)
+        self.assertTrue(
+            any(
+                kind == "diagnostic"
+                and isinstance(payload, dict)
+                and payload.get("component") == "team_detached"
+                for kind, payload in messages
+            )
+        )
 
     def test_reader_can_close_without_waiting_for_queue_feeder(self):
         events: list[str] = []
@@ -824,6 +864,54 @@ class HookWorkerBatchTests(unittest.TestCase):
             [line["function"] for line in map(__import__("json").loads, log_handle.getvalue().splitlines())],
             ["outbound", "boss", "name", "skill", "damage", "network"],
         )
+
+    def test_worker_emits_confirmed_self_character_identity_once(self):
+        worker_globals = self.module["HookWorker"]._sync_parser_runtime_state.__globals__
+        original_path = worker_globals["SELF_IDENTITY_CACHE_PATH"]
+        with tempfile.TemporaryDirectory() as directory:
+            worker_globals["SELF_IDENTITY_CACHE_PATH"] = (
+                Path(directory) / "self-identity.json"
+            )
+            try:
+                messages = self.module["queue"].Queue()
+                worker = self.module["HookWorker"](
+                    messages, self.module["threading"].Event()
+                )
+
+                class Parser:
+                    self_id = 12345
+
+                    @staticmethod
+                    def current_dungeon_context():
+                        return {}
+
+                    @staticmethod
+                    def take_team_profile_cache():
+                        return None
+
+                    @staticmethod
+                    def current_self_identity():
+                        return {
+                            "user_token": "AQAAAOwNKLYHAAAA",
+                            "name": "夜行者",
+                            "profession_id": 1_200_002,
+                        }
+
+                    @staticmethod
+                    def current_active_boss_state():
+                        return None
+
+                parser = Parser()
+                self.assertFalse(worker._sync_parser_runtime_state(parser, 43210))
+                kind, payload = messages.get_nowait()
+                self.assertEqual(kind, "self_character")
+                self.assertEqual(payload["entity_id"], parser.self_id)
+                self.assertEqual(payload["user_token"], "AQAAAOwNKLYHAAAA")
+
+                self.assertFalse(worker._sync_parser_runtime_state(parser, 43210))
+                self.assertTrue(messages.empty())
+            finally:
+                worker_globals["SELF_IDENTITY_CACHE_PATH"] = original_path
 
     def test_target_boss_lookup_config_missing_defaults_off(self):
         enabled_from_config = self.module[

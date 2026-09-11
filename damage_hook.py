@@ -1167,16 +1167,7 @@ class DamageHook:
                 record["local_player_id"] = self.local_player_id
             attacker_id = int(record.get("attacker_id", 0) or 0)
             target_id = int(record.get("target_id", 0) or 0)
-            if (
-                self._plausible_entity_id(target_id)
-                and target_id != self.local_player_id
-                and target_id not in self.existing_boss_scan_attempted
-                and (
-                    not self.existing_boss_full_scan_complete
-                    or target_id in self.existing_boss_component_cache
-                )
-            ):
-                self.pending_existing_boss_targets.add(target_id)
+            self._queue_existing_boss_candidates(attacker_id, target_id)
             if self._track_target_lookup_candidate(attacker_id, target_id):
                 if target_id not in self.pending_target_boss_lookups:
                     self.pending_target_boss_lookups[target_id] = time.monotonic()
@@ -1194,6 +1185,21 @@ class DamageHook:
             records.append(record)
             self.next_sequence += 1
         return records
+
+    def _queue_existing_boss_candidates(self, attacker_id: int, target_id: int) -> None:
+        """Recover pre-existing Bosses on incoming hits as well as outgoing hits.
+
+        A healer may never hit a Boss personally. This queues both ends of
+        the already captured event; the existing one-time, read-only component
+        scan still requires exact entity ID, BossType and template matches.
+        """
+        for entity_id in (attacker_id, target_id):
+            if (self._plausible_entity_id(entity_id)
+                    and entity_id != self.local_player_id
+                    and entity_id not in self.existing_boss_scan_attempted
+                    and (not self.existing_boss_full_scan_complete
+                         or entity_id in self.existing_boss_component_cache)):
+                self.pending_existing_boss_targets.add(entity_id)
 
     @staticmethod
     def _plausible_entity_id(value: int) -> bool:

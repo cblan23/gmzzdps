@@ -70,6 +70,18 @@ def message_stub(ring: int, resume: int, **options) -> bytes:
 
 
 class BossTypeCaptureTests(unittest.TestCase):
+    def test_incoming_hit_queues_preexisting_boss_for_healer_without_outgoing_damage(self):
+        hook = DamageHook(profile=RUNTIME_PROFILE, pid=1234)
+        hook.local_player_id = 57_176_221_752_954
+        boss_id = 57_189_637_177_222
+        hook._queue_existing_boss_candidates(boss_id, hook.local_player_id)
+        self.assertEqual(hook.pending_existing_boss_targets, {boss_id})
+        self.assertFalse(hook.target_boss_lookup_enabled)
+        hook.existing_boss_full_scan_complete = True
+        hook.existing_boss_scan_attempted.add(boss_id)
+        hook._queue_existing_boss_candidates(boss_id + 1, hook.local_player_id)
+        self.assertEqual(hook.pending_existing_boss_targets, {boss_id})
+
     def test_all_synchronous_methods_fit_in_the_injected_stub(self):
         stub = message_stub(0x1234_0000, 0x1400_1000)
 

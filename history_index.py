@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 
-HISTORY_INDEX_SCHEMA_VERSION = 10
+HISTORY_INDEX_SCHEMA_VERSION = 13
 HISTORY_INDEX_FILENAME = "history-index.sqlite3"
 
 RESULT_DEFEATED = "defeated"
@@ -100,6 +100,7 @@ HISTORY_DUNGEON_ALIASES = {
     "木桩": ("木桩",),
 }
 HISTORY_BOSS_ALIASES = {
+    "子爵夫人": ("子爵夫人", "子爵夫人-神话姿态"),
     "瑞尔比伯": (
         "瑞尔比伯",
         "瑞尔·比伯",
@@ -146,10 +147,9 @@ def is_first_believer_encounter(template_ids: Iterable[object]) -> bool:
         for value in template_ids
         if (template_id := _as_int(value)) > 0
     }
-    return any(
-        group.issubset(normalized)
-        for group in FIRST_BELIEVER_TEMPLATE_GROUPS
-    )
+    # Any verified stage member identifies the same encounter, including a
+    # log started in Anxia's final phase. Do not require observing both bodies.
+    return bool(normalized & FIRST_BELIEVER_PHASE_TEMPLATE_IDS)
 
 
 def _as_float(value: object, default: float = 0.0) -> float:
@@ -692,7 +692,24 @@ def build_history_summary(
     primary_boss = bosses[0] if bosses else {}
     inferred_dungeon_name = _inferred_history_dungeon_name(boss_names)
     resolved_dungeon_name = _text(dungeon.get("dungeon_name"))
-    if not resolved_dungeon_name:
+    if inferred_dungeon_name == "木桩":
+        # A training dummy can retain the dungeon/stage IDs from the scene the
+        # player left immediately before entering the practice area.  The
+        # confirmed target identity is stronger evidence here: do not present
+        # those stale IDs as a real dungeon in history.
+        stale_dungeon_identity = bool(
+            resolved_dungeon_name and resolved_dungeon_name != "木桩"
+        )
+        dungeon["dungeon_id"] = 0
+        dungeon["dungeon_name"] = "木桩"
+        dungeon["stage_id"] = 0
+        dungeon["stage_name"] = ""
+        dungeon["ambiguous"] = False
+        if stale_dungeon_identity:
+            dungeon["source"] = "boss_mapping_correction"
+        elif not resolved_dungeon_name:
+            dungeon["source"] = "boss_mapping"
+    elif not resolved_dungeon_name:
         dungeon["dungeon_name"] = inferred_dungeon_name
         if inferred_dungeon_name:
             dungeon["source"] = "boss_mapping"
@@ -706,6 +723,14 @@ def build_history_summary(
         dungeon["source"] = "boss_mapping_correction"
     if not _text(dungeon.get("stage_name")):
         dungeon["stage_name"] = _text(primary_boss.get("name"))
+    elif len(bosses) == 1 and _text(primary_boss.get('name')):
+        # Entry-stage IDs can lag one boss. A real, mapped target has stronger
+        # evidence than that stale label, without guessing another difficulty.
+        metadata = catalog.boss_metadata(primary_boss.get('template_id'))
+        mapped_stages = {_as_int(value) for value in metadata.get('stage_ids', ())}
+        if mapped_stages and _as_int(dungeon.get('stage_id')) not in mapped_stages:
+            dungeon['stage_name'] = _text(primary_boss.get('name'))
+            dungeon['source'] = 'boss_identity_over_stale_stage'
     participant, healer, taken, identity_source = _self_rows(record)
     identity = participant or healer or taken
 
@@ -759,6 +784,11 @@ def build_history_summary(
     )
 
     result = normalize_battle_result(record)
+    accounting = _dict(record.get("damage_accounting"))
+    completion_confirmed = bool(record.get("completion_confirmed")) or any(
+        bool(validation.get("completion_confirmed"))
+        for validation in _dict_rows(accounting.get("stage_summary_validations"))
+    )
     missing: list[str] = []
     if not dungeon["dungeon_name"]:
         missing.append("dungeon")
@@ -837,6 +867,8 @@ def build_history_summary(
         "boss_icon": _text(primary_boss.get("icon")),
         "difficulty": _text(record.get("difficulty")),
         "result": result,
+        'archive_reason': _text(record.get('archive_reason')),
+        "completion_confirmed": completion_confirmed,
         "team_size": team_size,
         "total_damage": total_damage,
         "team_dps": team_dps,

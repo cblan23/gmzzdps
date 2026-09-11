@@ -244,6 +244,26 @@ class HistoryIndexTests(unittest.TestCase):
             "瑞尔比伯",
         )
 
+    def test_training_dummy_identity_overrides_stale_dungeon_ids(self):
+        record = self.record("battle-dummy-stale-dungeon")
+        record["dungeon_id"] = 5100001
+        record["dungeon_stage_id"] = 5150001
+        record["monster"] = {
+            "entity_id": 99,
+            "template_id": 0,
+            "name": "伤害木桩",
+            "boss_type": 3,
+        }
+        record["targets"] = [dict(record["monster"])]
+
+        summary = build_history_summary(record, self.catalog)
+
+        self.assertEqual(summary["dungeon_id"], 0)
+        self.assertEqual(summary["dungeon_name"], "木桩")
+        self.assertEqual(summary["stage_id"], 0)
+        self.assertEqual(summary["stage_name"], "伤害木桩")
+        self.assertEqual(summary["dungeon_source"], "boss_mapping_correction")
+
     def test_old_incorrect_castle_name_is_normalized_for_existing_history(self):
         record = self.record("battle-old-castle-name")
         record["dungeon_name"] = "记忆的传承·城堡"
@@ -444,6 +464,19 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertEqual(summary["boss_count"], 1)
         self.assertEqual(summary["boss_names"], ["一号信徒"])
         self.assertEqual(summary["boss_template_id"], 7_102_980)
+
+    def test_first_believer_final_phase_uses_encounter_name_icon_despite_stale_stage(self):
+        record = self.record('first-believer-stale-stage')
+        record['monster'].update(template_id=7100210, name='安西娅', boss_rank=3)
+        record['targets'] = [dict(record['monster'])]
+        record['dungeon_id'] = 5100055
+        record['dungeon_stage_id'] = 5150061
+        record.pop('stage_id', None)
+        summary = build_history_summary(record)
+        self.assertEqual(summary['boss_name'], '一号信徒')
+        self.assertEqual(summary['stage_name'], '一号信徒')
+        self.assertEqual(summary['boss_icon'], 'yhxt-stage.png')
+        self.assertEqual(summary['boss_count'], 1)
 
     def test_index_filters_sorts_and_paginates_summaries(self):
         store = CombatHistoryStore(

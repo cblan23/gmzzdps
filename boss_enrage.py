@@ -266,6 +266,7 @@ class EnragePrediction:
     theoretical_stage_remaining_percent: float = 0.0
     actual_stage_remaining_percent: float = 0.0
     progress_delta_percent: float = 0.0
+    countdown_start_signal: str = ""
 
 
 def _prediction_message(
@@ -305,7 +306,6 @@ class BossEnragePredictor:
         self._slot_hp: dict[str, float] = {}
         self._schedule_start_hp_ratio = 1.0
         self._schedule_baseline_ready = False
-        self._last_elapsed_seconds: float | None = None
 
     def reset(self) -> None:
         self._encounter_key = ""
@@ -317,7 +317,6 @@ class BossEnragePredictor:
         self._slot_hp.clear()
         self._schedule_start_hp_ratio = 1.0
         self._schedule_baseline_ready = False
-        self._last_elapsed_seconds = None
 
     def _aggregate_hp(
         self,
@@ -511,12 +510,10 @@ class BossEnragePredictor:
             if rule.countdown_start_signal and explicit_countdown_elapsed is not None
             else encounter_elapsed
         )
-        if self._last_elapsed_seconds is not None:
-            # The UI can switch from its local pull edge to a corrected combat
-            # interval while the same encounter is running. Never let that
-            # source correction move the schedule marker backwards or reset
-            # phase/dual-Boss state; encounter-key changes still reset above.
-            elapsed = max(self._last_elapsed_seconds, elapsed)
+        # Follow the same resolved duration as the HUD even when a shared
+        # clock correction shortens it. Keeping a stale high-water mark here
+        # would make elapsed + remaining disagree with the displayed timer.
+        # Clock corrections do not reset phase HP or the stable warning state.
 
         aggregate = self._aggregate_hp(rule, boss_list)
         if aggregate is None:
@@ -539,7 +536,6 @@ class BossEnragePredictor:
             self._candidate_since = 0.0
             self._schedule_start_hp_ratio = 1.0
             self._schedule_baseline_ready = False
-            self._last_elapsed_seconds = None
             return None
 
         if not self._schedule_baseline_ready and rule.first_sample_is_baseline:
@@ -547,7 +543,6 @@ class BossEnragePredictor:
                 1.0, max(0.0, current_hp / max_hp)
             )
         self._schedule_baseline_ready = True
-        self._last_elapsed_seconds = elapsed
 
         time_to_enrage = max(0.0, rule.enrage_seconds - elapsed)
         theoretical_stage_ratio = min(
@@ -625,4 +620,5 @@ class BossEnragePredictor:
             theoretical_stage_remaining_percent=theoretical_stage_ratio * 100.0,
             actual_stage_remaining_percent=actual_stage_ratio * 100.0,
             progress_delta_percent=progress_delta_percent,
+            countdown_start_signal=rule.countdown_start_signal,
         )

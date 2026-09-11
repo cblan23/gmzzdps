@@ -34,13 +34,15 @@ CHINA_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 FREE_TRIAL_END = datetime(2026, 9, 3, 23, 59, 59, tzinfo=CHINA_TIMEZONE)
 DEFAULT_SERVER_URL = "https://daodaogame.vip"
 REQUEST_TIMEOUT_SECONDS = 6.0
+ENCOUNTER_UPLOAD_TIMEOUT_SECONDS = 45.0
 UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 CLIENT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 TRIAL_CARD_PATTERN = re.compile(r"^GMZZ[A-HJ-NP-Z2-9]{26}$")
 CA_BUNDLE_PATH = Path(__file__).resolve().with_name("cacert.pem")
 CARD_LOGIN_FAILURE_MESSAGE = "登录失败，请稍后重试；若持续出现，请联系管理员。"
 SYSTEM_TIME_SYNC_MESSAGE = (
-    "本机时间异常，请在 Windows 设置中同步时间后重新登录。"
+    "【请先校准系统时间】\n"
+    "打开 Windows“日期和时间”，确认日期、时间和时区正确，点击“立即同步”后重新登录。"
 )
 ROLLBACK_VERSION_PATTERN = re.compile(
     r"^(?P<numeric>\d+(?:\.\d+){2,3})(?P<suffix>[a-z]?)$",
@@ -77,6 +79,24 @@ SERVER_ERROR_MESSAGES = {
     ),
     "invalid_session": "登录状态已失效，请重新登录。",
     "forbidden": "登录失败，请稍后重试；若持续出现，请联系管理员。",
+    "INVALID_CHARACTER_ID": "未能确认当前游戏角色，请进入游戏后重试。",
+    "AI_CHARACTER_NOT_ALLOWED": "人机角色不能创建或关联上传身份。",
+    "CHARACTER_ALREADY_LINKED": "当前角色已经关联了其他上传身份。",
+    "PROFILE_NOT_FOUND": "当前角色尚未创建或关联上传身份。",
+    "NICKNAME_INVALID_FORMAT": "昵称只能使用中文、英文字母和数字，不能包含空格或符号。",
+    "NICKNAME_TOO_SHORT": "昵称至少需要 2 个字符。",
+    "NICKNAME_TOO_LONG": "昵称最多只能有 12 个字符。",
+    "NICKNAME_ALREADY_EXISTS": "该昵称已被使用，请换一个昵称。",
+    "NICKNAME_RESERVED": "该昵称为保留名称，请换一个昵称。",
+    "NICKNAME_SENSITIVE": "该昵称包含不可用内容，请换一个昵称。",
+    "LINK_CODE_INVALID": "角色关联码无效，请检查后重试。",
+    "LINK_CODE_EXPIRED": "角色关联码已过期，请重新生成。",
+    "LINK_CODE_USED": "角色关联码已经使用，请重新生成。",
+    "BAD_ENCOUNTER": "战斗记录格式不完整，无法上传。",
+    "UPLOADER_NOT_IN_ENCOUNTER": "无法确认这场战斗中的本机角色。",
+    "UPLOAD_VICTORY_REQUIRED": "只有战斗胜利的记录才能上传。",
+    "UPLOAD_TRAINING_DUMMY_NOT_ALLOWED": "伤害木桩和治疗木桩记录不能上传。",
+    "UPLOAD_NOT_ALLOWED": "当前登录状态没有数据上传权限。",
 }
 
 
@@ -172,6 +192,66 @@ class FeedbackResult:
 
 
 @dataclass(frozen=True)
+class UploadProfile:
+    profile_id: str = ""
+    nickname: str = ""
+
+
+@dataclass(frozen=True)
+class ProfileResult:
+    accepted: bool
+    status: str = ""
+    profile: UploadProfile | None = None
+    error: str = ""
+    message: str = ""
+    changed: bool = False
+
+
+@dataclass(frozen=True)
+class NicknameAvailability:
+    status: str = "INVALID"
+    nickname: str = ""
+    error: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class ProfileLinkCode:
+    accepted: bool
+    code: str = ""
+    expires_at: datetime | None = None
+    profile: UploadProfile | None = None
+    error: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class EncounterUploadResult:
+    accepted: bool
+    upload_id: str = ""
+    encounter_id: str = ""
+    upload_status: str = ""
+    statistics_status: str = ""
+    ranking_status: str = ""
+    rank: int | None = None
+    validation_reasons: tuple[str, ...] = ()
+    duplicate_upload: bool = False
+    upload_source_count: int = 0
+    error: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class ProfileUploadsResult:
+    accepted: bool
+    profile: UploadProfile | None = None
+    scope: str = "profile"
+    uploads: tuple[dict[str, object], ...] = ()
+    error: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class CombatClockResult:
     synchronized: bool = False
     encounter_id: str = ""
@@ -238,6 +318,66 @@ class LicensingGateway(Protocol):
         character_name: str,
         diagnostics: dict[str, object] | None = None,
     ) -> FeedbackResult: ...
+
+    def resolve_upload_profile(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult: ...
+
+    def check_upload_nickname(
+        self, session: LicenseSession, character_id: str, nickname: str
+    ) -> NicknameAvailability: ...
+
+    def create_upload_profile(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        nickname: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult: ...
+
+    def rename_upload_profile(
+        self, session: LicenseSession, character_id: str, nickname: str
+    ) -> ProfileResult: ...
+
+    def create_profile_link_code(
+        self, session: LicenseSession, character_id: str
+    ) -> ProfileLinkCode: ...
+
+    def redeem_profile_link_code(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        code: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult: ...
+
+    def upload_encounter(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        encounter: dict[str, object],
+        *,
+        public_mode: str,
+        character_name: str = "",
+    ) -> EncounterUploadResult: ...
+
+    def profile_uploads(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        *,
+        scope: str = "profile",
+        limit: int = 100,
+    ) -> ProfileUploadsResult: ...
 
     def sync_combat_clock(
         self, session: LicenseSession, snapshot: dict[str, object]
@@ -308,6 +448,82 @@ class LocalLicensingGateway:
     ) -> FeedbackResult:
         del session, category, content, character_name, diagnostics
         return FeedbackResult(False, message="反馈服务需要连接服务器")
+
+    def resolve_upload_profile(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        del session, character_id, character_name, profession_id
+        return ProfileResult(False, error="offline", message="上传身份服务需要连接服务器")
+
+    def check_upload_nickname(
+        self, session: LicenseSession, character_id: str, nickname: str
+    ) -> NicknameAvailability:
+        del session, character_id, nickname
+        return NicknameAvailability(error="offline", message="上传身份服务需要连接服务器")
+
+    def create_upload_profile(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        nickname: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        del session, character_id, nickname, character_name, profession_id
+        return ProfileResult(False, error="offline", message="上传身份服务需要连接服务器")
+
+    def rename_upload_profile(
+        self, session: LicenseSession, character_id: str, nickname: str
+    ) -> ProfileResult:
+        del session, character_id, nickname
+        return ProfileResult(False, error="offline", message="上传身份服务需要连接服务器")
+
+    def create_profile_link_code(
+        self, session: LicenseSession, character_id: str
+    ) -> ProfileLinkCode:
+        del session, character_id
+        return ProfileLinkCode(False, error="offline", message="上传身份服务需要连接服务器")
+
+    def redeem_profile_link_code(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        code: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        del session, character_id, code, character_name, profession_id
+        return ProfileResult(False, error="offline", message="上传身份服务需要连接服务器")
+
+    def upload_encounter(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        encounter: dict[str, object],
+        *,
+        public_mode: str,
+        character_name: str = "",
+    ) -> EncounterUploadResult:
+        del session, character_id, encounter, public_mode, character_name
+        return EncounterUploadResult(False, error="offline", message="战斗上传服务需要连接服务器")
+
+    def profile_uploads(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        *,
+        scope: str = "profile",
+        limit: int = 100,
+    ) -> ProfileUploadsResult:
+        del session, character_id, scope, limit
+        return ProfileUploadsResult(False, error="offline", message="战斗上传服务需要连接服务器")
 
     def sync_combat_clock(
         self, session: LicenseSession, snapshot: dict[str, object]
@@ -433,6 +649,8 @@ class ServerLicensingGateway:
         *,
         access_token: str = "",
         allow_forbidden: bool = False,
+        allow_error_response: bool = False,
+        request_timeout: float | None = None,
     ) -> dict:
         request_payload = dict(payload)
         if self.build_id:
@@ -455,14 +673,21 @@ class ServerLicensingGateway:
         raw = b""
         for attempt in range(2):
             try:
-                open_options = {"timeout": self.timeout}
+                timeout = (
+                    self.timeout
+                    if request_timeout is None
+                    else max(self.timeout, float(request_timeout))
+                )
+                open_options = {"timeout": timeout}
                 if self.ssl_context is not None:
                     open_options["context"] = self.ssl_context
                 with urlopen(request, **open_options) as response:
                     raw = response.read(64 * 1024)
                 break
             except HTTPError as exc:
-                if allow_forbidden and exc.code in (401, 403):
+                if allow_error_response or (
+                    allow_forbidden and exc.code in (401, 403)
+                ):
                     try:
                         raw = exc.read(64 * 1024)
                         value = json.loads(raw.decode("utf-8"))
@@ -728,6 +953,282 @@ class ServerLicensingGateway:
             message=self._server_message(
                 value,
                 "反馈已提交。" if accepted else "反馈提交失败，请稍后再试。",
+            ),
+        )
+
+    @staticmethod
+    def _upload_profile(value: object) -> UploadProfile | None:
+        if not isinstance(value, dict):
+            return None
+        profile_id = str(value.get("profile_id", "")).strip()[:64]
+        nickname = str(value.get("nickname", "")).strip()[:24]
+        if not profile_id or not nickname:
+            return None
+        return UploadProfile(profile_id=profile_id, nickname=nickname)
+
+    def _profile_request(
+        self,
+        session: LicenseSession,
+        path: str,
+        payload: dict[str, object],
+        *,
+        request_timeout: float | None = None,
+    ) -> dict:
+        if not session.access_token:
+            return {
+                "ok": False,
+                "error": "invalid_session",
+                "message": SERVER_ERROR_MESSAGES["invalid_session"],
+            }
+        return self._request(
+            path,
+            payload,
+            access_token=session.access_token,
+            allow_error_response=True,
+            request_timeout=request_timeout,
+        )
+
+    def resolve_upload_profile(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        value = self._profile_request(
+            session,
+            "/api/v1/dps/profile/resolve",
+            {
+                "character_id": str(character_id).strip(),
+                "character_name": str(character_name).strip()[:48],
+                "profession_id": max(0, int(profession_id or 0)),
+            },
+        )
+        accepted = bool(value.get("ok"))
+        status = str(value.get("status", "")).strip().upper()
+        return ProfileResult(
+            accepted=accepted,
+            status=status,
+            profile=self._upload_profile(value.get("profile")),
+            error=str(value.get("error", "")).strip(),
+            message=self._server_message(
+                value,
+                "上传身份已恢复。" if accepted else "上传身份查询失败，请稍后重试。",
+            ),
+        )
+
+    def check_upload_nickname(
+        self, session: LicenseSession, character_id: str, nickname: str
+    ) -> NicknameAvailability:
+        value = self._profile_request(
+            session,
+            "/api/v1/dps/profile/nickname/check",
+            {
+                "character_id": str(character_id).strip(),
+                "nickname": str(nickname),
+            },
+        )
+        status = str(value.get("status", "INVALID")).strip().upper()
+        error = str(value.get("error", "")).strip()
+        return NicknameAvailability(
+            status=status,
+            nickname=str(value.get("nickname", "")).strip()[:24],
+            error=error,
+            message=self._server_message(
+                value,
+                "昵称可以使用。"
+                if bool(value.get("ok")) and status == "AVAILABLE"
+                else SERVER_ERROR_MESSAGES.get(error, "昵称暂时无法使用。"),
+            ),
+        )
+
+    def create_upload_profile(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        nickname: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        value = self._profile_request(
+            session,
+            "/api/v1/dps/profile/create",
+            {
+                "character_id": str(character_id).strip(),
+                "nickname": str(nickname),
+                "character_name": str(character_name).strip()[:48],
+                "profession_id": max(0, int(profession_id or 0)),
+            },
+        )
+        accepted = bool(value.get("ok"))
+        return ProfileResult(
+            accepted=accepted,
+            status="LINKED" if accepted else "",
+            profile=self._upload_profile(value.get("profile")),
+            error=str(value.get("error", "")).strip(),
+            message=self._server_message(
+                value,
+                "上传身份已创建。" if accepted else "创建上传身份失败。",
+            ),
+        )
+
+    def rename_upload_profile(
+        self, session: LicenseSession, character_id: str, nickname: str
+    ) -> ProfileResult:
+        value = self._profile_request(
+            session,
+            "/api/v1/dps/profile/rename",
+            {
+                "character_id": str(character_id).strip(),
+                "nickname": str(nickname),
+            },
+        )
+        accepted = bool(value.get("ok"))
+        return ProfileResult(
+            accepted=accepted,
+            status="LINKED" if accepted else "",
+            profile=self._upload_profile(value.get("profile")),
+            error=str(value.get("error", "")).strip(),
+            message=self._server_message(
+                value,
+                "上传昵称已修改。" if accepted else "修改上传昵称失败。",
+            ),
+            changed=bool(value.get("changed")),
+        )
+
+    def create_profile_link_code(
+        self, session: LicenseSession, character_id: str
+    ) -> ProfileLinkCode:
+        value = self._profile_request(
+            session,
+            "/api/v1/dps/profile/link-code/create",
+            {"character_id": str(character_id).strip()},
+        )
+        accepted = bool(value.get("ok"))
+        return ProfileLinkCode(
+            accepted=accepted,
+            code=str(value.get("code", "")).strip()[:20],
+            expires_at=self._expires_at(value.get("expires_at")),
+            profile=self._upload_profile(value.get("profile")),
+            error=str(value.get("error", "")).strip(),
+            message=self._server_message(
+                value,
+                "角色关联码已生成。" if accepted else "生成角色关联码失败。",
+            ),
+        )
+
+    def redeem_profile_link_code(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        code: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        value = self._profile_request(
+            session,
+            "/api/v1/dps/profile/link-code/redeem",
+            {
+                "character_id": str(character_id).strip(),
+                "code": str(code).strip().upper(),
+                "character_name": str(character_name).strip()[:48],
+                "profession_id": max(0, int(profession_id or 0)),
+            },
+        )
+        accepted = bool(value.get("ok"))
+        return ProfileResult(
+            accepted=accepted,
+            status="LINKED" if accepted else "",
+            profile=self._upload_profile(value.get("profile")),
+            error=str(value.get("error", "")).strip(),
+            message=self._server_message(
+                value,
+                "角色已关联到上传身份。" if accepted else "关联上传身份失败。",
+            ),
+        )
+
+    def upload_encounter(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        encounter: dict[str, object],
+        *,
+        public_mode: str,
+        character_name: str = "",
+    ) -> EncounterUploadResult:
+        value = self._profile_request(
+            session,
+            "/api/v1/dps/encounters/upload",
+            {
+                "character_id": str(character_id).strip(),
+                "public_mode": str(public_mode).strip().casefold(),
+                "character_name": str(character_name).strip()[:48],
+                "encounter": encounter if isinstance(encounter, dict) else {},
+            },
+            request_timeout=ENCOUNTER_UPLOAD_TIMEOUT_SECONDS,
+        )
+        accepted = bool(value.get("ok"))
+        try:
+            rank_value = value.get("rank")
+            rank = max(1, int(rank_value)) if rank_value is not None else None
+        except (TypeError, ValueError, OverflowError):
+            rank = None
+        reasons = value.get("validation_reasons")
+        return EncounterUploadResult(
+            accepted=accepted,
+            upload_id=str(value.get("upload_id", "")).strip()[:64],
+            encounter_id=str(value.get("encounter_id", "")).strip()[:64],
+            upload_status=str(value.get("upload_status", "")).strip()[:24],
+            statistics_status=str(value.get("statistics_status", "")).strip()[:24],
+            ranking_status=str(value.get("ranking_status", "")).strip()[:24],
+            rank=rank,
+            validation_reasons=tuple(
+                str(reason).strip()[:48]
+                for reason in reasons
+                if str(reason).strip()
+            ) if isinstance(reasons, list) else (),
+            duplicate_upload=bool(value.get("duplicate_upload")),
+            upload_source_count=max(0, int(value.get("upload_source_count", 0) or 0)),
+            error=str(value.get("error", "")).strip(),
+            message=self._server_message(
+                value,
+                "战斗记录已上传。" if accepted else "战斗记录上传失败。",
+            ),
+        )
+
+    def profile_uploads(
+        self,
+        session: LicenseSession,
+        character_id: str,
+        *,
+        scope: str = "profile",
+        limit: int = 100,
+    ) -> ProfileUploadsResult:
+        value = self._profile_request(
+            session,
+            "/api/v1/dps/profile/uploads",
+            {
+                "character_id": str(character_id).strip(),
+                "scope": str(scope).strip().casefold(),
+                "limit": min(200, max(1, int(limit))),
+            },
+        )
+        accepted = bool(value.get("ok"))
+        rows = value.get("uploads")
+        return ProfileUploadsResult(
+            accepted=accepted,
+            profile=self._upload_profile(value.get("profile")),
+            scope=str(value.get("scope", scope)).strip().casefold()[:16],
+            uploads=tuple(dict(row) for row in rows if isinstance(row, dict))
+            if isinstance(rows, list)
+            else (),
+            error=str(value.get("error", "")).strip(),
+            message=self._server_message(
+                value,
+                "上传记录已加载。" if accepted else "上传记录加载失败。",
             ),
         )
 
@@ -1085,6 +1586,99 @@ class LicensingService:
             content=content,
             character_name=character_name,
             diagnostics=diagnostics,
+        )
+
+    def resolve_upload_profile(
+        self,
+        character_id: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        return self.gateway.resolve_upload_profile(
+            self.session,
+            character_id,
+            character_name=character_name,
+            profession_id=profession_id,
+        )
+
+    def check_upload_nickname(
+        self, character_id: str, nickname: str
+    ) -> NicknameAvailability:
+        return self.gateway.check_upload_nickname(
+            self.session, character_id, nickname
+        )
+
+    def create_upload_profile(
+        self,
+        character_id: str,
+        nickname: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        return self.gateway.create_upload_profile(
+            self.session,
+            character_id,
+            nickname,
+            character_name=character_name,
+            profession_id=profession_id,
+        )
+
+    def rename_upload_profile(
+        self, character_id: str, nickname: str
+    ) -> ProfileResult:
+        return self.gateway.rename_upload_profile(
+            self.session, character_id, nickname
+        )
+
+    def create_profile_link_code(self, character_id: str) -> ProfileLinkCode:
+        return self.gateway.create_profile_link_code(self.session, character_id)
+
+    def redeem_profile_link_code(
+        self,
+        character_id: str,
+        code: str,
+        *,
+        character_name: str = "",
+        profession_id: int = 0,
+    ) -> ProfileResult:
+        return self.gateway.redeem_profile_link_code(
+            self.session,
+            character_id,
+            code,
+            character_name=character_name,
+            profession_id=profession_id,
+        )
+
+    def upload_encounter(
+        self,
+        character_id: str,
+        encounter: dict[str, object],
+        *,
+        public_mode: str,
+        character_name: str = "",
+    ) -> EncounterUploadResult:
+        return self.gateway.upload_encounter(
+            self.session,
+            character_id,
+            encounter,
+            public_mode=public_mode,
+            character_name=character_name,
+        )
+
+    def profile_uploads(
+        self,
+        character_id: str,
+        *,
+        scope: str = "profile",
+        limit: int = 100,
+    ) -> ProfileUploadsResult:
+        return self.gateway.profile_uploads(
+            self.session,
+            character_id,
+            scope=scope,
+            limit=limit,
         )
 
     def sync_combat_clock(

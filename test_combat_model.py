@@ -42,6 +42,14 @@ NetworkPacketParser = MODULE["NetworkPacketParser"]
 UpdateInfo = MODULE["UpdateInfo"]
 TrialClaim = MODULE["TrialClaim"]
 CombatClockResult = MODULE["CombatClockResult"]
+UploadProfile = MODULE["UploadProfile"]
+EncounterUploadResult = MODULE["EncounterUploadResult"]
+ProfileUploadError = MODULE["ProfileUploadError"]
+normalize_combat_upload_states = MODULE["normalize_combat_upload_states"]
+combat_upload_status_text = MODULE["combat_upload_status_text"]
+encounter_upload_state = MODULE["encounter_upload_state"]
+history_upload_action_visible = MODULE["history_upload_action_visible"]
+history_upload_action_clickable = MODULE["history_upload_action_clickable"]
 CombatClockWorker = MODULE["CombatClockWorker"]
 combat_clock_sync_interval = MODULE["combat_clock_sync_interval"]
 ResolvedCombatInterval = MODULE["ResolvedCombatInterval"]
@@ -86,6 +94,8 @@ membership_badge_for_card_tier = MODULE["membership_badge_for_card_tier"]
 membership_availability_text = MODULE["membership_availability_text"]
 membership_contract_text = MODULE["membership_contract_text"]
 format_duration = MODULE["format_duration"]
+format_main_rate = MODULE["format_main_rate"]
+format_main_total = MODULE["format_main_total"]
 format_response_time = MODULE["format_response_time"]
 format_overheal_rate = MODULE["format_overheal_rate"]
 format_team_health_number = MODULE["format_team_health_number"]
@@ -108,6 +118,12 @@ dropdown_popup_bounds = MODULE["dropdown_popup_bounds"]
 clipped_overlay_bounds = MODULE["clipped_overlay_bounds"]
 parse_absolute_tk_geometry = MODULE["parse_absolute_tk_geometry"]
 login_window_dimensions = MODULE["login_window_dimensions"]
+profession_metric_options = MODULE["profession_metric_options"]
+default_profession_metric = MODULE["default_profession_metric"]
+normalize_profession_display_metrics = MODULE[
+    "normalize_profession_display_metrics"
+]
+migrate_main_display_config = MODULE["migrate_main_display_config"]
 HEALING_TARGET_TEMPLATE_IDS = MODULE["HEALING_TARGET_TEMPLATE_IDS"]
 main = MODULE["main"]
 
@@ -182,6 +198,20 @@ def actor_health(timestamp: int, actor: int, current: int, maximum: int) -> dict
 
 
 class CombatModelTests(unittest.TestCase):
+    def test_older_boss_hp_cannot_replace_latest_sample_or_revive_dead_target(self):
+        model = CombatModel()
+        template = 7_100_215
+        model.ingest_monster(dict(entity_id=MONSTER_ID, template_id=template, name='子嗣守护',
+                                  current_hp=20000, max_hp=100000, filetime_100ns=BASE_FILETIME + 2000))
+        old = dict(entity_id=MONSTER_ID, current_hp=90000, filetime_100ns=BASE_FILETIME + 1000)
+        model.ingest_monster(old)
+        self.assertEqual(model.monsters[MONSTER_ID].current_hp, 20000)
+        self.assertEqual(old['current_hp'], 90000)
+        model.ingest_monster(dict(entity_id=MONSTER_ID, current_hp=0, death_confirmed=True, filetime_100ns=BASE_FILETIME + 3000))
+        model.ingest_monster(old)
+        self.assertEqual(model.monsters[MONSTER_ID].current_hp, 0)
+        self.assertTrue(model.monsters[MONSTER_ID].death_confirmed)
+
     @staticmethod
     def _clock_ready_model(run_id: str) -> object:
         model = CombatModel(run_id=run_id)
@@ -200,6 +230,189 @@ class CombatModelTests(unittest.TestCase):
         model.ingest(damage(1, SELF_ID, MONSTER_ID, 800_000))
         model.ingest(damage(15_001, TEAMMATE_ID, MONSTER_ID, 1_200_000))
         return model
+
+    def test_main_display_profession_metric_contract_covers_all_real_classes(self):
+        expected = {
+            1_200_001: (("dps",), "dps"),
+            1_200_002: (("hps", "dps"), "hps"),
+            1_200_003: (("dps",), "dps"),
+            1_200_004: (("dps",), "dps"),
+            1_200_005: (("dps",), "dps"),
+            1_200_006: (("dps", "dt"), "dps"),
+            1_200_007: (("dps",), "dps"),
+        }
+        for profession_id, (options, default) in expected.items():
+            self.assertEqual(profession_metric_options(profession_id), options)
+            self.assertEqual(default_profession_metric(profession_id), default)
+        self.assertEqual(profession_metric_options(1_299_999), ("dps",))
+
+        normalized = normalize_profession_display_metrics(
+            {
+                "1200001": "DT",
+                "1200002": "DPS",
+                "1200006": "dt",
+                "1200007": "HPS",
+            }
+        )
+        self.assertEqual(normalized["1200001"], "dps")
+        self.assertEqual(normalized["1200002"], "dps")
+        self.assertEqual(normalized["1200006"], "dt")
+        self.assertEqual(normalized["1200007"], "dps")
+
+    def test_main_display_config_migration_preserves_legacy_preferences(self):
+        original = {
+            "geometry": "640x480+31+47",
+            "font_size": 16,
+            "alpha": 0.72,
+            "team_rating_preview": True,
+            "boss_enrage_prediction": False,
+            "main_meter_mode": "hps",
+            "compact_mode": True,
+            "show_dps": False,
+            "main_row_mask_opacity": -20,
+            "main_ui_scale": 9,
+            "profession_display_metrics": {
+                "1200002": "invalid",
+                "1200006": "dt",
+            },
+        }
+
+        migrated, changed = migrate_main_display_config(original)
+
+        self.assertTrue(changed)
+        for key in (
+            "geometry",
+            "font_size",
+            "team_rating_preview",
+            "boss_enrage_prediction",
+            "main_meter_mode",
+            "show_dps",
+        ):
+            self.assertEqual(migrated[key], original[key])
+        self.assertEqual(migrated['alpha'], 1.0)
+        self.assertEqual(original['alpha'], 0.72)
+        self.assertFalse(migrated["compact_mode"])
+        self.assertEqual(migrated["main_row_mask_opacity"], 0)
+        self.assertEqual(migrated["main_ui_scale"], 1.4)
+        self.assertEqual(
+            migrated["profession_display_metrics"]["1200002"], "hps"
+        )
+        self.assertEqual(
+            migrated["profession_display_metrics"]["1200006"], "dt"
+        )
+        self.assertTrue(migrated["show_deaths"])
+        self.assertFalse(migrate_main_display_config(migrated)[1])
+
+    def test_main_display_uses_class_metric_but_always_sorts_by_dps(self):
+        damage_rows = [
+            ActorStats(SELF_ID, damage=100),
+            ActorStats(TEAMMATE_ID, damage=300),
+            ActorStats(NEARBY_ID, damage=200),
+        ]
+        professions = {
+            SELF_ID: 1_200_002,
+            TEAMMATE_ID: 1_200_006,
+            NEARBY_ID: 1_200_003,
+        }
+        model = type(
+            "Model",
+            (),
+            {
+                "self_id": SELF_ID,
+                "friend_order": [SELF_ID, TEAMMATE_ID, NEARBY_ID],
+                "non_player_actor_ids": set(),
+                "member_death_counts": {TEAMMATE_ID: 2},
+                "current_stats": lambda _self: list(damage_rows),
+                "current_taken_rows": lambda _self: [
+                    {"actor_id": TEAMMATE_ID, "taken": 700}
+                ],
+                "_current_member_ids": lambda _self: set(professions),
+                "duration": lambda _self, _now=None: 10.0,
+                "actor_profession_id": lambda _self, actor_id: professions[
+                    actor_id
+                ],
+            },
+        )()
+        window = object.__new__(DpsWindow)
+        window.model = model
+        window.profession_display_metrics = normalize_profession_display_metrics(
+            {"1200002": "hps", "1200006": "dt"}
+        )
+        window.latest_healing_summary = {
+            "healers": [
+                {
+                    "actor_id": SELF_ID,
+                    "profession_id": 1_200_002,
+                    "hps": 90,
+                    "effective_healing": 900,
+                }
+            ]
+        }
+        window._shown_actor_name = lambda actor_id: f"玩家{actor_id}"
+
+        rows = window._main_combat_display_rows(now=123.0)
+
+        self.assertEqual(
+            [row["actor_id"] for row in rows],
+            [TEAMMATE_ID, NEARBY_ID, SELF_ID],
+        )
+        self.assertEqual([row["metric"] for row in rows], ["dt", "dps", "hps"])
+        self.assertEqual([row["stat_value"] for row in rows], [70, 20, 90])
+        self.assertEqual([row["total_value"] for row in rows], [700, 200, 900])
+        self.assertEqual(rows[0]["deaths"], 2)
+
+        window.latest_healing_summary = {"healers": []}
+        missing = window._main_combat_display_rows(now=123.0)
+        audience = next(row for row in missing if row["actor_id"] == SELF_ID)
+        self.assertIsNone(audience["stat_value"])
+        self.assertIsNone(audience["total_value"])
+
+    def test_combat_data_has_priority_over_team_rating_preview(self):
+        class Model:
+            party_active = True
+            party_member_count = 2
+
+            def __init__(self):
+                self.in_combat = False
+
+            def combat_in_progress(self):
+                return self.in_combat
+
+        window = object.__new__(DpsWindow)
+        window.model = Model()
+        window.team_rating_preview_enabled = True
+        window._team_rating_preview_rows = lambda: [
+            {"actor_id": SELF_ID},
+            {"actor_id": TEAMMATE_ID},
+        ]
+
+        self.assertTrue(window._team_rating_preview_active())
+        window.model.in_combat = True
+        self.assertFalse(window._team_rating_preview_active())
+        window.model.in_combat = False
+        self.assertTrue(window._team_rating_preview_active())
+
+    def test_main_death_column_is_removed_and_space_is_reclaimed(self):
+        window = object.__new__(DpsWindow)
+        window.main_ui_scale = 1.0
+        window.window_dpi = 96
+        window.show_main_totals = True
+        window.show_deaths = True
+        with_deaths = window._main_display_columns(520)
+        window.show_deaths = False
+        without_deaths = window._main_display_columns(520)
+
+        self.assertIn("deaths", with_deaths)
+        self.assertNotIn("deaths", without_deaths)
+        self.assertGreater(without_deaths["stat"], with_deaths["stat"])
+        self.assertGreater(without_deaths["name_right"], with_deaths["name_right"])
+
+    def test_main_reference_number_formats_keep_rates_exact(self):
+        self.assertEqual(format_main_rate(1_048_208), "1,048,208/s")
+        self.assertEqual(format_main_rate(None), "--")
+        self.assertEqual(format_main_total(17_820_000), "(1782万)")
+        self.assertEqual(format_main_total(144_000_000), "(1.44亿)")
+        self.assertEqual(format_main_total(None), "--")
 
     def test_enrage_countdown_edge_is_encounter_scoped(self):
         model = CombatModel(run_id="enrage-phase-edge")
@@ -2005,6 +2218,7 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertIn("$SourcePath = Join-Path $ProjectDir \"dps_meter.pyw\"", main_build)
         self.assertIn("$AppVersion", main_build)
+        self.assertIn('"--include-module=profile_upload"', main_build)
         self.assertIn("$SourcePath = Join-Path $ProjectDir \"diagnostic_report.py\"", diagnostic_build)
         self.assertIn("$ToolVersion", diagnostic_build)
         self.assertNotIn("v0.1.0.exe", main_build)
@@ -2211,12 +2425,23 @@ class CombatModelTests(unittest.TestCase):
         model.ingest(event)
         self.assertEqual(model.stats[NEARBY_ID].damage, 100_000)
 
-    def test_single_line_notice_is_compact(self):
+    def test_notice_dimensions_prioritize_readability(self):
         compact = DpsWindow._notice_dimensions("已复制到剪贴板。")
+        confirmation = DpsWindow._notice_dimensions(
+            "退出前会安全停止采集，并保存当前战斗数据。",
+            modal=True,
+        )
+        large_confirmation = DpsWindow._notice_dimensions(
+            "退出前会安全停止采集，并保存当前战斗数据。",
+            modal=True,
+            font_size=18,
+        )
         detailed = DpsWindow._notice_dimensions(
             "第一行包含较长的说明文字，需要自动换行并增加高度。\n第二行继续说明。"
         )
-        self.assertEqual(compact, (350, 132))
+        self.assertEqual(compact, (430, 190))
+        self.assertEqual(confirmation, (490, 244))
+        self.assertEqual(large_confirmation, (594, 280))
         self.assertGreater(detailed[1], compact[1])
 
     def test_window_lock_enables_click_through_and_restores_managed_style_bits(self):
@@ -2391,7 +2616,7 @@ class CombatModelTests(unittest.TestCase):
 
         for button in buttons:
             self.assertTrue(button._hovered)
-            self.assertEqual(button.options["bg"], MODULE["PANEL_2"])
+            self.assertEqual(button.options["bg"], MODULE["MAIN_TRANSPARENT_KEY"])
             self.assertEqual(button.image[2], MODULE["ACCENT"])
 
     def test_membership_label_follows_server_card_tier(self):
@@ -2990,7 +3215,7 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertTrue(actor_targets[0]["history_encounter_group"])
 
-    def test_history_single_first_believer_phase_is_not_relabelled(self):
+    def test_history_single_first_believer_phase_belongs_to_one_encounter(self):
         record = {
             "monster": {
                 "entity_id": MONSTER_ID,
@@ -3029,10 +3254,10 @@ class CombatModelTests(unittest.TestCase):
             {"7100208": {"name": "安西娅", "boss_type": 3}},
         )
 
-        self.assertIs(restored, record)
+        self.assertIsNot(restored, record)
         self.assertEqual(
             restored["participants"][0]["targets"][0]["name"],
-            "安西娅",
+            "一号信徒",
         )
 
     def test_history_placeholder_skill_names_use_verified_current_catalog(self):
@@ -5655,8 +5880,8 @@ class CombatModelTests(unittest.TestCase):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(APP_VERSION, "0.2.2")
-        self.assertEqual(CLIENT_BUILD, "0.2.2+20260909.1")
+        self.assertEqual(APP_VERSION, "0.2.3b")
+        self.assertEqual(CLIENT_BUILD, "0.2.3+20260911.5")
         self.assertNotIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
@@ -5737,7 +5962,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertIn('actions, "compact", "迷你模式"', source)
         self.assertIn('actions, "menu", "主菜单", self.show_main_menu', source)
         self.assertIn('def show_main_menu(self)', source)
-        self.assertIn("MAIN_MIN_WIDTH = 430", source)
+        self.assertIn("MAIN_MIN_WIDTH = 300", source)
         self.assertIn("MINI_DEFAULT_WIDTH = 340", source)
         self.assertIn("MINI_MIN_WIDTH = 228", source)
         self.assertIn("MINI_DEFAULT_HEIGHT = 118", source)
@@ -5747,13 +5972,15 @@ class CombatModelTests(unittest.TestCase):
         self.assertIn("self.licensing.session.card_tier", source)
         self.assertNotIn('identity_icon = self.icons.toolbar("user"', source)
         self.assertIn('self.root.bind("<MouseWheel>", self._scroll_main, add="+")', source)
-        self.assertIn("self._dismiss_compact_auxiliary_windows()", source)
+        self.assertIn('self.config["compact_mode"] = False', source)
         nav_source = source[
             source.index("    def _backend_nav_button(") : source.index(
                 "    def _sync_backend_navigation("
             )
         ]
         self.assertIn("caption_label = tk.Label(", nav_source)
+        self.assertIn("module_badge_label = tk.Label(", nav_source)
+        self.assertIn('normalized_module_tag in {"PVE", "PVP"}', nav_source)
         self.assertIn("image=icon_image", nav_source)
         self.assertIn('self.icons.toolbar(', nav_source)
         self.assertNotIn('text=f"{icon_name}   {caption}"', nav_source)
@@ -6150,11 +6377,11 @@ class CombatModelTests(unittest.TestCase):
         self.assertFalse(window.config["compact_mode"])
         self.assertEqual(window.window_alpha, 1.0)
         self.assertEqual(window.config["alpha"], 1.0)
-        self.assertEqual(window.config["geometry"], "778x400+32+120")
+        self.assertEqual(window.config["geometry"], "778x340+32+120")
         self.assertEqual(
-            window.config["compact_geometry"], "610x118+32+120"
+            window.config["compact_geometry"], "340x118+20+-110"
         )
-        self.assertEqual(root.geometry_calls, ["778x400+32+120"])
+        self.assertEqual(root.geometry_calls, ["778x340+32+120"])
         self.assertEqual(root.minsize_calls, [(778, MAIN_MIN_HEIGHT)])
         self.assertNotIn(id(root), window.drag_state)
         self.assertNotIn(id(root), window.resize_state)
@@ -7055,6 +7282,204 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(participant["revives"], 1)
         self.assertAlmostEqual(participant["death_duration_seconds"], 5.0)
 
+    @staticmethod
+    def _sun_survival_model(run_id: str, *, with_teammate: bool = False):
+        model = CombatModel(run_id=run_id)
+        model.ingest_identity({"entity_id": SELF_ID})
+        if with_teammate:
+            model.ingest_party(
+                {
+                    "entity_ids": [TEAMMATE_ID],
+                    "member_count": 2,
+                    "authoritative": True,
+                }
+            )
+        model.ingest_profile(
+            {
+                "entity_id": SELF_ID,
+                "entity_type": "Player",
+                "profession_id": 1_200_001,
+            }
+        )
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 1_000))
+        return model
+
+    def test_singer_zero_to_one_survival_is_not_a_death_or_wipe(self):
+        model = self._sun_survival_model("singer-survival-test")
+        death_time = BASE_FILETIME + 2 * 10_000_000
+
+        self.assertTrue(
+            model.ingest_life(
+                {
+                    "actor_id": SELF_ID,
+                    "dead": True,
+                    "current_hp": 0,
+                    "death_confirmed": True,
+                    "filetime_100ns": death_time,
+                }
+            )
+        )
+        self.assertIn(SELF_ID, model.pending_sun_deaths)
+        self.assertNotIn(SELF_ID, model.member_death_counts)
+        self.assertFalse(model.combat_end_time)
+
+        self.assertTrue(
+            model.ingest_life(
+                {
+                    "actor_id": SELF_ID,
+                    "dead": False,
+                    "current_hp": 1,
+                    "explicit_transition": False,
+                    "filetime_100ns": death_time + 5_000_000,
+                }
+            )
+        )
+        self.assertNotIn(SELF_ID, model.pending_sun_deaths)
+        self.assertNotIn(SELF_ID, model.member_death_counts)
+        self.assertNotIn(SELF_ID, model.member_revive_counts)
+        self.assertEqual(model.member_death_duration(SELF_ID), 0.0)
+        self.assertFalse(model.combat_end_time)
+
+    def test_singer_bound_health_one_resolves_survival_passive(self):
+        model = self._sun_survival_model("singer-health-survival-test")
+        death_time = BASE_FILETIME + 2 * 10_000_000
+        model.ingest_life(
+            {
+                "actor_id": SELF_ID,
+                "dead": True,
+                "current_hp": 0,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+
+        self.assertTrue(
+            model.ingest_actor_health(
+                actor_health(
+                    death_time + 2_000_000,
+                    SELF_ID,
+                    1,
+                    100_000,
+                )
+            )
+        )
+        self.assertNotIn(SELF_ID, model.pending_sun_deaths)
+        self.assertNotIn(SELF_ID, model.member_death_counts)
+        self.assertNotIn(SELF_ID, model.member_revive_counts)
+        self.assertFalse(model.combat_end_time)
+
+    def test_singer_newer_health_one_survives_delayed_death_delivery(self):
+        model = self._sun_survival_model("singer-reordered-survival-test")
+        death_time = BASE_FILETIME + 2 * 10_000_000
+        model.ingest_actor_health(
+            actor_health(
+                death_time + 2_000_000,
+                SELF_ID,
+                1,
+                100_000,
+            )
+        )
+
+        self.assertTrue(
+            model.ingest_life(
+                {
+                    "actor_id": SELF_ID,
+                    "dead": True,
+                    "current_hp": 0,
+                    "death_confirmed": True,
+                    "filetime_100ns": death_time,
+                }
+            )
+        )
+        self.assertNotIn(SELF_ID, model.pending_sun_deaths)
+        self.assertNotIn(SELF_ID, model.member_death_counts)
+        self.assertNotIn(SELF_ID, model.member_revive_counts)
+        self.assertFalse(model.combat_end_time)
+
+    def test_singer_true_death_is_confirmed_after_grace_window(self):
+        model = self._sun_survival_model("singer-true-death-test")
+        death_time = BASE_FILETIME + 2 * 10_000_000
+        model.ingest_life(
+            {
+                "actor_id": SELF_ID,
+                "dead": True,
+                "current_hp": 0,
+                "death_confirmed": True,
+                "filetime_100ns": death_time,
+            }
+        )
+        pending = model.pending_sun_deaths[SELF_ID]
+
+        self.assertTrue(
+            model.flush_pending_member_deaths(
+                pending.deadline_monotonic + 0.001
+            )
+        )
+        self.assertNotIn(SELF_ID, model.pending_sun_deaths)
+        self.assertEqual(model.member_death_counts[SELF_ID], 1)
+        self.assertEqual(model.combat_end_reason, "party_wipe")
+
+    def test_singer_explicit_relive_keeps_real_death_and_revive(self):
+        model = self._sun_survival_model(
+            "singer-explicit-relive-test", with_teammate=True
+        )
+        death_time = BASE_FILETIME + 2 * 10_000_000
+        revive_time = death_time + 10_000_000
+        model.ingest_life(
+            {
+                "actor_id": SELF_ID,
+                "dead": True,
+                "current_hp": 0,
+                "death_confirmed": True,
+                "explicit_transition": True,
+                "filetime_100ns": death_time,
+            }
+        )
+
+        self.assertTrue(
+            model.ingest_life(
+                {
+                    "actor_id": SELF_ID,
+                    "dead": False,
+                    "explicit_transition": True,
+                    "filetime_100ns": revive_time,
+                }
+            )
+        )
+        self.assertNotIn(SELF_ID, model.pending_sun_deaths)
+        self.assertEqual(model.member_death_counts[SELF_ID], 1)
+        self.assertEqual(model.member_revive_counts[SELF_ID], 1)
+        self.assertAlmostEqual(model.member_death_duration(SELF_ID), 1.0)
+        self.assertFalse(model.combat_end_time)
+
+    def test_other_profession_death_remains_immediate(self):
+        model = self._sun_survival_model("ordinary-death-control-test")
+        model.ingest_profile(
+            {
+                "entity_id": SELF_ID,
+                "entity_type": "Player",
+                "profession_id": 1_200_002,
+            }
+        )
+
+        self.assertTrue(
+            model.ingest_life(
+                {
+                    "actor_id": SELF_ID,
+                    "dead": True,
+                    "current_hp": 0,
+                    "death_confirmed": True,
+                    "filetime_100ns": BASE_FILETIME + 2 * 10_000_000,
+                }
+            )
+        )
+        self.assertFalse(model.pending_sun_deaths)
+        self.assertEqual(model.member_death_counts[SELF_ID], 1)
+        self.assertEqual(model.combat_end_reason, "party_wipe")
+
     def test_self_life_metrics_start_from_boss_state_without_self_attack(self):
         model = CombatModel(run_id="self-life-without-attack-test")
         model.ingest_identity({"entity_id": SELF_ID})
@@ -7461,7 +7886,7 @@ class CombatModelTests(unittest.TestCase):
             participants[TEAMMATE_ID]["penetration_rate"], 0.95
         )
 
-    def test_window_alpha_clamps_and_accepts_percent_or_fraction(self):
+    def test_retired_window_alpha_is_forced_to_full_opacity(self):
         class Root:
             def __init__(self):
                 self.alpha = 1.0
@@ -7479,6 +7904,8 @@ class CombatModelTests(unittest.TestCase):
                 return None
 
             def attributes(self, name, *values):
+                if name == "-transparentcolor":
+                    return MODULE["MAIN_TRANSPARENT_KEY"]
                 self.assert_alpha_name(name)
                 if values:
                     self.alpha = float(values[0])
@@ -7507,23 +7934,23 @@ class CombatModelTests(unittest.TestCase):
         apply_transparency.assert_called_once_with()
 
         window._set_window_alpha(40, persist=False)
-        self.assertEqual(window.window_alpha, 0.40)
-        self.assertEqual(window.root.alpha, 0.40)
+        self.assertEqual(window.window_alpha, 1.0)
+        self.assertEqual(window.root.alpha, 1.0)
         window._set_window_alpha(10, persist=False)
-        self.assertEqual(window.window_alpha, 0.10)
-        self.assertEqual(window.root.alpha, 0.10)
+        self.assertEqual(window.window_alpha, 1.0)
+        self.assertEqual(window.root.alpha, 1.0)
         window._set_window_alpha(-10, persist=False)
-        self.assertEqual(window.window_alpha, 0.10)
-        self.assertEqual(window.root.alpha, 0.10)
+        self.assertEqual(window.window_alpha, 1.0)
+        self.assertEqual(window.root.alpha, 1.0)
         window._set_window_alpha(82, persist=False)
-        self.assertEqual(window.window_alpha, 0.82)
+        self.assertEqual(window.window_alpha, 1.0)
         window._set_window_alpha(0.73, persist=False)
-        self.assertEqual(window.window_alpha, 0.73)
-        self.assertEqual(window.config["alpha"], 0.73)
+        self.assertEqual(window.window_alpha, 1.0)
+        self.assertEqual(window.config["alpha"], 1.0)
         self.assertEqual(window.history_window.alpha_changes, [])
         self.assertEqual(apply_transparency.call_count, 6)
 
-    def test_opacity_slider_applies_directly_without_fading_settings_window(self):
+    def test_legacy_opacity_callback_cannot_fade_main_or_settings(self):
         class Window:
             def __init__(self):
                 self.alpha = 1.0
@@ -7545,6 +7972,8 @@ class CombatModelTests(unittest.TestCase):
                 return None
 
             def attributes(self, name, *values):
+                if name == "-transparentcolor":
+                    return MODULE["MAIN_TRANSPARENT_KEY"]
                 if name != "-alpha":
                     raise AssertionError(name)
                 if values:
@@ -7570,10 +7999,10 @@ class CombatModelTests(unittest.TestCase):
         ):
             window._preview_window_alpha(68)
 
-        self.assertEqual(window.window_alpha, 0.68)
-        self.assertEqual(window.root.alpha, 0.68)
+        self.assertEqual(window.window_alpha, 1.0)
+        self.assertEqual(window.root.alpha, 1.0)
         self.assertEqual(window.history_window.alpha, 1.0)
-        self.assertEqual(window.config["alpha"], 0.68)
+        self.assertEqual(window.config["alpha"], 1.0)
         window.history_window.alpha = 0.42
         window._ensure_backend_window_opaque()
         self.assertEqual(window.history_window.alpha, 1.0)
@@ -7635,7 +8064,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(root.callbacks[0][0], 60)
         root.callbacks[0][1]()
 
-        self.assertEqual(root.alpha, 0.64)
+        self.assertEqual(root.alpha, 1.0)
         self.assertTrue(click_states[-1])
 
     def test_compact_width_tracks_the_number_of_visible_metrics(self):
@@ -8005,7 +8434,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertTrue(window.team_rating_preview_rows_dirty)
         self.assertIn(SELF_ID, window.team_rating_preview_profile_cache)
 
-    def test_rating_settings_default_off_and_team_preview_is_available(self):
+    def test_legacy_rating_default_off_and_team_preview_default_on(self):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
@@ -8026,7 +8455,7 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertIn('TEAM_RATING_PREVIEW_CONFIG_KEY = "team_rating_preview"', source)
         self.assertIn(
-            'self.config.get(TEAM_RATING_PREVIEW_CONFIG_KEY, False)', source
+            'self.config.get(TEAM_RATING_PREVIEW_CONFIG_KEY, True)', source
         )
         self.assertIn("TEAM_RATING_PREVIEW_AVAILABLE = True", source)
         self.assertIn('"队伍非凡评分预览"', source)
@@ -8041,7 +8470,7 @@ class CombatModelTests(unittest.TestCase):
             source,
         )
 
-    def test_compact_resize_survives_expand_and_restore_cycle(self):
+    def test_compact_mode_is_retired_and_old_geometry_is_migrated(self):
         class Root:
             def __init__(self):
                 self.value = "277x166+31+47"
@@ -8082,37 +8511,28 @@ class CombatModelTests(unittest.TestCase):
             "geometry": "590x400+31+47",
             "compact_layout_version": 3,
         }
+        window.main_display_config_migrated = True
+        window.main_ui_scale = 1.0
+        window.window_dpi = 96
         window.compact_mode = True
-        window.main_meter_mode = "dps"
-        window.show_total_damage = True
-        window.show_dps = True
-        window.show_damage_share = True
-        window.show_critical_rate = True
-        window.window_locked = False
-        window.closing = False
-        window.restore_geometry = {}
-        window._apply_layout_mode = lambda: None
+        window._monitor_work_areas = lambda: [(0, 0, 1920, 1080)]
 
-        self.assertEqual(window._initial_geometry(), "277x166+31+47")
-        with mock.patch.dict(
-            DpsWindow.toggle_compact_mode.__globals__,
-            {"save_config": lambda _config: None},
-        ):
-            window.toggle_compact_mode()
-            self.assertEqual(window.root.geometry(), "590x400+31+47")
-            window.toggle_compact_mode()
+        self.assertEqual(window._initial_geometry(), "306x340+31+47")
+        window.toggle_compact_mode()
 
+        self.assertFalse(window.compact_mode)
+        self.assertFalse(window.config["compact_mode"])
         self.assertEqual(window.root.geometry(), "277x166+31+47")
-        window.root.geometry("289x177+31+47")
+        old_compact_geometry = window.config["compact_geometry"]
         window._sync_compact_geometry_width()
-        self.assertEqual(window.config["compact_geometry"], "289x177+31+47")
-        self.assertEqual(window.root.geometry(), "289x177+31+47")
+        self.assertEqual(window.config["compact_geometry"], old_compact_geometry)
 
     def test_boss_hp_uses_one_continuous_fill_without_a_name_block(self):
         class Canvas:
             def __init__(self):
                 self.rectangles = []
                 self.texts = []
+                self.images = []
 
             @staticmethod
             def delete(*_args):
@@ -8124,13 +8544,16 @@ class CombatModelTests(unittest.TestCase):
 
             @staticmethod
             def winfo_height():
-                return 36
+                return 46
 
             def create_rectangle(self, *args, **kwargs):
                 self.rectangles.append((args, kwargs))
 
             def create_text(self, *args, **kwargs):
                 self.texts.append((args, kwargs))
+
+            def create_image(self, *args, **kwargs):
+                self.images.append((args, kwargs))
 
         monster = type(
             "Monster",
@@ -8148,29 +8571,49 @@ class CombatModelTests(unittest.TestCase):
         window.model = type(
             "Model", (), {"current_monster": lambda _self: monster}
         )()
-        window._fit_main_actor_name = lambda value, _width: value
+        class Icons:
+            def __init__(self):
+                self.main_boss_sizes = []
+
+            def main_boss_icon(self, size):
+                self.main_boss_sizes.append(size)
+                return object()
+
+            @staticmethod
+            def boss(*_args):
+                raise AssertionError("the main window must use the design Boss icon")
+
+        window.icons = Icons()
+        window._fit_ui_text = lambda value, _width, _role: value
         window._ui_font = lambda _role: None
 
         window._draw_monster_hp()
 
-        self.assertEqual(len(window.monster_hp_canvas.rectangles), 2)
-        track, fill = window.monster_hp_canvas.rectangles
-        self.assertEqual(track[0][:2], (1, 3))
-        self.assertEqual(fill[0][:2], (2, 4))
-        self.assertAlmostEqual(fill[0][2], 248, delta=1)
-        self.assertEqual(len(window.monster_hp_canvas.texts), 1)
-        text_args, text_options = window.monster_hp_canvas.texts[0]
-        self.assertEqual(text_args[:2], (250, 18))
-        self.assertEqual(
-            text_options["text"], "Lv.60   测试 Boss   50 / 100   50.0%"
+        self.assertEqual(len(window.monster_hp_canvas.rectangles), 4)
+        outer_track, track, fill, inner_outline = (
+            window.monster_hp_canvas.rectangles
         )
+        self.assertEqual(outer_track[0][:2], (30, 8))
+        self.assertEqual(track[0][:2], (31, 9))
+        self.assertEqual(fill[0][:2], (32, 10))
+        self.assertAlmostEqual(fill[0][2], 265, delta=1)
+        self.assertEqual(inner_outline[0][:2], (34, 12))
+        self.assertEqual(len(window.monster_hp_canvas.images), 1)
+        self.assertEqual(window.icons.main_boss_sizes, [46.0])
+        self.assertEqual(
+            [options["text"] for _args, options in window.monster_hp_canvas.texts],
+            ["测试 Boss", "50 / 100", "50.0%"],
+        )
+        for text_args, _text_options in window.monster_hp_canvas.texts:
+            self.assertGreaterEqual(text_args[0], outer_track[0][0])
+            self.assertLessEqual(text_args[0], outer_track[0][2])
 
-    def test_two_bosses_render_as_two_stable_full_height_hp_rows(self):
+    def test_boss_area_renders_only_the_current_boss(self):
         class Canvas:
             def __init__(self):
                 self.rectangles = []
                 self.texts = []
-                self.configured = []
+                self.images = []
 
             @staticmethod
             def delete(*_args):
@@ -8180,14 +8623,18 @@ class CombatModelTests(unittest.TestCase):
             def winfo_width():
                 return 500
 
-            def configure(self, **kwargs):
-                self.configured.append(kwargs)
+            @staticmethod
+            def winfo_height():
+                return 46
 
             def create_rectangle(self, *args, **kwargs):
                 self.rectangles.append((args, kwargs))
 
             def create_text(self, *args, **kwargs):
                 self.texts.append((args, kwargs))
+
+            def create_image(self, *args, **kwargs):
+                self.images.append((args, kwargs))
 
         first = MonsterStats(
             MONSTER_ID,
@@ -8207,68 +8654,40 @@ class CombatModelTests(unittest.TestCase):
             max_hp=100,
             observed_max_hp=100,
         )
-        bosses = [first, second]
+        selected = {"boss": first}
         window = object.__new__(DpsWindow)
         window.monster_hp_canvas = Canvas()
-        window.summary = Canvas()
         window.model = type(
             "Model",
             (),
             {
-                "current_bosses": lambda _self: list(bosses),
-                "_monster_rank": lambda _self, monster: monster.boss_rank,
+                "current_monster": lambda _self: selected["boss"],
             },
         )()
-        window._fit_main_actor_name = lambda value, _width: value
+        window.icons = type(
+            "Icons",
+            (),
+            {"main_boss_icon": lambda _self, *_args: object()},
+        )()
+        window._fit_ui_text = lambda value, _width, _role: value
         window._ui_font = lambda _role: None
 
         window._draw_monster_hp()
 
-        self.assertEqual(window.monster_hp_canvas.configured, [{"height": 72}])
-        self.assertEqual(window.summary.configured, [{"height": 112}])
-        self.assertEqual(len(window.monster_hp_canvas.rectangles), 4)
-        self.assertEqual(len(window.monster_hp_canvas.texts), 2)
-        self.assertEqual(
-            [text[0][1] for text in window.monster_hp_canvas.texts], [18, 54]
-        )
         self.assertEqual(
             [text[1]["text"] for text in window.monster_hp_canvas.texts],
-            [
-                "Lv.60   Boss A   50 / 100   50.0%",
-                "Lv.61   Boss B   75 / 100   75.0%",
-            ],
+            ["Boss A", "50 / 100", "50.0%"],
         )
 
-        first.current_hp = 0
-        first.death_confirmed = True
-        second.current_hp = 25
-        window.monster_hp_canvas.rectangles.clear()
-        window.monster_hp_canvas.texts.clear()
-        window.monster_hp_canvas.configured.clear()
-        window.summary.configured.clear()
-
-        window._draw_monster_hp()
-
-        self.assertEqual(window.monster_hp_canvas.configured, [])
-        self.assertEqual(window.summary.configured, [])
-        self.assertEqual(len(window.monster_hp_canvas.rectangles), 3)
-        self.assertEqual(len(window.monster_hp_canvas.texts), 2)
-        self.assertEqual(
-            [text[1]["text"] for text in window.monster_hp_canvas.texts],
-            [
-                "Lv.60   Boss A   0 / 100   0%",
-                "Lv.61   Boss B   25 / 100   25.0%",
-            ],
-        )
-
-        bosses[:] = [second]
+        selected["boss"] = second
         window.monster_hp_canvas.rectangles.clear()
         window.monster_hp_canvas.texts.clear()
         window._draw_monster_hp()
 
-        self.assertEqual(window.monster_hp_canvas.configured, [{"height": 36}])
-        self.assertEqual(window.summary.configured, [{"height": 76}])
-        self.assertEqual(len(window.monster_hp_canvas.texts), 1)
+        self.assertEqual(
+            [text[1]["text"] for text in window.monster_hp_canvas.texts],
+            ["Boss B", "75 / 100", "75.0%"],
+        )
 
     def test_first_believer_forecast_marker_moves_from_barney_to_anxia(self):
         barney = MonsterStats(
@@ -8330,11 +8749,11 @@ class CombatModelTests(unittest.TestCase):
 
         class Canvas:
             def __init__(self):
-                self.configured = []
                 self.rectangles = []
                 self.texts = []
                 self.lines = []
                 self.polygons = []
+                self.images = []
 
             @staticmethod
             def delete(*_args):
@@ -8344,8 +8763,9 @@ class CombatModelTests(unittest.TestCase):
             def winfo_width():
                 return 500
 
-            def configure(self, **kwargs):
-                self.configured.append(kwargs)
+            @staticmethod
+            def winfo_height():
+                return 46
 
             def create_rectangle(self, *args, **kwargs):
                 self.rectangles.append((args, kwargs))
@@ -8358,6 +8778,9 @@ class CombatModelTests(unittest.TestCase):
 
             def create_polygon(self, *args, **kwargs):
                 self.polygons.append((args, kwargs))
+
+            def create_image(self, *args, **kwargs):
+                self.images.append((args, kwargs))
 
         monster = MonsterStats(
             MONSTER_ID,
@@ -8383,43 +8806,45 @@ class CombatModelTests(unittest.TestCase):
         )()
         window = object.__new__(DpsWindow)
         window.monster_hp_canvas = Canvas()
-        window.summary = Canvas()
         window.model = type(
             "Model",
             (),
             {
-                "current_bosses": lambda _self: [monster],
-                "_monster_rank": lambda _self, value: value.boss_rank,
+                "current_monster": lambda _self: monster,
                 "combat_target_id": MONSTER_ID,
                 "active_target_id": MONSTER_ID,
             },
         )()
+        window.icons = type(
+            "Icons",
+            (),
+            {"main_boss_icon": lambda _self, *_args: object()},
+        )()
         window.enrage_prediction = prediction
         window.enrage_prediction_visible = True
-        window._monster_hp_row_count = 1
-        window._monster_hp_prediction_spacing = 0
-        window._fit_main_actor_name = lambda value, _width: value
+        window._fit_ui_text = lambda value, _width, _role: value
         window._ui_font = lambda _role: Font()
 
         window._draw_monster_hp()
 
-        self.assertEqual(window.monster_hp_canvas.configured, [{"height": 44}])
-        self.assertEqual(window.summary.configured, [{"height": 84}])
-        track = window.monster_hp_canvas.rectangles[0][0]
-        label = window.monster_hp_canvas.rectangles[2][0]
-        status = window.monster_hp_canvas.texts[-1][0]
-        self.assertEqual((track[1], track[3]), (11, 41))
-        self.assertEqual((label[1], label[3]), (0, 13))
-        self.assertEqual(status[1], 26)
-        self.assertEqual(status[1], (track[1] + track[3]) // 2)
-        self.assertEqual(len(window.monster_hp_canvas.lines), 1)
-        self.assertEqual(len(window.monster_hp_canvas.polygons), 1)
+        self.assertEqual(len(window.monster_hp_canvas.rectangles), 0)
+        self.assertEqual(
+            [item[0][1] for item in window.monster_hp_canvas.texts[:3]],
+            [31, 31, 31],
+        )
+        self.assertEqual(window.monster_hp_canvas.texts[-1][0][1], 9)
+        self.assertEqual(
+            window.monster_hp_canvas.texts[-1][1]["text"], "⚠ 正常 · +0:24"
+        )
+        self.assertEqual(len(window.monster_hp_canvas.lines), 0)
+        self.assertEqual(len(window.monster_hp_canvas.polygons), 6)
 
-        first_label_width = label[2] - label[0]
         prediction.message = "危险 · -8:08"
         window._draw_monster_hp()
-        second_label = window.monster_hp_canvas.rectangles[-1][0]
-        self.assertEqual(second_label[2] - second_label[0], first_label_width)
+        self.assertEqual(len(window.monster_hp_canvas.polygons), 12)
+        self.assertEqual(
+            window.monster_hp_canvas.texts[-1][1]["text"], "⚠ 危险 · -8:08"
+        )
 
     def test_first_believer_successor_overrides_stale_barney_marker(self):
         stale_barney = MonsterStats(
@@ -8567,8 +8992,28 @@ class CombatModelTests(unittest.TestCase):
         self.assertIn('text="回到主窗口"', sidebar_source)
         self.assertNotIn('text="⌃  收起"', sidebar_source)
         self.assertIn("self._sync_backend_sidebar_status()", source)
-        self.assertIn('("statistics", "analytics", "数据统计", False)', sidebar_source)
-        self.assertIn('("upload", "peak", "巅峰记录", False)', sidebar_source)
+        self.assertIn(
+            '("history", "history", "战斗记录", True, "PVE")',
+            sidebar_source,
+        )
+        self.assertIn(
+            '("statistics", "analytics", "数据洞察", False, "PVE")',
+            sidebar_source,
+        )
+        self.assertIn(
+            '("upload", "peak", "巅峰记录", False, "PVE")',
+            sidebar_source,
+        )
+        self.assertIn(
+            '("kings", "analytics", "诸王战纪", False, "PVP")',
+            sidebar_source,
+        )
+        self.assertIn('PVE_MODE_FOREGROUND = "#74bdff"', source)
+        self.assertIn('PVP_MODE_FOREGROUND = "#ff8299"', source)
+        self.assertNotIn(
+            '("statistics", "analytics", "数据统计", False)',
+            sidebar_source,
+        )
         self.assertNotIn('text="筹备"', source)
         self.assertIn('text="记录每一次战斗"', source)
         self.assertIn('text="让数据说话"', source)
@@ -8729,9 +9174,8 @@ class CombatModelTests(unittest.TestCase):
             )
         ]
         self.assertIn("previous_font_size = self.ui_font_size", save_source)
-        self.assertIn(
-            "if self.ui_font_size != previous_font_size:", save_source
-        )
+        self.assertIn("previous_ui_scale", save_source)
+        self.assertIn("self._refresh_main_scale_layout()", save_source)
 
         window = object.__new__(DpsWindow)
         calls = []
@@ -8977,7 +9421,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn("boss_hits", reduced)
         self.assertIn("boss_max_hit", reduced)
 
-    def test_boss_settings_apply_to_live_columns(self):
+    def test_new_display_settings_apply_to_live_main_window(self):
         class Variable:
             def __init__(self, value):
                 self.value = value
@@ -8987,7 +9431,9 @@ class CombatModelTests(unittest.TestCase):
 
         window = object.__new__(DpsWindow)
         window.ui_font_size = 14
-        window.compact_mode = False
+        window.main_ui_scale = 1.0
+        window.main_row_mask_opacity = 24
+        window.profession_display_metrics = normalize_profession_display_metrics({})
         for name in (
             "settings_font_size_var",
             "settings_opacity_var",
@@ -9010,39 +9456,57 @@ class CombatModelTests(unittest.TestCase):
             "settings_show_effective_healing_var",
             "settings_show_hps_var",
             "settings_show_overheal_rate_var",
+            "settings_show_boss_damage_var",
+            "settings_show_boss_share_var",
+            "settings_show_boss_hits_var",
+            "settings_show_boss_max_hit_var",
         ):
             setattr(window, name, None)
-        window.settings_show_boss_damage_var = Variable(False)
-        window.settings_show_boss_share_var = Variable(True)
-        window.settings_show_boss_hits_var = Variable(False)
-        window.settings_show_boss_max_hit_var = Variable(True)
+        window.settings_audience_metric_var = Variable("dps")
+        window.settings_warrior_metric_var = Variable("dt")
+        window.settings_row_mask_opacity_var = Variable(35)
+        window.settings_ui_scale_var = Variable(125)
+        window.settings_show_boss_hp_var = Variable(False)
+        window.settings_show_combat_time_var = Variable(False)
+        window.settings_show_main_totals_var = Variable(False)
+        window.settings_show_deaths_var = Variable(False)
+        window.settings_show_team_dps_var = Variable(False)
+        window.settings_highlight_self_var = Variable(False)
+        window.settings_show_pvp_button_var = Variable(False)
         window._team_rating_preview_active = lambda: False
         window._sync_team_rating_preview_layout = mock.Mock()
-        window._sync_compact_geometry_width = mock.Mock()
         window._main_minimum_width = lambda: 430
         window.root = mock.Mock()
         window._configure_ui_fonts = mock.Mock()
+        window._refresh_main_scale_layout = mock.Mock()
+        window._sync_main_component_visibility = mock.Mock()
         window._sync_action_buttons = mock.Mock()
         window._draw_main_header = mock.Mock()
         window._draw_main_rows = mock.Mock()
-        window._schedule_main_content_overlay_sync = mock.Mock()
+        window._draw_monster_hp = mock.Mock()
         window._draw_history_participant_header = mock.Mock()
         window._render_history_selection = mock.Mock()
         window._save_preferences = mock.Mock()
 
         window._save_ui_settings()
 
-        self.assertFalse(window.show_boss_damage)
-        self.assertTrue(window.show_boss_share)
-        self.assertFalse(window.show_boss_hits)
-        self.assertTrue(window.show_boss_max_hit)
-        self.assertEqual(window._enabled_boss_metrics(), (
-            "boss_share",
-            "boss_max_hit",
-        ))
+        self.assertEqual(window.profession_display_metrics["1200002"], "dps")
+        self.assertEqual(window.profession_display_metrics["1200006"], "dt")
+        self.assertEqual(window.main_row_mask_opacity, 35)
+        self.assertEqual(window.main_ui_scale, 1.25)
+        self.assertFalse(window.show_boss_hp_bar)
+        self.assertFalse(window.show_combat_time)
+        self.assertFalse(window.show_main_totals)
+        self.assertFalse(window.show_deaths)
+        self.assertFalse(window.show_team_dps)
+        self.assertFalse(window.highlight_self)
+        self.assertFalse(window.show_pvp_button)
+        window._configure_ui_fonts.assert_called_once_with()
+        window._refresh_main_scale_layout.assert_called_once_with()
+        window._sync_main_component_visibility.assert_called_once_with()
         window._save_preferences.assert_called_once_with()
 
-    def test_transparency_overlay_redraws_empty_message_without_black_mask(self):
+    def test_transparent_main_rows_draw_empty_message_without_a_mask(self):
         class Canvas:
             def __init__(self):
                 self.texts = []
@@ -9104,29 +9568,26 @@ class CombatModelTests(unittest.TestCase):
 
         self.assertEqual(
             [options["text"] for _args, options in main_canvas.texts],
-            ["暂无伤害记录"],
+            ["等待战斗数据"],
         )
         self.assertEqual(overlay_canvas.texts, [])
         self.assertEqual(overlay_canvas.rectangles, [])
 
-    def test_opaque_dps_rows_do_not_overlay_total_dps_or_black_background(self):
+    def test_schema_v1_rows_have_no_dps_color_bar_layer(self):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertNotIn("main_content_overlay_dps", source)
-        self.assertNotIn("_draw_main_content_overlay_dps", source)
-        self.assertNotIn("opaque_background", source)
-        self.assertIn(
-            'window.attributes("-alpha", DPS_BAR_COLOR_STRENGTH)', source
-        )
-        self.assertIn("draw_bars=False", source)
-        self.assertIn("opaque_bar_layer=True", source)
-        self.assertIn("if opaque_bar_layer", source)
-        self.assertIn(
-            "else blend_color(BG, color, DPS_BAR_COLOR_STRENGTH)", source
-        )
+        draw_source = source[
+            source.index("    def _draw_main_rows_on_canvas(") : source.index(
+                "    def _draw_retired_main_rows_on_canvas("
+            )
+        ]
+        self.assertIn("del draw_bars, opaque_bar_layer", draw_source)
+        self.assertNotIn("DPS_BAR_COLOR_STRENGTH", draw_source)
+        self.assertNotIn("blend_color(", draw_source)
+        self.assertNotIn("main-progress", draw_source)
 
-    def test_opaque_dps_rows_are_opt_in_and_only_apply_to_dps(self):
+    def test_retired_opaque_dps_option_never_requests_an_overlay(self):
         window = object.__new__(DpsWindow)
         window.window_alpha = 0.8
         window.main_meter_mode = "dps"
@@ -9135,7 +9596,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertFalse(window._main_content_overlay_requested())
 
         window.keep_dps_bars_opaque = True
-        self.assertTrue(window._main_content_overlay_requested())
+        self.assertFalse(window._main_content_overlay_requested())
 
         window.main_meter_mode = "hps"
         self.assertFalse(window._main_content_overlay_requested())
@@ -9188,7 +9649,7 @@ class CombatModelTests(unittest.TestCase):
             clipped_overlay_bounds(40, 60, 500, 300, 48, 150, 0, 160)
         )
 
-    def test_restarting_overlay_sync_cancels_stale_position_callback(self):
+    def test_retired_overlay_sync_does_not_schedule_work(self):
         class Root:
             def __init__(self):
                 self.cancelled = []
@@ -9212,11 +9673,11 @@ class CombatModelTests(unittest.TestCase):
 
         window._schedule_main_content_overlay_sync(restart=True)
 
-        self.assertEqual(window.root.cancelled, ["stale-position"])
-        self.assertEqual(window.root.scheduled[0][0], 16)
-        self.assertEqual(window.main_content_overlay_sync_after_id, "new-position")
+        self.assertEqual(window.root.cancelled, [])
+        self.assertEqual(window.root.scheduled, [])
+        self.assertIsNone(window.main_content_overlay_root_geometry)
 
-    def test_rows_layout_change_hides_stale_overlay_before_redraw(self):
+    def test_rows_layout_change_redraws_without_using_retired_overlay(self):
         class OverlayWindow:
             def __init__(self):
                 self.withdraw_count = 0
@@ -9240,7 +9701,7 @@ class CombatModelTests(unittest.TestCase):
 
         window._main_rows_canvas_configure()
 
-        self.assertEqual(overlay.withdraw_count, 1)
+        self.assertEqual(overlay.withdraw_count, 0)
         self.assertIsNone(window.main_content_overlay_root_geometry)
         window._draw_main_rows.assert_called_once_with()
         window._schedule_main_content_overlay_sync.assert_called_once_with(
@@ -9439,13 +9900,14 @@ class CombatModelTests(unittest.TestCase):
         window._sync_action_buttons.assert_called_once_with()
         window._save_preferences.assert_called_once_with()
 
-    def test_main_and_backend_titlebars_include_independent_pin_buttons(self):
+    def test_main_footer_and_backend_titlebar_use_their_final_controls(self):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
+        dps_window_start = source.index("class DpsWindow:")
         main_source = source[
-            source.index("    def _build_ui(") : source.index(
-                "    def _sync_main_meter_tabs("
+            source.index("    def _build_ui(", dps_window_start) : source.index(
+                "    def _sync_main_component_visibility("
             )
         ]
         backend_source = source[
@@ -9455,6 +9917,11 @@ class CombatModelTests(unittest.TestCase):
         ]
         self.assertIn("self.pin_button = self._main_icon_button(", main_source)
         self.assertIn("self.toggle_topmost", main_source)
+        self.assertIn('actions, "pvp", "PVP（暂未开放）", lambda: None', main_source)
+        self.assertIn("self.pvp_button._disabled = True", main_source)
+        self.assertIn('actions, "settings", "设置", self.show_settings', main_source)
+        self.assertIn('"lock" if self.window_locked else "unlock"', main_source)
+        self.assertIn('actions, "close", "退出程序", self._request_close', main_source)
         self.assertIn(
             "self.history_pin_button = self._titlebar_icon_button(", backend_source
         )
@@ -9500,7 +9967,7 @@ class CombatModelTests(unittest.TestCase):
 
         self.assertTrue(toolbar.hidden)
 
-    def test_transparent_main_overlay_owns_rows_without_black_mask(self):
+    def test_retired_overlay_never_owns_schema_v1_rows(self):
         class Root:
             @staticmethod
             def winfo_exists():
@@ -9565,7 +10032,7 @@ class CombatModelTests(unittest.TestCase):
         window.main_content_overlay_topmost = False
         window._set_window_topmost_noactivate = lambda *_args: True
         window.main_content_overlay_root_geometry = None
-        window._ensure_main_content_overlay = lambda: True
+        window._ensure_main_content_overlay = mock.Mock(return_value=True)
         bounds_calls = []
         place_calls = []
         window._main_content_overlay_layout = lambda: (
@@ -9583,25 +10050,12 @@ class CombatModelTests(unittest.TestCase):
         )
         window._sync_main_content_overlay()
 
-        self.assertEqual(
-            bounds_calls,
-            [(window.main_content_overlay_window, 480, 160, 48, 150)],
-        )
-        self.assertEqual(
-            place_calls,
-            [(window.main_content_overlay_rows, window.rows_canvas, 48, 150)],
-        )
-        self.assertEqual(len(calls), 2)
-        self.assertIs(calls[0][0], window.rows_canvas)
-        self.assertTrue(calls[0][1]["update_scroll_state"])
-        self.assertFalse(calls[0][1]["draw_bars"])
-        self.assertIs(calls[1][0], window.main_content_overlay_rows)
-        self.assertFalse(calls[1][1]["update_scroll_state"])
-        self.assertFalse(calls[1][1]["draw_content"])
-        self.assertTrue(calls[1][1]["opaque_bar_layer"])
-        self.assertNotIn("opaque_background", calls[1][1])
+        window._ensure_main_content_overlay.assert_not_called()
+        self.assertEqual(bounds_calls, [])
+        self.assertEqual(place_calls, [])
+        self.assertEqual(calls, [])
 
-    def test_opaque_row_overlay_failure_restores_normal_translucent_rows(self):
+    def test_retired_overlay_does_not_attempt_fallback_row_redraw(self):
         class Root:
             @staticmethod
             def winfo_exists():
@@ -9624,18 +10078,17 @@ class CombatModelTests(unittest.TestCase):
         window.keep_dps_bars_opaque = True
         window.main_meter_mode = "dps"
         window.rows_canvas = object()
-        window._ensure_main_content_overlay = lambda: False
+        window._ensure_main_content_overlay = mock.Mock(return_value=False)
         window._draw_main_rows_on_canvas = (
             lambda canvas, **options: calls.append((canvas, options))
         )
 
         window._sync_main_content_overlay()
 
-        self.assertEqual(calls, [
-            (window.rows_canvas, {"update_scroll_state": True})
-        ])
+        window._ensure_main_content_overlay.assert_not_called()
+        self.assertEqual(calls, [])
 
-    def test_main_wheel_scrolls_normal_and_compact_dps_lists(self):
+    def test_main_wheel_scrolls_the_single_player_list_by_one_row(self):
         class Canvas:
             def __init__(self):
                 self.positions = []
@@ -9674,21 +10127,17 @@ class CombatModelTests(unittest.TestCase):
         wheel_up = type("Wheel", (), {"delta": 120, "num": "??"})()
 
         self.assertEqual(window._scroll_main(wheel_down), "break")
-        self.assertEqual(window.main_scroll_offset, 32)
-        self.assertAlmostEqual(window.rows_canvas.positions[-1], 32 / 192)
+        self.assertEqual(window.main_scroll_offset, 36)
+        self.assertAlmostEqual(window.rows_canvas.positions[-1], 36 / 192)
         window._scroll_main(wheel_up)
         self.assertEqual(window.main_scroll_offset, 0)
-
-        window.compact_mode = True
-        window.main_scroll_content_height = 112
-        window._scroll_main(wheel_down)
-        self.assertEqual(window.main_scroll_offset, 28)
         self.assertTrue(window.rows_canvas.indicators)
 
-    def test_main_player_rows_are_compact_and_touch_without_a_gap(self):
+    def test_main_player_rows_are_tight_and_touch_without_a_gap(self):
         class Canvas:
             def __init__(self):
                 self.rectangles = []
+                self.images = []
                 self.options = {}
 
             @staticmethod
@@ -9714,9 +10163,8 @@ class CombatModelTests(unittest.TestCase):
             def create_rectangle(self, *args, **kwargs):
                 self.rectangles.append((args, kwargs))
 
-            @staticmethod
-            def create_image(*_args, **_kwargs):
-                return None
+            def create_image(self, *args, **kwargs):
+                self.images.append((args, kwargs))
 
             @staticmethod
             def create_text(*_args, **_kwargs):
@@ -9750,16 +10198,17 @@ class CombatModelTests(unittest.TestCase):
         window._profession_info = lambda _class_id: ("", "#5869c4")
         window._shown_actor_name = lambda actor_id: str(actor_id)
         window._fit_main_actor_name = lambda value, _maximum: value
+        window._fit_ui_text = lambda value, _maximum, _role: value
         window._ui_font = lambda _role: None
 
         window._draw_main_rows()
 
-        first_rect, second_rect = window.rows_canvas.rectangles
-        self.assertEqual(first_rect[0][3], second_rect[0][1])
-        self.assertEqual(second_rect[0][3] - second_rect[0][1], 32)
+        self.assertEqual(window.rows_canvas.rectangles, [])
+        first_icon, second_icon = window.rows_canvas.images
+        self.assertEqual(second_icon[0][1] - first_icon[0][1], 36)
         self.assertEqual(window.rows_canvas.options["yscrollincrement"], 1)
 
-    def test_hps_main_rows_show_effective_hps_and_overheal_without_average(self):
+    def test_hps_main_rows_show_only_effective_hps_and_total_healing(self):
         class Canvas:
             def __init__(self):
                 self.texts = []
@@ -9837,6 +10286,7 @@ class CombatModelTests(unittest.TestCase):
         window._profession_info = lambda _class_id: ("", "#6fe3bd")
         window._shown_actor_name = lambda _actor_id: "治疗者"
         window._fit_main_actor_name = lambda value, _maximum: value
+        window._fit_ui_text = lambda value, _maximum, _role: value
         window._ui_font = lambda _role: None
         canvas = Canvas()
         window.rows_canvas = canvas
@@ -9845,12 +10295,11 @@ class CombatModelTests(unittest.TestCase):
 
         rendered = [options["text"] for _args, options in canvas.texts]
         self.assertIn("治疗者", rendered)
-        self.assertIn("900", rendered)
-        self.assertIn("90", rendered)
-        self.assertIn("25.0%", rendered)
-        self.assertNotIn("25.0%*", rendered)
-        self.assertIn("100.0%", rendered)
-        self.assertNotIn("500ms", rendered)
+        self.assertIn("(900)", rendered)
+        self.assertIn("90/s", rendered)
+        self.assertIn("(0)", rendered)
+        self.assertIn("0/s", rendered)
+        self.assertFalse(any("%" in value for value in rendered))
         self.assertEqual(format_overheal_rate(0.25, partial=True), "25.0%")
         self.assertEqual(format_response_time(1250), "1.25s")
         self.assertIn("明细为已观测部分", healing_coverage_label(
@@ -10063,6 +10512,9 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertLess(columns["performance"], columns["result_left"])
         self.assertLess(columns["result"], columns["operation_left"])
+        self.assertGreaterEqual(
+            columns["right"] - columns["operation_left"], 286
+        )
 
         window.history_visible_fields = set()
         compact_columns = window._history_list_columns(
@@ -13391,18 +13843,20 @@ class CombatModelTests(unittest.TestCase):
                 "current_monster": lambda _self: monster,
             },
         )()
-        window._fit_main_actor_name = lambda value, _width: value
+        window.icons = type(
+            "Icons",
+            (),
+            {"main_boss_icon": lambda _self, *_args: object()},
+        )()
+        window._fit_ui_text = lambda value, _width, _role: value
         window._ui_font = lambda _role: None
 
         window._draw_monster_hp()
 
-        self.assertEqual(len(window.monster_hp_canvas.rectangles), 2)
-        self.assertEqual(len(window.monster_hp_canvas.texts), 1)
-        text_args, text_options = window.monster_hp_canvas.texts[0]
-        self.assertEqual(text_args[:2], (310, 18))
+        self.assertEqual(len(window.monster_hp_canvas.rectangles), 4)
         self.assertEqual(
-            text_options["text"],
-            "Lv.60   测试 Boss   50 / 100   50.0%",
+            [text[1]["text"] for text in window.monster_hp_canvas.texts],
+            ["测试 Boss", "50 / 100", "50.0%"],
         )
 
     def test_healing_summary_reuses_same_second_aggregate_cache(self):
@@ -14695,6 +15149,82 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.member_death_counts[SELF_ID], 1)
         self.assertEqual(model.build_combat_record()["participants"][0]["deaths"], 1)
         self.assertEqual(model.encounter_team_size, 1)
+
+    def test_native_local_actor_rebind_keeps_self_dps_across_three_bosses(self):
+        parser = NetworkPacketParser()
+        model = CombatModel(run_id="three-boss-local-rebind")
+        self_token = "AQAAAOwNKLYHAAAA"
+        actor_ids = [SELF_ID, SELF_ID + 101, SELF_ID + 202]
+        boss_ids = [MONSTER_ID, SECOND_MONSTER_ID, THIRD_MONSTER_ID]
+        expected_damage = [110_000, 220_000, 330_000]
+
+        def dispatch(updates: list[tuple[str, dict]]) -> None:
+            for kind, payload in updates:
+                if kind == "actor_merge":
+                    model.merge_actor(payload)
+                elif kind == "identity":
+                    model.ingest_identity(payload)
+                elif kind == "event":
+                    model.ingest(payload)
+                elif kind == "party":
+                    model.ingest_party(payload)
+                elif kind == "profile":
+                    model.ingest_profile(payload)
+
+        for index, (actor_id, boss_id, amount) in enumerate(
+            zip(actor_ids, boss_ids, expected_damage), start=1
+        ):
+            if index > 1:
+                previous_actor = actor_ids[index - 2]
+                parser.stage_bound_tokens.add(self_token)
+                parser.combat_source_actors.add(previous_actor)
+                model.reset(keep_identity=True, keep_monsters=False)
+
+            model.ingest_profile(
+                {
+                    "entity_id": boss_id,
+                    "entity_type": "Boss",
+                    "boss_rank": 3,
+                }
+            )
+            model.ingest_monster(
+                {
+                    "entity_id": boss_id,
+                    "current_hp": 10_000_000,
+                    "max_hp": 10_000_000,
+                    "filetime_100ns": BASE_FILETIME + index * 10_000,
+                }
+            )
+            updates = parser.process_native_damage(
+                {
+                    "filetime_100ns": BASE_FILETIME + index * 10_000,
+                    "attacker_id": actor_id,
+                    "target_id": boss_id,
+                    "arg4_u64": 8_602_107_000_396,
+                    "raw_damage": amount,
+                    "damage": amount,
+                    "local_player_id": actor_id,
+                }
+            )
+            dispatch(updates)
+
+            if index == 1:
+                parser.self_token = self_token
+                parser.token_actors[self_token] = actor_id
+                parser.actor_tokens[actor_id] = self_token
+
+            rows = model.current_stats()
+            self.assertEqual(model.self_id, actor_id)
+            self.assertEqual([(row.actor_id, row.damage) for row in rows], [(actor_id, amount)])
+            record = model.build_combat_record()
+            self.assertTrue(
+                any(
+                    participant.get("actor_id") == actor_id
+                    and participant.get("is_self") is True
+                    and participant.get("damage") == amount
+                    for participant in record["participants"]
+                )
+            )
 
     def test_token_proven_actor_merge_clears_previous_occupant_rating(self):
         model = CombatModel()
@@ -17677,13 +18207,13 @@ class CombatModelTests(unittest.TestCase):
             '("teammate_gear", "队友装备快照", False)', source
         )
         self.assertIn(
-            '("upload", "peak", "巅峰记录", False)', source
+            '("upload", "peak", "巅峰记录", False, "PVE")', source
         )
         self.assertIn(
-            '("statistics", "analytics", "数据统计", False)', source
+            '("statistics", "analytics", "数据洞察", False, "PVE")', source
         )
         self.assertIn(
-            '("history", "history", "战斗记录", True)', source
+            '("history", "history", "战斗记录", True, "PVE")', source
         )
         window = object.__new__(DpsWindow)
         window.history_meter_mode = "dps"
@@ -18627,6 +19157,615 @@ class CombatModelTests(unittest.TestCase):
             window.history_snapshot_labels["team_dps"].options["text"],
             "108,099",
         )
+
+    def test_private_character_identities_follow_actor_rebind_and_archive(self):
+        model = CombatModel(run_id="upload-identities")
+        self_token = "AQAAAOwNKLYHAAAA"
+        teammate_token = "AQAAABEREREHAAAA"
+        rebound_teammate = TEAMMATE_ID + 200
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party(
+            {
+                "entity_ids": [TEAMMATE_ID],
+                "member_count": 2,
+                "authoritative": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": SELF_ID,
+                "entity_type": "Player",
+                "name": "本人",
+                "user_token": self_token,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": TEAMMATE_ID,
+                "entity_type": "Player",
+                "name": "队友",
+                "user_token": teammate_token,
+            }
+        )
+        model.merge_actor(
+            {
+                "from_actor_id": TEAMMATE_ID,
+                "to_actor_id": rebound_teammate,
+                "user_token": teammate_token,
+                "replace_profile": True,
+            }
+        )
+        model.ingest_profile(
+            {
+                "entity_id": MONSTER_ID,
+                "entity_type": "Boss",
+                "name": "测试首领",
+                "boss_rank": 3,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+        model.ingest(damage(2, rebound_teammate, MONSTER_ID, 200))
+
+        record = model.build_combat_record()
+
+        self.assertEqual(record["self_character_id"], self_token)
+        self.assertEqual(
+            {
+                row["actor_id"]: row["character_id"]
+                for row in record["participant_identities"]
+            },
+            {
+                SELF_ID: self_token,
+                rebound_teammate: teammate_token,
+            },
+        )
+        model.reset(keep_identity=True, archive_current_record=False)
+        self.assertEqual(model.self_character_id, self_token)
+        self.assertEqual(
+            model.actor_character_ids[rebound_teammate], teammate_token
+        )
+        model.reset(keep_identity=False, archive_current_record=False)
+        self.assertEqual(model.self_character_id, "")
+        self.assertEqual(model.actor_character_ids, {})
+
+    def test_upload_state_recovery_and_receipt_milestones(self):
+        recovered = normalize_combat_upload_states(
+            {
+                "version": 1,
+                "records": {
+                    "battle-a": {
+                        "state": "uploading",
+                        "public_mode": "character",
+                        "updated_at": "corrupt",
+                    },
+                },
+            }
+        )
+        self.assertEqual(recovered["battle-a"]["state"], "failed")
+        self.assertEqual(recovered["battle-a"]["public_mode"], "character")
+        self.assertEqual(recovered["battle-a"]["updated_at"], 0.0)
+        self.assertEqual(combat_upload_status_text(recovered["battle-a"]), "上传失败")
+
+        ranked = EncounterUploadResult(
+            True,
+            upload_status="uploaded",
+            statistics_status="included",
+            ranking_status="eligible",
+            rank=17,
+        )
+        included = EncounterUploadResult(
+            True,
+            upload_status="uploaded",
+            statistics_status="included",
+            ranking_status="not_eligible",
+        )
+        ineligible = EncounterUploadResult(
+            True,
+            upload_status="uploaded",
+            statistics_status="not_eligible",
+            ranking_status="not_eligible",
+        )
+        self.assertEqual(encounter_upload_state(ranked), "ranked")
+        self.assertEqual(encounter_upload_state(included), "included")
+        self.assertEqual(encounter_upload_state(ineligible), "ineligible")
+        self.assertEqual(
+            encounter_upload_state(EncounterUploadResult(False)), "failed"
+        )
+        self.assertEqual(
+            combat_upload_status_text({"state": "ranked", "rank": 17}),
+            "已上传",
+        )
+
+    def test_history_hides_upload_action_for_non_victories_and_dummies(self):
+        victory = {
+            "result": "defeated",
+            "completion_confirmed": True,
+            "boss_name": "安西娅",
+            "boss_template_id": 7_100_210,
+        }
+        failed = {**victory, "result": "failed"}
+        damage_dummy = {
+            **victory,
+            "boss_name": "伤害木桩",
+            "boss_template_id": 7_114_223,
+        }
+        healing_dummy = {**victory, "target_filter": "healing_dummy"}
+
+        self.assertTrue(history_upload_action_visible(victory, "pending"))
+        self.assertTrue(history_upload_action_visible(victory, "uploaded"))
+        self.assertFalse(history_upload_action_visible(failed, "pending"))
+        self.assertFalse(history_upload_action_visible(damage_dummy, "pending"))
+        self.assertFalse(history_upload_action_visible(healing_dummy, "pending"))
+        self.assertTrue(history_upload_action_clickable("pending"))
+        self.assertTrue(history_upload_action_clickable("failed"))
+        for state in ("uploading", "uploaded", "included", "ranked", "ineligible"):
+            self.assertFalse(history_upload_action_clickable(state))
+
+    def test_history_upload_payload_uses_archived_character_not_live_character(self):
+        self_token = "AQAAAOwNKLYHAAAA"
+        other_token = "AQAAABEREREHAAAA"
+        record = {
+            "encounter_id": "private-owner-check",
+            "started_at_epoch": 100.0,
+            "ended_at_epoch": 130.0,
+            "duration_seconds": 30.0,
+            "total_damage": 200,
+            "team_size": 1,
+            "archive_reason": "target_defeated",
+            "completion_confirmed": True,
+            "monster": {"name": "测试首领", "template_id": 7_100_208},
+            "participants": [
+                {
+                    "actor_id": SELF_ID,
+                    "name": "旧角色",
+                    "is_self": True,
+                    "damage": 200,
+                }
+            ],
+            "participant_identities": [
+                {"actor_id": SELF_ID, "character_id": self_token}
+            ],
+            "self_character_id": self_token,
+        }
+
+        class Store:
+            @staticmethod
+            def load(_battle_id):
+                return record
+
+        window = object.__new__(DpsWindow)
+        window.history_store = Store()
+        window.history_records = []
+        window.current_character_id = other_token
+        window.current_character_name = "当前角色"
+
+        _record, payload, character_name = window._build_history_upload_payload(
+            "private-owner-check"
+        )
+        self.assertEqual(character_name, "旧角色")
+        self.assertTrue(payload["participants"][0]["is_uploader"])
+        self.assertEqual(
+            payload["participants"][0]["game_character_name"], "旧角色"
+        )
+
+    def test_history_upload_confirmation_does_not_require_profile_setup(self):
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        confirmation_source = source[
+            source.index("    def _show_history_upload_confirmation(") : source.index(
+                "    def _start_history_upload("
+            )
+        ]
+
+        self.assertNotIn("_show_profile_setup_choice", confirmation_source)
+        self.assertNotIn("upload_profile", confirmation_source)
+        self.assertIn('"anonymous"', confirmation_source)
+        self.assertIn('"匿名上传"', confirmation_source)
+        self.assertIn('"用户 ID 显示上传"', confirmation_source)
+        self.assertNotIn("使用上传昵称", confirmation_source)
+
+    def test_history_upload_click_explains_identity_and_legacy_blocks(self):
+        legacy_record = {
+            "encounter_id": "legacy-battle",
+            "archive_reason": "target_defeated",
+            "completion_confirmed": True,
+            "participants": [{"actor_id": SELF_ID, "is_self": True}],
+        }
+        window = object.__new__(DpsWindow)
+        window.history_upload_in_progress = set()
+        window.current_character_id = ""
+        window.history_window = None
+        window._history_record_for_upload = mock.Mock(return_value=legacy_record)
+        window._show_notice = mock.Mock()
+
+        window._show_history_upload_confirmation("legacy-battle")
+
+        notice_args, notice_options = window._show_notice.call_args
+        self.assertEqual(notice_args[0], "无法上传战斗记录")
+        self.assertIn("旧版本生成", notice_args[1])
+        self.assertTrue(callable(notice_options["on_confirm"]))
+
+        window.current_character_id = "AQAAAOwNKLYHAAAA"
+        window.upload_profile = UploadProfile("profile-1", "叨叨")
+        window._build_history_upload_payload = mock.Mock(
+            side_effect=ProfileUploadError("UPLOADER_NOT_IN_ENCOUNTER")
+        )
+        window._show_notice.reset_mock()
+
+        window._show_history_upload_confirmation("legacy-battle")
+
+        notice_args, notice_options = window._show_notice.call_args
+        self.assertEqual(notice_args[0], "无法上传战斗记录")
+        self.assertIn("旧版本生成", notice_args[1])
+        self.assertIn("旧战斗记录不会丢失", notice_args[1])
+        self.assertTrue(callable(notice_options["on_confirm"]))
+
+    def test_encounter_upload_result_updates_local_state_and_profile_label(self):
+        class Label:
+            def __init__(self):
+                self.text = "匿名"
+
+            @staticmethod
+            def winfo_exists():
+                return True
+
+            def cget(self, key):
+                return self.text if key == "text" else ""
+
+            def configure(self, **options):
+                self.text = options.get("text", self.text)
+
+        window = object.__new__(DpsWindow)
+        window.membership_label = Label()
+        window.upload_profile = UploadProfile("profile-1", "叨叨")
+        window._sync_upload_profile_label()
+        self.assertEqual(window.membership_label.text, "叨叨")
+
+        captured = []
+        notices = []
+        window.history_upload_in_progress = {"battle-a"}
+        window.current_character_id = "AQAAAOwNKLYHAAAA"
+        window.history_window = None
+        window._set_combat_upload_state = (
+            lambda battle_id, state, **metadata: captured.append(
+                (battle_id, state, metadata)
+            )
+        )
+        window._show_notice = lambda title, message, **_kwargs: notices.append(
+            (title, message)
+        )
+        result = EncounterUploadResult(
+            True,
+            upload_id="upload-1",
+            encounter_id="encounter-1",
+            upload_status="uploaded",
+            statistics_status="included",
+            ranking_status="eligible",
+            rank=17,
+        )
+        window._handle_encounter_upload_result(
+            {
+                "battle_id": "battle-a",
+                "character_id": window.current_character_id,
+                "public_mode": "nickname",
+                "result": result,
+            }
+        )
+        self.assertNotIn("battle-a", window.history_upload_in_progress)
+        self.assertEqual(captured[0][0:2], ("battle-a", "uploaded"))
+        self.assertEqual(captured[0][2]["rank"], 17)
+        self.assertEqual(notices, [])
+
+    def test_history_upload_runs_off_ui_thread_and_queues_receipt(self):
+        expected = EncounterUploadResult(
+            True,
+            upload_id="upload-queued",
+            encounter_id="encounter-queued",
+            upload_status="uploaded",
+            statistics_status="included",
+            ranking_status="not_eligible",
+        )
+
+        class Licensing:
+            calls = []
+
+            @classmethod
+            def upload_encounter(
+                cls,
+                character_id,
+                encounter,
+                *,
+                public_mode,
+                character_name,
+            ):
+                cls.calls.append(
+                    (
+                        character_id,
+                        encounter,
+                        public_mode,
+                        character_name,
+                    )
+                )
+                return expected
+
+        class ImmediateThread:
+            def __init__(self, *, target, name, daemon):
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+
+            def start(self):
+                self.target()
+
+        window = object.__new__(DpsWindow)
+        window.history_upload_in_progress = set()
+        window.upload_profile = None
+        window.current_character_id = "AQAAAOwNKLYHAAAA"
+        window.pending_upload_battle_id = "battle-a"
+        window.upload_public_mode = "anonymous"
+        window.config = {}
+        window.licensing = Licensing()
+        window.control_messages = queue.Queue()
+        window.history_window = None
+        window._close_history_modal = lambda: None
+        window._build_history_upload_payload = lambda _battle_id: (
+            {},
+            {
+                "client_encounter_id": "battle-a",
+                "participants": [
+                    {
+                        "character_id": window.current_character_id,
+                        "is_uploader": True,
+                    }
+                ],
+            },
+            "夜行者",
+        )
+        states = []
+        window._set_combat_upload_state = (
+            lambda battle_id, state, **metadata: states.append(
+                (battle_id, state, metadata)
+            )
+        )
+        method_globals = window._start_history_upload.__globals__
+        with mock.patch.dict(
+            method_globals,
+            {
+                "save_config": lambda _config: None,
+                "threading": mock.Mock(Thread=ImmediateThread),
+            },
+        ):
+            window._start_history_upload("battle-a", "character")
+
+        self.assertEqual(window.history_upload_in_progress, {"battle-a"})
+        self.assertEqual(states[0][0:2], ("battle-a", "uploading"))
+        self.assertEqual(len(Licensing.calls), 1)
+        character_id, encounter, public_mode, character_name = Licensing.calls[0]
+        self.assertEqual(character_id, window.current_character_id)
+        self.assertEqual(encounter["client_encounter_id"], "battle-a")
+        self.assertTrue(encounter["participants"][0]["is_uploader"])
+        self.assertEqual(public_mode, "character")
+        self.assertEqual(character_name, "夜行者")
+        kind, payload = window.control_messages.get_nowait()
+        self.assertEqual(kind, "encounter_upload_result")
+        self.assertEqual(payload["battle_id"], "battle-a")
+        self.assertEqual(payload["result"], expected)
+
+    def test_profile_modal_uses_shared_page_host(self):
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        modal_source = source[
+            source.index("    def _open_history_modal(") : source.index(
+                "    def _close_history_modal("
+            )
+        ]
+        self.assertIn('getattr(self, "backend_page_host", None)', modal_source)
+        self.assertIn("host = self.history_page_root", modal_source)
+
+    def test_long_profile_nickname_uses_a_font_that_fits_sidebar(self):
+        widths = {
+            "title": 17,
+            "strong": 15,
+            "small": 13,
+            "micro": 11,
+            "sidebar_micro": 9,
+        }
+
+        class Font:
+            def __init__(self, role):
+                self.role = role
+
+            def measure(self, value):
+                return len(str(value)) * widths[self.role]
+
+        class Label:
+            text = "匿名"
+            font = None
+
+            @staticmethod
+            def winfo_exists():
+                return True
+
+            def cget(self, key):
+                return self.text if key == "text" else self.font
+
+            def configure(self, **options):
+                self.text = options.get("text", self.text)
+                self.font = options.get("font", self.font)
+
+        window = object.__new__(DpsWindow)
+        window.membership_label = Label()
+        window.upload_profile = UploadProfile("profile-1", "十二字中文昵称测试长度甲")
+        window._ui_font = lambda role: Font(role)
+
+        window._sync_upload_profile_label()
+
+        self.assertEqual(window.membership_label.text, "十二字中文昵称测试长度甲")
+        self.assertLessEqual(
+            window.membership_label.font.measure(window.membership_label.text),
+            144,
+        )
+
+    def test_sidebar_profile_editor_is_disabled_until_profile_exists(self):
+        window = object.__new__(DpsWindow)
+        window.upload_profile = None
+        window._show_profile_nickname_form = mock.Mock()
+
+        self.assertEqual(window._show_upload_profile_editor(), "break")
+        window._show_profile_nickname_form.assert_not_called()
+
+        window.upload_profile = UploadProfile("profile-1", "叨叨测试")
+        self.assertEqual(window._show_upload_profile_editor(), "break")
+        window._show_profile_nickname_form.assert_called_once_with(rename=True)
+
+    def test_upload_pending_action_uses_the_report_button_style(self):
+        self.assertEqual(
+            DpsWindow._history_inline_action_palette(
+                "upload", upload_state="pending"
+            ),
+            DpsWindow._history_inline_action_palette("report"),
+        )
+        self.assertEqual(
+            DpsWindow._history_inline_action_palette(
+                "upload", hovered=True, upload_state="pending"
+            ),
+            DpsWindow._history_inline_action_palette("report", hovered=True),
+        )
+
+    def test_upload_dialog_resolves_title_from_complete_drill_record(self):
+        record = {
+            "schema_version": 1,
+            "encounter_id": "drill-upload-title",
+            "monster": {
+                "entity_id": 99,
+                "template_id": 7_115_090,
+                "name": "“钻头”",
+                "boss_type": 3,
+            },
+            "targets": [
+                {
+                    "entity_id": 99,
+                    "template_id": 7_115_090,
+                    "name": "“钻头”",
+                    "boss_type": 3,
+                }
+            ],
+            "participants": [],
+        }
+        window = object.__new__(DpsWindow)
+        window.history_records = []
+
+        summary = window._history_upload_display_summary(
+            "drill-upload-title", record
+        )
+
+        self.assertEqual(summary["boss_name"], "钻头")
+        self.assertEqual(window._history_encounter_title(summary), "钻头")
+
+    def test_history_dialogs_use_themed_controls_instead_of_native_popups(self):
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        upload_source = source[
+            source.index("    def _show_history_upload_confirmation(") : source.index(
+                "    def _start_history_upload("
+            )
+        ]
+        uploads_source = source[
+            source.index("    def _show_profile_uploads_dialog(") : source.index(
+                "    def _history_modal_action("
+            )
+        ]
+        modal_source = source[
+            source.index("    def _open_history_modal(") : source.index(
+                "    def _close_history_modal("
+            )
+        ]
+
+        self.assertNotIn("from tkinter import messagebox", source)
+        self.assertNotIn("messagebox.", source)
+        self.assertNotIn("tk.Radiobutton(", source)
+        self.assertIn("ModernChoiceCard(", upload_source)
+        self.assertNotIn("tk.Text(", uploads_source)
+        self.assertIn("ModernScrollbar(", uploads_source)
+        self.assertIn("MODAL_BACKDROP", modal_source)
+        self.assertIn('self.icons.app_logo(22)', modal_source)
+        self.assertIn("self._show_shutdown_error(*shutdown_error)", source)
+
+    def test_confirmation_notices_are_opaque_toplevels_with_readable_type(self):
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        notice_source = source[
+            source.index("    def _show_notice(") : source.index(
+                "    def _close_notice_window("
+            )
+        ]
+
+        self.assertIn("window = tk.Toplevel(owner)", notice_source)
+        self.assertIn('window.attributes("-alpha", 1.0)', notice_source)
+        self.assertIn('font=self._ui_font("dialog_title")', notice_source)
+        self.assertIn('font=self._ui_font("dialog_body")', notice_source)
+        self.assertIn('font=self._ui_font("dialog_button")', notice_source)
+        self.assertIn('icon_name = "power"', notice_source)
+        self.assertNotIn("holder = tk.Frame(anchor", notice_source)
+
+    def test_history_inline_actions_fit_entirely_inside_operation_column(self):
+        widths = MODULE["HISTORY_ACTION_BUTTON_WIDTHS"]
+        gap = MODULE["HISTORY_ACTION_BUTTON_GAP"]
+        panel_width = MODULE["HISTORY_ACTION_PANEL_WIDTH"]
+        action_width = sum(widths.values()) + gap * (len(widths) - 1)
+
+        self.assertEqual(
+            set(widths), {"report", "upload", "favorite", "delete"}
+        )
+        self.assertEqual(widths["upload"], 64)
+        self.assertLess(widths["upload"], widths["report"])
+        self.assertLessEqual(action_width + 10, panel_width)
+
+        class CompactFont:
+            @staticmethod
+            def measure(value):
+                return len(str(value)) * 10
+
+        measure_button = MODULE["history_action_button_width"]
+        pending_width = measure_button(CompactFont(), "upload", "未上传")
+        failed_width = measure_button(CompactFont(), "upload", "上传失败")
+        ranked_width = measure_button(CompactFont(), "upload", "巅峰 #9999")
+        self.assertEqual(pending_width, 64)
+        self.assertGreater(failed_width, pending_width)
+        self.assertGreater(ranked_width, failed_width)
+
+        class LargeFont:
+            @staticmethod
+            def measure(value):
+                return len(str(value)) * 18
+
+        measured_widths = MODULE["history_action_button_widths"](LargeFont())
+        measured_panel = MODULE["history_action_panel_width"](LargeFont())
+        self.assertGreater(measured_widths["upload"], widths["upload"])
+        self.assertEqual(
+            measured_panel,
+            sum(measured_widths.values())
+            + gap * (len(measured_widths) - 1)
+            + 10,
+        )
+
+        source = Path(__file__).with_name("dps_meter.pyw").read_text(
+            encoding="utf-8"
+        )
+        actions_source = source[
+            source.index("    def _draw_history_inline_actions(") : source.index(
+                "    @staticmethod\n    def _history_inline_action_palette("
+            )
+        ]
+        self.assertIn("canvas.create_rectangle(", actions_source)
+        self.assertNotIn("canvas.create_polygon(", actions_source)
+        self.assertIn('"upload": "upload"', actions_source)
+        self.assertIn("history_action_button_width(", actions_source)
+        self.assertIn("HISTORY_ACTION_BUTTON_GAP", actions_source)
 
 
 if __name__ == "__main__":

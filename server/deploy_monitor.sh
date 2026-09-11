@@ -14,6 +14,7 @@ NGINX_FILE=/etc/nginx/conf.d/daodao-domain.conf
 
 for required in \
     dps_monitor_server.py \
+    profile_upload.py \
     runtime_capability.py \
     gmzz-dps-monitor.service \
     daodao-domain.conf \
@@ -34,6 +35,8 @@ install -d -o root -g root -m 0755 "$APP_DIR"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0700 "$DATA_DIR"
 install -o root -g root -m 0644 \
     "$STAGE_DIR/dps_monitor_server.py" "$APP_DIR/dps_monitor_server.py"
+install -o root -g root -m 0644 \
+    "$STAGE_DIR/profile_upload.py" "$APP_DIR/profile_upload.py"
 install -o root -g root -m 0644 \
     "$STAGE_DIR/runtime_capability.py" "$APP_DIR/runtime_capability.py"
 install -o root -g root -m 0644 \
@@ -79,6 +82,10 @@ if [ ! -f "$ENV_FILE" ]; then
         'GMZZ_MONITOR_HOST=127.0.0.1' \
         'GMZZ_MONITOR_PORT=8766' \
         'GMZZ_MONITOR_DB=/var/lib/gmzz-dps-monitor/sessions.sqlite3' \
+        'GMZZ_PROFILE_HMAC_KEY_PATH=/var/lib/gmzz-dps-monitor/profile-character-hmac.key' \
+        'GMZZ_PROFILE_SUPPORTED_BOSSES=' \
+        'GMZZ_PROFILE_SUPPORTED_GAME_VERSIONS=' \
+        'GMZZ_PROFILE_SENSITIVE_WORDS=' \
         'GMZZ_MONITOR_ADMIN_USER=admin' \
         'GMZZ_MONITOR_PARTNER_CARD=' \
         "GMZZ_MONITOR_BUILD_ALLOWLIST=$BUILD_ALLOWLIST_FILE" \
@@ -101,6 +108,7 @@ set_env_value() {
 }
 set_env_value GMZZ_MONITOR_BUILD_ALLOWLIST "$BUILD_ALLOWLIST_FILE"
 set_env_value GMZZ_MONITOR_ENFORCE_BUILD_ALLOWLIST 1
+set_env_value GMZZ_PROFILE_HMAC_KEY_PATH "$DATA_DIR/profile-character-hmac.key"
 set_env_value GMZZ_MONITOR_RUNTIME_PROFILE "$RUNTIME_PROFILE_FILE"
 set_env_value GMZZ_MONITOR_CAPABILITY_SIGNING_KEY_ID "$capability_signing_key_id"
 set_env_value GMZZ_MONITOR_CAPABILITY_SIGNING_PRIVATE_KEY "$CAPABILITY_PRIVATE_KEY_FILE"

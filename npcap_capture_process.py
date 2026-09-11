@@ -2,10 +2,9 @@
 """Passive Npcap capture backend used by the isolated v0.2.2n build.
 
 The backend receives encrypted UDP/KCP traffic from Npcap and decodes only
-inbound server PUSH data.  It never imports a hook module, injects code,
-modifies game memory, calls a game function, or transmits a packet.  Npcap
-cannot expose the per-session RC4 plaintext state, so the one non-Npcap input
-is a query/read-only snapshot of that state from the game process.
+inbound server PUSH data without modifying the game's packet decoder or
+transmitting a packet. Npcap cannot expose the per-session RC4 or Zstd state,
+so those two inputs are copied with query/read-only process access.
 """
 
 from __future__ import annotations
@@ -25,6 +24,11 @@ import npcap_shadow_capture as shadow_capture
 from npcap_key_state import Rc4Anchor, Rc4StateReader, locate_readers
 from npcap_protocol import NpcapProtocolDecoder, application_frame_valid
 from npcap_rc4_decode import Rc4State
+from npcap_zstd_state import (
+    ZstdStateReader,
+    coherent_session_snapshot,
+    locate_zstd_readers,
+)
 from runtime_capability import RuntimeCapability, RuntimeCapabilityError
 
 
@@ -37,9 +41,17 @@ PCAP_BUFFER_BYTES = 32 * 1024 * 1024
 BATCH_INTERVAL_SECONDS = 0.02
 BATCH_RECORD_LIMIT = 256
 ALIGNMENT_VALID_PUSHES = 3
-ALIGNMENT_RETRY_SECONDS = 1.0
+# Sparse scene/heartbeat traffic may need several seconds to provide the three
+# consecutive PUSH records used to prove an RC4 boundary.  Refreshing the
+# snapshot every second discarded that useful buffer and repeatedly rescanned
+# game memory.  Alignment still completes immediately once validation passes;
+# this value only controls how long an unproven anchor is retained.
+ALIGNMENT_RETRY_SECONDS = 4.0
 KCP_GAP_WAIT_SECONDS = 1.25
 FLOW_SWITCH_WAIT_SECONDS = 2.0
+PROTOCOL_STALL_MIN_PUSHES = 64
+PROTOCOL_STALL_SECONDS = 8.0
+SCENE_TRANSITION_RELOCATE_DELAY_SECONDS = 0.25
 MAX_FLOW_SEGMENTS = 16_384
 MAX_FLOWS = 16
 
@@ -264,6 +276,7 @@ class DecryptedPush:
     sequence: int
     timestamp_epoch: float
     plaintext: bytes
+    after_anchor: bool
 
 
 class PassiveRc4Reassembler:
@@ -299,6 +312,7 @@ class PassiveRc4Reassembler:
         self.active_flow: tuple[int, str, int, int] | None = None
         self.state: Rc4State | None = None
         self.next_sequence: int | None = None
+        self.alignment_boundary: int | None = None
         self.gap_started_monotonic: float | None = None
         self.alignment_started_monotonic: float | None = None
         self.counters: Counter[str] = Counter()
@@ -316,21 +330,28 @@ class PassiveRc4Reassembler:
         self.active_flow = None
         self.state = None
         self.next_sequence = None
+        self.alignment_boundary = None
         self.gap_started_monotonic = None
         self.alignment_started_monotonic = (
             time.monotonic() if now is None else float(now)
         )
         self.counters["rc4_anchors"] += 1
 
-    def invalidate(self) -> None:
+    def invalidate(self, *, clear_history: bool = False) -> None:
         if self.aligned:
             self.counters["stream_invalidations"] += 1
         self.anchor = None
         self.active_flow = None
         self.state = None
         self.next_sequence = None
+        self.alignment_boundary = None
         self.gap_started_monotonic = None
         self.alignment_started_monotonic = None
+        if clear_history:
+            self.flows.clear()
+            self.last_seen_monotonic.clear()
+            self.last_delivered.clear()
+            self.counters["connection_history_resets"] += 1
 
     def _flow_segments(
         self, flow: tuple[int, str, int, int]
@@ -460,23 +481,13 @@ class PassiveRc4Reassembler:
         sequence = boundary
         while sequence in values and sequence > delivered:
             plaintext = backward.backward(values[sequence].ciphertext)
-            if not application_frame_valid(plaintext):
-                break
             decoded[sequence] = plaintext
             sequence -= 1
 
         forward = anchor.decrypt.clone()
         sequence = boundary + 1
         while sequence in values:
-            trial = forward.clone()
-            plaintext = trial.forward(values[sequence].ciphertext)
-            # Alignment already proved the first run.  Every observed game
-            # PUSH in validated sessions is one complete Doraemon frame; an
-            # invalid later PUSH means the RC4 object/connection changed.
-            if not application_frame_valid(plaintext):
-                self.counters["plaintext_validation_failures"] += 1
-                break
-            forward = trial
+            plaintext = forward.forward(values[sequence].ciphertext)
             decoded[sequence] = plaintext
             sequence += 1
 
@@ -486,6 +497,7 @@ class PassiveRc4Reassembler:
         self.active_flow = flow
         self.state = forward
         self.next_sequence = sequence
+        self.alignment_boundary = boundary
         self.gap_started_monotonic = None
         self.counters["rc4_alignments"] += 1
         output = [
@@ -494,6 +506,7 @@ class PassiveRc4Reassembler:
                 sequence=item,
                 timestamp_epoch=values[item].timestamp_epoch,
                 plaintext=decoded[item],
+                after_anchor=item > boundary,
             )
             for item in sorted(decoded)
             if item > delivered
@@ -513,16 +526,13 @@ class PassiveRc4Reassembler:
         while self.next_sequence in values:
             segment = values[self.next_sequence]
             plaintext = self.state.forward(segment.ciphertext)
-            if not application_frame_valid(plaintext):
-                self.counters["plaintext_validation_failures"] += 1
-                self.invalidate()
-                break
             result.append(
                 DecryptedPush(
                     flow=segment.flow,
                     sequence=segment.sequence,
                     timestamp_epoch=segment.timestamp_epoch,
                     plaintext=plaintext,
+                    after_anchor=True,
                 )
             )
             self.last_delivered[segment.flow] = segment.sequence
@@ -580,6 +590,21 @@ class PassiveRc4Reassembler:
         monotonic_now = time.monotonic() if now is None else float(now)
         started = self.alignment_started_monotonic or monotonic_now
         return monotonic_now - started >= ALIGNMENT_RETRY_SECONDS
+
+
+def _protocol_stream_stalled(
+    *,
+    aligned: bool,
+    pushes_without_frame: int,
+    last_frame_monotonic: float,
+    now: float,
+) -> bool:
+    return bool(
+        aligned
+        and int(pushes_without_frame) >= PROTOCOL_STALL_MIN_PUSHES
+        and float(now) - float(last_frame_monotonic)
+        >= PROTOCOL_STALL_SECONDS
+    )
 
 
 class PcapStat(ctypes.Structure):
@@ -746,17 +771,102 @@ def _emit_batch(
     return True
 
 
-def _locate_reader(pid: int) -> tuple[Rc4StateReader | None, dict[str, object]]:
-    readers, diagnostics = locate_readers(pid)
-    reader = readers[0] if readers else None
-    for extra in readers[1:]:
-        extra.close()
-    return reader, {
-        "regions_read": diagnostics.regions_read,
-        "bytes_read": diagnostics.bytes_read,
-        "pointer_hits": diagnostics.pointer_hits,
-        "elapsed_seconds": diagnostics.elapsed_seconds,
+@dataclass
+class SessionStateReader:
+    rc4: Rc4StateReader
+    zstd: ZstdStateReader
+
+    @property
+    def cryptor_address(self) -> int:
+        return self.rc4.cryptor_address
+
+    def close(self) -> None:
+        self.rc4.close()
+        self.zstd.close()
+
+
+def _close_state_readers(readers: Iterable[SessionStateReader]) -> None:
+    for reader in readers:
+        reader.close()
+
+
+def _rc4_anchor_changed(before: Rc4Anchor, after: Rc4Anchor) -> bool:
+    first = before.decrypt
+    second = after.decrypt
+    return bool(
+        first.x != second.x
+        or first.y != second.y
+        or first.s != second.s
+    )
+
+
+def _prioritize_active_state_readers(
+    readers: list[SessionStateReader],
+) -> tuple[list[SessionStateReader], int]:
+    """Move candidates that advanced during discovery ahead of stale peers."""
+    active: list[SessionStateReader] = []
+    unchanged: list[SessionStateReader] = []
+    for reader in readers:
+        initial = getattr(reader.rc4, "initial_anchor", None)
+        try:
+            current = reader.rc4.snapshot()
+        except (OSError, RuntimeError, ValueError):
+            unchanged.append(reader)
+            continue
+        if initial is not None and _rc4_anchor_changed(initial, current):
+            active.append(reader)
+        else:
+            unchanged.append(reader)
+    return active + unchanged, len(active)
+
+
+def _locate_state_readers(
+    pid: int,
+) -> tuple[list[SessionStateReader], dict[str, object]]:
+    rc4_readers, rc4_diagnostic = locate_readers(pid)
+    try:
+        zstd_readers, zstd_diagnostic = locate_zstd_readers(
+            pid, (reader.cryptor_address for reader in rc4_readers)
+        )
+    except Exception:
+        for reader in rc4_readers:
+            reader.close()
+        raise
+
+    pairs = []
+    for rc4_reader in rc4_readers:
+        zstd_reader = zstd_readers.pop(rc4_reader.cryptor_address, None)
+        if zstd_reader is None:
+            rc4_reader.close()
+            continue
+        pairs.append(SessionStateReader(rc4_reader, zstd_reader))
+    for zstd_reader in zstd_readers.values():
+        zstd_reader.close()
+    pairs, active_candidates = _prioritize_active_state_readers(pairs)
+    return pairs, {
+        "rc4_regions_read": rc4_diagnostic.regions_read,
+        "rc4_bytes_read": rc4_diagnostic.bytes_read,
+        "rc4_pointer_hits": rc4_diagnostic.pointer_hits,
+        "rc4_elapsed_seconds": rc4_diagnostic.elapsed_seconds,
+        "zstd_regions_read": zstd_diagnostic.regions_read,
+        "zstd_bytes_read": zstd_diagnostic.bytes_read,
+        "zstd_pointer_hits": zstd_diagnostic.pointer_hits,
+        "zstd_elapsed_seconds": zstd_diagnostic.elapsed_seconds,
+        "rc4_candidates": len(rc4_readers),
+        "paired_candidates": len(pairs),
+        "active_candidates": active_candidates,
     }
+
+
+def _install_state_snapshot(
+    reader: SessionStateReader,
+    reassembler: PassiveRc4Reassembler,
+    decoder: NpcapProtocolDecoder,
+    now: float | None = None,
+) -> None:
+    anchor, snapshot = coherent_session_snapshot(reader.rc4, reader.zstd)
+    decoder.install_zstd_snapshot(snapshot)
+    reassembler.install_anchor(anchor, now)
 
 
 def _session(
@@ -788,7 +898,8 @@ def _session(
             f"pcap_open_live failed: {shadow_capture._decode_native(errbuf.value)}"
         )
 
-    reader: Rc4StateReader | None = None
+    state_readers: list[SessionStateReader] = []
+    state_reader_index = 0
     try:
         _configure_pcap(wpcap, handle)
         _install_bpf(wpcap, handle, bpf)
@@ -804,13 +915,13 @@ def _session(
                 "npcap_capture_active": True,
             },
         )
-        reader, locate_diagnostic = _locate_reader(pid)
-        if reader is None:
+        state_readers, locate_diagnostic = _locate_state_readers(pid)
+        if not state_readers:
             _put(
                 output_queue,
                 "capture_error",
                 {
-                    "stage": "npcap_rc4_unavailable",
+                    "stage": "npcap_stream_state_unavailable",
                     "details": "未能读取当前连接的解密状态，将自动重试。",
                     "capture_backend": "npcap",
                     **locate_diagnostic,
@@ -820,9 +931,29 @@ def _session(
 
         reassembler = PassiveRc4Reassembler()
         decoder = NpcapProtocolDecoder()
-        reassembler.install_anchor(reader.snapshot())
+        installed = False
+        for state_reader_index, state_reader in enumerate(state_readers):
+            try:
+                _install_state_snapshot(state_reader, reassembler, decoder)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            installed = True
+            break
+        if not installed:
+            _put(
+                output_queue,
+                "capture_error",
+                {
+                    "stage": "npcap_stream_snapshot_unavailable",
+                    "details": "Unable to synchronize the current connection; retrying.",
+                    "capture_backend": "npcap",
+                    **locate_diagnostic,
+                },
+            )
+            return "retry"
         counters: Counter[str] = Counter()
         counters["server_requests_added"] = 0
+        counters["stream_state_candidates"] = len(state_readers)
         pending_records: list[dict] = []
         pending_gaps: list[dict] = []
         batch_id = 0
@@ -835,6 +966,9 @@ def _session(
         last_pcap_dropped = 0
         pcap_diagnostic: dict[str, object] = {"available": False}
         next_pcap_stats = time.monotonic()
+        last_protocol_frame = time.monotonic()
+        pushes_without_protocol_frame = 0
+        scene_transition_relocate_at: float | None = None
 
         _put(
             output_queue,
@@ -858,6 +992,7 @@ def _session(
                 "npcap_local_ip": local_ip,
                 "npcap_game_ports": ports,
                 "rc4_read_mode": "query_and_read_only",
+                "zstd_read_mode": "query_and_read_only",
                 "server_requests_added": 0,
                 "rc4_locator": locate_diagnostic,
             },
@@ -865,6 +1000,8 @@ def _session(
 
         while not _should_stop(stop_event, watchdog, runtime_expiry):
             now = time.monotonic()
+            protocol_state_resync = False
+
             header_ptr = ctypes.POINTER(shadow_capture.PcapPacketHeader)()
             data_ptr = ctypes.POINTER(ctypes.c_ubyte)()
             status = wpcap.pcap_next_ex(
@@ -917,8 +1054,24 @@ def _session(
                                     udp.payload[offset : offset + length]
                                 ),
                             )
+                            was_aligned = reassembler.aligned
                             decrypted = reassembler.add(push, now)
+                            if not was_aligned and reassembler.aligned:
+                                counters["stream_state_alignments"] += 1
+                                if len(state_readers) > 1:
+                                    selected = state_readers[state_reader_index]
+                                    _close_state_readers(
+                                        reader
+                                        for index, reader in enumerate(state_readers)
+                                        if index != state_reader_index
+                                    )
+                                    state_readers = [selected]
+                                    state_reader_index = 0
                             for value in decrypted:
+                                if not value.after_anchor:
+                                    counters["pre_snapshot_pushes_skipped"] += 1
+                                    continue
+                                frames_before = decoder.diagnostics.doraemon_frames
                                 try:
                                     records = decoder.feed_push(
                                         value.plaintext,
@@ -931,8 +1084,33 @@ def _session(
                                     decoder.reset_transport()
                                     data_incomplete = True
                                     next_anchor_retry = now
+                                    protocol_state_resync = True
+                                    break
+                                if (
+                                    decoder.diagnostics.doraemon_frames
+                                    > frames_before
+                                ):
+                                    last_protocol_frame = now
+                                    pushes_without_protocol_frame = 0
+                                else:
+                                    pushes_without_protocol_frame += 1
+                                if decoder.consume_state_resync_request():
+                                    counters["protocol_state_resyncs"] += 1
+                                    reassembler.invalidate()
+                                    decoder.reset_transport()
+                                    data_incomplete = True
+                                    next_anchor_retry = now
+                                    protocol_state_resync = True
                                     break
                                 for record in records:
+                                    if (
+                                        record.get("method")
+                                        == "OnMsgBeforeEnterNewSpace"
+                                    ):
+                                        scene_transition_relocate_at = (
+                                            now
+                                            + SCENE_TRANSITION_RELOCATE_DELAY_SECONDS
+                                        )
                                     if record.get("method") in {
                                         "RetCommonCombatStatisticsByTeam",
                                         "OnMsgSettlementCombatStatistics",
@@ -943,8 +1121,36 @@ def _session(
                                             int(record.get("filetime_100ns", 0) or 0),
                                         )
                                     pending_records.append(record)
+                            if protocol_state_resync:
+                                break
 
             now = time.monotonic()
+            protocol_stalled = _protocol_stream_stalled(
+                aligned=reassembler.aligned,
+                pushes_without_frame=pushes_without_protocol_frame,
+                last_frame_monotonic=last_protocol_frame,
+                now=now,
+            )
+            scene_relocate_due = bool(
+                scene_transition_relocate_at is not None
+                and now >= scene_transition_relocate_at
+            )
+            if scene_relocate_due or protocol_stalled:
+                if scene_relocate_due:
+                    counters["scene_transition_state_refreshes"] += 1
+                if protocol_stalled:
+                    counters["protocol_stall_state_refreshes"] += 1
+                    data_incomplete = True
+                _close_state_readers(state_readers)
+                state_readers = []
+                state_reader_index = 0
+                reassembler.invalidate(clear_history=True)
+                decoder.reset_transport()
+                pushes_without_protocol_frame = 0
+                last_protocol_frame = now
+                scene_transition_relocate_at = None
+                next_anchor_retry = now
+
             gap = reassembler.pending_gap(now)
             if reassembler.needs_resync(now):
                 if gap is not None:
@@ -962,31 +1168,58 @@ def _session(
                 data_incomplete = True
                 decoder.reset_transport()
                 try:
-                    reassembler.install_anchor(reader.snapshot(), now)
+                    if not state_readers:
+                        raise RuntimeError("connection state is unavailable")
+                    _install_state_snapshot(
+                        state_readers[state_reader_index],
+                        reassembler,
+                        decoder,
+                        now,
+                    )
+                    pushes_without_protocol_frame = 0
+                    last_protocol_frame = now
                     next_anchor_retry = now + ALIGNMENT_RETRY_SECONDS
                 except (OSError, RuntimeError, ValueError):
-                    reader.close()
-                    reader = None
                     reassembler.invalidate()
+                    decoder.reset_transport()
+                    state_reader_index += 1
                     next_anchor_retry = now
 
             if (
                 (reassembler.anchor is None or reassembler.alignment_stale(now))
                 and now >= next_anchor_retry
             ):
+                stale_alignment = reassembler.alignment_stale(now)
                 try:
-                    if reader is None:
-                        reader, locate_diagnostic = _locate_reader(pid)
-                        if reader is None:
-                            raise RuntimeError("RC4 state is unavailable")
-                    reassembler.install_anchor(reader.snapshot(), now)
-                    decoder.reset_transport()
+                    if stale_alignment:
+                        state_reader_index += 1
+                        counters["stream_state_candidate_rotations"] += 1
+                    if state_reader_index >= len(state_readers):
+                        _close_state_readers(state_readers)
+                        state_readers, locate_diagnostic = (
+                            _locate_state_readers(pid)
+                        )
+                        state_reader_index = 0
+                        counters["stream_state_locator_refreshes"] += 1
+                        counters["stream_state_candidates"] = len(
+                            state_readers
+                        )
+                    if not state_readers:
+                        raise RuntimeError("connection state is unavailable")
+                    _install_state_snapshot(
+                        state_readers[state_reader_index],
+                        reassembler,
+                        decoder,
+                        now,
+                    )
+                    pushes_without_protocol_frame = 0
+                    last_protocol_frame = now
                     counters["rc4_reanchors"] += 1
                 except (OSError, RuntimeError, ValueError):
                     counters["rc4_reanchor_errors"] += 1
-                    if reader is not None:
-                        reader.close()
-                    reader = None
+                    reassembler.invalidate()
+                    decoder.reset_transport()
+                    state_reader_index += 1
                 next_anchor_retry = now + ALIGNMENT_RETRY_SECONDS
 
             if now >= next_endpoint_refresh:
@@ -1065,6 +1298,27 @@ def _session(
                 counters["protocol_zstd_errors"] = (
                     decoder.diagnostics.zstd_errors
                 )
+                counters["protocol_native_zstd_restores"] = (
+                    decoder.diagnostics.native_zstd_restores
+                )
+                counters["protocol_native_zstd_errors"] = (
+                    decoder.diagnostics.native_zstd_errors
+                )
+                counters["protocol_native_zstd_validations"] = (
+                    decoder.diagnostics.native_zstd_validations
+                )
+                counters["protocol_native_zstd_rejections"] = (
+                    decoder.diagnostics.native_zstd_rejections
+                )
+                counters["protocol_zstd_candidate_attempts"] = (
+                    decoder.diagnostics.zstd_candidate_attempts
+                )
+                counters["protocol_zstd_candidate_rejections"] = (
+                    decoder.diagnostics.zstd_candidate_rejections
+                )
+                counters["protocol_zstd_candidate_validations"] = (
+                    decoder.diagnostics.zstd_candidate_validations
+                )
                 counters["protocol_unknown_methods"] = (
                     decoder.diagnostics.unknown_method_messages
                 )
@@ -1088,8 +1342,7 @@ def _session(
 
         return "stopped"
     finally:
-        if reader is not None:
-            reader.close()
+        _close_state_readers(state_readers)
         wpcap.pcap_close(handle)
 
 

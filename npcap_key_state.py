@@ -32,6 +32,13 @@ MEM_PRIVATE = 0x20000
 WRITABLE_PAGE_TYPES = frozenset({0x04, 0x08, 0x40, 0x80})
 MAX_USER_ADDRESS = 0x00007FFFFFFF0000
 SCAN_CHUNK_BYTES = 8 * 1024 * 1024
+MAX_CRYPTOR_CANDIDATES = 8
+# A reconnected client can retain an old cipher in a much earlier allocator
+# band than the live one.  Continue through the normal scan budget after the
+# first hit so the caller can validate every plausible connection against
+# actual Npcap traffic.
+POST_MATCH_SCAN_BYTES = 2 * 1024 * 1024 * 1024
+SMALL_CONNECTION_REGION_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -91,7 +98,10 @@ class Rc4StateReader:
                 "OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ)"
             )
         try:
-            self.snapshot()
+            # Retain the validation sample.  The Npcap backend compares it
+            # after the paired Zstd scan; a live connection normally advances
+            # while stale reconnect remnants remain byte-for-byte unchanged.
+            self.initial_anchor = self.snapshot()
         except Exception:
             self.close()
             raise
@@ -156,12 +166,26 @@ def _memory_regions(process) -> Iterable[proc_inspect.MEMORY_BASIC_INFORMATION]:
         cursor = max(cursor + 0x1000, base + size)
 
 
+def _region_priority(base: int, size: int) -> tuple[bool, int, int, int]:
+    """Prioritize connection-sized heaps independently of their VA band."""
+    distance = min(abs(int(base) - 0x35000000), abs(int(base) - 0x10D000000))
+    small = int(size) <= SMALL_CONNECTION_REGION_BYTES
+    return (
+        not small,
+        int(size) if small else 0,
+        distance,
+        int(base),
+    )
+
+
 def _candidate_addresses(
     process,
     owner_pointer: int,
     *,
     module_base: int,
     maximum_scan_bytes: int,
+    maximum_candidates: int,
+    post_match_scan_bytes: int,
 ) -> tuple[list[int], LocateDiagnostics]:
     started = time.monotonic()
     needle = struct.pack("<Q", owner_pointer)
@@ -186,8 +210,7 @@ def _candidate_addresses(
         # regions first.  The two distance anchors cover both allocation bands
         # observed across clean game launches without making either address a
         # correctness requirement.
-        distance = min(abs(base - 0x35000000), abs(base - 0x10D000000))
-        regions.append((size > 16 * 1024 * 1024, distance, base, size))
+        regions.append((_region_priority(base, size), base, size))
     regions.sort()
 
     candidates: list[int] = []
@@ -195,7 +218,8 @@ def _candidate_addresses(
     bytes_read = 0
     regions_read = 0
     stop = False
-    for _not_preferred, _distance, base, size in regions:
+    first_match_bytes: int | None = None
+    for _priority, base, size in regions:
         if stop:
             break
         offset = 0
@@ -257,13 +281,22 @@ def _candidate_addresses(
                             pass
                         else:
                             candidates.append(address)
-                            stop = True
-                            break
+                            if first_match_bytes is None:
+                                first_match_bytes = bytes_read
+                            if len(candidates) >= maximum_candidates:
+                                stop = True
+                                break
                     position = haystack.find(needle, position + 1)
                 overlap = haystack[-(CRYPTOR_POINTERS.size - 1) :]
             else:
                 overlap = b""
             offset += length
+            if (
+                first_match_bytes is not None
+                and bytes_read - first_match_bytes >= post_match_scan_bytes
+            ):
+                stop = True
+                break
         regions_read += 1
     diagnostics = LocateDiagnostics(
         regions_read=regions_read,
@@ -280,6 +313,8 @@ def locate_readers(
     module_name: str = GAME_MODULE,
     owner_vtable_rva: int = RC4_CRYPTOR_OWNER_VTABLE_RVA,
     maximum_scan_bytes: int = 2 * 1024 * 1024 * 1024,
+    maximum_candidates: int = MAX_CRYPTOR_CANDIDATES,
+    post_match_scan_bytes: int = POST_MATCH_SCAN_BYTES,
 ) -> tuple[list[Rc4StateReader], LocateDiagnostics]:
     module_base, _module_size, _path = proc_inspect.find_module(
         int(pid), module_name
@@ -295,6 +330,8 @@ def locate_readers(
             owner_pointer,
             module_base=module_base,
             maximum_scan_bytes=max(64 * 1024 * 1024, int(maximum_scan_bytes)),
+            maximum_candidates=max(1, int(maximum_candidates)),
+            post_match_scan_bytes=max(0, int(post_match_scan_bytes)),
         )
     finally:
         proc_inspect.kernel32.CloseHandle(process)

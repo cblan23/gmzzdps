@@ -22,6 +22,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
+from profile_upload import (
+    PROFILE_ERROR_MESSAGES,
+    ProfileUploadError,
+    ProfileUploadStore,
+    initialize_profile_schema,
+)
 from runtime_capability import (
     SIGNING_KEY_ID_PATTERN,
     RuntimeCapabilityError,
@@ -41,6 +47,7 @@ ADMIN_PASSWORD = os.environ.get("GMZZ_MONITOR_ADMIN_PASSWORD", "")
 HEARTBEAT_INTERVAL = 30
 ONLINE_WINDOW = 75
 MAX_BODY_BYTES = 512 * 1024
+MAX_UPLOAD_BODY_BYTES = 16 * 1024 * 1024
 CLIENT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 BUILD_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 TRIAL_REQUEST_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -77,6 +84,9 @@ SQLITE_BUSY_RETRY_DELAY_SECONDS = 0.05
 SQLITE_WRITE_QUEUE_TIMEOUT_SECONDS = 5.0
 _DATABASE_WRITE_LOCK = threading.RLock()
 _COMBAT_CLOCK_CLEANUP_STATE: tuple[str, float] | None = None
+PROFILE_HMAC_KEY_PATH = os.environ.get("GMZZ_PROFILE_HMAC_KEY_PATH", "").strip()
+_PROFILE_HMAC_KEY_LOCK = threading.Lock()
+_PROFILE_HMAC_KEY_CACHE: tuple[str, bytes] | None = None
 DIAGNOSTIC_TOOL_NAME = "叨叨诡秘问题检测工具"
 UPDATE_METADATA_PATH = Path(
     os.environ.get(
@@ -177,6 +187,84 @@ def trial_next_available_at(timestamp: float) -> float:
 
 def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _profile_hmac_key_path() -> Path:
+    configured = PROFILE_HMAC_KEY_PATH or os.environ.get(
+        "GMZZ_PROFILE_HMAC_KEY_PATH", ""
+    ).strip()
+    return (
+        Path(configured)
+        if configured
+        else DATABASE_PATH.with_name("profile-character-hmac.key")
+    )
+
+
+def profile_hmac_key() -> bytes:
+    """Load the persistent server-only key used to pseudonymize characters."""
+
+    global _PROFILE_HMAC_KEY_CACHE
+    environment_secret = os.environ.get("GMZZ_PROFILE_HMAC_SECRET", "")
+    cache_key = "env:" + hashlib.sha256(
+        environment_secret.encode("utf-8")
+    ).hexdigest() if environment_secret else str(_profile_hmac_key_path().absolute())
+    cached = _PROFILE_HMAC_KEY_CACHE
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+    with _PROFILE_HMAC_KEY_LOCK:
+        cached = _PROFILE_HMAC_KEY_CACHE
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        if environment_secret:
+            key = environment_secret.encode("utf-8")
+            if len(key) < 32:
+                raise RuntimeError("GMZZ_PROFILE_HMAC_SECRET must be at least 32 bytes")
+        else:
+            path = _profile_hmac_key_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                key = path.read_bytes()
+            except FileNotFoundError:
+                key = secrets.token_bytes(32)
+                try:
+                    with path.open("xb") as handle:
+                        handle.write(key)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except FileExistsError:
+                    key = path.read_bytes()
+            if len(key) < 32:
+                raise RuntimeError("profile character HMAC key is invalid")
+            if os.name != "nt":
+                os.chmod(path, 0o600)
+        _PROFILE_HMAC_KEY_CACHE = (cache_key, key)
+        return key
+
+
+def profile_upload_store() -> ProfileUploadStore:
+    sensitive_words = tuple(
+        value.strip()
+        for value in os.environ.get("GMZZ_PROFILE_SENSITIVE_WORDS", "").split(",")
+        if value.strip()
+    )
+    supported_bosses = tuple(
+        int(value)
+        for value in os.environ.get("GMZZ_PROFILE_SUPPORTED_BOSSES", "").split(",")
+        if value.strip().isdigit()
+    )
+    supported_game_versions = tuple(
+        value.strip()
+        for value in os.environ.get(
+            "GMZZ_PROFILE_SUPPORTED_GAME_VERSIONS", ""
+        ).split(",")
+        if value.strip()
+    )
+    return ProfileUploadStore(
+        profile_hmac_key(),
+        sensitive_words=sensitive_words,
+        supported_boss_template_ids=supported_bosses,
+        supported_game_versions=supported_game_versions,
+    )
 
 
 def clean_text(value: object, limit: int) -> str:
@@ -939,6 +1027,10 @@ def initialize_database() -> None:
                 ON combat_clock_clients_v2(clock_id, last_seen DESC);
             """
         )
+        initialize_profile_schema(connection)
+        # Create or validate the persistent pseudonymization key before the
+        # service accepts any identity or upload request.
+        profile_hmac_key()
         session_columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
@@ -1286,12 +1378,12 @@ class MonitorHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
-    def _body(self) -> dict | None:
+    def _body(self, *, maximum_bytes: int = MAX_BODY_BYTES) -> dict | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             return None
-        if length <= 0 or length > MAX_BODY_BYTES:
+        if length <= 0 or length > max(1, int(maximum_bytes)):
             return None
         try:
             value = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1348,6 +1440,69 @@ class MonitorHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/") or "/"
         if path == "/api/v1/dps/health":
             self._json(HTTPStatus.OK, {"ok": True, "server_time": now_epoch()})
+            return
+        if path == "/api/v1/dps/public/statistics":
+            with database() as connection:
+                statistics = profile_upload_store().public_statistics(connection)
+            self._json(HTTPStatus.OK, {"ok": True, "statistics": statistics})
+            return
+        if path == "/api/v1/dps/public/performance":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+
+            def first_query_value(name: str, default: str) -> str:
+                values = query.get(name)
+                return str(values[0]) if values else default
+
+            calibrated = first_query_value("calibrated", "0").casefold() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            with database() as connection:
+                performance = profile_upload_store().public_performance(
+                    connection,
+                    boss=first_query_value("boss", "drill"),
+                    difficulty=first_query_value("difficulty", "all"),
+                    metric=first_query_value("metric", "dps"),
+                    rating_basis=first_query_value(
+                        "rating_basis", "extraordinary"
+                    ),
+                    min_rating=first_query_value("min_rating", "0"),
+                    max_rating=first_query_value("max_rating", "200000"),
+                    game_version=first_query_value("game_version", "all"),
+                    sort_by=first_query_value("sort", "p50"),
+                    calibrated=calibrated,
+                    profile_id=first_query_value("profile_id", ""),
+                )
+            self._json(HTTPStatus.OK, {"ok": True, "performance": performance})
+            return
+        if path == "/api/v1/dps/public/leaderboards":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            try:
+                limit = int(query.get("limit", ["100"])[0] or 100)
+            except (TypeError, ValueError, OverflowError):
+                limit = 100
+            with database() as connection:
+                leaderboards = profile_upload_store().public_leaderboards(
+                    connection, limit=limit
+                )
+            self._json(HTTPStatus.OK, {"ok": True, "leaderboards": leaderboards})
+            return
+        public_encounter_prefix = "/api/v1/dps/public/encounters/"
+        if path.startswith(public_encounter_prefix):
+            encounter_id = path[len(public_encounter_prefix) :]
+            with database() as connection:
+                encounter = profile_upload_store().public_encounter(
+                    connection, encounter_id
+                )
+            if encounter is None:
+                self._json(
+                    HTTPStatus.NOT_FOUND,
+                    {"ok": False, "error": "encounter_not_found"},
+                )
+            else:
+                self._json(HTTPStatus.OK, {"ok": True, "encounter": encounter})
             return
         if path == "/api/v1/dps/update":
             if not self._update_access_allowed():
@@ -1409,6 +1564,30 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/dps/feedback":
             self._submit_feedback()
             return
+        if path == "/api/v1/dps/profile/resolve":
+            self._resolve_upload_profile()
+            return
+        if path == "/api/v1/dps/profile/nickname/check":
+            self._check_upload_nickname()
+            return
+        if path == "/api/v1/dps/profile/create":
+            self._create_upload_profile()
+            return
+        if path == "/api/v1/dps/profile/rename":
+            self._rename_upload_profile()
+            return
+        if path == "/api/v1/dps/profile/link-code/create":
+            self._create_profile_link_code()
+            return
+        if path == "/api/v1/dps/profile/link-code/redeem":
+            self._redeem_profile_link_code()
+            return
+        if path == "/api/v1/dps/profile/uploads":
+            self._list_profile_uploads()
+            return
+        if path == "/api/v1/dps/encounters/upload":
+            self._upload_encounter()
+            return
         if path == "/api/v1/dps/diagnostic":
             self._submit_diagnostic()
             return
@@ -1452,6 +1631,211 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if retry_after > 0:
             payload["retry_after"] = int(retry_after)
         self._json(HTTPStatus.FORBIDDEN, payload)
+
+    def _active_desktop_session(self) -> sqlite3.Row | None:
+        session = self._session_for_token(self._bearer_token())
+        if session is None:
+            self._authorization_denied("invalid_session")
+            return None
+        authorization_error = self._feedback_session_error(session, now_epoch())
+        if authorization_error:
+            self._end_authorized_session(session["session_id"])
+            self._authorization_denied(authorization_error)
+            return None
+        return session
+
+    def _profile_error(self, error: ProfileUploadError) -> None:
+        conflict_errors = {
+            "CHARACTER_ALREADY_LINKED",
+            "NICKNAME_ALREADY_EXISTS",
+            "NICKNAME_RESERVED",
+            "LINK_CODE_USED",
+        }
+        status = (
+            HTTPStatus.CONFLICT
+            if error.code in conflict_errors
+            else HTTPStatus.BAD_REQUEST
+        )
+        self._json(
+            status,
+            {"ok": False, "error": error.code, "message": error.message},
+        )
+
+    def _resolve_upload_profile(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        if self._active_desktop_session() is None:
+            return
+        try:
+            with write_database() as connection:
+                result = profile_upload_store().resolve_profile(
+                    connection,
+                    body.get("character_id"),
+                    character_name=body.get("character_name"),
+                    profession_id=body.get("profession_id"),
+                )
+        except ProfileUploadError as error:
+            self._profile_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _check_upload_nickname(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        if self._active_desktop_session() is None:
+            return
+        try:
+            with write_database() as connection:
+                store = profile_upload_store()
+                resolved = store.resolve_profile(
+                    connection, body.get("character_id")
+                )
+                profile = resolved.get("profile")
+                current_profile_id = (
+                    str(profile.get("profile_id", ""))
+                    if isinstance(profile, dict)
+                    else ""
+                )
+                result = store.nickname_availability(
+                    connection,
+                    body.get("nickname"),
+                    current_profile_id=current_profile_id,
+                )
+        except ProfileUploadError as error:
+            self._profile_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _create_upload_profile(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        if self._active_desktop_session() is None:
+            return
+        try:
+            with write_database() as connection:
+                result = profile_upload_store().create_profile(
+                    connection,
+                    body.get("character_id"),
+                    body.get("nickname"),
+                    character_name=body.get("character_name"),
+                    profession_id=body.get("profession_id"),
+                )
+        except ProfileUploadError as error:
+            self._profile_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _rename_upload_profile(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        if self._active_desktop_session() is None:
+            return
+        try:
+            with write_database() as connection:
+                result = profile_upload_store().rename_profile(
+                    connection,
+                    body.get("character_id"),
+                    body.get("nickname"),
+                )
+        except ProfileUploadError as error:
+            self._profile_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _create_profile_link_code(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        if self._active_desktop_session() is None:
+            return
+        try:
+            with write_database() as connection:
+                result = profile_upload_store().create_link_code(
+                    connection, body.get("character_id")
+                )
+        except ProfileUploadError as error:
+            self._profile_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _redeem_profile_link_code(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        if self._active_desktop_session() is None:
+            return
+        try:
+            with write_database() as connection:
+                result = profile_upload_store().redeem_link_code(
+                    connection,
+                    body.get("character_id"),
+                    body.get("code"),
+                    character_name=body.get("character_name"),
+                    profession_id=body.get("profession_id"),
+                )
+        except ProfileUploadError as error:
+            self._profile_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _list_profile_uploads(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        if self._active_desktop_session() is None:
+            return
+        try:
+            with database() as connection:
+                result = profile_upload_store().profile_uploads(
+                    connection,
+                    body.get("character_id"),
+                    scope=clean_text(body.get("scope"), 16).casefold(),
+                    limit=body.get("limit", 100),
+                )
+        except (TypeError, ValueError, OverflowError):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "bad_limit"},
+            )
+            return
+        except ProfileUploadError as error:
+            self._profile_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _upload_encounter(self) -> None:
+        body = self._body(maximum_bytes=MAX_UPLOAD_BODY_BYTES)
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        try:
+            with write_database() as connection:
+                result = profile_upload_store().upload_encounter(
+                    connection,
+                    body.get("character_id"),
+                    body.get("encounter"),
+                    public_mode=body.get("public_mode"),
+                    character_name=body.get("character_name"),
+                    app_version=str(session["app_version"] or ""),
+                )
+        except ProfileUploadError as error:
+            self._profile_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
 
     def _claim_trial(self) -> None:
         body = self._body()

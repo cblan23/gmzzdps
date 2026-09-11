@@ -37,9 +37,8 @@ enable_windows_dpi_awareness()
 
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import messagebox
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageTk
 
 from boss_damage import BossDamageTracker
 from boss_enrage import (
@@ -67,6 +66,7 @@ from combat_history import (
     HISTORY_SCHEMA_VERSION,
     ResolvedCombatInterval,
     authoritative_team_combat_seconds,
+    settlement_clock_covers_boss_phases,
     interval_iso_timestamp,
     rebase_relative_combat_logs,
 )
@@ -82,21 +82,36 @@ from history_index import (
     RESULT_FAILED,
     RESULT_INTERRUPTED,
     RESULT_UNDETERMINED,
+    build_history_summary,
     is_first_believer_encounter,
     rebuild_dps_timeline,
     rebuild_participant_dps_timelines,
     rebuild_team_dps_timeline,
+)
+from main_hud import (
+    HUD_LOGICAL_WIDTH,
+    HUD_MAX_VISIBLE_ROWS,
+    HUD_ROW_HEIGHT,
+    MainHudRenderer,
+    WindowsLayeredPresenter,
+    clamp_visible_rows,
 )
 from device_identity import resolve_client_id
 from licensing import (
     CARD_LOGIN_FAILURE_MESSAGE,
     CombatClockResult,
     DEFAULT_SERVER_URL,
+    EncounterUploadResult,
     LicensingConnectionError,
     LicensingService,
+    NicknameAvailability,
+    ProfileLinkCode,
+    ProfileResult,
+    ProfileUploadsResult,
     ServerLicensingGateway,
     SYSTEM_TIME_SYNC_MESSAGE,
     TrialClaim,
+    UploadProfile,
     UpdateInfo,
     normalize_rollback_version,
     rollback_version_is_supported,
@@ -115,6 +130,7 @@ from network_state import (
     LONG_GAP_BOSS_PHASE_TRANSITIONS,
     MAX_PARTY_MEMBERS,
     NetworkPacketParser,
+    parse_combat_amount,
     PROJECTION_NAME_SUFFIX,
     SEPARATE_BOSS_ENCOUNTER_TRANSITIONS,
     SETTLEMENT_COMBAT_STATISTICS_METHOD,
@@ -129,6 +145,14 @@ from network_state import (
     unique_inferred_auxiliary_for_parent,
 )
 from remembered_card import remember_card, remembered_card
+from profile_upload import (
+    ProfileUploadError,
+    build_upload_encounter,
+    canonical_character_identity,
+    encounter_upload_rejection_code,
+    normalize_nickname,
+    recorded_self_character_id,
+)
 from release_security import (
     load_release_identity,
     verify_release_resources,
@@ -233,6 +257,7 @@ ASSET_DIR = BUNDLE_DIR / "assets"
 ICON_SOURCES_PATH = ASSET_DIR / "icon_sources.json"
 APP_LOGO_PATH = ASSET_DIR / "app_logo.png"
 APP_ICON_PATH = ASSET_DIR / "app_icon.ico"
+MAIN_BOSS_ICON_PATH = ASSET_DIR / "main_boss_icon.png"
 SIDEBAR_ART_PATH = ASSET_DIR / "sidebar_starry_swing_v2.png"
 SIDEBAR_AVATAR_PATH = ASSET_DIR / "sidebar_nightwalker_avatar_v2.png"
 LOG_DIR = DATA_DIR / "logs"
@@ -241,13 +266,14 @@ TEAM_PROFILE_CACHE_PATH = DATA_DIR / "team_profiles.json"
 SELF_IDENTITY_CACHE_PATH = DATA_DIR / "network_self_identity.json"
 ACTIVE_BOSS_CACHE_PATH = DATA_DIR / "network_active_boss.json"
 MONSTER_NAME_CACHE_PATH = DATA_DIR / "monster_name_cache.json"
+UPLOAD_STATE_PATH = DATA_DIR / "combat_upload_state.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3b"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.2.2+20260909.1"
+CLIENT_BUILD = "0.2.3+20260911.5"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
     "runtime-profile.dev.json"
@@ -277,6 +303,31 @@ SUBTLE = "#556170"
 ACCENT = "#6fe3bd"
 WARN = "#f0bc72"
 ERROR = "#ef6b73"
+PVE_MODE_BACKGROUND = "#102a43"
+PVE_MODE_BORDER = "#245f91"
+PVE_MODE_FOREGROUND = "#74bdff"
+PVP_MODE_BACKGROUND = "#351820"
+PVP_MODE_BORDER = "#793044"
+PVP_MODE_FOREGROUND = "#ff8299"
+PVP_MODE_DISABLED_FOREGROUND = "#b95c6d"
+MODAL_BACKDROP = "#03070b"
+MODAL_HEADER = "#0b131b"
+MODAL_SURFACE = "#111820"
+MODAL_CARD = "#151f29"
+MODAL_CARD_HOVER = "#192a38"
+MODAL_BORDER = "#2b5778"
+MODAL_PRIMARY = "#247db5"
+MODAL_PRIMARY_HOVER = "#3193cf"
+HISTORY_ACTION_PANEL_WIDTH = 286
+HISTORY_ACTION_BUTTON_GAP = 5
+HISTORY_ACTION_CONTENT_GAP = 4
+HISTORY_ACTION_HORIZONTAL_PADDING = 12
+HISTORY_ACTION_BUTTON_WIDTHS = {
+    "report": 72,
+    "upload": 64,
+    "favorite": 48,
+    "delete": 48,
+}
 TEAMMATE_SKILL_DETAIL_MISSING_MESSAGE = (
     "本场服务器未返回该队友的技能明细；总伤害数据不受影响。"
 )
@@ -298,6 +349,32 @@ SHOW_EXTRAORDINARY_RATING_CONFIG_KEY = "show_extraordinary_rating"
 TEAM_RATING_PREVIEW_CONFIG_KEY = "team_rating_preview"
 BOSS_ENRAGE_PREDICTION_CONFIG_KEY = "boss_enrage_prediction"
 TEAM_RATING_PREVIEW_AVAILABLE = True
+MAIN_DISPLAY_SCHEMA_VERSION = 4
+MAIN_DISPLAY_SCHEMA_CONFIG_KEY = "main_display_schema_version"
+PROFESSION_DISPLAY_METRICS_CONFIG_KEY = "profession_display_metrics"
+MAIN_ROW_MASK_OPACITY_CONFIG_KEY = "main_row_mask_opacity"
+MAIN_UI_SCALE_CONFIG_KEY = "main_ui_scale"
+MAIN_VISIBLE_ROWS_CONFIG_KEY = "main_visible_rows"
+SHOW_BOSS_HP_BAR_CONFIG_KEY = "show_boss_hp_bar"
+SHOW_COMBAT_TIME_CONFIG_KEY = "show_combat_time"
+SHOW_MAIN_TOTALS_CONFIG_KEY = "show_main_totals"
+SHOW_TEAM_DPS_CONFIG_KEY = "show_team_dps"
+HIGHLIGHT_SELF_CONFIG_KEY = "highlight_self"
+SHOW_PVP_BUTTON_CONFIG_KEY = "show_pvp_button"
+AUDIENCE_PROFESSION_ID = 1_200_002
+WARRIOR_PROFESSION_ID = 1_200_006
+KNOWN_PROFESSION_IDS = tuple(range(1_200_001, 1_200_008))
+DEFAULT_PROFESSION_DISPLAY_METRICS = {
+    str(profession_id): (
+        "hps" if profession_id == AUDIENCE_PROFESSION_ID else "dps"
+    )
+    for profession_id in KNOWN_PROFESSION_IDS
+}
+UPLOAD_PUBLIC_MODE_CONFIG_KEY = "upload_public_mode"
+UPLOAD_STATE_VERSION = 1
+UPLOAD_STATE_VALUES = frozenset(
+    {"pending", "uploading", "failed", "uploaded", "included", "ranked", "ineligible"}
+)
 HISTORY_LIST_OPTIONAL_FIELDS = (
     "character",
     "extraordinary_rating",
@@ -305,8 +382,16 @@ HISTORY_LIST_OPTIONAL_FIELDS = (
     "result",
 )
 HISTORY_LIST_DEFAULT_FIELDS = HISTORY_LIST_OPTIONAL_FIELDS
-MAIN_MIN_WIDTH = 430
-MAIN_MIN_HEIGHT = 260
+MAIN_DEFAULT_WIDTH = HUD_LOGICAL_WIDTH
+MAIN_DEFAULT_HEIGHT = 340
+MAIN_MIN_WIDTH = 300
+MAIN_MIN_HEIGHT = 150
+MAIN_MAX_VISIBLE_ROWS = HUD_MAX_VISIBLE_ROWS
+MAIN_TITLE_HEIGHT = 27
+MAIN_BOSS_HEIGHT = 52
+MAIN_ROW_BASE_HEIGHT = 36
+MAIN_FOOTER_HEIGHT = 42
+MAIN_ACTION_SIZE = 30
 MAIN_SUMMARY_BASE_HEIGHT = 76
 MAIN_SUMMARY_METRIC_HEIGHT = 34
 MONSTER_HP_ROW_HEIGHT = 36
@@ -339,6 +424,7 @@ METRIC_COLUMN_WEIGHTS = {
     "boss_max_hit": 1.15,
 }
 MAIN_CONTENT_OVERLAY_KEY = "#010203"
+MAIN_TRANSPARENT_KEY = MAIN_CONTENT_OVERLAY_KEY
 DPS_BAR_COLOR_STRENGTH = 0.22
 WINDOW_EXSTYLE_TRANSPARENT = 0x00000020
 WINDOW_EXSTYLE_TOPMOST = 0x00000008
@@ -511,6 +597,9 @@ UNKNOWN_TARGET_EVENT_WINDOW_SECONDS = 30.0
 UNKNOWN_TARGET_EVENT_LIMIT_PER_TARGET = 2048
 UNKNOWN_TARGET_EVENT_LIMIT_GLOBAL = 4096
 MEMBER_LIFE_TRANSITION_LIMIT = 256
+SUN_PROFESSION_ID = 1_200_001
+SUN_SURVIVAL_HP = 1.0
+SUN_DEATH_CONFIRM_SECONDS = 3.0
 STAGE_SUMMARY_SELF_DAMAGE_TOLERANCE = 150_000
 STAGE_SUMMARY_FINAL_WINDOW_SECONDS = 120.0
 STAGE_SUMMARY_CONFIRMED_FINAL_WINDOW_SECONDS = 300.0
@@ -588,6 +677,16 @@ def window_exstyle_for_taskbar(style: int, *, no_activate: bool = False) -> int:
     if no_activate:
         return updated | WINDOW_EXSTYLE_NOACTIVATE
     return updated & ~WINDOW_EXSTYLE_NOACTIVATE
+
+
+def window_exstyle_for_overlay(style: int) -> int:
+    """Keep the meter as an interactive layered tool window without a taskbar item."""
+
+    return (
+        (int(style) | WINDOW_EXSTYLE_TOOLWINDOW | WINDOW_EXSTYLE_LAYERED)
+        & ~WINDOW_EXSTYLE_APPWINDOW
+        & ~WINDOW_EXSTYLE_NOACTIVATE
+    )
 
 
 def canonical_toggle_hotkey_key(value: object) -> str:
@@ -855,6 +954,117 @@ def format_duration(seconds: float) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+def profession_metric_options(profession_id: object) -> tuple[str, ...]:
+    """Return the only main-window metrics a real profession may select."""
+
+    try:
+        parsed_profession_id = int(profession_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        parsed_profession_id = 0
+    if parsed_profession_id == AUDIENCE_PROFESSION_ID:
+        return ("hps", "dps")
+    if parsed_profession_id == WARRIOR_PROFESSION_ID:
+        return ("dps", "dt")
+    return ("dps",)
+
+
+def default_profession_metric(profession_id: object) -> str:
+    return profession_metric_options(profession_id)[0]
+
+
+def normalize_profession_display_metrics(value: object) -> dict[str, str]:
+    """Normalize saved choices and reject metrics a profession cannot use."""
+
+    raw = value if isinstance(value, dict) else {}
+    normalized: dict[str, str] = {}
+    for profession_id in KNOWN_PROFESSION_IDS:
+        key = str(profession_id)
+        selected = str(raw.get(key, "") or "").strip().casefold()
+        allowed = profession_metric_options(profession_id)
+        normalized[key] = selected if selected in allowed else allowed[0]
+    return normalized
+
+
+def migrate_main_display_config(config: object) -> tuple[dict, bool]:
+    """Migrate display settings; force the retired global opacity to 100%."""
+
+    migrated = dict(config) if isinstance(config, dict) else {}
+    before = dict(migrated)
+    try:
+        previous_schema = int(
+            migrated.get(MAIN_DISPLAY_SCHEMA_CONFIG_KEY, 0) or 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        previous_schema = 0
+    migrated[MAIN_DISPLAY_SCHEMA_CONFIG_KEY] = MAIN_DISPLAY_SCHEMA_VERSION
+    migrated['alpha'] = 1.0
+    migrated[PROFESSION_DISPLAY_METRICS_CONFIG_KEY] = (
+        normalize_profession_display_metrics(
+            migrated.get(PROFESSION_DISPLAY_METRICS_CONFIG_KEY)
+        )
+    )
+    migrated[MAIN_ROW_MASK_OPACITY_CONFIG_KEY] = (
+        0
+        if previous_schema < 4
+        else clamp_percent(
+            migrated.get(MAIN_ROW_MASK_OPACITY_CONFIG_KEY, 0), 0
+        )
+    )
+    migrated[MAIN_UI_SCALE_CONFIG_KEY] = clamp_main_ui_scale(
+        migrated.get(MAIN_UI_SCALE_CONFIG_KEY, 1.0)
+    )
+    migrated[MAIN_VISIBLE_ROWS_CONFIG_KEY] = clamp_visible_rows(
+        migrated.get(MAIN_VISIBLE_ROWS_CONFIG_KEY, HUD_MAX_VISIBLE_ROWS)
+    )
+    migrated.setdefault(SHOW_BOSS_HP_BAR_CONFIG_KEY, True)
+    migrated.setdefault(SHOW_COMBAT_TIME_CONFIG_KEY, True)
+    migrated.setdefault(SHOW_MAIN_TOTALS_CONFIG_KEY, True)
+    migrated.setdefault("show_deaths", True)
+    migrated.setdefault(TEAM_RATING_PREVIEW_CONFIG_KEY, True)
+    migrated.setdefault(SHOW_TEAM_DPS_CONFIG_KEY, True)
+    migrated.setdefault(HIGHLIGHT_SELF_CONFIG_KEY, True)
+    migrated.setdefault(SHOW_PVP_BUTTON_CONFIG_KEY, True)
+    # The one-window design deliberately ignores these values, but retaining
+    # the keys lets an older installed build read the same config safely.
+    migrated["compact_mode"] = False
+    return migrated, migrated != before
+
+
+def clamp_percent(value: object, default: int, minimum: int = 0) -> int:
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        number = int(default)
+    return min(100, max(int(minimum), number))
+
+
+def clamp_main_ui_scale(value: object) -> float:
+    try:
+        scale = float(value)
+    except (TypeError, ValueError, OverflowError):
+        scale = 1.0
+    if not math.isfinite(scale):
+        scale = 1.0
+    return min(1.4, max(0.8, scale))
+
+
+def main_row_mask_stipple(opacity: object) -> str:
+    """Map an opacity percentage to Tk's transparent stipple coverage."""
+
+    percent = clamp_percent(opacity, 0)
+    if percent <= 0:
+        return ""
+    if percent <= 18:
+        return "gray12"
+    if percent <= 37:
+        return "gray25"
+    if percent <= 62:
+        return "gray50"
+    if percent <= 87:
+        return "gray75"
+    return ""
+
+
 def format_optional_number(value: object) -> str:
     if value is None:
         return "--"
@@ -862,6 +1072,40 @@ def format_optional_number(value: object) -> str:
         return format_number(float(value))
     except (TypeError, ValueError, OverflowError):
         return "--"
+
+
+def format_main_rate(value: object) -> str:
+    """Format the live DPS/HPS/DT column without hiding exact values."""
+
+    if value is None or isinstance(value, bool):
+        return "--"
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "--"
+    if not math.isfinite(number) or number < 0:
+        return "--"
+    return f"{int(round(number)):,}/s"
+
+
+def format_main_total(value: object) -> str:
+    """Format the muted total column in the compact style from the reference."""
+
+    if value is None or isinstance(value, bool):
+        return "--"
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "--"
+    if not math.isfinite(number) or number < 0:
+        return "--"
+    if number >= 100_000_000:
+        text = format_team_health_number(number)
+    elif number >= 10_000:
+        text = f"{number / 10_000:.0f}万"
+    else:
+        text = f"{int(round(number)):,}"
+    return f"({text})"
 
 
 def format_response_time(value: object) -> str:
@@ -1633,6 +1877,120 @@ def write_json_object(path: Path, value: dict) -> None:
         os.replace(temporary, path)
     except OSError:
         pass
+
+
+def normalize_combat_upload_states(value: object) -> dict[str, dict[str, object]]:
+    """Return bounded local upload metadata without touching combat archives."""
+
+    root = value if isinstance(value, dict) else {}
+    raw_records = root.get("records", root)
+    if not isinstance(raw_records, dict):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for raw_battle_id, raw_state in list(raw_records.items())[-2000:]:
+        battle_id = str(raw_battle_id or "").strip()[:96]
+        if not battle_id or not isinstance(raw_state, dict):
+            continue
+        state = str(raw_state.get("state", "pending") or "pending").casefold()
+        if state not in UPLOAD_STATE_VALUES:
+            state = "pending"
+        if state == "uploading":
+            state = "failed"
+        rank_value = raw_state.get("rank")
+        try:
+            rank = max(1, int(rank_value)) if rank_value is not None else None
+        except (TypeError, ValueError, OverflowError):
+            rank = None
+        try:
+            updated_at = max(0.0, float(raw_state.get("updated_at", 0.0) or 0.0))
+        except (TypeError, ValueError, OverflowError):
+            updated_at = 0.0
+        public_mode = str(
+            raw_state.get("public_mode", "nickname") or "nickname"
+        ).casefold()
+        result[battle_id] = {
+            "state": state,
+            "rank": rank,
+            "encounter_id": str(raw_state.get("encounter_id", "") or "")[:64],
+            "upload_id": str(raw_state.get("upload_id", "") or "")[:64],
+            "message": str(raw_state.get("message", "") or "")[:240],
+            "upload_status": str(raw_state.get("upload_status", "") or "")[:24],
+            "statistics_status": str(
+                raw_state.get("statistics_status", "") or ""
+            )[:24],
+            "ranking_status": str(raw_state.get("ranking_status", "") or "")[:24],
+            "validation_reasons": [
+                str(reason).strip()[:48]
+                for reason in raw_state.get("validation_reasons", [])[:16]
+                if str(reason).strip()
+            ]
+            if isinstance(raw_state.get("validation_reasons"), list)
+            else [],
+            "public_mode": (
+                public_mode
+                if public_mode in {"anonymous", "nickname", "character"}
+                else "anonymous"
+            ),
+            "updated_at": updated_at,
+        }
+    return result
+
+
+def combat_upload_status_text(value: object) -> str:
+    state = value if isinstance(value, dict) else {}
+    status = str(state.get("state", "pending") or "pending").casefold()
+    if status in {"uploaded", "included", "ranked", "ineligible"}:
+        return "已上传"
+    return {
+        "uploading": "上传中",
+        "failed": "上传失败",
+    }.get(status, "未上传")
+
+
+def history_upload_action_visible(record: object, upload_state: object = "pending") -> bool:
+    """Only eligible victories expose upload state/action in battle history."""
+
+    del upload_state  # State changes the caption, never the battle's eligibility.
+    return not encounter_upload_rejection_code(record)
+
+
+def history_upload_action_clickable(upload_state: object) -> bool:
+    """Uploaded receipts are status-only; failed attempts may be retried."""
+
+    return str(upload_state or "pending").casefold() in {"pending", "failed"}
+
+
+UPLOAD_VALIDATION_REASON_MESSAGES = {
+    "BOSS_UNSUPPORTED": "当前 Boss 暂不支持全服统计",
+    "DIFFICULTY_INVALID": "战斗难度无法确认",
+    "CLIENT_VERSION_UNSUPPORTED": "当前客户端版本不支持统计",
+    "GAME_VERSION_UNSUPPORTED": "当前游戏版本不支持统计",
+    "ENCOUNTER_NOT_COMPLETED": "本场未完整通关",
+    "CAPTURE_INCOMPLETE": "本场采集数据不完整",
+    "PARTICIPANT_IDENTITY_INCOMPLETE": "部分队伍成员身份数据不完整",
+    "KEY_DATA_MISSING": "本场关键统计数据缺失",
+    "TEAM_TOTAL_MISMATCH": "团队总伤害校验未通过",
+    "DURATION_INVALID": "战斗时长不符合统计条件",
+}
+
+
+def encounter_upload_state(result: object) -> str:
+    """Return the highest local milestone represented by a server receipt."""
+
+    if not isinstance(result, EncounterUploadResult) or not result.accepted:
+        return "failed"
+    ranking_status = str(result.ranking_status or "").casefold()
+    statistics_status = str(result.statistics_status or "").casefold()
+    upload_status = str(result.upload_status or "").casefold()
+    if ranking_status == "eligible" and result.rank is not None:
+        return "ranked"
+    if statistics_status == "included":
+        return "included"
+    if upload_status == "uploaded" and (
+        statistics_status == "not_eligible" or ranking_status == "not_eligible"
+    ):
+        return "ineligible"
+    return "uploaded"
 
 
 def normalize_boss_name(value: object) -> str:
@@ -2549,6 +2907,12 @@ class StageHealingSnapshot:
     unclassified_healing: int = 0
 
 
+@dataclass(frozen=True)
+class PendingMemberDeath:
+    timestamp_100ns: int
+    deadline_monotonic: float
+
+
 class CombatModel:
     def __init__(
         self,
@@ -2602,6 +2966,10 @@ class CombatModel:
         self.entity_professions: dict[int, int] = {}
         self.entity_extraordinary_ratings: dict[int, int] = {}
         self.entity_ai_states: dict[int, bool] = {}
+        # Private upload identities are a side channel only. They never take
+        # part in combat classification, totals, clocks, or display names.
+        self.actor_character_ids: dict[int, str] = {}
+        self.self_character_id = ""
         self.target_catalog: dict[str, dict] = {
             str(template_id): dict(metadata)
             for template_id, metadata in (target_catalog or {}).items()
@@ -2667,6 +3035,11 @@ class CombatModel:
         self.member_death_states: dict[int, bool] = {}
         self.member_life_times: dict[int, int] = {}
         self.member_life_transitions: dict[int, list[tuple[int, bool]]] = {}
+        # The Sun path can briefly publish a confirmed 0-HP edge before its
+        # built-in survival passive restores the actor to exactly 1 HP. Delay
+        # only that profession's death edge so the transient cannot become a
+        # death, revive, dead-duration sample, or false party wipe.
+        self.pending_sun_deaths: dict[int, PendingMemberDeath] = {}
         self.member_death_counts: dict[int, int] = {}
         self.member_revive_counts: dict[int, int] = {}
         self.member_dead_since: dict[int, float] = {}
@@ -2964,6 +3337,8 @@ class CombatModel:
             self.self_id = None
             self.party_ids.clear()
             self.party_user_tokens.clear()
+            self.actor_character_ids.clear()
+            self.self_character_id = ""
             self.provisional_party_ids.clear()
             self.party_member_count = 0
             self.party_active = False
@@ -3006,6 +3381,7 @@ class CombatModel:
         self.encounter_team_size = 0
         self.encounter_authoritative_team_size = 0
         self.member_life_transitions.clear()
+        self.pending_sun_deaths.clear()
         self.member_death_counts.clear()
         self.member_revive_counts.clear()
         self.member_dead_since.clear()
@@ -3350,6 +3726,11 @@ class CombatModel:
                 # damage before that heal belongs to the same unanswered drop.
                 self.pending_health_drops.setdefault(actor_id, timestamp)
                 changed = True
+            changed |= self._resolve_sun_survival(
+                actor_id,
+                timestamp,
+                current_hp,
+            )
         self.actor_health_states[actor_id] = next_state
         return changed
 
@@ -4469,6 +4850,7 @@ class CombatModel:
             self.member_death_states,
             self.member_life_times,
             self.member_life_transitions,
+            self.pending_sun_deaths,
             self.member_death_counts,
             self.member_revive_counts,
             self.member_dead_since,
@@ -5224,6 +5606,7 @@ class CombatModel:
             )
         # Scene loading emits synthetic life-state edges. Close any real P1
         # death at the boundary, then let P2 establish a fresh current state.
+        self.pending_sun_deaths.clear()
         self.member_death_states.clear()
         self.member_life_times.clear()
         self._rebuild_member_life_metrics()
@@ -5437,6 +5820,11 @@ class CombatModel:
         return bool(
             self._verified_simultaneous_boss_encounter_group() is not None
             or self._preserve_long_gap_phase_counters()
+            or (
+                int(getattr(self.monsters.get(int(self.combat_target_id or 0)), 'template_id', 0) or 0) == 7_102_991
+                and any(int(getattr(self.monsters.get(entity_id), 'template_id', 0) or 0) == 7_102_990
+                        for entity_id in self.linked_boss_target_ids)
+            )
         )
 
     @staticmethod
@@ -7402,6 +7790,25 @@ class CombatModel:
             "encounter_member_ids": sorted(self.encounter_member_ids),
             "encounter_target_ids": sorted(target_ids),
         }
+        identity_actor_ids = set(self.encounter_member_ids)
+        identity_actor_ids.update(
+            int(participant.get("actor_id", 0) or 0)
+            for participant in participants
+            if isinstance(participant, dict)
+        )
+        if self.self_id is not None:
+            identity_actor_ids.add(int(self.self_id))
+        participant_identities = [
+            {
+                "actor_id": actor_id,
+                "character_id": self.actor_character_ids[actor_id],
+            }
+            for actor_id in sorted(identity_actor_ids)
+            if actor_id in self.actor_character_ids
+        ]
+        archived_self_character_id = (
+            self.actor_character_ids.get(int(self.self_id or 0), "")
+        )
         now = time.time()
         record = {
             "schema_version": HISTORY_SCHEMA_VERSION,
@@ -7516,6 +7923,10 @@ class CombatModel:
             "participants": participants,
             "damage_accounting": damage_accounting,
         }
+        if participant_identities:
+            record["participant_identities"] = participant_identities
+        if archived_self_character_id:
+            record["self_character_id"] = archived_self_character_id
         boss_damage_summary = self._boss_damage_summary(
             team_taken=team_taken,
             started_at_epoch=started_at,
@@ -7817,6 +8228,7 @@ class CombatModel:
             return
         if (
             damage <= 0
+            or parse_combat_amount(damage) is None
             or event.get("player_attacker") is False
             or attacker in self.non_player_actor_ids
         ):
@@ -7914,9 +8326,6 @@ class CombatModel:
             )
             if (
                 phase_target_continuation
-                and self._long_gap_phase_continues(
-                    target_before_gap, incoming_before_gap
-                )
                 and self.combat_end_reason in {"party_wipe", "target_reset"}
             ):
                 phase_target_continuation = False
@@ -7953,6 +8362,18 @@ class CombatModel:
                 if phase_target_continuation:
                     self.combat_end_time = 0.0
                     self.combat_end_reason = ""
+                    self.healing_end_time = 0.0
+                    self.healing_end_reason = ""
+                    self.completed_combats[:] = [
+                        record for record in self.completed_combats
+                        if record.get("encounter_id") != self.encounter_id
+                    ]
+                    self.last_archive_signature = None
+                    self.linked_boss_target_ids.update({self.combat_target_id, target})
+                    self._replace_simultaneous_boss_target(self.combat_target_id, target)
+                    self.combat_target_id = target
+                    self.active_target_id = target
+                    self._register_encounter_target(target)
                 elif (
                     target == self.combat_target_id
                     and current_target is not None
@@ -7961,11 +8382,12 @@ class CombatModel:
                     # Ignore damage already in flight when the explicit death
                     # packet arrived; it cannot reopen the completed encounter.
                     return
-                self.reset(
-                    keep_identity=True,
-                    keep_monsters=True,
-                    archive_reason=self.combat_end_reason or "new_encounter",
-                )
+                if not phase_target_continuation:
+                    self.reset(
+                        keep_identity=True,
+                        keep_monsters=True,
+                        archive_reason=self.combat_end_reason or "new_encounter",
+                    )
             elif (
                 self.combat_target_id is not None
                 and target != self.combat_target_id
@@ -8960,7 +9382,12 @@ class CombatModel:
                 team_duration, local_event_duration
             )
         )
-        clock_accepted = bool(clock_matches_encounter and team_duration)
+        phase_clock_covers_encounter = settlement_clock_covers_boss_phases(
+            (getattr(self.monsters.get(target_id), 'template_id', 0)
+             for target_id in self._encounter_damage_target_ids()),
+            team_duration, local_event_duration,
+        )
+        clock_accepted = bool(clock_matches_encounter and team_duration and phase_clock_covers_encounter)
         clock_audit = {
             "duration_seconds": team_duration,
             "policy": team_duration_policy,
@@ -8976,7 +9403,8 @@ class CombatModel:
             "local_interval_covers_observed_span": (
                 local_interval_covers_observed_span
             ),
-            "local_comparison_used_for_acceptance": False,
+            "local_comparison_used_for_acceptance": not phase_clock_covers_encounter,
+            "phase_clock_covers_encounter": phase_clock_covers_encounter,
             "accepted": clock_accepted,
         }
         validation_update["validation"]["game_server_team_clock"] = clock_audit
@@ -8997,7 +9425,9 @@ class CombatModel:
                 "summary_id": summary_id,
                 **clock_audit,
                 "reason": (
-                    "missing_team_combat_seconds"
+                    "phase_clock_shorter_than_observed_encounter"
+                    if not phase_clock_covers_encounter
+                    else "missing_team_combat_seconds"
                     if clock_matches_encounter and not team_duration
                     else "settlement_not_matched_to_current_encounter"
                 ),
@@ -9314,6 +9744,122 @@ class CombatModel:
         )
         return True
 
+    def _merge_pending_sun_death(self, old_actor: int, new_actor: int) -> bool:
+        pending = self.pending_sun_deaths.pop(old_actor, None)
+        if pending is None:
+            return False
+        current = self.pending_sun_deaths.get(new_actor)
+        if current is None:
+            self.pending_sun_deaths[new_actor] = pending
+        else:
+            self.pending_sun_deaths[new_actor] = PendingMemberDeath(
+                timestamp_100ns=min(
+                    pending.timestamp_100ns,
+                    current.timestamp_100ns,
+                ),
+                deadline_monotonic=min(
+                    pending.deadline_monotonic,
+                    current.deadline_monotonic,
+                ),
+            )
+        return True
+
+    def _apply_member_life_transition(
+        self,
+        actor_id: int,
+        timestamp: int,
+        dead: bool,
+    ) -> bool:
+        if (
+            actor_id not in self._current_member_ids()
+            or timestamp < self.member_life_times.get(actor_id, 0)
+        ):
+            return False
+        previous_dead = self.member_death_states.get(actor_id)
+        changed = previous_dead != dead
+        self.member_death_states[actor_id] = dead
+        self.member_life_times[actor_id] = timestamp
+        if changed:
+            self.pending_health_drops.pop(actor_id, None)
+            self.healing_response_keys = {
+                key for key in self.healing_response_keys if key[0] != actor_id
+            }
+            transitions = self.member_life_transitions.setdefault(actor_id, [])
+            transitions.append((timestamp, dead))
+            self.member_life_transitions[actor_id] = (
+                self._normalize_member_life_transitions(transitions)
+            )
+            self._rebuild_member_life_metrics()
+        event_time = self._event_seconds({"filetime_100ns": timestamp})
+        wiped = self._mark_party_wipe_if_complete(event_time)
+        if changed and self.combat_end_time and not wiped:
+            self._queue_current_record_refresh()
+        return changed or wiped
+
+    @staticmethod
+    def _sun_survival_hp(value: object) -> bool:
+        try:
+            current_hp = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return bool(
+            math.isfinite(current_hp)
+            and abs(current_hp - SUN_SURVIVAL_HP) <= 0.01
+        )
+
+    def _resolve_sun_survival(
+        self,
+        actor_id: int,
+        timestamp: int,
+        current_hp: object,
+    ) -> bool:
+        pending = self.pending_sun_deaths.get(actor_id)
+        if (
+            pending is None
+            or timestamp < pending.timestamp_100ns
+            or timestamp - pending.timestamp_100ns
+            > int(SUN_DEATH_CONFIRM_SECONDS * 10_000_000)
+            or not self._sun_survival_hp(current_hp)
+        ):
+            return False
+        self.pending_sun_deaths.pop(actor_id, None)
+        # Establish the latest live state, but never add the discarded 0-HP
+        # edge. A lone Singer therefore cannot end the pull as a false wipe.
+        self._apply_member_life_transition(actor_id, timestamp, False)
+        return True
+
+    def flush_pending_member_deaths(
+        self,
+        monotonic_now: float | None = None,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Confirm delayed Sun-path deaths once the 1-HP window has elapsed."""
+
+        now = time.monotonic() if monotonic_now is None else float(monotonic_now)
+        due = sorted(
+            (
+                (actor_id, pending)
+                for actor_id, pending in self.pending_sun_deaths.items()
+                if force or pending.deadline_monotonic <= now
+            ),
+            key=lambda item: item[1].timestamp_100ns,
+        )
+        changed = False
+        for actor_id, pending in due:
+            if self.pending_sun_deaths.get(actor_id) != pending:
+                continue
+            self.pending_sun_deaths.pop(actor_id, None)
+            if actor_id not in self._current_member_ids():
+                changed = True
+                continue
+            changed |= self._apply_member_life_transition(
+                actor_id,
+                pending.timestamp_100ns,
+                True,
+            )
+        return changed
+
     def _rebuild_member_life_metrics(self) -> None:
         """Derive life metrics from game timestamps inside the Boss interval."""
         self.member_death_counts.clear()
@@ -9376,8 +9922,18 @@ class CombatModel:
         previous_self_id = self.self_id
         changed = previous_self_id != entity_id
         self.self_id = entity_id
+        character_id = self.actor_character_ids.get(entity_id, "")
+        if character_id:
+            try:
+                identity = canonical_character_identity(character_id)
+            except ProfileUploadError:
+                identity = None
+            if identity is not None and self.self_character_id != identity.canonical:
+                self.self_character_id = identity.canonical
+                changed = True
         if previous_self_id and previous_self_id != entity_id:
             self._merge_member_life_transitions(previous_self_id, entity_id)
+            self._merge_pending_sun_death(previous_self_id, entity_id)
             previous_time = self.member_life_times.pop(previous_self_id, 0)
             previous_state = self.member_death_states.pop(
                 previous_self_id, None
@@ -9569,6 +10125,11 @@ class CombatModel:
         self.member_life_times = {
             actor_id: timestamp
             for actor_id, timestamp in self.member_life_times.items()
+            if actor_id in current_members
+        }
+        self.pending_sun_deaths = {
+            actor_id: pending
+            for actor_id, pending in self.pending_sun_deaths.items()
             if actor_id in current_members
         }
         update_is_during_encounter = True
@@ -9803,6 +10364,30 @@ class CombatModel:
         )
         changed |= move_token_profile_values(self.entity_ai_states)
 
+        # The supplied token is the authoritative identity for every target
+        # actor. Apply all bindings as one permutation so rotated actor slots
+        # cannot inherit another participant's identity.
+        relevant_ids = sources | targets
+        previous_identities = {
+            actor_id: self.actor_character_ids.get(actor_id, "")
+            for actor_id in relevant_ids
+        }
+        for actor_id in relevant_ids:
+            self.actor_character_ids.pop(actor_id, None)
+        for _source, target, token in bindings:
+            try:
+                identity = canonical_character_identity(token, allow_ai=True)
+            except ProfileUploadError:
+                continue
+            self.actor_character_ids[target] = identity.canonical
+            if target == self.self_id and identity.kind == "human":
+                self.self_character_id = identity.canonical
+        current_identities = {
+            actor_id: self.actor_character_ids.get(actor_id, "")
+            for actor_id in relevant_ids
+        }
+        changed |= previous_identities != current_identities
+
         if changed:
             self.healing_revision += 1
             self.healing_summary_cache_key = None
@@ -9826,6 +10411,37 @@ class CombatModel:
         )
 
         changed = False
+        raw_character_id = str(update.get("user_token", "") or "").strip()
+        identity = None
+        if raw_character_id:
+            try:
+                identity = canonical_character_identity(
+                    raw_character_id, allow_ai=True
+                )
+            except ProfileUploadError:
+                identity = None
+        old_character_id = self.actor_character_ids.pop(old_actor, "")
+        if old_character_id:
+            changed = True
+        if identity is not None:
+            if self.actor_character_ids.get(new_actor) != identity.canonical:
+                self.actor_character_ids[new_actor] = identity.canonical
+                changed = True
+        elif old_character_id and new_actor not in self.actor_character_ids:
+            self.actor_character_ids[new_actor] = old_character_id
+            changed = True
+        if (
+            new_actor == self.self_id
+            and self.actor_character_ids.get(new_actor)
+            and self.self_character_id != self.actor_character_ids[new_actor]
+        ):
+            try:
+                self.self_character_id = canonical_character_identity(
+                    self.actor_character_ids[new_actor]
+                ).canonical
+                changed = True
+            except ProfileUploadError:
+                pass
         if old_actor in self.provisional_party_ids:
             self.provisional_party_ids.discard(old_actor)
             if new_actor != self.self_id:
@@ -9925,6 +10541,8 @@ class CombatModel:
         old_life_time = self.member_life_times.pop(old_actor, 0)
         old_dead = self.member_death_states.pop(old_actor, None)
         if self._merge_member_life_transitions(old_actor, new_actor):
+            changed = True
+        if self._merge_pending_sun_death(old_actor, new_actor):
             changed = True
         if old_life_time >= self.member_life_times.get(new_actor, 0):
             if old_dead is not None:
@@ -10202,27 +10820,58 @@ class CombatModel:
         dead = bool(update.get("dead"))
         if dead and update.get("death_confirmed") is not True:
             return False
-        previous_dead = self.member_death_states.get(actor_id)
-        changed = previous_dead != dead
-        self.member_death_states[actor_id] = dead
-        self.member_life_times[actor_id] = timestamp
-        if changed:
-            self.pending_health_drops.pop(actor_id, None)
-            self.healing_response_keys = {
-                key for key in self.healing_response_keys if key[0] != actor_id
-            }
-            transitions = self.member_life_transitions.setdefault(actor_id, [])
-            transitions.append((timestamp, dead))
-            self.member_life_transitions[actor_id] = (
-                self._normalize_member_life_transitions(transitions)
+        pending = self.pending_sun_deaths.get(actor_id)
+        if pending is not None and timestamp < pending.timestamp_100ns:
+            return False
+
+        if dead:
+            if pending is not None:
+                # Duplicate zero-HP notifications must not extend the grace
+                # period indefinitely or create more than one death.
+                return False
+            if (
+                self.actor_profession_id(actor_id) == SUN_PROFESSION_ID
+                and self.member_death_states.get(actor_id) is not True
+            ):
+                self.pending_sun_deaths[actor_id] = PendingMemberDeath(
+                    timestamp_100ns=timestamp,
+                    deadline_monotonic=(
+                        time.monotonic() + SUN_DEATH_CONFIRM_SECONDS
+                    ),
+                )
+                # Capture sources are merged in bounded batches. If the newer
+                # 1-HP sample was already consumed before this delayed death
+                # edge, resolve the passive from that timestamp immediately.
+                health_state = self.actor_health_states.get(actor_id, {})
+                self._resolve_sun_survival(
+                    actor_id,
+                    int(health_state.get("filetime_100ns", 0) or 0),
+                    health_state.get("current_hp"),
+                )
+                return True
+            return self._apply_member_life_transition(actor_id, timestamp, True)
+
+        if pending is not None:
+            if (
+                not bool(update.get("explicit_transition"))
+                and self._resolve_sun_survival(
+                    actor_id,
+                    timestamp,
+                    update.get("current_hp"),
+                )
+            ):
+                return True
+            self.pending_sun_deaths.pop(actor_id, None)
+            death_changed = self._apply_member_life_transition(
+                actor_id,
+                pending.timestamp_100ns,
+                True,
             )
-        event_time = self._event_seconds(update)
-        if changed:
-            self._rebuild_member_life_metrics()
-        wiped = self._mark_party_wipe_if_complete(event_time)
-        if changed and self.combat_end_time and not wiped:
-            self._queue_current_record_refresh()
-        return changed or wiped
+            return (
+                self._apply_member_life_transition(actor_id, timestamp, False)
+                or death_changed
+            )
+        return self._apply_member_life_transition(actor_id, timestamp, False)
 
     def ingest_active_boss(self, update: dict) -> bool:
         """Freeze the old pull when the parser confirms a new active Boss entity."""
@@ -10278,7 +10927,6 @@ class CombatModel:
         )
         if (
             phase_continuation
-            and self._long_gap_phase_continues(previous, incoming)
             and self.combat_end_reason in {"party_wipe", "target_reset"}
         ):
             # An explicitly failed opening belongs to the failed attempt.  A
@@ -10296,7 +10944,7 @@ class CombatModel:
             self._register_encounter_target(entity_id)
             self.pending_active_boss_id = None
             self.pending_active_boss_time_100ns = 0
-            if long_gap_phase:
+            if long_gap_phase or self.combat_end_time:
                 self.combat_end_time = 0.0
                 self.combat_end_reason = ""
                 self.healing_end_time = 0.0
@@ -10401,6 +11049,28 @@ class CombatModel:
         was_priority_target = self._is_priority_target(entity_id)
         changed = False
         rating_changed = False
+        raw_character_id = str(update.get("user_token", "") or "").strip()
+        if raw_character_id:
+            try:
+                identity = canonical_character_identity(
+                    raw_character_id, allow_ai=True
+                )
+            except ProfileUploadError:
+                identity = None
+            if (
+                identity is not None
+                and self.actor_character_ids.get(entity_id) != identity.canonical
+            ):
+                self.actor_character_ids[entity_id] = identity.canonical
+                changed = True
+            if (
+                identity is not None
+                and identity.kind == "human"
+                and entity_id == self.self_id
+                and self.self_character_id != identity.canonical
+            ):
+                self.self_character_id = identity.canonical
+                changed = True
         monster = self.monsters.setdefault(entity_id, MonsterStats(entity_id))
         # Once a target has been identified by an exact treatment-dummy
         # template, that identity is authoritative for the rest of the
@@ -10761,6 +11431,21 @@ class CombatModel:
         if not entity_id:
             return False
         previous_monster = self.monsters.get(entity_id)
+        if previous_monster is not None and update.get('hp_source_reset'):
+            previous_monster.current_hp = None
+            previous_monster.max_hp = None
+            previous_monster.observed_max_hp = None
+            previous_monster.last_hp_update_100ns = 0
+            previous_monster.death_confirmed = False
+            previous_monster.death_time_100ns = 0
+        timestamp = int(update.get('filetime_100ns', 0) or 0)
+        if previous_monster is not None and timestamp and timestamp < previous_monster.last_hp_update_100ns:
+            # Native metadata and network batches can arrive interleaved.
+            # An older HP field must not resurrect a defeated target, move
+            # the bar backwards or arm a false wipe/reset.
+            update = dict(update)
+            for field in ('current_hp', 'reset_candidate_hp', 'death_confirmed'):
+                update.pop(field, None)
         previous_update_100ns = (
             previous_monster.last_update_100ns
             if previous_monster is not None
@@ -11166,6 +11851,12 @@ class CombatModel:
             state.baseline_snapshot_time_100ns = signal
 
     def ingest_team_stat(self, update: dict) -> bool:
+        invalid = [key for key in ('absolute_damage', 'absolute_taken', 'absolute_effective_healing')
+                   if key in update and parse_combat_amount(update[key]) is None]
+        if invalid:
+            update = dict(update)
+            for key in invalid:
+                update.pop(key, None)
         raw_team_tokens = update.get("team_tokens")
         if isinstance(raw_team_tokens, (list, tuple, set)):
             parsed_team_tokens = {
@@ -12058,6 +12749,142 @@ def blend_color(left: str, right: str, amount: float) -> str:
     return "#" + "".join(f"{value:02x}" for value in mixed)
 
 
+def canvas_rounded_rectangle(
+    canvas: tk.Canvas,
+    left: object,
+    top: object,
+    right: object,
+    bottom: object,
+    radius: object,
+    **options,
+) -> int:
+    """Draw a DPI-safe rounded rectangle on a Tk canvas."""
+
+    left_value = float(left)
+    top_value = float(top)
+    right_value = float(right)
+    bottom_value = float(bottom)
+    corner = min(
+        max(0.0, float(radius)),
+        max(0.0, (right_value - left_value) / 2.0),
+        max(0.0, (bottom_value - top_value) / 2.0),
+    )
+    points = (
+        left_value + corner,
+        top_value,
+        right_value - corner,
+        top_value,
+        right_value,
+        top_value,
+        right_value,
+        top_value + corner,
+        right_value,
+        bottom_value - corner,
+        right_value,
+        bottom_value,
+        right_value - corner,
+        bottom_value,
+        left_value + corner,
+        bottom_value,
+        left_value,
+        bottom_value,
+        left_value,
+        bottom_value - corner,
+        left_value,
+        top_value + corner,
+        left_value,
+        top_value,
+    )
+    create_polygon = getattr(canvas, "create_polygon", None)
+    if callable(create_polygon):
+        options.setdefault("smooth", True)
+        options.setdefault("splinesteps", 24)
+        return create_polygon(*points, **options)
+    # Lightweight canvas doubles used by diagnostics may only implement the
+    # rectangle primitive.  Keep those read-only paths compatible.
+    return canvas.create_rectangle(
+        left_value, top_value, right_value, bottom_value, **options
+    )
+
+
+def canvas_outlined_text(
+    canvas: tk.Canvas,
+    x: object,
+    y: object,
+    *,
+    outline: str = "#071019",
+    outline_width: int = 1,
+    **options,
+) -> int:
+    """Draw compact game-style text with a stable dark readability edge."""
+
+    foreground = str(options.pop("fill", TEXT))
+    if not hasattr(canvas, "tk"):
+        return canvas.create_text(x, y, fill=foreground, **options)
+    edge = max(1, int(outline_width))
+    for offset_x, offset_y in (
+        (-edge, 0),
+        (edge, 0),
+        (0, -edge),
+        (0, edge),
+    ):
+        canvas.create_text(
+            float(x) + offset_x,
+            float(y) + offset_y,
+            fill=outline,
+            **options,
+        )
+    return canvas.create_text(x, y, fill=foreground, **options)
+
+
+def history_action_button_width(font, kind: str, caption: object) -> int:
+    """Measure one compact history action without clipping its current text."""
+
+    icon_size = 14 if kind in {"report", "upload"} else 12
+    return max(
+        int(HISTORY_ACTION_BUTTON_WIDTHS[kind]),
+        int(font.measure(str(caption)))
+        + icon_size
+        + HISTORY_ACTION_CONTENT_GAP
+        + HISTORY_ACTION_HORIZONTAL_PADDING,
+    )
+
+
+def history_action_button_widths(font) -> dict[str, int]:
+    """Measure the widest state each history action may need in the column."""
+
+    captions = {
+        "report": ("全员截图", "首领截图"),
+        "upload": (
+            "未上传",
+            "上传中",
+            "上传失败",
+            "已上传",
+            "已统计",
+            "巅峰 #9999",
+            "不可排行",
+        ),
+        "favorite": ("收藏",),
+        "delete": ("删除",),
+    }
+    return {
+        kind: max(
+            history_action_button_width(font, kind, caption)
+            for caption in choices
+        )
+        for kind, choices in captions.items()
+    }
+
+
+def history_action_panel_width(font) -> int:
+    widths = history_action_button_widths(font)
+    return (
+        sum(widths.values())
+        + HISTORY_ACTION_BUTTON_GAP * (len(widths) - 1)
+        + 10
+    )
+
+
 class IconFactory:
     """Load extracted PNGs when present, otherwise draw deterministic badges."""
 
@@ -12167,6 +12994,18 @@ class IconFactory:
             self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
         return self.cache[key]
 
+    def main_boss_icon(self, size: int = 32) -> ImageTk.PhotoImage:
+        """Load the fixed Boss emblem from the approved main-window design."""
+
+        physical_size = self._physical_size(size)
+        key = ("main-boss", physical_size)
+        if key not in self.cache:
+            image = self._from_file(MAIN_BOSS_ICON_PATH, physical_size)
+            if image is None:
+                image = self._draw_badge("B", WARN, physical_size, 0)
+            self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
+        return self.cache[key]
+
     @staticmethod
     def _draw_toolbar_icon(name: str, size: int, color: str) -> Image.Image:
         render_scale = 4
@@ -12226,6 +13065,45 @@ class IconFactory:
                 (point(8), point(20), point(16), point(20)),
                 fill=stroke,
                 width=width,
+            )
+        elif name == "pvp":
+            # Two restrained crossed blades; the muted red is supplied by the
+            # caller while the PVP module remains unavailable.
+            draw.line(
+                (point(5), point(4), point(19), point(18)),
+                fill=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(19), point(4), point(5), point(18)),
+                fill=stroke,
+                width=width,
+            )
+            draw.polygon(
+                (
+                    (point(4), point(3)),
+                    (point(9), point(5)),
+                    (point(5), point(9)),
+                ),
+                fill=stroke,
+            )
+            draw.polygon(
+                (
+                    (point(20), point(3)),
+                    (point(19), point(9)),
+                    (point(15), point(5)),
+                ),
+                fill=stroke,
+            )
+            draw.line(
+                (point(3), point(18), point(7), point(22)),
+                fill=stroke,
+                width=max(render_scale, point(1.4)),
+            )
+            draw.line(
+                (point(21), point(18), point(17), point(22)),
+                fill=stroke,
+                width=max(render_scale, point(1.4)),
             )
         elif name == "analytics":
             draw.line(
@@ -12336,6 +13214,18 @@ class IconFactory:
                 fill=stroke,
                 width=max(render_scale, point(1.35)),
             )
+        elif name == "edit":
+            draw.line(
+                (point(5), point(19), point(8), point(18), point(19), point(7), point(16), point(4), point(5), point(15), point(5), point(19)),
+                fill=stroke,
+                width=width,
+                joint="curve",
+            )
+            draw.line(
+                (point(14), point(6), point(17), point(9)),
+                fill=stroke,
+                width=max(render_scale, point(1.25)),
+            )
         elif name == "share":
             draw.rounded_rectangle(
                 (point(4), point(9), point(20), point(21)),
@@ -12353,6 +13243,74 @@ class IconFactory:
                 fill=stroke,
                 width=width,
                 joint="curve",
+            )
+        elif name == "upload":
+            draw.rounded_rectangle(
+                (point(4), point(13), point(20), point(21)),
+                radius=point(2),
+                outline=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(12), point(17), point(12), point(3)),
+                fill=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(7), point(8), point(12), point(3), point(17), point(8)),
+                fill=stroke,
+                width=width,
+                joint="curve",
+            )
+        elif name == "camera":
+            draw.rounded_rectangle(
+                (point(3), point(7), point(21), point(19)),
+                radius=point(2),
+                outline=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(8), point(7), point(10), point(4), point(15), point(4), point(17), point(7)),
+                fill=stroke,
+                width=width,
+                joint="curve",
+            )
+            draw.ellipse(
+                (point(9), point(9), point(15), point(15)),
+                outline=stroke,
+                width=max(render_scale, point(1.4)),
+            )
+        elif name == "star":
+            vertices = []
+            for index in range(10):
+                angle = math.radians(-90 + index * 36)
+                radius = 9 if index % 2 == 0 else 4
+                vertices.append(
+                    (
+                        point(12 + math.cos(angle) * radius),
+                        point(12 + math.sin(angle) * radius),
+                    )
+                )
+            draw.polygon(vertices, outline=stroke)
+        elif name == "link":
+            draw.arc(
+                (point(2), point(7), point(14), point(18)),
+                start=55,
+                end=305,
+                fill=stroke,
+                width=width,
+            )
+            draw.arc(
+                (point(10), point(6), point(22), point(17)),
+                start=235,
+                end=125,
+                fill=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(8), point(14), point(16), point(10)),
+                fill=stroke,
+                width=width,
             )
         elif name == "reset":
             draw.arc(
@@ -12522,6 +13480,66 @@ class IconFactory:
                     fill=stroke,
                     width=width,
                 )
+        elif name == "power":
+            draw.arc(
+                (point(3.5), point(3.5), point(20.5), point(20.5)),
+                start=310,
+                end=230,
+                fill=stroke,
+                width=width,
+            )
+            draw.line(
+                (point(12), point(2), point(12), point(12)),
+                fill=stroke,
+                width=width,
+            )
+        elif name == "check":
+            draw.line(
+                (
+                    point(4),
+                    point(12),
+                    point(9.5),
+                    point(17.5),
+                    point(20),
+                    point(6.5),
+                ),
+                fill=stroke,
+                width=width,
+                joint="curve",
+            )
+        elif name == "info":
+            draw.ellipse(
+                (point(4), point(4), point(20), point(20)),
+                outline=stroke,
+                width=width,
+            )
+            draw.ellipse(
+                (point(11), point(7), point(13), point(9)),
+                fill=stroke,
+            )
+            draw.line(
+                (point(12), point(11), point(12), point(17)),
+                fill=stroke,
+                width=width,
+            )
+        elif name == "warning":
+            draw.polygon(
+                (
+                    (point(12), point(2.5)),
+                    (point(22), point(20.5)),
+                    (point(2), point(20.5)),
+                ),
+                outline=stroke,
+            )
+            draw.line(
+                (point(12), point(8), point(12), point(14)),
+                fill=stroke,
+                width=width,
+            )
+            draw.ellipse(
+                (point(11), point(17), point(13), point(19)),
+                fill=stroke,
+            )
         elif name == "close":
             draw.line(
                 (point(6), point(6), point(18), point(18)),
@@ -12611,6 +13629,68 @@ class IconFactory:
             )
         return self.cache[key]
 
+    def main_action(
+        self,
+        name: str,
+        size: int,
+        color: str,
+        *,
+        hovered: bool = False,
+    ) -> ImageTk.PhotoImage:
+        """Render one crisp HUD action tile without exposing a window frame."""
+
+        physical_size = self._physical_size(size)
+        key = (
+            "main-action",
+            str(name),
+            physical_size,
+            str(color),
+            bool(hovered),
+        )
+        if key in self.cache:
+            return self.cache[key]
+
+        render_size = max(4, physical_size * 4)
+        image = Image.new("RGBA", (render_size, render_size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image, "RGBA")
+        inset = max(2, round(render_size * 0.045))
+        radius = max(4, round(render_size * 0.20))
+        pvp = str(name) == "pvp"
+        if pvp:
+            fill = (48, 8, 21, 238) if not hovered else (76, 10, 29, 248)
+            outline = (177, 20, 59, 235) if not hovered else (255, 47, 91, 255)
+        else:
+            fill = (12, 23, 34, 232) if not hovered else (22, 42, 57, 246)
+            outline = (48, 77, 101, 225) if not hovered else (99, 151, 188, 250)
+        draw.rounded_rectangle(
+            (inset, inset, render_size - inset - 1, render_size - inset - 1),
+            radius=radius,
+            fill=fill,
+            outline=outline,
+            width=max(2, round(render_size * 0.022)),
+        )
+        inner = inset + max(2, round(render_size * 0.025))
+        draw.rounded_rectangle(
+            (inner, inner, render_size - inner - 1, render_size - inner - 1),
+            radius=max(2, radius - (inner - inset)),
+            outline=(142, 187, 218, 58) if not pvp else (255, 101, 132, 66),
+            width=max(1, round(render_size * 0.010)),
+        )
+        image = image.resize(
+            (physical_size, physical_size), Image.Resampling.LANCZOS
+        )
+        icon_size = max(14, round(physical_size * 0.62))
+        icon = self._draw_toolbar_icon(str(name), icon_size, str(color))
+        image.alpha_composite(
+            icon,
+            (
+                (physical_size - icon.width) // 2,
+                (physical_size - icon.height) // 2,
+            ),
+        )
+        self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
+        return self.cache[key]
+
     def profession(self, class_id: int | None, size: int = 34) -> ImageTk.PhotoImage:
         class_id = int(class_id or 0)
         color = PROFESSION_COLORS.get(class_id, SUBTLE)
@@ -12629,6 +13709,108 @@ class IconFactory:
                 class_id,
             )
             self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
+        return self.cache[key]
+
+    def main_profession(
+        self, class_id: int | None, size: int = 34
+    ) -> ImageTk.PhotoImage:
+        """Render the extracted game crest on its established profession color."""
+
+        class_id = int(class_id or 0)
+        color = PROFESSION_COLORS.get(class_id, SUBTLE)
+        physical_size = self._physical_size(size)
+        key = ("main-profession", class_id, physical_size, color)
+        if key in self.cache:
+            return self.cache[key]
+
+        render_size = max(4, physical_size * 4)
+        rgb = tuple(int(color[index : index + 2], 16) for index in (1, 3, 5))
+        bright = tuple(round(channel + (255 - channel) * 0.42) for channel in rgb)
+        dark = tuple(max(4, round(channel * 0.26)) for channel in rgb)
+        middle = tuple(max(8, round(channel * 0.72)) for channel in rgb)
+        image = Image.new("RGBA", (render_size, render_size), (0, 0, 0, 0))
+
+        glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow, "RGBA")
+        glow_margin = round(render_size * 0.14)
+        glow_draw.ellipse(
+            (
+                glow_margin,
+                glow_margin,
+                render_size - glow_margin - 1,
+                render_size - glow_margin - 1,
+            ),
+            fill=rgb + (150,),
+        )
+        glow = glow.filter(
+            ImageFilter.GaussianBlur(max(1.0, render_size * 0.095))
+        )
+        image.alpha_composite(glow)
+
+        draw = ImageDraw.Draw(image, "RGBA")
+        outer = round(render_size * 0.09)
+        inner = round(render_size * 0.14)
+        highlight_width = max(1, round(render_size * 0.012))
+        draw.ellipse(
+            (outer, outer, render_size - outer - 1, render_size - outer - 1),
+            fill=middle + (232,),
+        )
+        draw.ellipse(
+            (inner, inner, render_size - inner - 1, render_size - inner - 1),
+            fill=dark + (226,),
+        )
+        draw.arc(
+            (outer, outer, render_size - outer - 1, render_size - outer - 1),
+            start=202,
+            end=340,
+            fill=bright + (165,),
+            width=highlight_width,
+        )
+
+        path = ASSET_DIR / "professions" / f"{class_id}.png"
+        if not path.is_file():
+            path = ASSET_DIR / f"{class_id}.png"
+        source: Image.Image | None = None
+        if path.is_file():
+            try:
+                source = Image.open(path).convert("RGBA")
+            except (OSError, ValueError):
+                source = None
+        if source is not None and source.getchannel("A").getbbox() is not None:
+            source = source.crop(source.getchannel("A").getbbox())
+            glyph_extent = max(1, round(render_size * 0.64))
+            source.thumbnail((glyph_extent, glyph_extent), Image.Resampling.LANCZOS)
+            alpha = source.getchannel("A")
+            glyph = Image.new("RGBA", source.size, (248, 252, 255, 0))
+            glyph.putalpha(alpha)
+            glyph_glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            glyph_x = (render_size - source.width) // 2
+            glyph_y = (render_size - source.height) // 2
+            glow_mask = Image.new("L", image.size, 0)
+            glow_mask.paste(alpha, (glyph_x, glyph_y))
+            glow_mask = glow_mask.filter(
+                ImageFilter.GaussianBlur(max(1.0, render_size * 0.025))
+            )
+            glyph_glow.paste(rgb + (0,), (0, 0, render_size, render_size))
+            glyph_glow.putalpha(glow_mask)
+            image.alpha_composite(glyph_glow)
+            image.alpha_composite(glyph, (glyph_x, glyph_y))
+
+            white_core = Image.new("RGBA", source.size, (255, 255, 255, 0))
+            white_core.putalpha(alpha.point(lambda value: round(value * 0.30)))
+            image.alpha_composite(white_core, (glyph_x, glyph_y))
+        else:
+            fallback = (self.PROFESSION_GLYPHS.get(class_id, "?") or "?")[:1]
+            font = self._font(max(12, round(render_size * 0.42)), bold=True)
+            box = draw.textbbox((0, 0), fallback, font=font)
+            text_x = (render_size - (box[2] - box[0])) / 2 - box[0]
+            text_y = (render_size - (box[3] - box[1])) / 2 - box[1]
+            draw.text((text_x, text_y), fallback, font=font, fill=bright + (255,))
+
+        image = image.resize(
+            (physical_size, physical_size), Image.Resampling.LANCZOS
+        )
+        self.cache[key] = ImageTk.PhotoImage(image, master=self.root)
         return self.cache[key]
 
     def skill(
@@ -14399,6 +15581,211 @@ class ModernCheckboxControl(tk.Frame):
             )
 
 
+class ModernChoiceCard(tk.Frame):
+    """Keyboard-accessible, theme-drawn replacement for native radio buttons."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        title: str,
+        variable: tk.Variable,
+        value: object,
+        *,
+        font,
+        detail: str = "",
+        detail_font=None,
+        accent: str = PVE_MODE_FOREGROUND,
+        background: str = MODAL_CARD,
+        selected_background: str = "#142b3d",
+        disabled: bool = False,
+        command=None,
+        height: int = 58,
+    ) -> None:
+        cursor = "arrow" if disabled else "hand2"
+        try:
+            title_line_height = int(font.metrics("linespace"))
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            title_line_height = 18
+        try:
+            detail_line_height = int((detail_font or font).metrics("linespace"))
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            detail_line_height = 15
+        content_height = title_line_height + 20
+        if detail:
+            content_height += detail_line_height + 2
+        resolved_height = max(48, int(height), content_height)
+        super().__init__(
+            parent,
+            bg=background,
+            height=resolved_height,
+            cursor=cursor,
+            takefocus=0 if disabled else 1,
+            highlightthickness=1,
+            highlightbackground=MODAL_BORDER,
+            highlightcolor=MODAL_BORDER,
+        )
+        self.pack_propagate(False)
+        self.variable = variable
+        self.value = value
+        self.accent = accent
+        self.background = background
+        self.selected_background = selected_background
+        self.disabled = bool(disabled)
+        self.command = command
+        self.hovered = False
+
+        self.accent_bar = tk.Frame(self, bg=background, width=3)
+        self.accent_bar.pack(side="left", fill="y")
+        self.accent_bar.pack_propagate(False)
+        self.indicator = tk.Canvas(
+            self,
+            width=28,
+            height=28,
+            bg=background,
+            bd=0,
+            highlightthickness=0,
+            cursor=cursor,
+            takefocus=0,
+        )
+        self.indicator.pack(side="left", padx=(11, 7))
+        copy = tk.Frame(self, bg=background, cursor=cursor)
+        copy.pack(side="left", fill="both", expand=True, pady=7)
+        self.title_label = tk.Label(
+            copy,
+            text=str(title),
+            bg=background,
+            fg=TEXT if not disabled else SUBTLE,
+            anchor="w",
+            cursor=cursor,
+            font=font,
+        )
+        self.title_label.pack(fill="x", expand=not bool(detail))
+        self.detail_label: tk.Label | None = None
+        if detail:
+            self.detail_label = tk.Label(
+                copy,
+                text=str(detail),
+                bg=background,
+                fg=MUTED if not disabled else SUBTLE,
+                anchor="w",
+                cursor=cursor,
+                font=detail_font or font,
+            )
+            self.detail_label.pack(fill="x", pady=(1, 0))
+        self.state_label = tk.Label(
+            self,
+            text="已选择",
+            bg=background,
+            fg=accent,
+            width=6,
+            anchor="e",
+            cursor=cursor,
+            font=detail_font or font,
+        )
+        self.state_label.pack(side="right", fill="y", padx=(5, 12))
+
+        widgets = [
+            self,
+            self.accent_bar,
+            self.indicator,
+            copy,
+            self.title_label,
+            self.state_label,
+        ]
+        if self.detail_label is not None:
+            widgets.append(self.detail_label)
+        for widget in widgets:
+            widget.bind("<Button-1>", self._select)
+            widget.bind("<Enter>", self._enter)
+            widget.bind("<Leave>", self._leave)
+        self.bind("<space>", self._select)
+        self.bind("<Return>", self._select)
+        self._trace_id = variable.trace_add("write", self._redraw)
+        self._redraw()
+
+    def destroy(self) -> None:
+        try:
+            self.variable.trace_remove("write", self._trace_id)
+        except (AttributeError, tk.TclError):
+            pass
+        super().destroy()
+
+    def _selected(self) -> bool:
+        try:
+            return self.variable.get() == self.value
+        except tk.TclError:
+            return False
+
+    def _select(self, _event=None) -> str:
+        if self.disabled:
+            return "break"
+        changed = not self._selected()
+        self.variable.set(self.value)
+        if self.command is not None and changed:
+            self.command()
+        self.focus_set()
+        return "break"
+
+    def _enter(self, _event=None) -> None:
+        if self.disabled:
+            return
+        self.hovered = True
+        self._redraw()
+
+    def _leave(self, _event=None) -> None:
+        self.hovered = False
+        self._redraw()
+
+    def _redraw(self, *_args) -> None:
+        if not self.winfo_exists():
+            return
+        selected = self._selected()
+        if self.disabled:
+            background = self.background
+            border = BORDER
+        elif selected:
+            background = self.selected_background
+            border = self.accent
+        elif self.hovered:
+            background = MODAL_CARD_HOVER
+            border = blend_color(MODAL_BORDER, self.accent, 0.48)
+        else:
+            background = self.background
+            border = MODAL_BORDER
+        self.configure(bg=background, highlightbackground=border)
+        self.accent_bar.configure(bg=self.accent if selected else background)
+        for widget in (self.indicator, self.title_label, self.state_label):
+            widget.configure(bg=background)
+        copy = self.title_label.master
+        copy.configure(bg=background)
+        if self.detail_label is not None:
+            self.detail_label.configure(bg=background)
+        self.title_label.configure(
+            fg=SUBTLE if self.disabled else TEXT if selected else "#d4dee8"
+        )
+        self.state_label.configure(text="已选择" if selected else "")
+        self.indicator.delete("all")
+        indicator_outline = SUBTLE if self.disabled else self.accent if selected else MUTED
+        self.indicator.create_oval(
+            5,
+            5,
+            23,
+            23,
+            fill=background,
+            outline=indicator_outline,
+            width=2,
+        )
+        if selected:
+            self.indicator.create_oval(
+                10,
+                10,
+                18,
+                18,
+                fill=self.accent,
+                outline="",
+            )
+
+
 class ModernCheckControl(tk.Frame):
     """Theme-native switch control used by settings and feedback forms."""
 
@@ -15245,6 +16632,7 @@ class HookWorker(threading.Thread):
         self.team_stats_last_snapshot_total: int | None = None
         self.team_profile_cache = load_json_object(TEAM_PROFILE_CACHE_PATH)
         self.self_identity_cache = load_json_object(SELF_IDENTITY_CACHE_PATH)
+        self.last_emitted_self_identity: dict[str, object] = {}
         self.active_boss_cache = load_json_object(ACTIVE_BOSS_CACHE_PATH)
         self.boss_name_resolver = BossNameResolver(
             messages,
@@ -15622,6 +17010,7 @@ class HookWorker(threading.Thread):
     ) -> bool:
         dungeon_context = parser.current_dungeon_context()
         self._update_diagnostics(**dungeon_context)
+        self._update_diagnostics(invalid_combat_values=int(getattr(parser, 'invalid_combat_values', 0)))
         if dungeon_context != self.last_emitted_dungeon_context:
             self.last_emitted_dungeon_context = dict(dungeon_context)
             self.emit("dungeon_context", dict(dungeon_context))
@@ -15632,6 +17021,13 @@ class HookWorker(threading.Thread):
             profile_cache_dirty = True
         current_self_identity = parser.current_self_identity()
         if current_self_identity is not None:
+            emitted_identity = {
+                "entity_id": int(getattr(parser, "self_id", 0) or 0),
+                **current_self_identity,
+            }
+            if emitted_identity != self.last_emitted_self_identity:
+                self.last_emitted_self_identity = dict(emitted_identity)
+                self.emit("self_character", emitted_identity)
             next_self_identity = {
                 "game_pid": int(game_pid or 0),
                 **current_self_identity,
@@ -15859,6 +17255,7 @@ class HookWorker(threading.Thread):
         detail = self._capture_detail(payload)
         prefixes = {
             "team_install": "团队精确伤害主动查询不可用",
+            "team_detached": "队伍数据查询已断开，正在自动恢复",
             "team_rearm": "队伍数据响应超时，已重新同步",
             "team_reinstall": "队伍数据仍未恢复，已执行一次安全重连",
             "native_install": "原生伤害入口不可用，已使用脚本封包",
@@ -16184,7 +17581,7 @@ class HookWorker(threading.Thread):
                     self._update_diagnostics(stage="runtime_capability_expired")
                     self.emit(
                         "license_required",
-                        "采集授权已过期，请重新登录。",
+                        SYSTEM_TIME_SYNC_MESSAGE,
                     )
                 elif kind == "stopped":
                     received_stopped = True
@@ -16764,7 +18161,9 @@ class DpsWindow:
     """Borderless LOA-Logs-inspired live meter with custom Windows chrome."""
 
     def __init__(self):
-        self.config = load_config()
+        self.config, self.main_display_config_migrated = (
+            migrate_main_display_config(load_config())
+        )
         configured_toggle_hotkey = self.config.get(
             TOGGLE_VISIBILITY_HOTKEY_CONFIG_KEY,
             DEFAULT_TOGGLE_VISIBILITY_HOTKEY,
@@ -16891,7 +18290,9 @@ class DpsWindow:
         self.capture_started = False
         self.hide_names = bool(self.config.get("hide_names", False))
         self.history_hide_names = self.hide_names
-        self.compact_mode = bool(self.config.get("compact_mode", False))
+        # Kept as a compatibility attribute for old helper paths. The v1 main
+        # display has one layout and never enters compact mode.
+        self.compact_mode = False
         self.show_total_damage = bool(
             self.config.get("show_total_damage", True)
         )
@@ -16916,7 +18317,37 @@ class DpsWindow:
         )
         self.team_rating_preview_enabled = bool(
             TEAM_RATING_PREVIEW_AVAILABLE
-            and self.config.get(TEAM_RATING_PREVIEW_CONFIG_KEY, False)
+            and self.config.get(TEAM_RATING_PREVIEW_CONFIG_KEY, True)
+        )
+        self.profession_display_metrics = normalize_profession_display_metrics(
+            self.config.get(PROFESSION_DISPLAY_METRICS_CONFIG_KEY)
+        )
+        self.main_row_mask_opacity = clamp_percent(
+            self.config.get(MAIN_ROW_MASK_OPACITY_CONFIG_KEY, 0), 0
+        )
+        self.main_ui_scale = clamp_main_ui_scale(
+            self.config.get(MAIN_UI_SCALE_CONFIG_KEY, 1.0)
+        )
+        self.main_visible_rows = clamp_visible_rows(
+            self.config.get(MAIN_VISIBLE_ROWS_CONFIG_KEY, HUD_MAX_VISIBLE_ROWS)
+        )
+        self.show_boss_hp_bar = bool(
+            self.config.get(SHOW_BOSS_HP_BAR_CONFIG_KEY, True)
+        )
+        self.show_combat_time = bool(
+            self.config.get(SHOW_COMBAT_TIME_CONFIG_KEY, True)
+        )
+        self.show_main_totals = bool(
+            self.config.get(SHOW_MAIN_TOTALS_CONFIG_KEY, True)
+        )
+        self.show_team_dps = bool(
+            self.config.get(SHOW_TEAM_DPS_CONFIG_KEY, True)
+        )
+        self.highlight_self = bool(
+            self.config.get(HIGHLIGHT_SELF_CONFIG_KEY, True)
+        )
+        self.show_pvp_button = bool(
+            self.config.get(SHOW_PVP_BUTTON_CONFIG_KEY, True)
         )
         self.show_deaths = bool(self.config.get("show_deaths", True))
         self.show_revives = bool(self.config.get("show_revives", True))
@@ -16950,11 +18381,9 @@ class DpsWindow:
         # The average-response column was removed in v0.0.15.  Purge the old
         # preference so upgraded installations cannot bring it back.
         self.config.pop("show_healing_response", None)
-        self.main_meter_mode = str(
-            self.config.get("main_meter_mode", "dps") or "dps"
-        ).casefold()
-        if self.main_meter_mode not in {"dps", "hps", "dt", "boss"}:
-            self.main_meter_mode = "dps"
+        # Legacy detail helpers still read this attribute. It no longer drives
+        # the main window and is fixed to damage semantics.
+        self.main_meter_mode = "dps"
         self.window_locked = bool(self.config.get("window_locked", False))
         self.window_lock_topmost_restore: bool | None = (
             bool(self.config.get("topmost", True))
@@ -17019,6 +18448,7 @@ class DpsWindow:
         self.history_battle_detail_frame: tk.Frame | None = None
         self.history_detail_sticky_toolbar: tk.Frame | None = None
         self.history_page_root: tk.Frame | None = None
+        self.backend_page_host: tk.Frame | None = None
         self.history_page_canvas: tk.Canvas | None = None
         self.history_page_scrollbar: ModernScrollbar | None = None
         self.history_page_content_window: int | None = None
@@ -17140,6 +18570,7 @@ class DpsWindow:
         self.backend_sidebar_art_canvas: tk.Canvas | None = None
         self.backend_sidebar_art_after_id: object | None = None
         self.sidebar_avatar_label: tk.Label | None = None
+        self.profile_edit_button: tk.Label | None = None
         self.backend_connection_dot: tk.Label | None = None
         self.backend_connection_label: tk.Label | None = None
         self.backend_collapse_button: tk.Label | None = None
@@ -17185,7 +18616,9 @@ class DpsWindow:
         self.feedback_status_label: tk.Label | None = None
         self.feedback_submit_button: tk.Label | None = None
         self.feedback_submitting = False
-        self.notice_window: tk.Frame | None = None
+        self.notice_window: tk.Toplevel | None = None
+        self.notice_parent: tk.Misc | None = None
+        self.notice_modal = False
         self.update_status_label: tk.Label | None = None
         self.update_summary_label: tk.Label | None = None
         self.update_action_button: tk.Label | None = None
@@ -17210,6 +18643,19 @@ class DpsWindow:
         self.trial_claim_in_progress = False
         self.membership_label: tk.Label | None = None
         self.expiry_label: tk.Label | None = None
+        self.current_character_id = ""
+        self.current_character_name = ""
+        self.current_character_profession_id = 0
+        self.upload_profile: UploadProfile | None = None
+        self.profile_resolved_character_id = ""
+        self.profile_resolve_in_progress = False
+        self.profile_editor_pending = False
+        self.profile_mutation_in_progress = False
+        self.profile_modal_overlay: tk.Frame | None = None
+        self.profile_modal_status_label: tk.Label | None = None
+        self.profile_modal_submit_button: tk.Label | None = None
+        self.pending_upload_battle_id = ""
+        self.history_upload_in_progress: set[str] = set()
         self.login_status_message = ""
         self.opacity_value_label: tk.Label | None = None
         self.opacity_scale: ModernSlider | None = None
@@ -17227,6 +18673,18 @@ class DpsWindow:
         self.settings_team_rating_preview_var: tk.BooleanVar | None = None
         self.settings_boss_enrage_prediction_var: tk.BooleanVar | None = None
         self.settings_show_deaths_var: tk.BooleanVar | None = None
+        self.settings_audience_metric_var: tk.StringVar | None = None
+        self.settings_warrior_metric_var: tk.StringVar | None = None
+        self.settings_row_mask_opacity_var: tk.IntVar | None = None
+        self.settings_row_mask_value_label: tk.Label | None = None
+        self.settings_ui_scale_var: tk.IntVar | None = None
+        self.settings_ui_scale_value_label: tk.Label | None = None
+        self.settings_show_boss_hp_var: tk.BooleanVar | None = None
+        self.settings_show_combat_time_var: tk.BooleanVar | None = None
+        self.settings_show_main_totals_var: tk.BooleanVar | None = None
+        self.settings_show_team_dps_var: tk.BooleanVar | None = None
+        self.settings_highlight_self_var: tk.BooleanVar | None = None
+        self.settings_show_pvp_button_var: tk.BooleanVar | None = None
         self.settings_show_revives_var: tk.BooleanVar | None = None
         self.settings_show_death_duration_var: tk.BooleanVar | None = None
         self.settings_show_taken_var: tk.BooleanVar | None = None
@@ -17263,6 +18721,25 @@ class DpsWindow:
         self.main_content_overlay_root_geometry: tuple[int, ...] | None = None
         self.main_content_overlay_click_through_ready = False
         self.main_content_overlay_topmost: bool | None = None
+        # The visible main HUD uses one native 32-bit alpha surface on
+        # Windows.  Tk remains the lifecycle and input owner, while these
+        # fields hold the renderer, DIB presenter and manual hit targets.
+        self.layered_main_enabled = sys.platform == "win32"
+        self.layered_main_renderer: MainHudRenderer | None = None
+        self.layered_main_presenter: WindowsLayeredPresenter | None = None
+        self.layered_main_after_id: str | None = None
+        self.layered_main_rendering = False
+        self.layered_main_hit_regions: dict[
+            str, tuple[int, int, int, int]
+        ] = {}
+        self.layered_main_actor_regions: tuple[
+            tuple[tuple[int, int, int, int], int], ...
+        ] = ()
+        self.layered_main_hover_action = ""
+        self.layered_main_press_action = ""
+        self.layered_main_press_actor = 0
+        self.layered_main_press_origin: tuple[int, int] | None = None
+        self.layered_main_dragged = False
         self.footer_tabs: dict[str, tuple[tk.Frame, tk.Label, tk.Frame]] = {}
         self.process_is_elevated = is_process_elevated()
         self.tray_icon = None
@@ -17298,16 +18775,23 @@ class DpsWindow:
                 ),
             )
         )
+        self.combat_upload_states = normalize_combat_upload_states(
+            load_json_object(UPLOAD_STATE_PATH)
+        )
+        upload_public_mode = str(
+            self.config.get(UPLOAD_PUBLIC_MODE_CONFIG_KEY, "anonymous")
+            or "anonymous"
+        ).casefold()
+        self.upload_public_mode = (
+            upload_public_mode
+            if upload_public_mode in {"anonymous", "character"}
+            else "anonymous"
+        )
+        self.config[UPLOAD_PUBLIC_MODE_CONFIG_KEY] = self.upload_public_mode
         save_config(self.config)
 
-        try:
-            configured_alpha = float(self.config.get("alpha", 1.0))
-        except (TypeError, ValueError, OverflowError):
-            configured_alpha = 1.0
-        self.window_alpha = min(
-            1.0,
-            max(MIN_WINDOW_ALPHA_PERCENT / 100.0, configured_alpha),
-        )
+        self.window_alpha = 1.0
+        self.config['alpha'] = 1.0
 
         if sys.platform == "win32":
             try:
@@ -17322,12 +18806,9 @@ class DpsWindow:
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
         self.root.withdraw()
-        self.root.configure(bg=BG)
+        self.root.configure(bg=MAIN_TRANSPARENT_KEY)
         self.root.geometry(self._initial_geometry())
-        self.root.minsize(
-            self._main_minimum_width(),
-            MINI_MIN_HEIGHT if self.compact_mode else MAIN_MIN_HEIGHT,
-        )
+        self.root.minsize(self._main_minimum_width(), MAIN_MIN_HEIGHT)
         self.root.attributes(
             "-topmost",
             self.window_locked or bool(self.config.get("topmost", True)),
@@ -17342,9 +18823,26 @@ class DpsWindow:
         # calibration while the root is still at Tk's default (and withdrawn)
         # scale makes a 125% monitor build every font at 96 DPI first.
         self.root.update_idletasks()
+        self._apply_windows_style(self.root)
         self._configure_tk_dpi_scaling()
         self._initialize_ui_fonts()
         self.icons = IconFactory(self.root)
+        if self.layered_main_enabled:
+            try:
+                self.layered_main_renderer = MainHudRenderer(
+                    ASSET_DIR,
+                    PROFESSION_COLORS,
+                )
+                self.layered_main_presenter = WindowsLayeredPresenter(self.root)
+            except (AttributeError, OSError, RuntimeError, tk.TclError):
+                # Retain the existing Tk renderer as a safe fallback on an
+                # unsupported Windows compositor or remote desktop session.
+                presenter = self.layered_main_presenter
+                if presenter is not None:
+                    presenter.close()
+                self.layered_main_enabled = False
+                self.layered_main_renderer = None
+                self.layered_main_presenter = None
         self.app_window_icon = self.icons.app_logo(64)
         try:
             self.root.iconphoto(True, self.app_window_icon)
@@ -17431,7 +18929,9 @@ class DpsWindow:
         )
 
     def _enabled_main_metrics(self) -> tuple[str, ...]:
-        mode = getattr(self, "main_meter_mode", "dps")
+        # Compatibility helper for retired layout calculations and older
+        # saved integrations. The schema-v1 renderer does not consume this.
+        mode = str(getattr(self, "main_meter_mode", "dps") or "dps").casefold()
         if mode == "hps":
             return self._enabled_healing_metrics()
         if mode == "dt":
@@ -17440,10 +18940,33 @@ class DpsWindow:
             return self._enabled_boss_metrics()
         return self._enabled_damage_metrics()
 
+    def _main_px(self, value: object) -> int:
+        try:
+            logical = float(value) * float(
+                getattr(self, "main_ui_scale", 1.0) or 1.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            logical = float(value)
+        return logical_pixels_to_physical(
+            logical, getattr(self, "window_dpi", DEFAULT_DPI)
+        )
+
+    def _profession_display_metric(self, profession_id: object) -> str:
+        try:
+            parsed_profession_id = int(profession_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            parsed_profession_id = 0
+        selected = str(
+            getattr(self, "profession_display_metrics", {}).get(
+                str(parsed_profession_id), ""
+            )
+            or ""
+        ).casefold()
+        allowed = profession_metric_options(parsed_profession_id)
+        return selected if selected in allowed else allowed[0]
+
     def _main_minimum_width(self) -> int:
-        if self.compact_mode:
-            return MINI_MIN_WIDTH
-        return max(MAIN_MIN_WIDTH, 250 + 66 * len(self._enabled_main_metrics()))
+        return self._main_px(MAIN_MIN_WIDTH)
 
     def _compact_target_width(self) -> int:
         rating_reserve = (
@@ -17475,23 +18998,24 @@ class DpsWindow:
         return format_absolute_tk_geometry(parsed_width, parsed_height, x, y)
 
     def _initial_geometry(self) -> str:
-        if self.compact_mode:
-            saved = str(self.config.get("compact_geometry", ""))
-            saved = self._adaptive_compact_geometry(saved)
-            self.config["compact_geometry"] = saved
-            return self._visible_geometry(
-                saved, MINI_DEFAULT_WIDTH, MINI_DEFAULT_HEIGHT
-            )
         saved = str(self.config.get("geometry", ""))
-        if int(self.config.get("layout_version", 0)) < 14:
+        if bool(getattr(self, "main_display_config_migrated", False)):
             parsed = parse_absolute_tk_geometry(saved)
             if parsed is not None:
                 _width, _height, x, y = parsed
-                upgraded = format_absolute_tk_geometry(590, 400, x, y)
+                upgraded = format_absolute_tk_geometry(
+                    MAIN_DEFAULT_WIDTH, MAIN_DEFAULT_HEIGHT, x, y
+                )
             else:
-                upgraded = "590x400+32+120"
-            return self._visible_geometry(upgraded, 590, 400)
-        return self._visible_geometry(saved, 590, 400)
+                upgraded = format_absolute_tk_geometry(
+                    MAIN_DEFAULT_WIDTH, MAIN_DEFAULT_HEIGHT, 32, 120
+                )
+            return self._visible_geometry(
+                upgraded, MAIN_DEFAULT_WIDTH, MAIN_DEFAULT_HEIGHT
+            )
+        return self._visible_geometry(
+            saved, MAIN_DEFAULT_WIDTH, MAIN_DEFAULT_HEIGHT
+        )
 
     def _visible_geometry(self, value: str, default_width: int, default_height: int) -> str:
         parsed = parse_absolute_tk_geometry(value)
@@ -17530,11 +19054,24 @@ class DpsWindow:
                     ctypes.POINTER(wintypes.RECT),
                     wintypes.LPARAM,
                 )
+                # Other DPI helpers use their own MonitorInfo ctypes class.
+                # Do not share a globally cached function's pointer signature
+                # with those helpers when opening/moving settings windows.
+                monitor_api = ctypes.WinDLL("user32", use_last_error=True)
+                monitor_api.GetMonitorInfoW.argtypes = (
+                    wintypes.HMONITOR, ctypes.POINTER(MonitorInfo)
+                )
+                monitor_api.GetMonitorInfoW.restype = wintypes.BOOL
+                monitor_api.EnumDisplayMonitors.argtypes = (
+                    wintypes.HDC, ctypes.POINTER(wintypes.RECT),
+                    callback_type, wintypes.LPARAM,
+                )
+                monitor_api.EnumDisplayMonitors.restype = wintypes.BOOL
 
                 def collect(monitor, _hdc, _rect, _data):
                     info = MonitorInfo()
                     info.cbSize = ctypes.sizeof(info)
-                    if ctypes.windll.user32.GetMonitorInfoW(
+                    if monitor_api.GetMonitorInfoW(
                         monitor, ctypes.byref(info)
                     ):
                         work = info.rcWork
@@ -17542,7 +19079,7 @@ class DpsWindow:
                     return True
 
                 callback = callback_type(collect)
-                ctypes.windll.user32.EnumDisplayMonitors(0, 0, callback, 0)
+                monitor_api.EnumDisplayMonitors(None, None, callback, 0)
                 if areas:
                     return areas
             except (AttributeError, OSError, TypeError, ValueError):
@@ -17684,6 +19221,9 @@ class DpsWindow:
             # tk scaling alone does not rebuild those metrics, so reconfigure
             # every shared font even when its point size is unchanged.
             self._configure_ui_fonts()
+            if hasattr(self, "titlebar"):
+                self._refresh_main_scale_layout()
+                self._sync_main_component_visibility()
             self._sync_action_buttons()
             self._draw_main_header()
             self._draw_main_rows()
@@ -17738,6 +19278,7 @@ class DpsWindow:
                 (
                     candidate
                     for candidate in (
+                        getattr(self, "notice_window", None),
                         getattr(self, "user_notice_window", None),
                         getattr(self, "login_window", None),
                     )
@@ -17760,6 +19301,8 @@ class DpsWindow:
 
     def _configure_ui_fonts(self) -> None:
         base = int(self.ui_font_size)
+        main_scale = float(getattr(self, "main_ui_scale", 1.0) or 1.0)
+        main_base = max(10, int(round(base * main_scale)))
         specs = {
             "micro": (self.ui_font_family, max(9, base - 3), "normal"),
             "sidebar_micro": (
@@ -17767,12 +19310,20 @@ class DpsWindow:
                 max(8, base - 4),
                 "normal",
             ),
+            "sidebar_tag": (
+                self.ui_font_family,
+                max(8, base - 4),
+                "bold",
+            ),
             "small": (self.ui_font_family, max(10, base - 2), "normal"),
             "body": (self.ui_font_family, base, "normal"),
             "strong": (self.ui_font_family, base, "bold"),
             "settings": (self.ui_font_family, base + 1, "normal"),
             "settings_strong": (self.ui_font_family, base + 1, "bold"),
             "settings_title": (self.ui_font_family, base + 3, "bold"),
+            "dialog_body": (self.ui_font_family, base + 2, "normal"),
+            "dialog_button": (self.ui_font_family, base + 2, "bold"),
+            "dialog_title": (self.ui_font_family, base + 5, "bold"),
             "settings_number": (self.number_font_family, base + 1, "bold"),
             "title": (self.ui_font_family, base + 2, "bold"),
             "heading": (self.ui_font_family, base + 5, "bold"),
@@ -17797,6 +19348,23 @@ class DpsWindow:
             "table_header_compact": (
                 self.ui_font_family,
                 max(10, base - 1),
+                "bold",
+            ),
+            "main_micro": (
+                self.ui_font_family,
+                max(8, main_base - 4),
+                "normal",
+            ),
+            "main_text": (self.ui_font_family, main_base, "bold"),
+            "main_strong": (self.ui_font_family, main_base, "bold"),
+            "main_number_small": (
+                self.number_font_family,
+                max(10, main_base - 2),
+                "bold",
+            ),
+            "main_number_strong": (
+                self.number_font_family,
+                main_base,
                 "bold",
             ),
         }
@@ -18002,6 +19570,8 @@ class DpsWindow:
             bg=BG,
             fg=ERROR if self.login_status_message else WARN,
             anchor="w",
+            justify="left",
+            wraplength=px(LOGIN_WINDOW_WIDTH - 56),
             font=self._ui_font("small"),
         )
 
@@ -18768,6 +20338,124 @@ class DpsWindow:
         self.capture_started = True
         self.worker.start()
 
+    def _handle_self_character(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        raw_character_id = str(payload.get("user_token", "") or "").strip()
+        try:
+            identity = canonical_character_identity(raw_character_id)
+        except ProfileUploadError:
+            return
+        try:
+            entity_id = int(payload.get("entity_id", 0) or 0)
+            profession_id = max(0, int(payload.get("profession_id", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            entity_id = profession_id = 0
+        character_name = str(payload.get("name", "") or "").strip()[:48]
+        character_changed = self.current_character_id != identity.canonical
+        self.current_character_id = identity.canonical
+        self.current_character_name = character_name
+        self.current_character_profession_id = profession_id
+        if entity_id:
+            self.model.ingest_profile(
+                {
+                    "entity_id": entity_id,
+                    "user_token": identity.canonical,
+                    "name": character_name,
+                    "profession_id": profession_id,
+                    "entity_type": "Player",
+                }
+            )
+        if character_changed:
+            self.upload_profile = None
+            self.profile_resolved_character_id = ""
+        self._sync_upload_profile_label()
+        self._resolve_upload_profile_async()
+
+    def _resolve_upload_profile_async(self) -> None:
+        character_id = str(getattr(self, "current_character_id", "") or "")
+        if (
+            not character_id
+            or bool(getattr(self, "profile_resolve_in_progress", False))
+            or not self.licensing.session.active
+            or self.closing
+        ):
+            return
+        self.profile_resolve_in_progress = True
+        character_name = str(getattr(self, "current_character_name", "") or "")
+        profession_id = int(
+            getattr(self, "current_character_profession_id", 0) or 0
+        )
+
+        def resolve() -> None:
+            try:
+                result = self.licensing.resolve_upload_profile(
+                    character_id,
+                    character_name=character_name,
+                    profession_id=profession_id,
+                )
+            except LicensingConnectionError as exc:
+                result = ProfileResult(False, error="connection", message=str(exc))
+            except Exception:
+                result = ProfileResult(
+                    False,
+                    error="unexpected",
+                    message="上传身份查询失败，请稍后重试。",
+                )
+            self.control_messages.put(
+                (
+                    "profile_resolve_result",
+                    {"character_id": character_id, "result": result},
+                )
+            )
+
+        threading.Thread(
+            target=resolve, name="profile-resolve", daemon=True
+        ).start()
+
+    def _handle_profile_resolve_result(self, payload: object) -> None:
+        self.profile_resolve_in_progress = False
+        if not isinstance(payload, dict):
+            return
+        if str(payload.get("character_id", "")) != self.current_character_id:
+            self._resolve_upload_profile_async()
+            return
+        result = payload.get("result")
+        if not isinstance(result, ProfileResult):
+            return
+        if result.accepted:
+            self.upload_profile = result.profile
+            self.profile_resolved_character_id = self.current_character_id
+        self._sync_upload_profile_label()
+        pending_battle_id = str(self.pending_upload_battle_id or "")
+        editor_pending = bool(getattr(self, "profile_editor_pending", False))
+        if not pending_battle_id and not editor_pending:
+            return
+        if not result.accepted:
+            self.pending_upload_battle_id = ""
+            self.profile_editor_pending = False
+            self._show_notice(
+                "上传身份查询失败",
+                result.message or "上传身份查询失败，请稍后重试。",
+                parent=self.history_window,
+            )
+            return
+        self._close_notice_window()
+        self.profile_editor_pending = False
+        if pending_battle_id and isinstance(self.upload_profile, UploadProfile):
+            self.root.after_idle(
+                lambda battle_id=pending_battle_id: self._show_history_upload_confirmation(
+                    battle_id
+                )
+            )
+        elif pending_battle_id:
+            self._show_profile_setup_choice()
+        elif editor_pending:
+            if isinstance(self.upload_profile, UploadProfile):
+                self._show_profile_nickname_form(rename=True)
+            else:
+                self._show_profile_setup_choice()
+
     def _start_update_check(self, *, manual: bool = False) -> None:
         if (
             getattr(self, "update_check_in_progress", False)
@@ -19287,11 +20975,22 @@ class DpsWindow:
             self.root.after(1, self._finish_return_to_login)
             return
         self.model.reset(keep_identity=False, archive_reason="authorization")
+        self.main_last_battle_result = None
         self.model.entity_names.clear()
         self.model.entity_professions.clear()
         self.model.entity_extraordinary_ratings.clear()
         self.model.entity_ai_states.clear()
         self.model.local_player_name = ""
+        self.current_character_id = ""
+        self.current_character_name = ""
+        self.current_character_profession_id = 0
+        self.upload_profile = None
+        self.profile_resolved_character_id = ""
+        self.profile_resolve_in_progress = False
+        self.profile_editor_pending = False
+        self.profile_mutation_in_progress = False
+        self.pending_upload_battle_id = ""
+        self.history_upload_in_progress.clear()
         self._flush_combat_history(force=True)
         self.capture_started = False
         self.heartbeat_worker = None
@@ -19580,6 +21279,10 @@ class DpsWindow:
             return False
 
     def _destroy_unlock_window(self) -> None:
+        presenter = getattr(self, "layered_unlock_presenter", None)
+        if presenter is not None:
+            presenter.close()
+            self.layered_unlock_presenter = None
         if self.unlock_window is not None and self.unlock_window.winfo_exists():
             self.unlock_window.destroy()
         self.unlock_window = None
@@ -19628,12 +21331,23 @@ class DpsWindow:
             or self.root.state() != "normal"
         ):
             return
+        if self._layered_main_active():
+            region = getattr(self, "layered_main_hit_regions", {}).get("action:lock")
+            frame = getattr(self, "layered_main_last_image", None)
+            presenter = getattr(self, "layered_unlock_presenter", None)
+            if region is None or frame is None or presenter is None:
+                return
+            left, top, right, bottom = region
+            width, height = max(1, right - left), max(1, bottom - top)
+            x, y = self.root.winfo_x() + left, self.root.winfo_y() + top
+            geometry = format_absolute_tk_geometry(width, height, x, y)
+            if window.geometry() != geometry:
+                window.geometry(geometry)
+                window.update_idletasks()
+            presenter.present(frame.crop(region), opacity=1.0)
+            return
         self.root.update_idletasks()
-        if self.compact_mode:
-            width, height = 28, 28
-            x = self.root.winfo_rootx() + self.root.winfo_width() - 63
-            y = self.root.winfo_rooty() + 2
-        elif self.lock_button.winfo_ismapped():
+        if self.lock_button.winfo_ismapped():
             width = max(27, self.lock_button.winfo_width())
             height = max(24, self.lock_button.winfo_height())
             x = self.lock_button.winfo_rootx()
@@ -19648,6 +21362,25 @@ class DpsWindow:
 
     def _show_unlock_window(self) -> None:
         if self.root.state() != "normal":
+            return
+        if self._layered_main_active():
+            if self.unlock_window is None or not self.unlock_window.winfo_exists():
+                window = tk.Toplevel(self.root)
+                window.withdraw()
+                window.overrideredirect(True)
+                window.transient(self.root)
+                window.title("解锁 DPS 窗口")
+                window.attributes("-topmost", True)
+                window.configure(cursor="hand2")
+                window.bind("<Button-1>", lambda _event: self.toggle_window_lock())
+                self.unlock_window = window
+                self.unlock_button = None
+                self.layered_unlock_presenter = WindowsLayeredPresenter(window)
+                self._apply_windows_style(window)
+            self._sync_unlock_window_position()
+            self.unlock_window.deiconify()
+            self.unlock_window.update_idletasks()
+            self._sync_unlock_window_position()
             return
         if self.unlock_window is None or not self.unlock_window.winfo_exists():
             window = tk.Toplevel(self.root)
@@ -19749,6 +21482,838 @@ class DpsWindow:
         save_config(self.config)
 
     def _build_ui(self) -> None:
+        """Build the single transparent main meter used by the current display schema."""
+
+        transparent = MAIN_TRANSPARENT_KEY
+        shell = tk.Frame(self.root, bg=transparent, bd=0)
+        self.main_shell = shell
+        shell.pack(fill="both", expand=True)
+        inset = self._main_px(2)
+        self.body = tk.Frame(shell, bg=transparent, bd=0)
+        self.body.pack(fill="both", expand=True, padx=inset)
+        self._bind_drag(shell, self.root)
+        self._bind_drag(self.body, self.root)
+
+        self.titlebar = tk.Frame(
+            self.body,
+            bg=transparent,
+            height=self._main_px(MAIN_TITLE_HEIGHT),
+            bd=0,
+        )
+        self.titlebar.pack(fill="x")
+        self.titlebar.pack_propagate(False)
+        self._bind_drag(self.titlebar, self.root)
+        self.main_time_text = "00:00"
+        self.time_value = tk.Canvas(
+            self.titlebar,
+            bg=transparent,
+            bd=0,
+            highlightthickness=0,
+            width=self._main_px(66),
+            height=self._main_px(MAIN_TITLE_HEIGHT),
+        )
+        self.time_value.pack(side="left", anchor="w")
+        self.time_value.bind(
+            "<Configure>", lambda _event: self._draw_main_time_value()
+        )
+        self._bind_drag(self.time_value, self.root)
+
+        # Runtime status still feeds diagnostics and the backend sidebar, but
+        # it is intentionally absent from the clean overlay chrome.
+        self.dot = tk.Label(self.titlebar, text="", bg=transparent, fg=WARN)
+        self.status_label = tk.Label(
+            self.titlebar, text="准备中", bg=transparent, fg=MUTED
+        )
+        self.group_label = tk.Label(self.titlebar, text="", bg=transparent)
+        self.combat_mode_button = tk.Frame(self.titlebar, bg=transparent)
+
+        self.summary = tk.Frame(
+            self.body,
+            bg=transparent,
+            height=self._main_px(MAIN_BOSS_HEIGHT),
+            bd=0,
+        )
+        self.summary.pack(fill="x")
+        self.summary.pack_propagate(False)
+        self._bind_drag(self.summary, self.root)
+        self.metric_frame = tk.Frame(self.summary, bg=transparent, height=0)
+        self.total_caption = tk.Label(self.metric_frame, bg=transparent)
+        self.total_value = tk.Label(self.metric_frame, bg=transparent)
+        self.dps_group = tk.Frame(self.metric_frame, bg=transparent)
+        self.dps_caption = tk.Label(self.metric_frame, bg=transparent)
+        self.dps_value = tk.Label(self.metric_frame, bg=transparent)
+        self.monster_hp_canvas = tk.Canvas(
+            self.summary,
+            height=self._main_px(MAIN_BOSS_HEIGHT),
+            bg=transparent,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.monster_hp_canvas.pack(fill="both", expand=True)
+        self.monster_hp_canvas.bind(
+            "<Configure>", lambda _event: self._draw_monster_hp()
+        )
+        self.monster_hp_canvas.bind("<Motion>", self._track_enrage_tooltip)
+        self.monster_hp_canvas.bind("<Leave>", self._hide_enrage_tooltip)
+        self._bind_drag(self.monster_hp_canvas, self.root)
+        self.enrage_prediction_canvas = self.monster_hp_canvas
+
+        self.table_panel = tk.Frame(self.body, bg=transparent, bd=0)
+        self.table_panel.pack(fill="x")
+        self._bind_drag(self.table_panel, self.root)
+        # Kept as a hidden compatibility surface. Schema v1 has no table
+        # header, rank labels, or metric-mode tabs.
+        self.header_canvas = tk.Canvas(
+            self.table_panel,
+            height=0,
+            bg=transparent,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.rows_canvas = tk.Canvas(
+            self.table_panel,
+            height=self._main_px(36),
+            bg=transparent,
+            bd=0,
+            highlightthickness=0,
+            yscrollincrement=1,
+        )
+        self.rows_canvas.pack(fill="x")
+        self.rows_canvas.bind("<MouseWheel>", self._scroll_main)
+        self.rows_canvas.bind("<Button-4>", self._scroll_main)
+        self.rows_canvas.bind("<Button-5>", self._scroll_main)
+        self.rows_canvas.bind("<Configure>", self._main_rows_canvas_configure)
+        self.rows_canvas.bind(
+            "<ButtonPress-1>", lambda event: self._drag_start(event, self.root)
+        )
+        self.rows_canvas.bind(
+            "<B1-Motion>", lambda event: self._drag_move(event, self.root)
+        )
+        self.rows_canvas.bind(
+            "<ButtonRelease-1>", lambda event: self._drag_end(event, self.root)
+        )
+
+        self.footer = tk.Frame(
+            self.body,
+            bg=transparent,
+            height=self._main_px(MAIN_FOOTER_HEIGHT),
+            bd=0,
+        )
+        self.footer.pack(fill="x")
+        self.footer.pack_propagate(False)
+        self._bind_drag(self.footer, self.root)
+
+        self.team_dps_group = tk.Frame(self.footer, bg=transparent, bd=0)
+        self.team_dps_group.pack(side="left", fill="y")
+        footer_logo_image = self.icons.app_logo(27)
+        self.main_logo = tk.Label(
+            self.team_dps_group,
+            image=footer_logo_image,
+            bg=transparent,
+            bd=0,
+            padx=0,
+            pady=0,
+        )
+        self.main_logo.image = footer_logo_image
+        self.main_logo.pack(side="left", padx=(self._main_px(2), self._main_px(7)))
+        self.team_dps_caption = tk.Canvas(
+            self.team_dps_group,
+            bg=transparent,
+            bd=0,
+            highlightthickness=0,
+            width=self._main_px(145),
+            height=self._main_px(MAIN_FOOTER_HEIGHT),
+        )
+        # This compatibility name is intentionally kept because a few older
+        # integration helpers only check that the footer value surface exists.
+        # The canvas lets the white HUD text keep its dark edge on bright game
+        # scenes; an ordinary Tk Label cannot draw an outline.
+        self.team_dps_label = self.team_dps_caption
+        self.team_dps_text = "0"
+        self.team_dps_caption.pack(side="left")
+        self.team_dps_caption.bind(
+            "<Configure>", lambda _event: self._draw_team_dps_value()
+        )
+        for widget in (
+            self.team_dps_group,
+            self.main_logo,
+            self.team_dps_caption,
+        ):
+            self._bind_drag(widget, self.root)
+
+        actions = tk.Frame(self.footer, bg=transparent, bd=0)
+        actions.pack(side="right", fill="y")
+        self.pvp_button = self._main_icon_button(
+            actions, "pvp", "PVP（暂未开放）", lambda: None
+        )
+        self.pvp_button._disabled = True
+        self.pvp_button._normal_color = PVP_MODE_DISABLED_FOREGROUND
+        self.pvp_button.configure(cursor="arrow")
+        self.settings_button = self._main_icon_button(
+            actions, "settings", "设置", self.show_settings
+        )
+        self.pin_button = self._main_icon_button(
+            actions,
+            "pin" if self._preferred_main_topmost() else "pin_off",
+            "取消置顶" if self._preferred_main_topmost() else "置顶",
+            self.toggle_topmost,
+        )
+        self.lock_button = self._main_icon_button(
+            actions,
+            "lock" if self.window_locked else "unlock",
+            "解锁" if self.window_locked else "锁定",
+            self.toggle_window_lock,
+        )
+        self.close_button = self._main_icon_button(
+            actions, "close", "退出程序", self._request_close
+        )
+        self.close_button._normal_color = "#e8b5ba"
+        for button in (
+            self.pvp_button,
+            self.settings_button,
+            self.pin_button,
+            self.lock_button,
+            self.close_button,
+        ):
+            button.pack(side="left", fill="y")
+
+        self.share_button = None
+        self.reset_button = None
+        self.privacy_button = None
+        self.main_menu_button = None
+        self.compact_button = None
+        self.min_button = None
+        self.max_button = None
+        self.feedback_button = None
+        self.history_button = None
+        self.footer_tabs = {}
+        self.footer_brand_label = tk.Label(self.footer, text="", bg=transparent)
+        self.toolbar = tk.Frame(self.body, bg=transparent)
+        self.membership_label = None
+        self.expiry_label = None
+        self.opacity_scale = None
+        self.opacity_value_label = None
+
+        # The resize hit target stays invisible so the five requested icon
+        # footer remains the complete visible chrome.
+        self.resize_grip = tk.Label(
+            self.body,
+            text="",
+            bg=transparent,
+            bd=0,
+            cursor="size_nw_se",
+        )
+        self.resize_grip.place(
+            relx=1.0,
+            rely=1.0,
+            anchor="se",
+            width=self._main_px(10),
+            height=self._main_px(10),
+        )
+        self.resize_grip.bind(
+            "<ButtonPress-1>", lambda event: self._resize_start(event, self.root)
+        )
+        self.resize_grip.bind(
+            "<B1-Motion>",
+            lambda event: self._resize_move(
+                event,
+                self.root,
+                self._main_minimum_width(),
+                MAIN_MIN_HEIGHT,
+            ),
+        )
+
+        self.root.bind("<MouseWheel>", self._scroll_main, add="+")
+        self.root.bind("<Button-4>", self._scroll_main, add="+")
+        self.root.bind("<Button-5>", self._scroll_main, add="+")
+        self.root.bind("<Map>", self._main_window_map_state, add="+")
+        self.root.bind("<Unmap>", self._main_window_map_state, add="+")
+        self.root.bind("<Configure>", self._main_window_configure, add="+")
+        self._refresh_main_scale_layout()
+        self._sync_main_component_visibility()
+        self._sync_action_buttons()
+        if self.layered_main_enabled:
+            # Child Tk surfaces would reintroduce chroma-key antialiasing.
+            # Keep them alive for compatibility/tests, but expose only the
+            # single per-pixel-alpha HUD owned by the root HWND.
+            shell.pack_forget()
+            self.resize_grip.place_forget()
+            self.root.minsize(1, 1)
+            self.root.bind("<Motion>", self._layered_main_motion, add="+")
+            self.root.bind("<Leave>", self._layered_main_leave, add="+")
+            self.root.bind(
+                "<ButtonPress-1>", self._layered_main_press, add="+"
+            )
+            self.root.bind(
+                "<B1-Motion>", self._layered_main_drag, add="+"
+            )
+            self.root.bind(
+                "<ButtonRelease-1>", self._layered_main_release, add="+"
+            )
+            self._schedule_layered_main_render()
+
+    def _draw_main_time_value(self) -> None:
+        canvas = getattr(self, "time_value", None)
+        if not isinstance(canvas, tk.Canvas):
+            return
+        canvas.delete("all")
+        height = max(1, canvas.winfo_height())
+        canvas_outlined_text(
+            canvas,
+            self._main_px(1),
+            height // 2,
+            text=str(getattr(self, "main_time_text", "00:00") or "00:00"),
+            fill="#ffffff",
+            outline="#08111b",
+            outline_width=max(1, self._main_px(1)),
+            anchor="w",
+            font=self._ui_font("main_number_strong"),
+        )
+
+    def _draw_team_dps_value(self) -> None:
+        canvas = getattr(self, "team_dps_caption", None)
+        if not isinstance(canvas, tk.Canvas):
+            return
+        canvas.delete("all")
+        height = max(1, canvas.winfo_height())
+        middle_y = height // 2
+        caption_font = self._ui_font("main_text")
+        value_font = self._ui_font("main_number_strong")
+        caption = "全队秒伤"
+        canvas_outlined_text(
+            canvas,
+            self._main_px(1),
+            middle_y,
+            text=caption,
+            fill="#f7f9fc",
+            outline="#071019",
+            outline_width=max(1, self._main_px(1)),
+            anchor="w",
+            font=caption_font,
+        )
+        try:
+            value_x = caption_font.measure(caption) + self._main_px(7)
+        except (AttributeError, TypeError, ValueError, tk.TclError):
+            value_x = self._main_px(63)
+        canvas_outlined_text(
+            canvas,
+            value_x,
+            middle_y,
+            text=str(getattr(self, "team_dps_text", "0") or "0"),
+            fill="#79bdff",
+            outline="#071019",
+            outline_width=max(1, self._main_px(1)),
+            anchor="w",
+            font=value_font,
+        )
+
+    def _set_team_dps_value(self, text: object) -> None:
+        self.team_dps_text = str(text or "0")
+        widget = getattr(self, "team_dps_caption", None)
+        if isinstance(widget, tk.Canvas):
+            self._draw_team_dps_value()
+        elif getattr(self, "team_dps_label", None) is not None:
+            self.team_dps_label.configure(text=self.team_dps_text)
+        self._schedule_layered_main_render()
+
+    def _set_main_time_value(self, text: object) -> None:
+        self.main_time_text = str(text or "00:00")
+        widget = getattr(self, "time_value", None)
+        if isinstance(widget, tk.Canvas):
+            self._draw_main_time_value()
+        elif widget is not None:
+            widget.configure(text=self.main_time_text, fg="#ffffff")
+        self._schedule_layered_main_render()
+
+    def _layered_main_active(self) -> bool:
+        return bool(
+            getattr(self, "layered_main_enabled", False)
+            and getattr(self, "layered_main_renderer", None) is not None
+            and getattr(self, "layered_main_presenter", None) is not None
+        )
+
+    def _schedule_layered_main_render(self, delay: int = 0) -> None:
+        if not self._layered_main_active() or self.closing:
+            return
+        if getattr(self, "layered_main_after_id", None) is not None:
+            return
+
+        def render() -> None:
+            self.layered_main_after_id = None
+            self._render_layered_main_hud()
+
+        try:
+            self.layered_main_after_id = self.root.after(max(0, int(delay)), render)
+        except (AttributeError, tk.TclError):
+            self.layered_main_after_id = None
+
+    def _main_boss_display_values(self, monster) -> dict[str, object]:
+        boss_name = "暂无目标"
+        boss_level = None
+        current_hp = None
+        maximum_hp = None
+        if monster is not None:
+            try:
+                level = int(getattr(monster, "level", 0) or 0)
+                if 1 <= level <= 999:
+                    boss_level = level
+            except (TypeError, ValueError, OverflowError):
+                pass
+            boss_name = str(getattr(monster, "name", "") or "").strip()
+            if not boss_name or boss_name_is_placeholder(boss_name):
+                display_target_name = getattr(self.model, "display_target_name", None)
+                boss_name = (
+                    str(
+                        display_target_name(
+                            int(getattr(monster, "entity_id", 0) or 0)
+                        )
+                        or ""
+                    ).strip()
+                    if callable(display_target_name)
+                    else ""
+                )
+            boss_name = boss_name or "Boss"
+            current_hp = getattr(monster, "current_hp", None)
+            declared_maximum = getattr(monster, "max_hp", None)
+            maximum_hp = (
+                declared_maximum
+                if declared_maximum is not None and declared_maximum > 0
+                else None
+            )
+        # The first observed CurrentHP may already be damaged. It is a
+        # detection baseline, never an authoritative maximum or percentage.
+        boss_ratio = None
+        if current_hp is not None and maximum_hp is not None and maximum_hp > 0:
+            boss_ratio = min(1.0, max(0.0, float(current_hp) / float(maximum_hp)))
+        boss_hp = format_team_health_number(current_hp) if current_hp is not None else ""
+        boss_percent = ""
+        if maximum_hp is not None:
+            boss_hp = (
+                f"{boss_hp} / "
+                f"{format_team_health_number(maximum_hp)}"
+            )
+        if current_hp is not None and maximum_hp is not None and maximum_hp > 0:
+            percent = boss_ratio * 100.0
+            boss_percent = (
+                f"{percent:.0f}%" if percent in (0.0, 100.0) else f"{percent:.1f}%"
+            )
+        return dict(boss_name=boss_name, boss_available=monster is not None,
+                    boss_template_id=getattr(monster, 'template_id', 0) if monster is not None else 0,
+                    boss_level=boss_level, boss_hp=boss_hp, boss_percent=boss_percent, boss_ratio=boss_ratio)
+
+    def _layered_main_snapshot(self) -> dict[str, object]:
+        rows, rating_preview = self._main_display_rows()
+        display_rows: list[dict[str, object]] = []
+        for raw in rows:
+            row = dict(raw)
+            if rating_preview:
+                rating = normalize_extraordinary_rating(row.get("rating"))
+                row["rating_text"] = '人机' if row.get('is_ai') else "--" if rating is None else str(rating)
+            else:
+                row["stat_text"] = format_main_rate(row.get("stat_value"))
+                row["total_text"] = format_main_total(row.get("total_value"))
+            display_rows.append(row)
+
+        current_monster = getattr(self.model, "current_monster", None)
+        monster = current_monster() if callable(current_monster) else None
+        if monster is None:
+            current_bosses = getattr(self.model, "current_bosses", None)
+            bosses = list(current_bosses()) if callable(current_bosses) else []
+            monster = bosses[0] if bosses else None
+        retained_record = self.main_last_battle_result if self._main_retained_battle_active() else None
+        if retained_record is not None:
+            from types import SimpleNamespace
+            monster = SimpleNamespace(**retained_record['monster'])
+        boss_values = self._main_boss_display_values(monster)
+        boss_reader = getattr(self.model, 'current_bosses', None)
+        if retained_record:
+            display_bosses = retained_record.get('bosses') or [boss_values]
+        else:
+            monsters = (list(boss_reader()) if callable(boss_reader) else [])[:MAX_SIMULTANEOUS_BOSSES]
+            if len(monsters) > 1 and any(
+                int(getattr(value, 'template_id', 0) or 0) in
+                (FIRST_BELIEVER_BARNEY_TEMPLATE_IDS | FIRST_BELIEVER_ANXIA_TEMPLATE_IDS)
+                for value in monsters
+            ):
+                owner = enrage_marker_row_index(monsters)
+                if owner > 0:
+                    # Keep the forecast over its existing phase owner: Barney
+                    # first, then Anxia when the existing phase rule advances.
+                    monsters = [monsters[owner], *monsters[:owner], *monsters[owner + 1:]]
+            display_bosses = [self._main_boss_display_values(value) for value in monsters]
+            if not display_bosses:
+                display_bosses = [boss_values]
+
+        prediction_value: dict[str, object] | None = None
+        prediction = getattr(self, "enrage_prediction", None)
+        if (
+            bool(getattr(self, "boss_enrage_prediction_enabled", True))
+            and bool(getattr(self, "enrage_prediction_visible", False))
+            and prediction is not None
+            and not bool(getattr(prediction, "calculating", False))
+        ):
+            prediction_value = {
+                "state": str(getattr(prediction, "state", "") or ""),
+                "message": str(getattr(prediction, "message", "") or ""),
+                "marker": enrage_marker_ratio(prediction),
+            }
+
+        physical_row_height = max(
+            1,
+            logical_pixels_to_physical(
+                HUD_ROW_HEIGHT * float(getattr(self, "main_ui_scale", 1.0) or 1.0),
+                getattr(self, "window_dpi", DEFAULT_DPI),
+            ),
+        )
+        visible_rows = clamp_visible_rows(getattr(self, "main_visible_rows", HUD_MAX_VISIBLE_ROWS))
+        maximum_start = max(0, len(display_rows) - visible_rows)
+        start_index = min(
+            maximum_start,
+            max(0, int(getattr(self, "main_scroll_offset", 0)) // physical_row_height),
+        )
+        try:
+            topmost = self._preferred_main_topmost()
+        except (AttributeError, tk.TclError):
+            topmost = bool(self.config.get("topmost", True))
+        return {
+            "time": "00:00" if self._main_display_is_cleared() else format_duration(retained_record['duration_seconds']) if retained_record else str(getattr(self, "main_time_text", "00:00") or "00:00"),
+            **boss_values,
+            'bosses': display_bosses,
+            "prediction": None if retained_record or self._main_display_is_cleared() else prediction_value,
+            "rows": display_rows,
+            "rating_preview": rating_preview,
+            "start_index": start_index,
+            "visible_rows": visible_rows,
+            "show_time": bool(getattr(self, "show_combat_time", True)),
+            "show_boss": bool(getattr(self, "show_boss_hp_bar", True)),
+            "show_totals": bool(getattr(self, "show_main_totals", True)),
+            "show_deaths": bool(getattr(self, "show_deaths", True)),
+            "show_team_dps": bool(getattr(self, "show_team_dps", True)),
+            "show_pvp": bool(getattr(self, "show_pvp_button", True)),
+            "highlight_self": bool(getattr(self, "highlight_self", True)),
+            "team_dps": "0" if self._main_display_is_cleared() else f"{int(round(float(retained_record.get('team_dps') or 0))):,}" if retained_record else str(getattr(self, "team_dps_text", "0") or "0"),
+            "row_mask_opacity": int(getattr(self, "main_row_mask_opacity", 0) or 0),
+            "topmost": bool(topmost),
+            "locked": bool(getattr(self, "window_locked", False)),
+            "hover_action": str(getattr(self, "layered_main_hover_action", "") or ""),
+        }
+
+    def _render_layered_main_hud(self) -> None:
+        if (
+            not self._layered_main_active()
+            or self.closing
+            or bool(getattr(self, "layered_main_rendering", False))
+        ):
+            return
+        self.layered_main_rendering = True
+        try:
+            if self.root.state() != "normal":
+                return
+            renderer = self.layered_main_renderer
+            presenter = self.layered_main_presenter
+            if renderer is None or presenter is None:
+                return
+            pixel_scale = (
+                float(getattr(self, "window_dpi", DEFAULT_DPI)) / DEFAULT_DPI
+            ) * float(getattr(self, "main_ui_scale", 1.0) or 1.0)
+            snapshot = self._layered_main_snapshot()
+            if not self._main_retained_battle_active() and self._main_has_battle_values():
+                self.main_last_live_display_snapshot = dict(
+                    encounter_id=getattr(self.model, 'encounter_id', ''),
+                    bosses=snapshot.get('bosses', []),
+                )
+            result = renderer.render(
+                snapshot,
+                pixel_scale=pixel_scale,
+                font_size=int(getattr(self, "ui_font_size", 14) or 14),
+            )
+            width, height = result.image.size
+            try:
+                # Retired Tk layout helpers may reapply their old minimum
+                # after a settings change. The new HUD's actual art bounds
+                # (including removal of the death column) are authoritative.
+                self.root.minsize(1, 1)
+                x, y = self.root.winfo_x(), self.root.winfo_y()
+                if (self.root.winfo_width(), self.root.winfo_height()) != (width, height):
+                    self.root.geometry(
+                        format_absolute_tk_geometry(width, height, x, y)
+                    )
+                    self.root.update_idletasks()
+            except (AttributeError, TypeError, ValueError, tk.TclError):
+                pass
+            self.layered_main_hit_regions = dict(result.hit_regions)
+            self.layered_main_actor_regions = result.actor_regions
+            self.layered_main_visible_rows = result.visible_rows
+            row_total = len(snapshot.get("rows", ()))
+            viewport_rows = max(1, result.visible_rows)
+            self.main_scroll_content_height = max(
+                result.row_height * viewport_rows,
+                result.row_height * row_total,
+            )
+            maximum_offset = max(
+                0,
+                self.main_scroll_content_height - result.row_height * viewport_rows,
+            )
+            self.main_scroll_offset = min(
+                maximum_offset,
+                max(0, int(getattr(self, "main_scroll_offset", 0))),
+            )
+            try:
+                visible = self.root.state() == "normal"
+            except (AttributeError, tk.TclError):
+                visible = True
+            if visible:
+                presenter.present(
+                    result.image,
+                    opacity=1.0,
+                )
+            self.layered_main_last_image = result.image
+            self.layered_main_last_error = ""
+            if visible and self.window_locked:
+                self._sync_unlock_window_position()
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError, tk.TclError) as exc:
+            # A single paint failure must never interrupt combat collection.
+            error = f"{type(exc).__name__}: {exc}"
+            if error != getattr(self, "layered_main_last_error", ""):
+                print(f"[main-hud] {error}", file=sys.stderr)
+                self.layered_main_last_error = error
+            return
+        finally:
+            self.layered_main_rendering = False
+
+    def _layered_main_region_at(self, x: int, y: int) -> str:
+        for key, rect in getattr(self, "layered_main_hit_regions", {}).items():
+            left, top, right, bottom = rect
+            if left <= x <= right and top <= y <= bottom:
+                return "prediction" if key == "prediction_marker" else key
+        return ""
+
+    def _layered_main_motion(self, event) -> None:
+        if not self._layered_main_active() or self.window_locked:
+            return
+        region = self._layered_main_region_at(int(event.x), int(event.y))
+        action = region.removeprefix("action:") if region.startswith("action:") else ""
+        cursor = "sb_v_double_arrow" if region == "resize:height" else "hand2" if action and action != "pvp" else "arrow"
+        if cursor != getattr(self, "layered_main_cursor", ""):
+            try:
+                self.root.configure(cursor=cursor)
+                self.layered_main_cursor = cursor
+                self._schedule_layered_main_render()
+            except tk.TclError:
+                pass
+        if action != getattr(self, "layered_main_hover_action", ""):
+            self.layered_main_hover_action = action
+            self._schedule_layered_main_render()
+        if region == "prediction":
+            tooltip = getattr(self, "enrage_tooltip", None)
+            if tooltip is None or not tooltip.winfo_exists():
+                self._show_enrage_tooltip(event)
+        else:
+            self._hide_enrage_tooltip()
+
+    def _layered_main_leave(self, _event=None) -> None:
+        if getattr(self, "layered_main_hover_action", ""):
+            self.layered_main_hover_action = ""
+            self._schedule_layered_main_render()
+        self._hide_enrage_tooltip()
+
+    def _layered_main_press(self, event) -> None:
+        if not self._layered_main_active() or self.window_locked:
+            return
+        region = self._layered_main_region_at(int(event.x), int(event.y))
+        self.layered_main_press_action = (
+            region.removeprefix("action:") if region.startswith("action:") else ""
+        )
+        self.layered_main_press_origin = (int(event.x_root), int(event.y_root))
+        self.layered_main_dragged = False
+        self.layered_main_resize_origin = None
+        if region == "resize:height":
+            self.layered_main_resize_origin = (
+                int(event.y_root),
+                int(getattr(self, "layered_main_visible_rows", 1)),
+                self._main_row_height(),
+            )
+            self._hide_enrage_tooltip()
+            return
+        if not self.layered_main_press_action:
+            self._drag_start(event, self.root)
+
+    def _layered_main_drag(self, event) -> None:
+        origin = getattr(self, "layered_main_press_origin", None)
+        if origin is None or self.window_locked:
+            return
+        resize = getattr(self, "layered_main_resize_origin", None)
+        if resize is not None:
+            y, rows, row_height = resize
+            capacity = clamp_visible_rows(rows + int(round((int(event.y_root) - y) / max(1, row_height))))
+            if capacity != getattr(self, "main_visible_rows", HUD_MAX_VISIBLE_ROWS):
+                self.main_visible_rows = capacity
+                self._schedule_layered_main_render()
+            return
+        if abs(int(event.x_root) - origin[0]) + abs(int(event.y_root) - origin[1]) >= 3:
+            self.layered_main_dragged = True
+        if not getattr(self, "layered_main_press_action", ""):
+            self._drag_move(event, self.root)
+
+    def _layered_main_release(self, event) -> None:
+        if not self._layered_main_active() or self.window_locked:
+            return
+        pressed = str(getattr(self, "layered_main_press_action", "") or "")
+        dragged = bool(getattr(self, "layered_main_dragged", False))
+        self.layered_main_press_action = ""
+        self.layered_main_press_origin = None
+        self.layered_main_dragged = False
+        if getattr(self, "layered_main_resize_origin", None) is not None:
+            self.layered_main_resize_origin = None
+            self.config[MAIN_VISIBLE_ROWS_CONFIG_KEY] = clamp_visible_rows(
+                getattr(self, "main_visible_rows", HUD_MAX_VISIBLE_ROWS)
+            )
+            save_config(self.config)
+            self._schedule_layered_main_render()
+            return
+        if not pressed:
+            self._drag_end(event, self.root)
+            self._schedule_layered_main_render()
+            return
+        released = self._layered_main_region_at(int(event.x), int(event.y))
+        if dragged or released != f"action:{pressed}":
+            return
+        if pressed == "settings":
+            self.show_settings()
+        elif pressed == "clear":
+            self._clear_main_display()
+        elif pressed == "pin":
+            self.toggle_topmost()
+        elif pressed == "lock":
+            self.toggle_window_lock()
+        elif pressed == "close":
+            self._request_close()
+
+    def _sync_main_component_visibility(self) -> None:
+        """Apply display toggles without rebuilding or restarting the meter."""
+
+        if self._layered_main_active():
+            self._hide_enrage_tooltip()
+            self._schedule_layered_main_render()
+            return
+
+        if bool(getattr(self, "show_combat_time", True)):
+            self.titlebar.configure(height=self._main_px(MAIN_TITLE_HEIGHT))
+            if not self.titlebar.winfo_manager():
+                before = (
+                    self.summary
+                    if self.summary.winfo_manager()
+                    else self.table_panel
+                )
+                self.titlebar.pack(fill="x", before=before)
+            if not self.time_value.winfo_manager():
+                self.time_value.pack(side="left", anchor="w")
+        else:
+            self.time_value.pack_forget()
+            self.titlebar.pack_forget()
+
+        if bool(getattr(self, "show_boss_hp_bar", True)):
+            self.summary.configure(height=self._main_px(MAIN_BOSS_HEIGHT))
+            if not self.summary.winfo_manager():
+                self.summary.pack(fill="x", before=self.table_panel)
+        else:
+            self.summary.pack_forget()
+            self._hide_enrage_tooltip()
+
+        if bool(getattr(self, "show_team_dps", True)):
+            if not self.team_dps_group.winfo_manager():
+                self.team_dps_group.pack(side="left", fill="y")
+        else:
+            self.team_dps_group.pack_forget()
+
+        if bool(getattr(self, "show_pvp_button", True)):
+            if not self.pvp_button.winfo_manager():
+                self.pvp_button.pack(
+                    side="left", fill="y", before=self.settings_button
+                )
+        else:
+            self.pvp_button.pack_forget()
+
+    def _refresh_main_scale_layout(self) -> None:
+        self.titlebar.configure(height=self._main_px(MAIN_TITLE_HEIGHT))
+        if isinstance(self.time_value, tk.Canvas):
+            self.time_value.configure(
+                width=self._main_px(66),
+                height=self._main_px(MAIN_TITLE_HEIGHT),
+            )
+            self._draw_main_time_value()
+        if isinstance(getattr(self, "team_dps_caption", None), tk.Canvas):
+            self.team_dps_caption.configure(
+                width=self._main_px(145),
+                height=self._main_px(MAIN_FOOTER_HEIGHT),
+            )
+            self._draw_team_dps_value()
+        self.summary.configure(height=self._main_px(MAIN_BOSS_HEIGHT))
+        self.monster_hp_canvas.configure(height=self._main_px(MAIN_BOSS_HEIGHT))
+        self.footer.configure(height=self._main_px(MAIN_FOOTER_HEIGHT))
+        for button in (
+            self.pvp_button,
+            self.settings_button,
+            self.pin_button,
+            self.lock_button,
+            self.close_button,
+        ):
+            button.configure(
+                width=self._main_px(MAIN_ACTION_SIZE),
+                height=self._main_px(MAIN_ACTION_SIZE),
+            )
+            self._sync_main_icon_button_visual(button)
+        logo_size = max(20, int(round(27 * self.main_ui_scale)))
+        logo_image = self.icons.app_logo(logo_size)
+        self.main_logo.configure(image=logo_image)
+        self.main_logo.image = logo_image
+        self.resize_grip.place_configure(
+            width=self._main_px(10), height=self._main_px(10)
+        )
+        self.root.minsize(self._main_minimum_width(), MAIN_MIN_HEIGHT)
+        if self._layered_main_active():
+            self.root.minsize(1, 1)
+            self._schedule_layered_main_render()
+
+    def _sync_main_content_height(self, row_count: int) -> None:
+        """Keep Boss, rows, and footer touching with no opaque dead region."""
+
+        if self._layered_main_active():
+            return
+
+        visible_rows = max(1, min(MAIN_MAX_VISIBLE_ROWS, int(row_count or 0)))
+        rows_height = visible_rows * self._main_row_height()
+        try:
+            if int(self.rows_canvas.cget("height")) != rows_height:
+                self.rows_canvas.configure(height=rows_height)
+        except (AttributeError, TypeError, ValueError, tk.TclError):
+            pass
+
+        title_height = (
+            self._main_px(MAIN_TITLE_HEIGHT)
+            if bool(getattr(self, "show_combat_time", True))
+            else 0
+        )
+        boss_height = (
+            self._main_px(MAIN_BOSS_HEIGHT)
+            if bool(getattr(self, "show_boss_hp_bar", True))
+            else 0
+        )
+        footer_height = self._main_px(MAIN_FOOTER_HEIGHT)
+        target_height = max(
+            MAIN_MIN_HEIGHT,
+            title_height + boss_height + rows_height + footer_height,
+        )
+        try:
+            if id(self.root) in getattr(self, "resize_state", {}):
+                return
+            width = max(self._main_minimum_width(), self.root.winfo_width())
+            if abs(self.root.winfo_height() - target_height) > 1:
+                self.root.geometry(f"{width}x{target_height}")
+        except (AttributeError, TypeError, ValueError, tk.TclError):
+            return
+
+    def _build_retired_main_ui(self) -> None:
         shell = tk.Frame(self.root, bg=BG, bd=0)
         shell.pack(fill="both", expand=True)
         self.body = tk.Frame(shell, bg=BG, bd=0)
@@ -19786,6 +22351,67 @@ class DpsWindow:
         )
         self.time_value.pack(side="left")
         self._bind_drag(self.time_value, self.root)
+
+        # This segmented control is visual-only until the PVP pipeline opens.
+        self.combat_mode_button = tk.Frame(
+            self.titlebar,
+            bg="#101820",
+            bd=0,
+            width=154,
+            height=28,
+            highlightthickness=1,
+            highlightbackground="#253545",
+            cursor="arrow",
+        )
+        self.combat_mode_button._disabled = True
+        self.combat_mode_button.pack(side="left", padx=(14, 0), pady=8)
+        self.combat_mode_button.pack_propagate(False)
+        self.combat_mode_pve_label = tk.Label(
+            self.combat_mode_button,
+            text="PVE  当前",
+            bg=PVE_MODE_BACKGROUND,
+            fg=PVE_MODE_FOREGROUND,
+            bd=0,
+            width=8,
+            highlightthickness=1,
+            highlightbackground=PVE_MODE_FOREGROUND,
+            cursor="arrow",
+            font=self._ui_font("sidebar_tag"),
+        )
+        self.combat_mode_pve_label._selected = True
+        self.combat_mode_pve_label.pack(side="left", fill="both", expand=True)
+        self.combat_mode_switch_label = tk.Label(
+            self.combat_mode_button,
+            text="⇄",
+            bg="#101820",
+            fg="#718196",
+            bd=0,
+            width=2,
+            cursor="arrow",
+            font=self._ui_font("sidebar_micro"),
+        )
+        self.combat_mode_switch_label.pack(side="left", fill="y")
+        pvp_lock_image = self.icons.toolbar(
+            "lock", 10, PVP_MODE_DISABLED_FOREGROUND
+        )
+        self.combat_mode_pvp_label = tk.Label(
+            self.combat_mode_button,
+            text="PVP",
+            image=pvp_lock_image,
+            compound="right",
+            bg=PVP_MODE_BACKGROUND,
+            fg=PVP_MODE_DISABLED_FOREGROUND,
+            bd=0,
+            width=5,
+            padx=2,
+            highlightthickness=1,
+            highlightbackground=PVP_MODE_BORDER,
+            cursor="arrow",
+            font=self._ui_font("sidebar_tag"),
+        )
+        self.combat_mode_pvp_label.image = pvp_lock_image
+        self.combat_mode_pvp_label._disabled = True
+        self.combat_mode_pvp_label.pack(side="left", fill="both", expand=True)
 
         self.group_label = tk.Label(
             self.titlebar,
@@ -20107,13 +22733,19 @@ class DpsWindow:
     def _main_icon_button(
         self, parent: tk.Misc, icon_name: str, description: str, command
     ) -> tk.Label:
-        image = self.icons.toolbar(icon_name, 18, TEXT)
+        tile_size = max(24, int(round(MAIN_ACTION_SIZE * self.main_ui_scale)))
+        main_action_icon = getattr(self.icons, "main_action", None)
+        image = (
+            main_action_icon(icon_name, tile_size, TEXT)
+            if callable(main_action_icon)
+            else self.icons.toolbar(icon_name, max(14, tile_size - 10), TEXT)
+        )
         label = tk.Label(
             parent,
             image=image,
-            bg=BG,
-            width=34,
-            height=34,
+            bg=MAIN_TRANSPARENT_KEY,
+            width=self._main_px(MAIN_ACTION_SIZE),
+            height=self._main_px(MAIN_ACTION_SIZE),
             bd=0,
             cursor="hand2",
         )
@@ -20142,10 +22774,38 @@ class DpsWindow:
         return label
 
     def _render_main_icon_button(
-        self, button: tk.Label, color: str, background: str = BG
+        self,
+        button: tk.Label,
+        color: str,
+        background: str = MAIN_TRANSPARENT_KEY,
     ) -> None:
-        image = self.icons.toolbar(button._icon_name, 18, color)
-        button.configure(image=image, bg=background)
+        del background
+        tile_size = max(
+            24,
+            int(
+                round(
+                    MAIN_ACTION_SIZE
+                    * float(getattr(self, "main_ui_scale", 1.0) or 1.0)
+                )
+            ),
+        )
+        main_action_icon = getattr(self.icons, "main_action", None)
+        image = (
+            main_action_icon(
+                button._icon_name,
+                tile_size,
+                color,
+                hovered=(
+                    bool(getattr(button, "_hovered", False))
+                    and not bool(getattr(button, "_disabled", False))
+                ),
+            )
+            if callable(main_action_icon)
+            else self.icons.toolbar(
+                button._icon_name, max(14, tile_size - 10), color
+            )
+        )
+        button.configure(image=image, bg=MAIN_TRANSPARENT_KEY)
         button.image = image
 
     def _sync_main_icon_button_visual(self, button: tk.Label) -> None:
@@ -20155,13 +22815,18 @@ class DpsWindow:
         self._render_main_icon_button(
             button,
             ACCENT if hovered else button._normal_color,
-            PANEL_2 if hovered else BG,
+            "#18232d" if hovered else MAIN_TRANSPARENT_KEY,
         )
 
     def _main_icon_enter(self, button: tk.Label) -> None:
         button._hovered = True
         self._sync_main_icon_button_visual(button)
         self._hide_main_tooltip()
+        if str(getattr(button, "_description", "") or "").strip():
+            self.main_tooltip_after_id = self.root.after(
+                450,
+                lambda target=button: self._show_main_tooltip(target),
+            )
 
     def _main_icon_leave(self, button: tk.Label) -> None:
         button._hovered = False
@@ -20169,19 +22834,68 @@ class DpsWindow:
         self._sync_main_icon_button_visual(button)
 
     def _show_main_tooltip(self, button: tk.Label) -> None:
-        # Icon hover is rendered in-place.  Extra tooltip windows are avoided
-        # so the meter never steals focus while the player is in combat.
         self.main_tooltip_after_id = None
+        if (
+            not bool(getattr(button, "_hovered", False))
+            or not button.winfo_exists()
+            or self.closing
+        ):
+            return
+        description = str(getattr(button, "_description", "") or "").strip()
+        if not description:
+            return
+        try:
+            popup = tk.Toplevel(self.root)
+            self.main_tooltip = popup
+            popup.withdraw()
+            popup.overrideredirect(True)
+            popup.configure(bg="#28465d")
+            popup.transient(self.root)
+            body = tk.Label(
+                popup,
+                text=description,
+                bg="#101923",
+                fg="#e8eef5",
+                padx=9,
+                pady=5,
+                bd=0,
+                font=self._ui_font("main_micro"),
+            )
+            body.pack(fill="both", expand=True, padx=1, pady=1)
+            popup.update_idletasks()
+            popup_width = popup.winfo_reqwidth()
+            popup_height = popup.winfo_reqheight()
+            x, y = help_popup_position(
+                button.winfo_rootx(),
+                button.winfo_rooty(),
+                button.winfo_width(),
+                button.winfo_height(),
+                popup_width,
+                popup_height,
+                monitor_work_area_for_widget(button),
+            )
+            popup.geometry(
+                format_absolute_tk_geometry(
+                    popup_width, popup_height, x, y
+                )
+            )
+            popup.deiconify()
+            self._set_window_topmost_noactivate(
+                popup, self._preferred_main_topmost() or self.window_locked
+            )
+        except (AttributeError, tk.TclError):
+            self._hide_main_tooltip()
 
     def _hide_main_tooltip(self) -> None:
-        if self.main_tooltip_after_id is not None:
+        if getattr(self, "main_tooltip_after_id", None) is not None:
             try:
                 self.root.after_cancel(self.main_tooltip_after_id)
             except tk.TclError:
                 pass
             self.main_tooltip_after_id = None
-        if self.main_tooltip is not None and self.main_tooltip.winfo_exists():
-            self.main_tooltip.destroy()
+        tooltip = getattr(self, "main_tooltip", None)
+        if tooltip is not None and tooltip.winfo_exists():
+            tooltip.destroy()
         self.main_tooltip = None
 
     def _request_close(self) -> None:
@@ -20192,7 +22906,7 @@ class DpsWindow:
         self._hide_main_tooltip()
         self._show_notice(
             "退出程序",
-            "退出前会安全停止采集并保存本场数据。确定退出程序吗？",
+            "退出前会安全停止采集，并保存当前战斗数据。\n确定退出 DPS-LOGS 吗？",
             parent=self.root,
             confirm_text="退出",
             cancel_text="取消",
@@ -20216,12 +22930,9 @@ class DpsWindow:
         self.main_content_overlay_topmost = None
 
     def _main_content_overlay_requested(self) -> bool:
-        return bool(
-            getattr(self, "keep_dps_bars_opaque", False)
-            and getattr(self, "main_meter_mode", "dps") == "dps"
-            and getattr(self, "window_alpha", 1.0) < 0.999
-            and not self._team_rating_preview_active()
-        )
+        # Schema v1 removed DPS bars, so the legacy opaque-bar HWND must never
+        # be created even when an upgraded config still stores the old flag.
+        return False
 
     def _hide_main_content_overlay(self) -> None:
         self.main_content_overlay_root_geometry = None
@@ -20528,65 +23239,20 @@ class DpsWindow:
             pass
 
     def _sync_titlebar_density(self, width: int | None = None) -> None:
-        if not hasattr(self, "group_label") or not self.group_label.winfo_exists():
-            return
-        width = int(width if width is not None else self.root.winfo_width())
-        should_show = not self.compact_mode and width >= 680
-        if should_show and not self.group_label.winfo_manager():
-            self.group_label.pack(side="left", padx=(18, 0))
-        elif not should_show and self.group_label.winfo_manager():
-            self.group_label.pack_forget()
-        if hasattr(self, "footer_brand_label"):
-            show_brand = not self.compact_mode and width >= 560
-            if show_brand and not self.footer_brand_label.winfo_manager():
-                self.footer_brand_label.pack(
-                    side="right", fill="y", padx=(8, 14)
-                )
-            elif not show_brand and self.footer_brand_label.winfo_manager():
-                self.footer_brand_label.pack_forget()
+        # Schema v1 has no responsive title copy or mode tabs to reveal.
+        return
 
     def _apply_layout_mode(self) -> None:
         self._hide_main_tooltip()
-        if self.compact_mode:
-            for widget in (self.titlebar, self.summary, self.footer):
-                if widget.winfo_manager():
-                    widget.pack_forget()
-            if not self.table_panel.winfo_manager():
-                self.table_panel.pack(fill="both", expand=True, padx=2, pady=2)
-            else:
-                self.table_panel.pack_configure(padx=2, pady=2)
-            self.root.minsize(MINI_MIN_WIDTH, MINI_MIN_HEIGHT)
-            self.config["compact_layout_version"] = 3
-            self._dismiss_compact_auxiliary_windows()
-        else:
-            if not self.titlebar.winfo_manager():
-                self.titlebar.pack(
-                    fill="x", padx=8, pady=(2, 0), before=self.table_panel
-                )
-            if not self.summary.winfo_manager():
-                self.summary.pack(
-                    fill="x", padx=8, pady=(0, 2), before=self.table_panel
-                )
-            if not self.table_panel.winfo_manager():
-                self.table_panel.pack(fill="both", expand=True, padx=8)
-            else:
-                self.table_panel.pack_configure(padx=8, pady=0)
-            if not self.footer.winfo_manager():
-                self.footer.pack(
-                    side="bottom",
-                    fill="x",
-                    padx=8,
-                    pady=(1, 1),
-                    before=self.table_panel,
-                )
-            self.root.minsize(self._main_minimum_width(), MAIN_MIN_HEIGHT)
-        # Borderless windows have no native sizing frame.  Keep the custom
-        # grip in compact mode as well so both width and height remain free.
-        self.resize_grip.place(relx=1.0, rely=1.0, anchor="se")
+        self.compact_mode = False
+        self.config["compact_mode"] = False
+        self.root.minsize(self._main_minimum_width(), MAIN_MIN_HEIGHT)
+        if self._layered_main_active():
+            self.root.minsize(1, 1)
+        self._sync_main_component_visibility()
         self.resize_grip.lift()
         self._draw_main_header()
         self._draw_main_rows()
-        self._sync_titlebar_density()
         self._sync_action_buttons()
         self.root.after(10, self._apply_main_transparency)
 
@@ -20603,93 +23269,18 @@ class DpsWindow:
 
     def _remember_root_geometry(self) -> None:
         geometry = self.restore_geometry.get(id(self.root), self.root.geometry())
-        key = "compact_geometry" if self.compact_mode else "geometry"
-        self.config[key] = geometry
-        self.config["compact_mode"] = self.compact_mode
+        self.config["geometry"] = geometry
+        self.config["compact_mode"] = False
         self.config["window_locked"] = self.window_locked
 
     def _sync_compact_geometry_width(self) -> None:
-        fallback_x = self.root.winfo_x() if self.root.winfo_exists() else 32
-        fallback_y = self.root.winfo_y() if self.root.winfo_exists() else 120
-        saved_geometry = self.config.get("compact_geometry", "")
-        if self.compact_mode and self.root.winfo_exists():
-            # A resize can still be in memory only.  Prefer the live compact
-            # geometry so a settings refresh cannot overwrite the user's size.
-            saved_geometry = self.root.geometry()
-        geometry = self._adaptive_compact_geometry(
-            saved_geometry,
-            fallback_x,
-            fallback_y,
-        )
-        self.config["compact_geometry"] = geometry
-        if self.compact_mode and self.root.winfo_exists():
-            self.root.geometry(
-                self._visible_geometry(
-                    geometry, self._compact_target_width(), MINI_DEFAULT_HEIGHT
-                )
-            )
-            self.root.update_idletasks()
+        return
 
     def toggle_compact_mode(self) -> None:
-        if self.closing or self.window_locked:
-            return
-        root_key = id(self.root)
-        if root_key in self.restore_geometry:
-            self.root.geometry(self.restore_geometry.pop(root_key))
-            self.root.update_idletasks()
-
-        self._remember_root_geometry()
-        current_x = self.root.winfo_x()
-        current_y = self.root.winfo_y()
-        compact_layout_is_current = int(
-            self.config.get("compact_layout_version", 0)
-        ) >= 3
-
-        self.compact_mode = not self.compact_mode
-        self.config["compact_mode"] = self.compact_mode
-        self._apply_layout_mode()
-
-        geometry_key = "compact_geometry" if self.compact_mode else "geometry"
-        target_geometry = str(self.config.get(geometry_key, ""))
-        if self.compact_mode and not compact_layout_is_current:
-            target_geometry = ""
-        if self.compact_mode:
-            target_geometry = self._adaptive_compact_geometry(
-                target_geometry, current_x, current_y
-            )
-        parsed = parse_absolute_tk_geometry(target_geometry)
-        if parsed is not None:
-            width, height, target_x, target_y = parsed
-            minimum_width = self._main_minimum_width()
-            minimum_height = (
-                MINI_MIN_HEIGHT if self.compact_mode else MAIN_MIN_HEIGHT
-            )
-            target_geometry = format_absolute_tk_geometry(
-                max(minimum_width, width),
-                max(minimum_height, height),
-                target_x,
-                target_y,
-            )
-        else:
-            width = MINI_DEFAULT_WIDTH if self.compact_mode else max(
-                MAIN_MIN_WIDTH, self.root.winfo_width()
-            )
-            height = MINI_DEFAULT_HEIGHT if self.compact_mode else max(
-                MAIN_MIN_HEIGHT, self.root.winfo_height()
-            )
-            target_geometry = format_absolute_tk_geometry(
-                width, height, current_x, current_y
-            )
-        self.root.geometry(
-            self._visible_geometry(
-                target_geometry,
-                MINI_DEFAULT_WIDTH if self.compact_mode else 590,
-                MINI_DEFAULT_HEIGHT if self.compact_mode else 400,
-            )
-        )
-        self.root.update_idletasks()
-        self._remember_root_geometry()
-        save_config(self.config)
+        # Kept for old call sites and downgrade compatibility. There is no
+        # mini-mode transition in the current product.
+        self.compact_mode = False
+        self.config["compact_mode"] = False
 
     def _metric(self, parent: tk.Misc, caption: str, value: str, column: int) -> tk.Label:
         frame = tk.Frame(parent, bg=BG)
@@ -21622,6 +24213,7 @@ class DpsWindow:
         now = time.monotonic()
         worker = self.combat_clock_worker
         for record in records:
+            self._remember_main_battle_result(record)
             encounter_id = str(record.get("encounter_id", "")).strip()
             clock_request = record.get("_shared_clock_request")
             game_clock_final = bool(
@@ -22620,7 +25212,42 @@ class DpsWindow:
         self.show_backend("history")
 
     def show_settings(self) -> None:
-        self.show_backend("settings")
+        if getattr(self, 'closing', False) or getattr(self, 'settings_open_after_id', None) is not None:
+            return
+
+        def open_settings() -> None:
+            self.settings_open_after_id = None
+            if getattr(self, 'closing', False):
+                return
+            previous_window = getattr(self, 'history_window', None)
+            try:
+                self.show_backend('settings')
+            except Exception:
+                details = traceback.format_exc()
+                try:
+                    with (APP_DIR / 'dps_error.log').open('a', encoding='utf-8') as output:
+                        output.write(f'\n[{time.strftime("%Y-%m-%d %H:%M:%S")}] open_settings\n{details}\n')
+                except OSError:
+                    pass
+                partial_window = getattr(self, 'history_window', None)
+                if partial_window is not previous_window:
+                    try:
+                        if partial_window is not None and partial_window.winfo_exists():
+                            partial_window.destroy()
+                    except tk.TclError:
+                        pass
+                    self.history_window = previous_window
+                self.main_window_intentionally_hidden = False
+                try:
+                    self.root.deiconify()
+                    self._schedule_layered_main_render()
+                    self._show_notice('设置未能打开', '主窗口已恢复，请重试；若再次出现，请提交反馈以便检查错误日志。', parent=self.root)
+                except tk.TclError:
+                    pass
+
+        # Finish the mouse-release callback before mapping another toplevel
+        # or withdrawing the per-pixel-alpha HWND which owns that callback.
+        self.settings_open_after_id = self.root.after(0, open_settings)
 
     def show_backend(self, page: str = "history") -> None:
         if self.compact_mode:
@@ -22640,15 +25267,18 @@ class DpsWindow:
         self._close_notice_window()
         self._remember_root_geometry()
         self._destroy_unlock_window()
+        self.history_window.deiconify()
+        self._sync_backend_window_topmost()
+        self.history_window.lift()
+        self.history_window.update_idletasks()
+        if not self.history_window.winfo_viewable():
+            raise tk.TclError('Backend window did not become visible')
         self.main_window_intentionally_hidden = True
         self.root.withdraw()
-        self.history_window.deiconify()
         self.history_window.lift()
-        self._sync_backend_window_topmost()
-        if page == "settings":
-            self.history_window.focus_set()
-        else:
-            self.history_window.focus_force()
+        # An explicit click asks to activate this window, not to make it
+        # permanently topmost. focus_set alone can leave it behind the game.
+        self.history_window.focus_force()
         if page == "history":
             self._refresh_history_records()
 
@@ -22764,7 +25394,18 @@ class DpsWindow:
             anchor="w",
             font=self._ui_font("title"),
         )
-        self.membership_label.place(x=70, y=9)
+        self.membership_label.place(x=70, y=9, relwidth=1.0, width=-104)
+        self.membership_label.configure(cursor="arrow")
+        edit_image = self.icons.toolbar("edit", 16, "#496779")
+        self.profile_edit_button = tk.Label(
+            account_card,
+            image=edit_image,
+            bg="#081820",
+            bd=0,
+            cursor="arrow",
+        )
+        self.profile_edit_button.image = edit_image
+        self.profile_edit_button.place(relx=1.0, x=-13, y=12, width=24, height=24, anchor="ne")
 
         membership_badge = membership_label_for_card_tier(
             self.licensing.session.card_tier
@@ -22809,15 +25450,21 @@ class DpsWindow:
         nav = tk.Frame(sidebar, bg=sidebar_background)
         nav.pack(fill="x", padx=2, pady=(6, 0))
         self.backend_nav_buttons = {}
-        for key, icon_name, caption, enabled in (
-            ("history", "history", "战斗记录", True),
-            ("statistics", "analytics", "数据统计", False),
-            ("upload", "peak", "巅峰记录", False),
-            ("updates", "updates", "更新日志", True),
-            ("settings", "backend_settings", "设置", True),
+        for key, icon_name, caption, enabled, module_tag in (
+            ("history", "history", "战斗记录", True, "PVE"),
+            ("statistics", "analytics", "数据洞察", False, "PVE"),
+            ("upload", "peak", "巅峰记录", False, "PVE"),
+            ("kings", "analytics", "诸王战纪", False, "PVP"),
+            ("updates", "updates", "更新日志", True, ""),
+            ("settings", "backend_settings", "设置", True, ""),
         ):
             button = self._backend_nav_button(
-                nav, key, icon_name, caption, enabled=enabled
+                nav,
+                key,
+                icon_name,
+                caption,
+                enabled=enabled,
+                module_tag=module_tag,
             )
             button.pack(fill="x")
             self.backend_nav_buttons[key] = button
@@ -22904,6 +25551,7 @@ class DpsWindow:
         )
 
         page_host = tk.Frame(workspace, bg=BG)
+        self.backend_page_host = page_host
         page_host.grid_rowconfigure(0, weight=1)
         page_host.grid_columnconfigure(0, weight=1)
         workspace.add(
@@ -22950,6 +25598,7 @@ class DpsWindow:
         caption: str,
         *,
         enabled: bool,
+        module_tag: str = "",
     ) -> tk.Frame:
         row = tk.Frame(
             parent,
@@ -23006,6 +25655,45 @@ class DpsWindow:
         )
         chevron_label.image = chevron_image
         chevron_label.pack(side="right", padx=(4, 12))
+        normalized_module_tag = str(module_tag or "").strip().upper()
+        module_badge = None
+        module_badge_label = None
+        if normalized_module_tag in {"PVE", "PVP"}:
+            badge_background, badge_border, badge_foreground = (
+                (
+                    PVE_MODE_BACKGROUND,
+                    PVE_MODE_BORDER,
+                    PVE_MODE_FOREGROUND,
+                )
+                if normalized_module_tag == "PVE"
+                else (
+                    PVP_MODE_BACKGROUND,
+                    PVP_MODE_BORDER,
+                    PVP_MODE_FOREGROUND,
+                )
+            )
+            module_badge = tk.Frame(
+                surface,
+                bg=badge_background,
+                width=38,
+                height=20,
+                highlightthickness=1,
+                highlightbackground=badge_border,
+                cursor="hand2" if enabled else "arrow",
+            )
+            module_badge.pack(side="right", padx=(0, 2))
+            module_badge.pack_propagate(False)
+            module_badge_label = tk.Label(
+                module_badge,
+                text=normalized_module_tag,
+                bg=badge_background,
+                fg=badge_foreground,
+                anchor="center",
+                bd=0,
+                cursor="hand2" if enabled else "arrow",
+                font=self._ui_font("sidebar_tag"),
+            )
+            module_badge_label.pack(fill="both", expand=True)
         caption_label = tk.Label(
             surface,
             text=caption,
@@ -23028,9 +25716,12 @@ class DpsWindow:
         row._icon_name = icon_name
         row._caption_label = caption_label
         row._chevron_label = chevron_label
+        row._module_badge = module_badge
+        row._module_badge_label = module_badge_label
+        row._module_tag = normalized_module_tag
         row._separator = separator
         if enabled:
-            for widget in (
+            interactive_widgets = (
                 row,
                 surface,
                 indicator,
@@ -23038,7 +25729,10 @@ class DpsWindow:
                 icon_label,
                 caption_label,
                 chevron_label,
-            ):
+            )
+            if module_badge is not None and module_badge_label is not None:
+                interactive_widgets += (module_badge, module_badge_label)
+            for widget in interactive_widgets:
                 widget.bind(
                     "<Button-1>",
                     lambda _event, page_key=key: self._select_backend_page(
@@ -24145,7 +26839,7 @@ class DpsWindow:
         )
         content_x = 36 + time_width + 12 + boss_icon_extent + 8
         operation_width = max(
-            220, micro.measure("全员截图  上传  收藏  删除") + 42
+            HISTORY_ACTION_PANEL_WIDTH, history_action_panel_width(micro)
         )
         minimum = content_x + 104 + 10 + operation_width + 9
         if self._history_field_visible("character"):
@@ -29284,6 +31978,27 @@ class DpsWindow:
         )
         releases = (
             (
+                "v0.2.3b",
+                "v0.2.3b 更新日志 已支持在线更新 群文件下载\n"
+                "新增主窗口清空按钮，可立即清空当前显示；开启非凡评分预览时，清空后回到评分展示（听劝）\n"
+                "主窗口支持右下角调整高度，最少显示1人；玩家列表可滚动，Boss区和底栏固定（听劝2）\n"
+                "Boss区改为显示对应头像，隐藏名称，保留等级与血量（实在放不下了）\n"
+                "队伍非凡评分预览、死亡次数默认开启，保留已保存的关闭设置\n"
+                "修复部分场景下Boss血量串入小怪数据的问题，完善多阶段战斗计时保护（群里龙佬反馈的问题）\n"
+                "修复战斗时间与狂暴剩余时间计算不一致的问题\n"
+                "优化设置窗口打开流程，增加失败恢复和错误记录\n"
+                "增加异常伤害及累计值过滤，避免超大秒伤数值污染统计（群里那位打木桩天文数字的bug）\n"
+                "死亡次数增加误判提示，部分Boss机制相关问题仍在排查（这个估计要晚上了，我自己去打才能找出来，老6捡起来就计入死亡的问题）",
+            ),
+            (
+                "v0.2.3",
+                "主窗口全面重绘，统一为透明悬浮窗口，取消迷你模式\n"
+                "新增战斗上传入口，可选择匿名上传或显示本人的游戏角色名，其他队友默认匿名\n"
+                "增加PVP入口（暂不开放）\n"
+                "修复反馈的一些bug，如歌颂触发被动被计算死亡、队伍里看不到自己的一些bug\n"
+                "还有一些小秘密设置...",
+            ),
+            (
                 "v0.2.2",
                 "战斗详情新增真实起手序列，展示开战前 30 秒主动技能，并可联动定位完整技能时间轴\n"
                 "正式开放“Boss伤害”页，展示已确认的首领或机制伤害、归类占比、打击次数、最高一击、技能分布及真实事件时间轴\n"
@@ -29316,7 +32031,7 @@ class DpsWindow:
                 "重做技能命中表现和技能命中时间轴，支持筛选、拖动及逐次查看命中详情\n"
                 "新增全员战报截图与团队 DPS 趋势，可查看任意时刻的团队综合 DPS\n"
                 "统一战斗记录相关文案，并将详情顶部操作栏固定在滚动区域上方\n"
-                "预留 Boss 伤害、队友装备快照、巅峰记录与数据统计入口，暂不开放点击\n"
+                "预留 Boss 伤害、队友装备快照、巅峰记录与数据洞察入口，暂不开放点击\n"
                 "优化 Boss 头像、副本归类、战斗结果、分页、多选、收藏、删除和分享操作\n"
                 "战斗时间统一显示到秒；非凡评分、暴击率和穿刺率仅展示游戏实际数据\n"
                 "修复每日 Boss 卡尔·埃德加多阶段战斗被拆分，以及阶段加载噪声误判团灭的问题",
@@ -29518,6 +32233,222 @@ class DpsWindow:
         return page
 
     def _build_backend_settings_page(self, parent: tk.Misc) -> tk.Frame:
+        """One scrollable settings page, grouped by everyday usage."""
+        self.settings_live_apply_ready = False
+        page = tk.Frame(parent, bg=BG)
+        tk.Label(page, text="设置", bg=BG, fg=TEXT, anchor="w",
+                 font=self._ui_font("heading")).pack(fill="x", padx=30, pady=(22, 4))
+        tk.Label(page, text="修改即时生效并自动保存", bg=BG, fg=MUTED, anchor="w",
+                 font=self._ui_font("small")).pack(fill="x", padx=30, pady=(0, 14))
+        self.backend_settings_buttons = {}
+        self.backend_settings_frames = {}
+        viewport = tk.Canvas(page, bg=BG, bd=0, highlightthickness=0)
+        scrollbar = ModernScrollbar(page, command=viewport.yview, background=BG)
+        scrollbar.pack(side="right", fill="y", padx=(0, 8))
+        viewport.pack(side="left", fill="both", expand=True, padx=(24, 6))
+        viewport.configure(yscrollcommand=scrollbar.set)
+        content = tk.Frame(viewport, bg=BG)
+        item = viewport.create_window(0, 0, window=content, anchor="nw")
+        content.bind("<Configure>", lambda _event: viewport.configure(scrollregion=viewport.bbox("all")))
+        viewport.bind("<Configure>", lambda event: viewport.itemconfigure(item, width=max(1, event.width)))
+        master = self.history_window
+        self.settings_opacity_var = None
+        self.opacity_value_label = None
+        self.settings_audience_metric_var = None
+        self.settings_warrior_metric_var = None
+        self.settings_target_boss_lookup_var = None
+        self.settings_show_extraordinary_rating_var = None
+        self.settings_keep_dps_bars_opaque_var = None
+        variables = (
+            ("settings_show_names_var", not self.hide_names),
+            ("settings_team_rating_preview_var", self.team_rating_preview_enabled),
+            ("settings_show_deaths_var", self.show_deaths),
+            ("settings_show_main_totals_var", self.show_main_totals),
+            ("settings_show_team_dps_var", self.show_team_dps),
+            ("settings_highlight_self_var", self.highlight_self),
+            ("settings_show_combat_time_var", self.show_combat_time),
+            ("settings_show_pvp_button_var", self.show_pvp_button),
+            ("settings_show_boss_hp_var", self.show_boss_hp_bar),
+            ("settings_boss_enrage_prediction_var", self.boss_enrage_prediction_enabled),
+        )
+        for attribute, enabled in variables:
+            setattr(self, attribute, tk.BooleanVar(master=master, value=enabled))
+        self.settings_font_size_var = tk.IntVar(master=master, value=self.ui_font_size)
+        self.settings_ui_scale_var = tk.IntVar(master=master, value=round(self.main_ui_scale * 100))
+        self.settings_row_mask_opacity_var = tk.IntVar(master=master, value=self.main_row_mask_opacity)
+
+        def section(title, description=""):
+            card = tk.Frame(content, bg=PANEL, highlightthickness=1, highlightbackground=BORDER)
+            card.pack(fill="x", padx=6, pady=(0, 14))
+            tk.Label(card, text=title, bg=PANEL, fg=TEXT, anchor="w",
+                     font=self._ui_font("settings_title")).pack(fill="x", padx=18, pady=(14, 6))
+            if description:
+                tk.Label(card, text=description, bg=PANEL, fg=MUTED, anchor="w",
+                         font=self._ui_font("small")).pack(fill="x", padx=18, pady=(0, 5))
+            body = tk.Frame(card, bg=PANEL)
+            body.pack(fill="x", padx=10, pady=(0, 12))
+            return body
+
+        common = section("常用显示")
+        common.grid_columnconfigure(0, weight=1, uniform="common")
+        common.grid_columnconfigure(1, weight=1, uniform="common")
+        toggles = (
+            ("显示玩家名称", self.settings_show_names_var, ""),
+            ("队伍非凡评分预览", self.settings_team_rating_preview_var, "仅开打前预览；进入战斗立即切换，战后保留本场结果。"),
+            ("显示死亡次数", self.settings_show_deaths_var, "死亡次数统计可能存在 Bug，部分 Boss 机制可能导致误判，仅供参考。\n关闭时回收整列宽度。"),
+            ("显示对应总量", self.settings_show_main_totals_var, ""),
+            ("显示全队秒伤", self.settings_show_team_dps_var, ""),
+            ("本人高亮", self.settings_highlight_self_var, ""),
+            ("显示战斗时间", self.settings_show_combat_time_var, ""),
+            ("显示 PVP 按钮", self.settings_show_pvp_button_var, "PVP 暂未开放。"),
+        )
+        for index, (caption, variable, help_text) in enumerate(toggles):
+            self._settings_check_row(common, caption, variable, disabled=False,
+                                     row=index // 2, column=index % 2, help_text=help_text)
+
+        metrics = section('职业显示指标', '显示指标可单独选择，队伍始终按 DPS 排序。')
+        for col in range(2):
+            metrics.grid_columnconfigure(col, weight=1, uniform='profession_metrics')
+        self.settings_audience_metric_var = tk.StringVar(master=master, value=self._profession_display_metric(AUDIENCE_PROFESSION_ID).upper())
+        self.settings_warrior_metric_var = tk.StringVar(master=master, value=self._profession_display_metric(WARRIOR_PROFESSION_ID).upper())
+        for col, (caption, pid, variable, choices) in enumerate((
+                ('观众', AUDIENCE_PROFESSION_ID, self.settings_audience_metric_var, ('HPS', 'DPS')),
+                ('战士', WARRIOR_PROFESSION_ID, self.settings_warrior_metric_var, ('DPS', 'DT')))):
+            cell = tk.Frame(metrics, bg=PANEL)
+            cell.grid(row=0, column=col, sticky='ew', padx=8, pady=(5, 10))
+            icon = self.icons.profession(pid, 24)
+            icon_label = tk.Label(cell, image=icon, bg=PANEL, bd=0)
+            icon_label.image = icon
+            icon_label.pack(side='left', padx=(0, 6))
+            tk.Label(cell, text=caption, bg=PANEL, fg=TEXT, font=self._ui_font('settings')).pack(side='left')
+            selector = ModernDropdown(cell, variable, choices, width=150, font=self._ui_font('settings_strong'), background=PANEL_2)
+            selector.configure(height=max(36, self._ui_font('settings_strong').metrics('linespace') + 14))
+            selector.pack(side='right', padx=(10, 0))
+            variable.trace_add('write', self._apply_live_ui_settings)
+        tk.Label(metrics, text='其他职业：DPS', bg=PANEL, fg=MUTED, anchor='w', font=self._ui_font('small')).grid(row=1, column=0, columnspan=2, sticky='ew', padx=8, pady=(0, 2))
+
+        boss = section("首领信息", "狂暴节奏仅使用已验证的 Boss 时间资料。")
+        for col in range(2):
+            boss.grid_columnconfigure(col, weight=1, uniform="boss_options")
+        self._settings_check_row(boss, "显示 Boss 血条", self.settings_show_boss_hp_var,
+                                 disabled=False, row=0, column=0)
+        self._settings_check_row(boss, "Boss狂暴节奏预测", self.settings_boss_enrage_prediction_var,
+                                 disabled=False, row=0, column=1,
+                                 help_text="充裕、正常、临界、危险四档；不为未知首领编造时间。")
+        appearance = section("外观与缩放")
+        for col in range(2):
+            appearance.grid_columnconfigure(col, weight=1, uniform="appearance")
+
+        def slider(row, column, caption, variable, lower, upper, command, suffix):
+            cell = tk.Frame(appearance, bg=PANEL)
+            cell.grid(row=row, column=column, sticky="ew", padx=8, pady=(6, 12))
+            heading = tk.Frame(cell, bg=PANEL)
+            heading.pack(fill="x")
+            tk.Label(heading, text=caption, bg=PANEL, fg=TEXT,
+                     font=self._ui_font("settings")).pack(side="left")
+            value_label = tk.Label(heading, text=f"{variable.get()}{suffix}", bg=PANEL_2,
+                                   fg=ACCENT, padx=8, pady=3, font=self._ui_font("settings_number"))
+            value_label.pack(side="right")
+            control = ModernSlider(cell, from_=lower, to=upper, variable=variable,
+                                   resolution=1, command=command, background=PANEL)
+            control.pack(fill="x", pady=(8, 0))
+            return value_label
+        self.settings_font_value_label = slider(0, 0, "字体大小", self.settings_font_size_var,
+                                                12, 18, self._preview_font_size, "px")
+        self.settings_ui_scale_value_label = slider(0, 1, "UI 缩放", self.settings_ui_scale_var,
+                                                    80, 140, self._preview_main_ui_scale, "%")
+        self.settings_row_mask_value_label = slider(1, 0, "玩家行遮罩透明度", self.settings_row_mask_opacity_var,
+                                                    0, 100, self._preview_row_mask_opacity, "%")
+        shortcuts = section("快捷操作")
+        self.settings_hotkey_enabled_var = tk.BooleanVar(
+            master=master,
+            value=self.toggle_visibility_hotkey_enabled,
+        )
+        hotkey_cell = tk.Frame(shortcuts, bg=PANEL)
+        hotkey_cell.pack(fill="x", padx=8, pady=(12, 0))
+        tk.Frame(hotkey_cell, bg=BORDER, height=1).pack(side="bottom", fill="x")
+        hotkey_control = ModernCheckControl(
+            hotkey_cell,
+            "隐藏/显示快捷键",
+            self.settings_hotkey_enabled_var,
+            font=self._ui_font("settings"),
+            background=PANEL,
+            foreground=TEXT,
+            help_text="单键支持 Home、End、Insert、Delete、PageUp、PageDown、Pause、F1-F12。",
+            help_font=self._ui_font("small"),
+        )
+        hotkey_control.pack(side="left", fill="both", expand=True, pady=(8, 7))
+        hotkey_actions = tk.Frame(hotkey_cell, bg=PANEL)
+        hotkey_actions.pack(side="right", pady=(10, 11))
+        clear_hotkey = self._label_button(
+            hotkey_actions,
+            "清除",
+            self._clear_toggle_visibility_hotkey,
+            width=58,
+            bg=PANEL,
+            hover=PANEL_2,
+            fg=MUTED,
+            font=self._ui_font("settings"),
+        )
+        clear_hotkey.pack(side="right", fill="y", padx=(8, 0))
+        self.settings_hotkey_value_label = tk.Label(
+            hotkey_actions,
+            text="",
+            width=22,
+            bg=PANEL_2,
+            fg=ACCENT,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            cursor="hand2",
+            takefocus=True,
+            font=self._ui_font("settings_strong"),
+        )
+        self.settings_hotkey_value_label.pack(side="right", fill="y")
+        self.settings_hotkey_status_label = tk.Label(
+            hotkey_actions,
+            text="",
+            bg=PANEL,
+            fg=ERROR,
+            font=self._ui_font("small"),
+        )
+        self.settings_hotkey_status_label.pack(side="right", padx=(0, 8))
+        self.settings_hotkey_value_label.bind(
+            "<Button-1>", self._begin_toggle_hotkey_capture
+        )
+        self.settings_hotkey_value_label.bind(
+            "<KeyPress>", self._capture_toggle_hotkey_key
+        )
+        self.settings_hotkey_value_label.bind(
+            "<KeyRelease>", self._release_toggle_hotkey_modifier
+        )
+        self.settings_hotkey_value_label.bind(
+            "<FocusOut>", self._cancel_toggle_hotkey_capture
+        )
+        self.settings_hotkey_enabled_var.trace_add(
+            "write", self._apply_toggle_hotkey_enabled_setting
+        )
+        self._sync_toggle_hotkey_controls()
+
+
+        for attribute, _enabled in variables:
+            getattr(self, attribute).trace_add("write", self._apply_live_ui_settings)
+
+        def scroll(event):
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta:
+                viewport.yview_scroll(-1 if delta > 0 else 1, "units")
+                return "break"
+        def bind_scroll(widget):
+            widget.bind("<MouseWheel>", scroll, add="+")
+            for child in widget.winfo_children():
+                bind_scroll(child)
+        bind_scroll(content)
+        viewport.bind("<MouseWheel>", scroll)
+        self.settings_live_apply_ready = True
+        return page
+
+    def _build_retired_backend_settings_page(self, parent: tk.Misc) -> tk.Frame:
         self.settings_live_apply_ready = False
         page = tk.Frame(parent, bg=BG)
         tk.Label(
@@ -30460,6 +33391,19 @@ class DpsWindow:
         self.settings_font_value_label.configure(text=f"{size}px")
         self._apply_live_ui_settings()
 
+    def _preview_row_mask_opacity(self, value: object) -> None:
+        percent = clamp_percent(value, self.main_row_mask_opacity)
+        if self.settings_row_mask_value_label is not None:
+            self.settings_row_mask_value_label.configure(text=f"{percent}%")
+        self._apply_live_ui_settings()
+
+    def _preview_main_ui_scale(self, value: object) -> None:
+        percent = clamp_percent(value, round(self.main_ui_scale * 100), 80)
+        percent = min(140, percent)
+        if self.settings_ui_scale_value_label is not None:
+            self.settings_ui_scale_value_label.configure(text=f"{percent}%")
+        self._apply_live_ui_settings()
+
     def _preview_window_alpha(self, value: object) -> None:
         # Opacity has its own slider callback. Apply the value directly so it
         # cannot be dropped by the guard used while the rest of Settings is
@@ -30480,10 +33424,39 @@ class DpsWindow:
 
     def _save_ui_settings(self) -> None:
         previous_font_size = self.ui_font_size
+        previous_ui_scale = float(getattr(self, "main_ui_scale", 1.0) or 1.0)
         if self.settings_font_size_var is not None:
             self.ui_font_size = min(18, max(12, self.settings_font_size_var.get()))
         if self.settings_opacity_var is not None:
             self._set_window_alpha(self.settings_opacity_var.get(), persist=False)
+        row_mask_variable = getattr(self, "settings_row_mask_opacity_var", None)
+        if row_mask_variable is not None:
+            self.main_row_mask_opacity = clamp_percent(
+                row_mask_variable.get(), 24
+            )
+        ui_scale_variable = getattr(self, "settings_ui_scale_var", None)
+        if ui_scale_variable is not None:
+            self.main_ui_scale = clamp_main_ui_scale(
+                float(ui_scale_variable.get()) / 100.0
+            )
+        audience_metric_variable = getattr(
+            self, "settings_audience_metric_var", None
+        )
+        if audience_metric_variable is not None:
+            selected = str(audience_metric_variable.get()).casefold()
+            allowed = profession_metric_options(AUDIENCE_PROFESSION_ID)
+            self.profession_display_metrics[str(AUDIENCE_PROFESSION_ID)] = (
+                selected if selected in allowed else allowed[0]
+            )
+        warrior_metric_variable = getattr(
+            self, "settings_warrior_metric_var", None
+        )
+        if warrior_metric_variable is not None:
+            selected = str(warrior_metric_variable.get()).casefold()
+            allowed = profession_metric_options(WARRIOR_PROFESSION_ID)
+            self.profession_display_metrics[str(WARRIOR_PROFESSION_ID)] = (
+                selected if selected in allowed else allowed[0]
+            )
         if self.settings_target_boss_lookup_var is not None:
             self.target_boss_lookup_enabled = bool(
                 self.settings_target_boss_lookup_var.get()
@@ -30531,8 +33504,38 @@ class DpsWindow:
                 self.enrage_predictor.reset()
                 self.enrage_prediction = None
                 self._set_enrage_prediction_visible(False)
+        show_boss_hp_variable = getattr(self, "settings_show_boss_hp_var", None)
+        if show_boss_hp_variable is not None:
+            self.show_boss_hp_bar = bool(show_boss_hp_variable.get())
+        show_combat_time_variable = getattr(
+            self, "settings_show_combat_time_var", None
+        )
+        if show_combat_time_variable is not None:
+            self.show_combat_time = bool(
+                show_combat_time_variable.get()
+            )
+        show_main_totals_variable = getattr(
+            self, "settings_show_main_totals_var", None
+        )
+        if show_main_totals_variable is not None:
+            self.show_main_totals = bool(
+                show_main_totals_variable.get()
+            )
         if self.settings_show_deaths_var is not None:
             self.show_deaths = bool(self.settings_show_deaths_var.get())
+        show_team_dps_variable = getattr(self, "settings_show_team_dps_var", None)
+        if show_team_dps_variable is not None:
+            self.show_team_dps = bool(show_team_dps_variable.get())
+        highlight_self_variable = getattr(self, "settings_highlight_self_var", None)
+        if highlight_self_variable is not None:
+            self.highlight_self = bool(highlight_self_variable.get())
+        show_pvp_button_variable = getattr(
+            self, "settings_show_pvp_button_var", None
+        )
+        if show_pvp_button_variable is not None:
+            self.show_pvp_button = bool(
+                show_pvp_button_variable.get()
+            )
         if self.settings_show_revives_var is not None:
             self.show_revives = bool(self.settings_show_revives_var.get())
         if self.settings_show_death_duration_var is not None:
@@ -30574,17 +33577,22 @@ class DpsWindow:
         self._sync_team_rating_preview_layout(
             self._team_rating_preview_active()
         )
-        self._sync_compact_geometry_width()
-        self.root.minsize(
-            self._main_minimum_width(),
-            MINI_MIN_HEIGHT if self.compact_mode else MAIN_MIN_HEIGHT,
-        )
-        if self.ui_font_size != previous_font_size:
+        if (
+            self.ui_font_size != previous_font_size
+            or self.main_ui_scale != previous_ui_scale
+        ):
             self._configure_ui_fonts()
+        if (
+            self.main_ui_scale != previous_ui_scale
+            or self.ui_font_size != previous_font_size
+        ):
+            self._refresh_main_scale_layout()
+        self._sync_main_component_visibility()
+        self.root.minsize(self._main_minimum_width(), MAIN_MIN_HEIGHT)
         self._sync_action_buttons()
         self._draw_main_header()
         self._draw_main_rows()
-        self._schedule_main_content_overlay_sync()
+        self._draw_monster_hp()
         self._draw_history_participant_header()
         self._render_history_selection()
         self._save_preferences()
@@ -33149,7 +36157,7 @@ class DpsWindow:
         icon_x = time_x + time_width + 12
         content_x = icon_x + icon_extent + 8
         operation_width = max(
-            220, micro.measure("全员截图  上传  收藏  删除") + 42
+            HISTORY_ACTION_PANEL_WIDTH, history_action_panel_width(micro)
         )
         operation_left = right - operation_width
         operation_center = operation_left + operation_width // 2
@@ -33272,90 +36280,157 @@ class DpsWindow:
         center_y: int,
         index: int,
         favorite: bool,
+        battle_id: str = "",
+        record: object = None,
     ) -> dict[str, str]:
-        button_gap = 3
         tags: dict[str, str] = {}
-        specs = (
+        upload_metadata = self._history_upload_state(battle_id)
+        upload_state = str(
+            upload_metadata.get("state", "pending") or "pending"
+        ).casefold()
+        upload_caption = combat_upload_status_text(
+            {"state": upload_state, **upload_metadata}
+        )
+        action_font = self._ui_font("micro")
+        specs = [
             (
                 "report",
                 "首领截图"
                 if getattr(self, "history_meter_mode", "dps") == "boss_damage"
                 else "全员截图",
                 False,
-                64,
             ),
-            ("upload", "上传", False, 46),
-            ("favorite", "收藏", favorite, 46),
-            ("delete", "删除", False, 46),
-        )
+        ]
+        if history_upload_action_visible(record, upload_state):
+            specs.append((
+                "upload",
+                upload_caption,
+                upload_state != "pending",
+            ))
+        specs.extend((
+            (
+                "favorite",
+                "收藏",
+                favorite,
+            ),
+            (
+                "delete",
+                "删除",
+                False,
+            ),
+        ))
         left = left_x
-        for kind, caption, active, button_width in specs:
+        for kind, caption, active in specs:
+            button_width = history_action_button_width(
+                action_font, kind, caption
+            )
             action_tag = f"history-action-{kind}:{index}"
             background_tag = f"history-action-{kind}-bg:{index}"
+            icon_tag = f"history-action-{kind}-icon:{index}"
             text_tag = f"history-action-{kind}-text:{index}"
             tags[kind] = action_tag
             right = left + button_width
-            top, bottom = center_y - 13, center_y + 13
-            cut = 4
+            top, bottom = center_y - 14, center_y + 14
             fill, outline, foreground = self._history_inline_action_palette(
-                kind, active=active
+                kind, active=active, upload_state=upload_state
             )
-            canvas.create_polygon(
-                (
-                    left + cut,
-                    top,
-                    right - cut,
-                    top,
-                    right,
-                    top + cut,
-                    right,
-                    bottom - cut,
-                    right - cut,
-                    bottom,
-                    left + cut,
-                    bottom,
-                    left,
-                    bottom - cut,
-                    left,
-                    top + cut,
-                ),
+            canvas.create_rectangle(
+                left,
+                top,
+                right,
+                bottom,
                 fill=fill,
                 outline=outline,
                 width=1,
                 tags=(action_tag, background_tag),
             )
+            icon_name = {
+                "report": "camera",
+                "upload": "upload",
+                "favorite": "star",
+                "delete": "trash",
+            }[kind]
+            icon_size = 14 if kind in {"report", "upload"} else 12
+            gap = HISTORY_ACTION_CONTENT_GAP
+            text_width = action_font.measure(caption)
+            group_width = icon_size + gap + text_width
+            group_left = (left + right - group_width) / 2
+            icon_image = self.icons.toolbar(icon_name, icon_size, foreground)
+            canvas.create_image(
+                group_left,
+                center_y,
+                image=icon_image,
+                anchor="w",
+                tags=(action_tag, icon_tag),
+            )
             canvas.create_text(
-                (left + right) // 2,
+                group_left + icon_size + gap,
                 center_y,
                 text=caption,
                 fill=foreground,
-                font=self._ui_font("micro"),
+                anchor="w",
+                font=action_font,
                 tags=(action_tag, text_tag),
             )
             if kind == "favorite" and active:
                 canvas.create_line(
-                    left + 7,
-                    top + 2,
-                    right - 7,
-                    top + 2,
+                    left + 1,
+                    top + 1,
+                    right - 1,
+                    top + 1,
                     fill=WARN,
                     width=2,
                     tags=(action_tag,),
                 )
-            left = right + button_gap
+            left = right + HISTORY_ACTION_BUTTON_GAP
         return tags
 
     @staticmethod
     def _history_inline_action_palette(
-        kind: str, *, active: bool = False, hovered: bool = False
+        kind: str,
+        *,
+        active: bool = False,
+        hovered: bool = False,
+        upload_state: str = "pending",
     ) -> tuple[str, str, str]:
         if kind == "upload":
-            return "#0d1114", "#252c31", "#59636d"
+            state = str(upload_state or "pending").casefold()
+            if state == "uploading":
+                return "#15191c", "#343b41", MUTED
+            if state == "failed":
+                return (
+                    "#32171d" if hovered else "#251419",
+                    ERROR,
+                    ERROR,
+                )
+            if state == "ranked":
+                return (
+                    "#3b3017" if hovered else "#2d2616",
+                    WARN,
+                    WARN,
+                )
+            if state in {"included", "uploaded"}:
+                return (
+                    "#1a493c" if hovered else "#15362e",
+                    ACCENT,
+                    ACCENT,
+                )
+            if state == "ineligible":
+                return (
+                    "#242a2f" if hovered else "#171c20",
+                    "#59636d",
+                    "#a8b1ba",
+                )
+            return (
+                "#1b2b39" if hovered else "#151e27",
+                "#456077" if hovered else MODAL_BORDER,
+                "#dce9f4" if hovered else "#a9b9c8",
+            )
         if kind == "report":
             return (
-                "#1b463a" if hovered else "#15362e",
-                ACCENT,
-                ACCENT,
+                "#1b2b39" if hovered else "#151e27",
+                "#456077" if hovered else MODAL_BORDER,
+                "#dce9f4" if hovered else "#a9b9c8",
             )
         if kind == "favorite":
             if active or hovered:
@@ -33377,11 +36452,13 @@ class DpsWindow:
         hovered: bool,
         *,
         active: bool = False,
+        upload_state: str = "pending",
     ) -> None:
-        if kind == "upload":
-            return
         fill, outline, foreground = self._history_inline_action_palette(
-            kind, active=active, hovered=hovered
+            kind,
+            active=active,
+            hovered=hovered,
+            upload_state=upload_state,
         )
         canvas.itemconfigure(
             f"history-action-{kind}-bg:{index}",
@@ -33392,7 +36469,22 @@ class DpsWindow:
             f"history-action-{kind}-text:{index}",
             fill=foreground,
         )
-        canvas.configure(cursor="hand2" if hovered else "")
+        icon_name = {
+            "report": "camera",
+            "upload": "upload",
+            "favorite": "star",
+            "delete": "trash",
+        }.get(kind, "")
+        if icon_name:
+            icon_size = 14 if kind in {"report", "upload"} else 12
+            canvas.itemconfigure(
+                f"history-action-{kind}-icon:{index}",
+                image=self.icons.toolbar(icon_name, icon_size, foreground),
+            )
+        disabled = kind == "upload" and not history_upload_action_clickable(
+            upload_state
+        )
+        canvas.configure(cursor="arrow" if hovered and disabled else "hand2" if hovered else "")
 
     def _draw_history_list_header(self) -> None:
         canvas = getattr(self, "history_list_header_canvas", None)
@@ -33732,6 +36824,8 @@ class DpsWindow:
                 middle,
                 index,
                 bool(summary.get("favorite", False)),
+                battle_id,
+                summary,
             )
             canvas.create_line(0, bottom - 1, width, bottom - 1, fill=BORDER)
             canvas.tag_bind(
@@ -33764,6 +36858,19 @@ class DpsWindow:
                     selected_id
                 ),
             )
+            upload_state = str(
+                self._history_upload_state(battle_id).get("state", "pending")
+                or "pending"
+            ).casefold()
+            upload_tag = action_tags.get("upload")
+            if upload_tag and history_upload_action_clickable(upload_state):
+                canvas.tag_bind(
+                    upload_tag,
+                    "<Button-1>",
+                    lambda _event, selected_id=battle_id: self._show_history_upload_confirmation(
+                        selected_id
+                    ),
+                )
             canvas.tag_bind(
                 action_tags["favorite"],
                 "<Button-1>",
@@ -33780,29 +36887,34 @@ class DpsWindow:
             )
             for kind, active in (
                 ("report", False),
+                ("upload", upload_state != "pending"),
                 ("favorite", favorite),
                 ("delete", False),
             ):
+                if kind not in action_tags:
+                    continue
                 canvas.tag_bind(
                     action_tags[kind],
                     "<Enter>",
-                    lambda _event, selected_index=index, selected_kind=kind, selected_active=active: self._set_history_inline_action_hover(
+                    lambda _event, selected_index=index, selected_kind=kind, selected_active=active, selected_upload_state=upload_state: self._set_history_inline_action_hover(
                         canvas,
                         selected_index,
                         selected_kind,
                         True,
                         active=selected_active,
+                        upload_state=selected_upload_state,
                     ),
                 )
                 canvas.tag_bind(
                     action_tags[kind],
                     "<Leave>",
-                    lambda _event, selected_index=index, selected_kind=kind, selected_active=active: self._set_history_inline_action_hover(
+                    lambda _event, selected_index=index, selected_kind=kind, selected_active=active, selected_upload_state=upload_state: self._set_history_inline_action_hover(
                         canvas,
                         selected_index,
                         selected_kind,
                         False,
                         active=selected_active,
+                        upload_state=selected_upload_state,
                     ),
                 )
             for interactive_tag in (tag, check_tag):
@@ -36387,62 +39499,1211 @@ class DpsWindow:
             str(record.get("encounter_id", record.get("battle_id", "")))
         )
 
+    def _history_upload_state(self, battle_id: object) -> dict[str, object]:
+        states = getattr(self, "combat_upload_states", {})
+        if not isinstance(states, dict):
+            return {"state": "pending"}
+        value = states.get(str(battle_id or ""))
+        return value if isinstance(value, dict) else {"state": "pending"}
+
+    def _persist_combat_upload_states(self) -> None:
+        states = getattr(self, "combat_upload_states", {})
+        if not isinstance(states, dict):
+            states = {}
+        if len(states) > 2000:
+            newest = sorted(
+                states.items(),
+                key=lambda item: float(
+                    item[1].get("updated_at", 0.0) or 0.0
+                )
+                if isinstance(item[1], dict)
+                else 0.0,
+            )[-2000:]
+            states = dict(newest)
+            self.combat_upload_states = states
+        write_json_object(
+            UPLOAD_STATE_PATH,
+            {"version": UPLOAD_STATE_VERSION, "records": states},
+        )
+
+    def _refresh_history_upload_display(self) -> None:
+        canvas = getattr(self, "history_list_canvas", None)
+        if canvas is None:
+            return
+        try:
+            if canvas.winfo_exists():
+                self._draw_history_list()
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _set_combat_upload_state(
+        self,
+        battle_id: object,
+        state: str,
+        **metadata: object,
+    ) -> None:
+        clean_battle_id = str(battle_id or "").strip()[:96]
+        clean_state = str(state or "pending").casefold()
+        if not clean_battle_id or clean_state not in UPLOAD_STATE_VALUES:
+            return
+        states = getattr(self, "combat_upload_states", None)
+        if not isinstance(states, dict):
+            states = {}
+            self.combat_upload_states = states
+        current = states.get(clean_battle_id)
+        entry = dict(current) if isinstance(current, dict) else {}
+        entry["state"] = clean_state
+        entry["updated_at"] = time.time()
+        for field, limit in (
+            ("encounter_id", 64),
+            ("upload_id", 64),
+            ("message", 240),
+            ("upload_status", 24),
+            ("statistics_status", 24),
+            ("ranking_status", 24),
+        ):
+            if field in metadata:
+                entry[field] = str(metadata.get(field, "") or "")[:limit]
+        if "rank" in metadata:
+            try:
+                rank_value = metadata.get("rank")
+                entry["rank"] = (
+                    max(1, int(rank_value)) if rank_value is not None else None
+                )
+            except (TypeError, ValueError, OverflowError):
+                entry["rank"] = None
+        if "public_mode" in metadata:
+            mode = str(metadata.get("public_mode", "nickname") or "nickname").casefold()
+            entry["public_mode"] = (
+                mode
+                if mode in {"anonymous", "nickname", "character"}
+                else "anonymous"
+            )
+        if "validation_reasons" in metadata:
+            reasons = metadata.get("validation_reasons")
+            entry["validation_reasons"] = [
+                str(reason).strip()[:48]
+                for reason in reasons
+                if str(reason).strip()
+            ][:16] if isinstance(reasons, (list, tuple)) else []
+        states[clean_battle_id] = entry
+        self._persist_combat_upload_states()
+        self._refresh_history_upload_display()
+
+    def _history_record_for_upload(self, battle_id: object) -> dict | None:
+        clean_battle_id = str(battle_id or "").strip()
+        if not clean_battle_id:
+            return None
+        store = getattr(self, "history_store", None)
+        loader = getattr(store, "load", None)
+        if callable(loader):
+            try:
+                record = loader(clean_battle_id)
+            except (OSError, TypeError, ValueError):
+                record = None
+            if isinstance(record, dict):
+                return record
+        for record in getattr(self, "history_records", []):
+            if not isinstance(record, dict) or not isinstance(
+                record.get("participants"), list
+            ):
+                continue
+            record_id = str(
+                record.get("battle_id", record.get("encounter_id", ""))
+            )
+            if record_id == clean_battle_id:
+                return record
+        return None
+
+    def _history_upload_display_summary(
+        self, battle_id: object, record: object
+    ) -> dict:
+        """Return the same resolved title metadata shown by the history list."""
+
+        clean_battle_id = str(battle_id or "").strip()
+        for summary in getattr(self, "history_records", []):
+            if not isinstance(summary, dict):
+                continue
+            summary_id = str(
+                summary.get("battle_id", summary.get("encounter_id", ""))
+            ).strip()
+            if summary_id == clean_battle_id and any(
+                str(summary.get(key, "") or "").strip()
+                for key in ("stage_name", "boss_name", "dungeon_name")
+            ):
+                return summary
+        if isinstance(record, dict):
+            try:
+                return build_history_summary(record)
+            except (OSError, TypeError, ValueError):
+                return record
+        return {}
+
+    def _history_upload_character_name(self, record: object) -> str:
+        if isinstance(record, dict):
+            participants = record.get("participants")
+            if isinstance(participants, list):
+                for participant in participants:
+                    if isinstance(participant, dict) and bool(
+                        participant.get("is_self")
+                    ):
+                        name = str(participant.get("name", "") or "").strip()
+                        if name:
+                            return name[:48]
+        return str(getattr(self, "current_character_name", "") or "").strip()[:48]
+
+    def _build_history_upload_payload(
+        self, battle_id: object
+    ) -> tuple[dict, dict[str, object], str]:
+        record = self._history_record_for_upload(battle_id)
+        if record is None:
+            raise ProfileUploadError(
+                "BAD_ENCOUNTER", "这场战斗记录已不存在，请刷新战斗列表。"
+            )
+        rejection_code = encounter_upload_rejection_code(record)
+        if rejection_code:
+            raise ProfileUploadError(rejection_code)
+        character_name = self._history_upload_character_name(record)
+        character_id = recorded_self_character_id(record)
+        payload = build_upload_encounter(
+            record,
+            character_id,
+            current_character_name=character_name,
+            game_version=str(record.get("game_version", "") or ""),
+        )
+        return record, payload, character_name
+
+    @staticmethod
+    def _upload_validation_summary(reasons: object) -> str:
+        if not isinstance(reasons, (list, tuple)):
+            return ""
+        messages = [
+            UPLOAD_VALIDATION_REASON_MESSAGES.get(
+                str(reason).strip().upper(), str(reason).strip()
+            )
+            for reason in reasons
+            if str(reason).strip()
+        ]
+        return "；".join(dict.fromkeys(messages))
+
+    def _show_history_upload_confirmation(self, battle_id: object) -> str:
+        clean_battle_id = str(battle_id or "").strip()
+        in_progress = getattr(self, "history_upload_in_progress", set())
+        if clean_battle_id in in_progress:
+            self._show_notice(
+                "上传战斗记录",
+                "这场战斗正在上传，请稍候。",
+                parent=self.history_window,
+            )
+            return "break"
+
+        record = self._history_record_for_upload(clean_battle_id)
+        if record is None:
+            self._show_notice(
+                "无法上传战斗记录",
+                "这场战斗记录已不存在，请刷新战斗列表。",
+                parent=self.history_window,
+                confirm_text="知道了",
+                on_confirm=lambda: None,
+            )
+            return "break"
+        if encounter_upload_rejection_code(record):
+            return "break"
+
+        try:
+            record, _payload, character_name = self._build_history_upload_payload(
+                clean_battle_id
+            )
+        except ProfileUploadError as exc:
+            message = exc.message
+            if (
+                exc.code == "UPLOADER_NOT_IN_ENCOUNTER"
+                and not record.get("self_character_id")
+                and not record.get("participant_identities")
+            ):
+                message = (
+                    "这场记录由旧版本生成，未保存本机角色唯一 ID，"
+                    "无法安全确认上传者。请使用当前版本完成一场新战斗后上传，"
+                    "旧战斗记录不会丢失。"
+                )
+            self._show_notice(
+                "无法上传战斗记录",
+                message,
+                parent=self.history_window,
+                confirm_text="知道了",
+                on_confirm=lambda: None,
+            )
+            return "break"
+
+        self.pending_upload_battle_id = ""
+        default_mode = str(
+            getattr(self, "upload_public_mode", "anonymous") or "anonymous"
+        )
+        if default_mode not in {"anonymous", "character"}:
+            default_mode = "anonymous"
+        if default_mode == "character" and not character_name:
+            default_mode = "anonymous"
+        mode_var = tk.StringVar(master=self.history_window, value=default_mode)
+        _panel, body, _overlay = self._open_history_modal(
+            "上传战斗记录", width=520, height=348
+        )
+        # Reserve the action area before laying out the content. Tk pack
+        # otherwise gives the last-packed footer only the leftover pixels.
+        actions = tk.Frame(body, bg=PANEL)
+        actions.pack(side='bottom', fill='x', pady=(10, 0))
+        display_summary = self._history_upload_display_summary(
+            clean_battle_id, record
+        )
+        encounter_title = self._history_encounter_title(display_summary)
+        encounter_bar = tk.Frame(
+            body,
+            bg="#101f2b",
+            height=max(42, self._ui_font('strong').metrics('linespace') + 16),
+            highlightthickness=1,
+            highlightbackground=MODAL_BORDER,
+        )
+        encounter_bar.pack(fill="x", pady=(0, 13))
+        encounter_bar.pack_propagate(False)
+        tk.Frame(
+            encounter_bar, bg=PVE_MODE_FOREGROUND, width=3
+        ).pack(side="left", fill="y")
+        tk.Label(
+            encounter_bar,
+            text=encounter_title,
+            bg="#101f2b",
+            fg=TEXT,
+            anchor="w",
+            font=self._ui_font("strong"),
+        ).pack(side="left", fill="both", expand=True, padx=(11, 8))
+        tk.Label(
+            encounter_bar,
+            text="仅控制本人",
+            bg="#17344a",
+            fg=PVE_MODE_FOREGROUND,
+            padx=8,
+            pady=3,
+            font=self._ui_font("micro"),
+        ).pack(side="right", padx=9)
+        tk.Label(
+            body,
+            text="选择本场公开身份",
+            bg=PANEL,
+            fg="#cbd7e2",
+            anchor="w",
+            font=self._ui_font("strong"),
+        ).pack(fill="x", pady=(0, 7))
+        for mode, caption, detail in (
+            (
+                "anonymous",
+                "匿名上传",
+                "本人不公开角色名称，仍可正常上传与统计",
+            ),
+            (
+                "character",
+                "用户 ID 显示上传",
+                f"公开显示本场自动识别到的本人角色名：{character_name or '未识别'}",
+            ),
+        ):
+            option = ModernChoiceCard(
+                body,
+                caption,
+                mode_var,
+                mode,
+                font=self._ui_font("body"),
+                detail=detail,
+                detail_font=self._ui_font("micro"),
+                disabled=mode == "character" and not bool(character_name),
+            )
+            option.pack(fill="x", pady=(0, 7))
+        tk.Label(
+            body,
+            text="此选择只影响你本人；其他队友始终显示为匿名玩家。",
+            bg=PANEL,
+            fg=MUTED,
+            anchor="w",
+            font=self._ui_font("micro"),
+        ).pack(fill="x", pady=(1, 8))
+        self._history_modal_action(
+            actions,
+            "确认上传",
+            lambda: self._start_history_upload(clean_battle_id, mode_var.get()),
+            primary=True,
+        ).pack(side="right")
+        self._history_modal_action(
+            actions, "取消", self._close_history_modal
+        ).pack(side="right", padx=(0, 8))
+        self._fit_history_modal_contents(body)
+        return "break"
+
+    def _start_history_upload(self, battle_id: object, public_mode: object) -> None:
+        clean_battle_id = str(battle_id or "").strip()
+        mode = str(public_mode or "anonymous").casefold()
+        if mode not in {"anonymous", "character"}:
+            return
+        in_progress = getattr(self, "history_upload_in_progress", None)
+        if not isinstance(in_progress, set):
+            in_progress = set()
+            self.history_upload_in_progress = in_progress
+        if clean_battle_id in in_progress:
+            return
+        try:
+            _record, encounter, character_name = self._build_history_upload_payload(
+                clean_battle_id
+            )
+        except ProfileUploadError as exc:
+            self._close_history_modal()
+            self._show_notice(
+                "无法上传战斗记录", exc.message, parent=self.history_window
+            )
+            return
+        if mode == "character" and not character_name:
+            self._profile_modal_status("本场用户 ID 缺失，请使用匿名上传。")
+            return
+
+        character_id = next(
+            (
+                str(participant.get("character_id", "") or "")
+                for participant in encounter.get("participants", [])
+                if isinstance(participant, dict)
+                and bool(participant.get("is_uploader"))
+            ),
+            "",
+        )
+        if not character_id:
+            self._close_history_modal()
+            self._show_notice(
+                "无法上传战斗记录",
+                "无法确认这场战斗中的本机角色。",
+                parent=self.history_window,
+            )
+            return
+        self.pending_upload_battle_id = ""
+        self.upload_public_mode = mode
+        self.config[UPLOAD_PUBLIC_MODE_CONFIG_KEY] = mode
+        save_config(self.config)
+        self._close_history_modal()
+        in_progress.add(clean_battle_id)
+        self._set_combat_upload_state(
+            clean_battle_id,
+            "uploading",
+            rank=None,
+            encounter_id="",
+            upload_id="",
+            message="正在上传战斗记录。",
+            upload_status="uploading",
+            statistics_status="",
+            ranking_status="",
+            validation_reasons=(),
+            public_mode=mode,
+        )
+
+        def upload() -> None:
+            try:
+                result = self.licensing.upload_encounter(
+                    character_id,
+                    encounter,
+                    public_mode=mode,
+                    character_name=character_name,
+                )
+            except LicensingConnectionError as exc:
+                result = EncounterUploadResult(
+                    False, error="connection", message=str(exc)
+                )
+            except Exception:
+                result = EncounterUploadResult(
+                    False,
+                    error="unexpected",
+                    message="战斗记录上传失败，请稍后重试。",
+                )
+            self.control_messages.put(
+                (
+                    "encounter_upload_result",
+                    {
+                        "battle_id": clean_battle_id,
+                        "character_id": character_id,
+                        "public_mode": mode,
+                        "result": result,
+                    },
+                )
+            )
+
+        threading.Thread(
+            target=upload,
+            name=f"encounter-upload-{clean_battle_id[:12]}",
+            daemon=True,
+        ).start()
+
+    def _handle_encounter_upload_result(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        battle_id = str(payload.get("battle_id", "") or "").strip()
+        in_progress = getattr(self, "history_upload_in_progress", None)
+        if isinstance(in_progress, set):
+            in_progress.discard(battle_id)
+        result = payload.get("result")
+        if not battle_id or not isinstance(result, EncounterUploadResult):
+            if battle_id:
+                self._set_combat_upload_state(
+                    battle_id,
+                    "failed",
+                    message="战斗记录上传失败，请稍后重试。",
+                )
+            return
+
+        state = "uploaded" if result.accepted else "failed"
+        self._set_combat_upload_state(
+            battle_id,
+            state,
+            rank=result.rank,
+            encounter_id=result.encounter_id,
+            upload_id=result.upload_id,
+            message=result.message,
+            upload_status=result.upload_status,
+            statistics_status=result.statistics_status,
+            ranking_status=result.ranking_status,
+            validation_reasons=result.validation_reasons,
+            public_mode=payload.get("public_mode", "nickname"),
+        )
+        if not result.accepted:
+            requested_character_id = str(payload.get("character_id", "") or "")
+            if str(result.error or "").upper() == "PROFILE_NOT_FOUND":
+                if requested_character_id == str(
+                    getattr(self, "current_character_id", "") or ""
+                ):
+                    self.upload_profile = None
+                    self.profile_resolved_character_id = requested_character_id
+                    self._sync_upload_profile_label()
+            self._show_notice(
+                "战斗记录上传失败",
+                result.message or "战斗记录上传失败，请稍后重试。",
+                parent=self.history_window,
+            )
+            return
+
     def _open_history_modal(
         self, title: str, *, width: int = 430, height: int = 270
     ) -> tuple[tk.Frame, tk.Frame, tk.Frame]:
         self._close_history_modal()
-        host = self.history_page_root
+        host = getattr(self, "backend_page_host", None)
+        if host is None:
+            host = self.history_page_root
         if host is None:
             raise tk.TclError("history page is unavailable")
-        overlay = tk.Frame(host, bg="#050607")
+        overlay = tk.Frame(host, bg=MODAL_BACKDROP, takefocus=1)
         overlay.place(x=0, y=0, relwidth=1, relheight=1)
         overlay.lift()
-        panel = tk.Frame(
-            overlay,
-            bg=PANEL,
-            width=width,
-            height=height,
-            highlightthickness=1,
-            highlightbackground=BORDER,
+        overlay.bind("<Escape>", lambda _event: self._close_history_modal())
+
+        font_growth = max(
+            0,
+            min(5, int(getattr(self, "ui_font_size", 13) or 13) - 13),
         )
-        panel.place(relx=0.5, rely=0.5, anchor="center")
+        header_height = 56 + font_growth * 3
+        panel_height = max(220, int(height) + 22 + font_growth * 10)
+        shell = tk.Frame(
+            overlay,
+            bg=MODAL_BORDER,
+            width=width,
+            height=panel_height,
+        )
+        shell.place(relx=0.5, rely=0.5, anchor="center")
+        shell.pack_propagate(False)
+        panel = tk.Frame(shell, bg=PANEL)
+        panel.pack(fill="both", expand=True, padx=1, pady=1)
         panel.pack_propagate(False)
-        header = tk.Frame(panel, bg=SURFACE, height=44)
+        tk.Frame(panel, bg=PVE_MODE_FOREGROUND, height=2).pack(fill="x")
+        header = tk.Frame(panel, bg=MODAL_HEADER, height=header_height)
         header.pack(fill="x")
         header.pack_propagate(False)
+        logo_image = self.icons.app_logo(22)
+        logo = tk.Label(header, image=logo_image, bg=MODAL_HEADER, bd=0)
+        logo.image = logo_image
+        logo.pack(side="left", padx=(17, 10))
+        title_group = tk.Frame(header, bg=MODAL_HEADER)
+        title_group.pack(side="left", fill="y", pady=(8, 7))
         tk.Label(
-            header,
+            title_group,
             text=title,
-            bg=SURFACE,
+            bg=MODAL_HEADER,
             fg=TEXT,
             anchor="w",
-            font=self._ui_font("title"),
-        ).pack(side="left", padx=14, fill="y")
-        close = tk.Label(
+            font=self._ui_font("settings_title"),
+        ).pack(fill="x")
+        tk.Label(
+            title_group,
+            text="DPS-LOGS  /  PVE DATA",
+            bg=MODAL_HEADER,
+            fg=PVE_MODE_FOREGROUND,
+            anchor="w",
+            font=self._ui_font("sidebar_micro"),
+        ).pack(fill="x", pady=(1, 0))
+        self._titlebar_icon_button(
             header,
-            text="×",
-            bg=SURFACE,
-            fg=MUTED,
-            width=4,
-            cursor="hand2",
-            font=self._ui_font("icon"),
-        )
-        close.pack(side="right", fill="y")
-        close.bind("<Button-1>", lambda _event: self._close_history_modal())
+            "close",
+            self._close_history_modal,
+            width=48,
+            height=header_height,
+            bg=MODAL_HEADER,
+            hover="#562631",
+            fg="#9eabb8",
+        ).pack(side="right", fill="y")
         body = tk.Frame(panel, bg=PANEL)
-        body.pack(fill="both", expand=True, padx=14, pady=12)
+        body.pack(fill="both", expand=True, padx=22, pady=(17, 18))
         self.history_modal_overlay = overlay
+        self.history_modal_layout = (shell, header, title_group, body, overlay)
+        overlay.focus_set()
         return panel, body, overlay
+
+    def _fit_history_modal_contents(self, body: tk.Misc) -> None:
+        """Fit measured fonts/content instead of clipping a fixed-height footer."""
+        layout = getattr(self, 'history_modal_layout', None)
+        if not layout or layout[3] is not body:
+            return
+        shell, header, title_group, _body, overlay = layout
+        body.update_idletasks()
+        header_height = max(int(header.cget('height')), title_group.winfo_reqheight() + 15)
+        header.configure(height=header_height)
+        wanted_width = max(int(shell.cget('width')), body.winfo_reqwidth() + 46,
+                           title_group.winfo_reqwidth() + 120)
+        shell.configure(width=wanted_width)
+        shell.update_idletasks()
+        for child in body.winfo_children():
+            if isinstance(child, ModernChoiceCard) and child.detail_label is not None:
+                detail = child.detail_label
+                detail.configure(wraplength=max(160, body.winfo_width() - 126), justify='left')
+                detail.update_idletasks()
+                child.configure(height=max(int(child.cget('height')),
+                                           child.title_label.winfo_reqheight() + detail.winfo_reqheight() + 22))
+        body.update_idletasks()
+        wanted_height = header_height + body.winfo_reqheight() + 39
+        shell.configure(height=max(int(shell.cget('height')), wanted_height))
+        shell.update_idletasks()
 
     def _close_history_modal(self) -> None:
         overlay = getattr(self, "history_modal_overlay", None)
         self.history_modal_overlay = None
+        self.history_modal_layout = None
+        self.profile_modal_overlay = None
+        self.profile_modal_status_label = None
+        self.profile_modal_submit_button = None
         if overlay is not None:
             try:
                 if overlay.winfo_exists():
                     overlay.destroy()
             except tk.TclError:
                 pass
+
+    def _profile_modal_status(self, message: object, *, error: bool = True) -> None:
+        label = getattr(self, "profile_modal_status_label", None)
+        if label is None:
+            return
+        try:
+            if label.winfo_exists():
+                label.configure(
+                    text=str(message or ""),
+                    fg=ERROR if error else PVE_MODE_FOREGROUND,
+                )
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _show_upload_profile_editor(self) -> str:
+        # Profile creation belongs to the upload flow.  The sidebar pencil is
+        # strictly a rename action and remains inert until a Profile exists.
+        if not isinstance(getattr(self, "upload_profile", None), UploadProfile):
+            return "break"
+        self._show_profile_nickname_form(rename=True)
+        return "break"
+
+    def _show_profile_setup_choice(self) -> None:
+        _panel, body, overlay = self._open_history_modal(
+            "创建上传身份", width=500, height=286
+        )
+        self.profile_modal_overlay = overlay
+        intro = tk.Frame(body, bg=PANEL)
+        intro.pack(fill="x", pady=(0, 14))
+        identity_icon = self.icons.toolbar("identity", 26, PVE_MODE_FOREGROUND)
+        identity_badge = tk.Label(
+            intro,
+            image=identity_icon,
+            bg="#142b3d",
+            width=46,
+            height=46,
+            bd=0,
+        )
+        identity_badge.image = identity_icon
+        identity_badge.pack(side="left", padx=(0, 12))
+        intro_copy = tk.Frame(intro, bg=PANEL)
+        intro_copy.pack(side="left", fill="both", expand=True)
+        tk.Label(
+            intro_copy,
+            text="当前角色尚未关联上传身份",
+            bg=PANEL,
+            fg=TEXT,
+            anchor="w",
+            font=self._ui_font("strong"),
+        ).pack(fill="x", pady=(1, 3))
+        tk.Label(
+            intro_copy,
+            text="请选择创建新身份，或通过安全关联码加入已有身份。",
+            bg=PANEL,
+            fg=MUTED,
+            anchor="w",
+            font=self._ui_font("micro"),
+        ).pack(fill="x")
+        create_button = self._history_modal_command_card(
+            body,
+            "创建新的上传身份",
+            "设置全服唯一昵称，并绑定当前游戏角色",
+            lambda: self._show_profile_nickname_form(rename=False),
+            icon_name="identity",
+            primary=True,
+        )
+        create_button.pack(fill="x", pady=(0, 8))
+        link_button = self._history_modal_command_card(
+            body,
+            "关联已有上传身份",
+            "输入已绑定角色生成的一次性关联码",
+            self._show_profile_link_form,
+            icon_name="link",
+        )
+        link_button.pack(fill="x")
+
+    def _show_profile_nickname_form(self, *, rename: bool) -> None:
+        profile = getattr(self, "upload_profile", None)
+        if rename and not isinstance(profile, UploadProfile):
+            self._show_profile_setup_choice()
+            return
+        title = "修改上传昵称" if rename else "创建上传身份"
+        height = 354 if rename else 278
+        _panel, body, overlay = self._open_history_modal(
+            title, width=480, height=height
+        )
+        self.profile_modal_overlay = overlay
+        tk.Label(
+            body,
+            text="上传昵称",
+            bg=PANEL,
+            fg=TEXT,
+            anchor="w",
+            font=self._ui_font("strong"),
+        ).pack(fill="x")
+        field = ModernTextField(
+            body,
+            placeholder="2～12 个中文、英文字母或数字",
+            width=420,
+            height=38,
+            font=self._ui_font("body"),
+            background=SURFACE,
+        )
+        field.pack(fill="x", pady=(7, 5))
+        if rename and isinstance(profile, UploadProfile):
+            field.set_value(profile.nickname)
+        status = tk.Label(
+            body,
+            text="昵称全服唯一，修改不会改变身份与历史归属。",
+            bg=PANEL,
+            fg=MUTED,
+            anchor="w",
+            font=self._ui_font("micro"),
+        )
+        status.pack(fill="x", pady=(0, 8))
+        self.profile_modal_status_label = status
+
+        actions = tk.Frame(body, bg=PANEL)
+        actions.pack(side="bottom", fill="x")
+
+        def submit() -> None:
+            self._start_profile_nickname_mutation(field.value(), rename=rename)
+
+        submit_button = self._history_modal_action(
+            actions,
+            "保存昵称" if rename else "创建身份",
+            submit,
+            primary=True,
+        )
+        submit_button.pack(side="right")
+        self.profile_modal_submit_button = submit_button
+        self._history_modal_action(
+            actions, "取消", self._close_history_modal
+        ).pack(side="right", padx=(0, 8))
+        if rename:
+            utilities = tk.Frame(body, bg=PANEL)
+            utilities.pack(fill="x", pady=(7, 10))
+            self._history_modal_action(
+                utilities,
+                "生成角色关联码",
+                self._start_profile_link_code,
+            ).pack(side="left")
+            self._history_modal_action(
+                utilities,
+                "查询上传记录",
+                lambda: self._start_profile_uploads_query("profile"),
+            ).pack(side="left", padx=(8, 0))
+        field.entry.bind("<Return>", lambda _event: submit())
+        field.focus_set()
+
+    def _start_profile_nickname_mutation(
+        self, nickname: object, *, rename: bool
+    ) -> None:
+        if self.profile_mutation_in_progress:
+            return
+        try:
+            display_nickname, _normalized = normalize_nickname(nickname)
+        except ProfileUploadError as exc:
+            self._profile_modal_status(exc.message)
+            return
+        character_id = str(self.current_character_id or "")
+        if not character_id:
+            self._profile_modal_status("尚未识别当前游戏角色。")
+            return
+        self.profile_mutation_in_progress = True
+        self._profile_modal_status("正在校验昵称…", error=False)
+        operation = "rename" if rename else "create"
+        character_name = str(self.current_character_name or "")
+        profession_id = int(self.current_character_profession_id or 0)
+
+        def mutate() -> None:
+            try:
+                availability = self.licensing.check_upload_nickname(
+                    character_id, display_nickname
+                )
+                if availability.status != "AVAILABLE":
+                    result = ProfileResult(
+                        False,
+                        error=availability.error,
+                        message=availability.message,
+                    )
+                elif rename:
+                    result = self.licensing.rename_upload_profile(
+                        character_id, display_nickname
+                    )
+                else:
+                    result = self.licensing.create_upload_profile(
+                        character_id,
+                        display_nickname,
+                        character_name=character_name,
+                        profession_id=profession_id,
+                    )
+            except LicensingConnectionError as exc:
+                result = ProfileResult(False, error="connection", message=str(exc))
+            except Exception:
+                result = ProfileResult(
+                    False,
+                    error="unexpected",
+                    message="上传身份操作失败，请稍后重试。",
+                )
+            self.control_messages.put(
+                (
+                    "profile_mutation_result",
+                    {
+                        "operation": operation,
+                        "character_id": character_id,
+                        "result": result,
+                    },
+                )
+            )
+
+        threading.Thread(
+            target=mutate, name=f"profile-{operation}", daemon=True
+        ).start()
+
+    def _show_profile_link_form(self) -> None:
+        _panel, body, overlay = self._open_history_modal(
+            "关联已有上传身份", width=480, height=274
+        )
+        self.profile_modal_overlay = overlay
+        tk.Label(
+            body,
+            text="一次性角色关联码",
+            bg=PANEL,
+            fg=TEXT,
+            anchor="w",
+            font=self._ui_font("strong"),
+        ).pack(fill="x")
+        field = ModernTextField(
+            body,
+            placeholder="XXXX-XXXX-XXXX",
+            width=420,
+            height=38,
+            font=self._ui_font("body"),
+            background=SURFACE,
+        )
+        field.pack(fill="x", pady=(7, 5))
+        status = tk.Label(
+            body,
+            text="关联码需由已绑定该身份的角色生成，10 分钟内仅可使用一次。",
+            bg=PANEL,
+            fg=MUTED,
+            anchor="w",
+            font=self._ui_font("micro"),
+        )
+        status.pack(fill="x")
+        self.profile_modal_status_label = status
+        actions = tk.Frame(body, bg=PANEL)
+        actions.pack(side="bottom", fill="x")
+
+        def submit() -> None:
+            self._start_profile_link_redeem(field.value())
+
+        submit_button = self._history_modal_action(
+            actions, "确认关联", submit, primary=True
+        )
+        submit_button.pack(side="right")
+        self.profile_modal_submit_button = submit_button
+        self._history_modal_action(
+            actions, "返回", self._show_profile_setup_choice
+        ).pack(side="right", padx=(0, 8))
+        field.entry.bind("<Return>", lambda _event: submit())
+        field.focus_set()
+
+    def _start_profile_link_redeem(self, code: object) -> None:
+        if self.profile_mutation_in_progress:
+            return
+        clean_code = str(code or "").strip().upper()
+        if not re.fullmatch(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){2}", clean_code):
+            self._profile_modal_status("请输入完整的 12 位角色关联码。")
+            return
+        character_id = str(self.current_character_id or "")
+        if not character_id:
+            self._profile_modal_status("尚未识别当前游戏角色。")
+            return
+        self.profile_mutation_in_progress = True
+        self._profile_modal_status("正在关联角色…", error=False)
+        character_name = str(self.current_character_name or "")
+        profession_id = int(self.current_character_profession_id or 0)
+
+        def redeem() -> None:
+            try:
+                result = self.licensing.redeem_profile_link_code(
+                    character_id,
+                    clean_code,
+                    character_name=character_name,
+                    profession_id=profession_id,
+                )
+            except LicensingConnectionError as exc:
+                result = ProfileResult(False, error="connection", message=str(exc))
+            except Exception:
+                result = ProfileResult(
+                    False, error="unexpected", message="关联上传身份失败，请稍后重试。"
+                )
+            self.control_messages.put(
+                (
+                    "profile_mutation_result",
+                    {
+                        "operation": "link",
+                        "character_id": character_id,
+                        "result": result,
+                    },
+                )
+            )
+
+        threading.Thread(target=redeem, name="profile-link", daemon=True).start()
+
+    def _handle_profile_mutation_result(self, payload: object) -> None:
+        self.profile_mutation_in_progress = False
+        if not isinstance(payload, dict):
+            return
+        result = payload.get("result")
+        if str(payload.get("character_id", "")) != self.current_character_id:
+            self._resolve_upload_profile_async()
+            return
+        if not isinstance(result, ProfileResult):
+            return
+        if not result.accepted or result.profile is None:
+            self._profile_modal_status(
+                result.message or "上传身份操作失败，请稍后重试。"
+            )
+            return
+        self.upload_profile = result.profile
+        self.profile_resolved_character_id = self.current_character_id
+        self._sync_upload_profile_label()
+        operation = str(payload.get("operation", ""))
+        pending_battle_id = str(self.pending_upload_battle_id or "")
+        self._close_history_modal()
+        if pending_battle_id:
+            self.root.after_idle(
+                lambda battle_id=pending_battle_id: self._show_history_upload_confirmation(
+                    battle_id
+                )
+            )
+        else:
+            title = "上传昵称已修改" if operation == "rename" else "上传身份已就绪"
+            self._show_notice(
+                title,
+                result.message or f"当前上传昵称：{result.profile.nickname}",
+                parent=self.history_window,
+            )
+
+    def _start_profile_link_code(self) -> None:
+        if self.profile_mutation_in_progress or not self.current_character_id:
+            return
+        self.profile_mutation_in_progress = True
+        self._profile_modal_status("正在生成关联码…", error=False)
+        character_id = str(self.current_character_id)
+
+        def generate() -> None:
+            try:
+                result = self.licensing.create_profile_link_code(character_id)
+            except LicensingConnectionError as exc:
+                result = ProfileLinkCode(False, error="connection", message=str(exc))
+            except Exception:
+                result = ProfileLinkCode(
+                    False, error="unexpected", message="生成角色关联码失败，请稍后重试。"
+                )
+            self.control_messages.put(
+                (
+                    "profile_link_code_result",
+                    {"character_id": character_id, "result": result},
+                )
+            )
+
+        threading.Thread(
+            target=generate, name="profile-link-code", daemon=True
+        ).start()
+
+    def _handle_profile_link_code_result(self, payload: object) -> None:
+        self.profile_mutation_in_progress = False
+        if not isinstance(payload, dict):
+            return
+        result = payload.get("result")
+        if str(payload.get("character_id", "")) != self.current_character_id:
+            return
+        if not isinstance(result, ProfileLinkCode) or not result.accepted or not result.code:
+            message = (
+                result.message
+                if isinstance(result, ProfileLinkCode)
+                else "生成角色关联码失败，请稍后重试。"
+            )
+            self._profile_modal_status(message)
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(result.code)
+        self.root.update_idletasks()
+        self._close_history_modal()
+        self._show_notice(
+            "角色关联码已复制",
+            f"{result.code}\n10 分钟内有效，使用一次后立即失效。",
+            parent=self.history_window,
+        )
+
+    def _start_profile_uploads_query(self, scope: str) -> None:
+        if self.profile_mutation_in_progress or not self.current_character_id:
+            return
+        self.profile_mutation_in_progress = True
+        self._profile_modal_status("正在查询上传记录…", error=False)
+        character_id = str(self.current_character_id)
+        requested_scope = "character" if scope == "character" else "profile"
+
+        def query_uploads() -> None:
+            try:
+                result = self.licensing.profile_uploads(
+                    character_id, scope=requested_scope, limit=100
+                )
+            except LicensingConnectionError as exc:
+                result = ProfileUploadsResult(
+                    False, scope=requested_scope, error="connection", message=str(exc)
+                )
+            except Exception:
+                result = ProfileUploadsResult(
+                    False,
+                    scope=requested_scope,
+                    error="unexpected",
+                    message="查询上传记录失败，请稍后重试。",
+                )
+            self.control_messages.put(
+                (
+                    "profile_uploads_result",
+                    {"character_id": character_id, "result": result},
+                )
+            )
+
+        threading.Thread(
+            target=query_uploads, name="profile-uploads-query", daemon=True
+        ).start()
+
+    def _handle_profile_uploads_result(self, payload: object) -> None:
+        self.profile_mutation_in_progress = False
+        if not isinstance(payload, dict):
+            return
+        result = payload.get("result")
+        if str(payload.get("character_id", "")) != self.current_character_id:
+            return
+        if not isinstance(result, ProfileUploadsResult) or not result.accepted:
+            message = (
+                result.message
+                if isinstance(result, ProfileUploadsResult)
+                else "查询上传记录失败，请稍后重试。"
+            )
+            self._profile_modal_status(message)
+            return
+        self._show_profile_uploads_dialog(result)
+
+    def _show_profile_uploads_dialog(self, result: ProfileUploadsResult) -> None:
+        _panel, body, overlay = self._open_history_modal(
+            "我的上传记录", width=650, height=454
+        )
+        self.profile_modal_overlay = overlay
+        controls = tk.Frame(body, bg=PANEL)
+        controls.pack(fill="x", pady=(0, 11))
+        tk.Label(
+            controls,
+            text="查看范围",
+            bg=PANEL,
+            fg=MUTED,
+            anchor="w",
+            font=self._ui_font("micro"),
+        ).pack(side="left", fill="y", padx=(0, 10))
+        for scope, caption in (("profile", "当前上传身份"), ("character", "当前角色")):
+            button = self._history_modal_action(
+                controls,
+                caption,
+                lambda selected_scope=scope: self._start_profile_uploads_query(
+                    selected_scope
+                ),
+                primary=result.scope == scope,
+            )
+            button.pack(side="left", padx=(0, 7))
+
+        table = tk.Frame(
+            body,
+            bg=SURFACE,
+            highlightthickness=1,
+            highlightbackground=MODAL_BORDER,
+        )
+        table.pack(fill="both", expand=True)
+        header = tk.Frame(table, bg=MODAL_HEADER, height=34)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        header.grid_columnconfigure(0, minsize=130)
+        header.grid_columnconfigure(1, weight=1)
+        header.grid_columnconfigure(2, minsize=116)
+        header.grid_columnconfigure(3, minsize=102)
+        for column, caption, anchor in (
+            (0, "上传时间", "w"),
+            (1, "首领", "w"),
+            (2, "DPS", "e"),
+            (3, "状态", "e"),
+        ):
+            tk.Label(
+                header,
+                text=caption,
+                bg=MODAL_HEADER,
+                fg=MUTED,
+                anchor=anchor,
+                padx=10,
+                font=self._ui_font("micro"),
+            ).grid(row=0, column=column, sticky="nsew")
+
+        viewport = tk.Frame(table, bg=SURFACE)
+        viewport.pack(fill="both", expand=True)
+        upload_canvas = tk.Canvas(
+            viewport,
+            bg=SURFACE,
+            bd=0,
+            highlightthickness=0,
+            yscrollincrement=45,
+        )
+        upload_scrollbar = ModernScrollbar(
+            viewport,
+            orient="vertical",
+            command=upload_canvas.yview,
+            background=SURFACE,
+            width=9,
+        )
+        upload_canvas.configure(yscrollcommand=upload_scrollbar.set)
+        upload_scrollbar.pack(side="right", fill="y")
+        upload_canvas.pack(side="left", fill="both", expand=True)
+        rows = tk.Frame(upload_canvas, bg=SURFACE)
+        rows_window = upload_canvas.create_window(0, 0, window=rows, anchor="nw")
+        rows.bind(
+            "<Configure>",
+            lambda _event: upload_canvas.configure(
+                scrollregion=upload_canvas.bbox("all")
+            ),
+        )
+        upload_canvas.bind(
+            "<Configure>",
+            lambda event: upload_canvas.itemconfigure(
+                rows_window, width=max(1, int(event.width))
+            ),
+        )
+
+        def scroll_uploads(event) -> str:
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta:
+                upload_canvas.yview_scroll(-max(1, abs(delta) // 120) if delta > 0 else max(1, abs(delta) // 120), "units")
+            return "break"
+
+        upload_canvas.bind("<MouseWheel>", scroll_uploads)
+        if not result.uploads:
+            tk.Label(
+                rows,
+                text="暂无上传记录",
+                bg=SURFACE,
+                fg=MUTED,
+                pady=34,
+                font=self._ui_font("small"),
+            ).pack(fill="x")
+        else:
+            for index, row in enumerate(result.uploads):
+                try:
+                    occurred = dt.datetime.fromtimestamp(
+                        float(row.get("ended_at", 0.0) or 0.0)
+                    ).strftime("%Y-%m-%d %H:%M")
+                except (OSError, TypeError, ValueError, OverflowError):
+                    occurred = "时间未知"
+                state = (
+                    "ranked"
+                    if row.get("ranking_status") == "eligible"
+                    else "included"
+                    if row.get("statistics_status") == "included"
+                    else "ineligible"
+                )
+                status = combat_upload_status_text(
+                    {"state": state, "rank": row.get("rank")}
+                )
+                boss_name = str(row.get("boss_name", "") or "未知 Boss")
+                row_bg = MODAL_CARD if index % 2 == 0 else SURFACE
+                record_row = tk.Frame(rows, bg=row_bg, height=45)
+                record_row.pack(fill="x")
+                record_row.pack_propagate(False)
+                record_row.grid_columnconfigure(0, minsize=130)
+                record_row.grid_columnconfigure(1, weight=1)
+                record_row.grid_columnconfigure(2, minsize=116)
+                record_row.grid_columnconfigure(3, minsize=102)
+                status_color = (
+                    WARN
+                    if state == "ranked"
+                    else PVE_MODE_FOREGROUND
+                    if state == "included"
+                    else MUTED
+                )
+                values = (
+                    (occurred, MUTED, "w"),
+                    (boss_name, TEXT, "w"),
+                    (f"{format_number(row.get('dps', 0))} DPS", TEXT, "e"),
+                    (status, status_color, "e"),
+                )
+                row_widgets: list[tk.Widget] = [record_row]
+                for column, (value, foreground, anchor) in enumerate(values):
+                    label = tk.Label(
+                        record_row,
+                        text=value,
+                        bg=row_bg,
+                        fg=foreground,
+                        anchor=anchor,
+                        padx=10,
+                        font=(
+                            self._ui_font("number_small")
+                            if column == 2
+                            else self._ui_font("small")
+                        ),
+                    )
+                    label.grid(row=0, column=column, sticky="nsew")
+                    row_widgets.append(label)
+                tk.Frame(rows, bg=BORDER, height=1).pack(fill="x")
+                for widget in row_widgets:
+                    widget.bind("<MouseWheel>", scroll_uploads)
 
     def _history_modal_action(
         self,
@@ -36454,17 +40715,160 @@ class DpsWindow:
         danger: bool = False,
     ) -> tk.Label:
         button = self._backend_action_button(parent, caption, command)
+        button.configure(
+            bg="#17212b",
+            fg="#dce6ef",
+            padx=16,
+            pady=8,
+            font=self._ui_font("strong"),
+            takefocus=1,
+            highlightthickness=1,
+            highlightbackground="#35495b",
+        )
+        button._normal_bg = "#17212b"
+        button._normal_fg = "#dce6ef"
+        button._hover_bg = "#213344"
+        button._hover_fg = TEXT
         if primary:
-            button.configure(bg=ACCENT, fg="#07110e")
-            button._normal_bg = ACCENT
-            button._normal_fg = "#07110e"
-            button._hover_bg = blend_color(ACCENT, "#ffffff", 0.12)
-            button._hover_fg = "#07110e"
+            button.configure(
+                bg=MODAL_PRIMARY,
+                fg="#f6fbff",
+                highlightbackground=PVE_MODE_FOREGROUND,
+            )
+            button._normal_bg = MODAL_PRIMARY
+            button._normal_fg = "#f6fbff"
+            button._hover_bg = MODAL_PRIMARY_HOVER
+            button._hover_fg = "#ffffff"
         elif danger:
-            button.configure(fg=ERROR)
-            button._normal_fg = ERROR
-            button._hover_fg = ERROR
+            button.configure(
+                bg="#b63e50",
+                fg="#ffffff",
+                highlightbackground=PVP_MODE_FOREGROUND,
+            )
+            button._normal_bg = "#b63e50"
+            button._normal_fg = "#ffffff"
+            button._hover_bg = "#d34e61"
+            button._hover_fg = "#ffffff"
+        button.bind(
+            "<Return>",
+            lambda _event: (
+                None if getattr(button, "_disabled", False) else command()
+            ),
+        )
+        button.bind(
+            "<space>",
+            lambda _event: (
+                None if getattr(button, "_disabled", False) else command()
+            ),
+        )
         return button
+
+    def _history_modal_command_card(
+        self,
+        parent: tk.Misc,
+        title: str,
+        description: str,
+        command,
+        *,
+        icon_name: str,
+        primary: bool = False,
+        accent: str = PVE_MODE_FOREGROUND,
+        height: int = 66,
+    ) -> tk.Frame:
+        normal_bg = "#14293a" if primary else MODAL_CARD
+        hover_bg = "#193a51" if primary else MODAL_CARD_HOVER
+        normal_border = accent if primary else MODAL_BORDER
+        try:
+            copy_height = (
+                int(self._ui_font("strong").metrics("linespace"))
+                + int(self._ui_font("micro").metrics("linespace"))
+                + 22
+            )
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            copy_height = 60
+        card = tk.Frame(
+            parent,
+            bg=normal_bg,
+            height=max(56, int(height), copy_height),
+            cursor="hand2",
+            takefocus=1,
+            highlightthickness=1,
+            highlightbackground=normal_border,
+        )
+        card.pack_propagate(False)
+        rail = tk.Frame(card, bg=accent if primary else normal_bg, width=3)
+        rail.pack(side="left", fill="y")
+        rail.pack_propagate(False)
+        icon_image = self.icons.toolbar(icon_name, 19, accent)
+        icon = tk.Label(
+            card,
+            image=icon_image,
+            bg=normal_bg,
+            bd=0,
+            cursor="hand2",
+        )
+        icon.image = icon_image
+        icon.pack(side="left", padx=(14, 11))
+        copy = tk.Frame(card, bg=normal_bg, cursor="hand2")
+        copy.pack(side="left", fill="both", expand=True, pady=(9, 8))
+        title_label = tk.Label(
+            copy,
+            text=str(title),
+            bg=normal_bg,
+            fg=TEXT,
+            anchor="w",
+            cursor="hand2",
+            font=self._ui_font("strong"),
+        )
+        title_label.pack(fill="x")
+        detail_label = tk.Label(
+            copy,
+            text=str(description),
+            bg=normal_bg,
+            fg=MUTED,
+            anchor="w",
+            cursor="hand2",
+            font=self._ui_font("micro"),
+        )
+        detail_label.pack(fill="x", pady=(2, 0))
+        arrow_image = self.icons.toolbar("chevron_right", 14, accent)
+        arrow = tk.Label(
+            card,
+            image=arrow_image,
+            bg=normal_bg,
+            bd=0,
+            cursor="hand2",
+        )
+        arrow.image = arrow_image
+        arrow.pack(side="right", padx=(8, 13))
+        widgets = (card, rail, icon, copy, title_label, detail_label, arrow)
+
+        def set_hover(hovered: bool) -> None:
+            background = hover_bg if hovered else normal_bg
+            card.configure(
+                bg=background,
+                highlightbackground=(
+                    blend_color(normal_border, accent, 0.45)
+                    if hovered
+                    else normal_border
+                ),
+            )
+            rail.configure(bg=accent if primary or hovered else background)
+            for widget in (icon, copy, title_label, detail_label, arrow):
+                widget.configure(bg=background)
+            title_label.configure(fg="#ffffff" if hovered else TEXT)
+
+        def activate(_event=None) -> str:
+            command()
+            return "break"
+
+        for widget in widgets:
+            widget.bind("<Enter>", lambda _event: set_hover(True))
+            widget.bind("<Leave>", lambda _event: set_hover(False))
+            widget.bind("<Button-1>", activate)
+        card.bind("<Return>", activate)
+        card.bind("<space>", activate)
+        return card
 
     def _show_history_export_dialog(self) -> None:
         selected_ids = sorted(self.history_selected_ids)
@@ -36476,7 +40880,7 @@ class DpsWindow:
             )
             return
         _panel, body, _overlay = self._open_history_modal(
-            "导出战斗记录", width=440, height=266
+            "导出战斗记录", width=500, height=245
         )
         tk.Label(
             body,
@@ -36488,45 +40892,31 @@ class DpsWindow:
         ).pack(fill="x", pady=(0, 10))
         choices = tk.Frame(body, bg=PANEL)
         choices.pack(fill="both", expand=True)
-        for export_format, caption, description in (
-            ("json", "JSON", "保留团队、玩家、技能和诊断明细，适合备份。"),
-            ("csv", "CSV", "导出列表摘要，适合使用 Excel 查看。"),
+        for export_format, caption, description, icon_name in (
+            (
+                "json",
+                "JSON 完整档案",
+                "保留团队、玩家、技能和诊断明细，适合备份",
+                "updates",
+            ),
+            (
+                "csv",
+                "CSV 数据表",
+                "导出列表摘要，适合使用 Excel 查看",
+                "analytics",
+            ),
         ):
-            option = tk.Frame(
+            option = self._history_modal_command_card(
                 choices,
-                bg=SURFACE,
-                cursor="hand2",
-                highlightthickness=1,
-                highlightbackground=BORDER,
+                caption,
+                description,
+                lambda fmt=export_format, ids=selected_ids: self._choose_history_export_path(
+                    ids, fmt
+                ),
+                icon_name=icon_name,
+                primary=export_format == "json",
             )
-            option.pack(side="left", fill="both", expand=True, padx=(0, 6) if export_format == "json" else (6, 0))
-            title = tk.Label(
-                option,
-                text=caption,
-                bg=SURFACE,
-                fg=ACCENT,
-                anchor="w",
-                font=self._ui_font("title"),
-            )
-            title.pack(fill="x", padx=12, pady=(12, 3))
-            detail = tk.Label(
-                option,
-                text=description,
-                bg=SURFACE,
-                fg=MUTED,
-                justify="left",
-                anchor="nw",
-                wraplength=170,
-                font=self._ui_font("micro"),
-            )
-            detail.pack(fill="both", expand=True, padx=12, pady=(0, 10))
-            for widget in (option, title, detail):
-                widget.bind(
-                    "<Button-1>",
-                    lambda _event, fmt=export_format, ids=selected_ids: self._choose_history_export_path(
-                        ids, fmt
-                    ),
-                )
+            option.pack(fill="x", pady=(0, 9))
 
     def _export_current_history(self) -> None:
         if self.history_selected_id:
@@ -36694,7 +41084,7 @@ class DpsWindow:
 
     def _show_history_cleanup_dialog(self) -> None:
         _panel, body, _overlay = self._open_history_modal(
-            "清理战斗记录", width=470, height=380
+            "清理战斗记录", width=470, height=420
         )
         tk.Label(
             body,
@@ -36705,7 +41095,6 @@ class DpsWindow:
             font=self._ui_font("small"),
         ).pack(fill="x", pady=(0, 8))
         choice_var = tk.StringVar(master=self.history_window, value="selected")
-        choices: dict[str, tk.Frame] = {}
         descriptions = (
             (
                 "selected",
@@ -36716,52 +41105,20 @@ class DpsWindow:
             ("90", "删除 90 天以前记录", "保留最近 90 天的战斗档案"),
             ("all", "清空全部战斗记录", f"当前共 {self.history_total_records} 场"),
         )
-
-        def select(value: str) -> None:
-            choice_var.set(value)
-            for key, frame in choices.items():
-                frame.configure(
-                    highlightbackground=ERROR if key == value else BORDER,
-                    bg="#21171a" if key == value else SURFACE,
-                )
-                for child in frame.winfo_children():
-                    child.configure(bg=frame.cget("bg"))
-
         for value, caption, description in descriptions:
-            row = tk.Frame(
+            row = ModernChoiceCard(
                 body,
-                bg=SURFACE,
-                height=46,
-                cursor="hand2",
-                highlightthickness=1,
-                highlightbackground=BORDER,
+                caption,
+                choice_var,
+                value,
+                font=self._ui_font("strong"),
+                detail=description,
+                detail_font=self._ui_font("micro"),
+                accent=ERROR,
+                selected_background="#29181e",
+                height=58,
             )
             row.pack(fill="x", pady=3)
-            row.pack_propagate(False)
-            title = tk.Label(
-                row,
-                text=caption,
-                bg=SURFACE,
-                fg=TEXT,
-                anchor="w",
-                font=self._ui_font("strong"),
-            )
-            title.pack(side="left", padx=11, fill="y")
-            detail = tk.Label(
-                row,
-                text=description,
-                bg=SURFACE,
-                fg=MUTED,
-                anchor="e",
-                font=self._ui_font("micro"),
-            )
-            detail.pack(side="right", padx=11, fill="y")
-            choices[value] = row
-            for widget in (row, title, detail):
-                widget.bind(
-                    "<Button-1>", lambda _event, selected=value: select(selected)
-                )
-        select("selected")
         footer = tk.Frame(body, bg=PANEL)
         footer.pack(fill="x", pady=(8, 0))
         self._history_modal_action(
@@ -36974,16 +41331,28 @@ class DpsWindow:
         self._show_notice("分享 DPS", "已复制到剪贴板。", parent=parent)
 
     @staticmethod
-    def _notice_dimensions(message: object) -> tuple[int, int]:
+    def _notice_dimensions(
+        message: object, *, modal: bool = False, font_size: object = 14
+    ) -> tuple[int, int]:
         text = str(message or "")
         visual_lines = 0
-        widest = 0
         for line in text.splitlines() or [""]:
             units = sum(2 if ord(char) > 0x7F else 1 for char in line)
-            widest = max(widest, units)
-            visual_lines += max(1, (units + 41) // 42)
-        width = 350 if widest <= 34 else 390
-        height = min(286, 132 + max(0, visual_lines - 1) * 18)
+            visual_lines += max(1, (units + 45) // 46)
+        try:
+            normalized_font_size = int(font_size)
+        except (TypeError, ValueError, OverflowError):
+            normalized_font_size = 14
+        font_growth = max(0, min(4, normalized_font_size - 14))
+        width = (490 if modal else 430) + font_growth * 26
+        base_height = 244 if modal else 190
+        included_lines = 2 if modal else 1
+        height = min(
+            410 if modal else 330,
+            base_height
+            + font_growth * 9
+            + max(0, visual_lines - included_lines) * 26,
+        )
         return width, height
 
     def _show_notice(
@@ -36997,72 +41366,305 @@ class DpsWindow:
         on_confirm=None,
     ) -> None:
         self._close_notice_window()
-        if self.compact_mode:
-            return
-        anchor = parent if parent is not None and parent.winfo_exists() else self.root
-        bar = tk.Frame(
-            anchor,
-            bg=SURFACE,
-            highlightthickness=1,
-            highlightbackground=ACCENT if on_confirm is not None else BORDER,
+        try:
+            anchor_exists = parent is not None and parent.winfo_exists()
+        except (AttributeError, tk.TclError):
+            anchor_exists = False
+        anchor = parent if anchor_exists else self.root
+        try:
+            owner = anchor.winfo_toplevel()
+        except (AttributeError, tk.TclError):
+            owner = self.root
+        title = str(title_text or "提示")
+        message_text = str(message or "")
+        danger = any(
+            token in title
+            for token in (
+                "退出",
+                "删除",
+                "清理",
+                "失败",
+                "无法",
+                "取消",
+                "错误",
+            )
         )
-        self.notice_window = bar
-        bar.place(
-            relx=0.5,
-            rely=1.0,
-            y=-14,
-            anchor="s",
-            relwidth=0.9,
+        success = any(
+            token in title for token in ("成功", "完成", "已上传", "已复制", "已就绪")
         )
-        text_group = tk.Frame(bar, bg=SURFACE)
-        text_group.pack(side="left", fill="both", expand=True, padx=14, pady=10)
-        tk.Label(
-            text_group,
-            text=str(title_text),
-            bg=SURFACE,
-            fg=ACCENT,
+        accent = ERROR if danger else (ACCENT if success else PVE_MODE_FOREGROUND)
+        modal = on_confirm is not None or bool(cancel_text)
+        destructive = any(
+            token in str(confirm_text or "") for token in ("退出", "删除", "清理")
+        )
+        if "退出" in title:
+            icon_name = "power"
+        elif destructive:
+            icon_name = "trash"
+        elif danger:
+            icon_name = "warning"
+        elif success:
+            icon_name = "check"
+        else:
+            icon_name = "info"
+
+        logical_width, logical_height = self._notice_dimensions(
+            message_text,
+            modal=modal,
+            font_size=getattr(self, "ui_font_size", 14),
+        )
+
+        try:
+            owner.update_idletasks()
+            initial_dpi = get_window_dpi(owner)
+        except (AttributeError, OSError, tk.TclError, TypeError, ValueError):
+            initial_dpi = getattr(self, "window_dpi", DEFAULT_DPI)
+
+        window = tk.Toplevel(owner)
+        window.withdraw()
+        self.notice_window = window
+        self.notice_parent = owner
+        self.notice_modal = modal
+        window.title(f"{UI_BRAND} · {title}")
+        window.configure(bg=accent)
+        try:
+            window.transient(owner)
+        except tk.TclError:
+            pass
+
+        width = logical_pixels_to_physical(logical_width, initial_dpi)
+        height = logical_pixels_to_physical(logical_height, initial_dpi)
+        try:
+            owner_x = int(owner.winfo_rootx())
+            owner_y = int(owner.winfo_rooty())
+            owner_width = max(1, int(owner.winfo_width()))
+            owner_height = max(1, int(owner.winfo_height()))
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            owner_x = owner_y = 0
+            owner_width = int(window.winfo_screenwidth())
+            owner_height = int(window.winfo_screenheight())
+        x = owner_x + (owner_width - width) // 2
+        y = owner_y + (owner_height - height) // 2
+        work_area = monitor_work_area_for_widget(owner)
+        x, y = clamp_popup_position(x, y, width, height, work_area, margin=12)
+        window.geometry(format_absolute_tk_geometry(width, height, x, y))
+        self._prepare_toplevel_dpi(window)
+        dpi = get_window_dpi(owner)
+
+        def px(value: object) -> int:
+            return logical_pixels_to_physical(value, dpi)
+
+        width = px(logical_width)
+        height = px(logical_height)
+        if modal:
+            x = owner_x + (owner_width - width) // 2
+            y = owner_y + (owner_height - height) // 2
+        else:
+            x = owner_x + owner_width - width - px(18)
+            y = owner_y + owner_height - height - px(18)
+        x, y = clamp_popup_position(x, y, width, height, work_area, margin=12)
+        window.geometry(format_absolute_tk_geometry(width, height, x, y))
+        window.resizable(False, False)
+        try:
+            owner_topmost = bool(owner.attributes("-topmost"))
+        except (AttributeError, tk.TclError, TypeError):
+            owner_topmost = False
+        window.attributes("-topmost", owner_topmost)
+        window.attributes("-alpha", 1.0)
+        window.overrideredirect(True)
+        window.protocol("WM_DELETE_WINDOW", self._close_notice_window)
+        window.bind("<Escape>", lambda _event: self._close_notice_window())
+
+        shell = tk.Frame(window, bg=accent)
+        shell.pack(fill="both", expand=True)
+        card = tk.Frame(shell, bg=MODAL_SURFACE)
+        card.pack(fill="both", expand=True, padx=px(1), pady=px(1))
+        card.pack_propagate(False)
+        tk.Frame(card, bg=accent, height=px(3)).pack(fill="x")
+
+        header = tk.Frame(card, bg=BG, height=px(48))
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        self._bind_drag(header, window)
+        header.bind("<Double-Button-1>", lambda _event: "break")
+        logo_image = self.icons.app_logo(22)
+        logo = tk.Label(header, image=logo_image, bg=BG, bd=0)
+        logo.image = logo_image
+        logo.pack(side="left", padx=(px(16), px(8)))
+        self._bind_drag(logo, window)
+        logo.bind("<Double-Button-1>", lambda _event: "break")
+        brand_label = tk.Label(
+            header,
+            text=UI_BRAND,
+            bg=BG,
+            fg=TEXT,
             anchor="w",
-            font=self._ui_font("strong"),
-        ).pack(fill="x")
+            font=self._ui_font("title"),
+        )
+        brand_label.pack(side="left", fill="y")
+        self._bind_drag(brand_label, window)
+        brand_label.bind("<Double-Button-1>", lambda _event: "break")
+        self._titlebar_icon_button(
+            header,
+            "close",
+            self._close_notice_window,
+            width=px(48),
+            height=px(48),
+            bg=BG,
+            hover="#562631",
+            fg="#b9c3cc",
+        ).pack(side="right", fill="y")
+
+        content = tk.Frame(card, bg=MODAL_SURFACE)
+        content.pack(
+            fill="both",
+            expand=True,
+            padx=px(22),
+            pady=(px(16), px(13)),
+        )
+        status_icon = tk.Canvas(
+            content,
+            width=px(56),
+            height=px(56),
+            bg=MODAL_SURFACE,
+            bd=0,
+            highlightthickness=0,
+        )
+        status_icon.create_oval(
+            px(2),
+            px(2),
+            px(54),
+            px(54),
+            fill=blend_color(MODAL_SURFACE, accent, 0.15),
+            outline=blend_color(BORDER, accent, 0.72),
+            width=max(1, px(1)),
+        )
+        status_image = self.icons.toolbar(icon_name, 26, accent)
+        status_icon.create_image(px(28), px(28), image=status_image)
+        status_icon.image = status_image
+        status_icon.pack(side="left", anchor="n", padx=(0, px(14)))
+
+        text_group = tk.Frame(content, bg=MODAL_SURFACE)
+        text_group.pack(side="left", fill="both", expand=True)
         tk.Label(
             text_group,
-            text=str(message),
-            bg=SURFACE,
+            text=title,
+            bg=MODAL_SURFACE,
             fg=TEXT,
             justify="left",
             anchor="w",
-            wraplength=max(260, anchor.winfo_width() - 300),
-            font=self._ui_font("small"),
-        ).pack(fill="x", pady=(2, 0))
-        buttons = tk.Frame(bar, bg=SURFACE)
-        buttons.pack(side="right", padx=12, pady=10)
+            font=self._ui_font("dialog_title"),
+        ).pack(fill="x")
+        tk.Label(
+            text_group,
+            text=message_text,
+            bg=MODAL_SURFACE,
+            fg="#c5cfd8",
+            justify="left",
+            anchor="nw",
+            wraplength=max(px(280), width - px(126)),
+            font=self._ui_font("dialog_body"),
+        ).pack(fill="both", expand=True, pady=(px(7), 0))
+
+        button_bar = tk.Frame(card, bg=BG, height=px(60))
+        button_bar.pack(side="bottom", fill="x")
+        button_bar.pack_propagate(False)
+        tk.Frame(button_bar, bg=BORDER, height=px(1)).pack(fill="x")
+        action_host = tk.Frame(button_bar, bg=BG)
+        action_host.pack(side="right", fill="y", padx=px(18), pady=px(10))
 
         def confirm() -> None:
             self._close_notice_window()
             if on_confirm is not None:
                 on_confirm()
 
-        if cancel_text:
-            cancel = self._action_button(buttons, cancel_text, self._close_notice_window)
-            cancel.configure(padx=14, pady=5, font=self._ui_font("small"))
-            cancel.pack(side="right", padx=(8, 0))
-        confirm_button = self._action_button(buttons, confirm_text, confirm)
-        confirm_button.configure(
-            bg=ACCENT,
-            fg="#07110e",
-            padx=14,
-            pady=5,
-            font=self._ui_font("strong"),
-        )
-        confirm_button.pack(side="right")
-        bar.lift()
-        if on_confirm is None and not cancel_text:
-            bar.after(2800, self._close_notice_window)
+        def action_button(
+            caption: str,
+            command,
+            *,
+            primary: bool = False,
+            danger: bool = False,
+            logical_button_width: int = 112,
+        ) -> tk.Label:
+            slot = tk.Frame(
+                action_host,
+                bg=BG,
+                width=px(logical_button_width),
+                height=px(38),
+            )
+            slot.pack(side="right", padx=(px(9), 0))
+            slot.pack_propagate(False)
+            button = self._history_modal_action(
+                slot,
+                caption,
+                command,
+                primary=primary,
+                danger=danger,
+            )
+            button.configure(
+                padx=0,
+                pady=0,
+                font=self._ui_font("dialog_button"),
+            )
+            button.pack(fill="both", expand=True)
+            return button
 
-    def _close_notice_window(self) -> None:
-        if self.notice_window is not None and self.notice_window.winfo_exists():
-            self.notice_window.destroy()
+        confirm_button = action_button(
+            confirm_text,
+            confirm,
+            primary=not destructive,
+            danger=destructive,
+            logical_button_width=108,
+        )
+        cancel_button = None
+        if cancel_text:
+            cancel_button = action_button(
+                cancel_text,
+                self._close_notice_window,
+                logical_button_width=96,
+            )
+
+        window.deiconify()
+        window.lift(owner)
+        window.after(20, lambda target=window: self._apply_windows_style(target))
+        if modal:
+            window.grab_set()
+            window.focus_force()
+            (cancel_button or confirm_button).focus_set()
+        if on_confirm is None and not cancel_text:
+            window.after(
+                3600,
+                lambda target=window: self._close_notice_window(target),
+            )
+
+    def _close_notice_window(self, expected: tk.Misc | None = None) -> None:
+        window = getattr(self, "notice_window", None)
+        if expected is not None and window is not expected:
+            return
+        parent = getattr(self, "notice_parent", None)
+        modal = bool(getattr(self, "notice_modal", False))
         self.notice_window = None
+        self.notice_parent = None
+        self.notice_modal = False
+        if window is not None:
+            getattr(self, "drag_state", {}).pop(id(window), None)
+            try:
+                if window.winfo_exists():
+                    try:
+                        window.grab_release()
+                    except tk.TclError:
+                        pass
+                    window.destroy()
+            except (AttributeError, tk.TclError):
+                pass
+        if not modal or bool(getattr(self, "closing", False)):
+            return
+        try:
+            if parent is not None and parent.winfo_exists():
+                parent.lift()
+                parent.focus_force()
+        except (AttributeError, tk.TclError):
+            pass
 
     def _minimize_history(self) -> None:
         if self.history_window is None or not self.history_window.winfo_exists():
@@ -37102,6 +41704,7 @@ class DpsWindow:
         self.history_battle_detail_frame = None
         self.history_detail_sticky_toolbar = None
         self.history_page_root = None
+        self.backend_page_host = None
         self.history_page_canvas = None
         self.history_page_scrollbar = None
         self.history_page_content_window = None
@@ -37255,6 +41858,18 @@ class DpsWindow:
         self.opacity_value_label = None
         self.settings_font_size_var = None
         self.settings_opacity_var = None
+        self.settings_audience_metric_var = None
+        self.settings_warrior_metric_var = None
+        self.settings_row_mask_opacity_var = None
+        self.settings_row_mask_value_label = None
+        self.settings_ui_scale_var = None
+        self.settings_ui_scale_value_label = None
+        self.settings_show_boss_hp_var = None
+        self.settings_show_combat_time_var = None
+        self.settings_show_main_totals_var = None
+        self.settings_show_team_dps_var = None
+        self.settings_highlight_self_var = None
+        self.settings_show_pvp_button_var = None
         self.settings_target_boss_lookup_var = None
         self.settings_show_names_var = None
         self.settings_show_damage_var = None
@@ -37347,6 +41962,7 @@ class DpsWindow:
                 cursor="arrow" if reset_disabled else "hand2"
             )
             self._sync_main_icon_button_visual(self.reset_button)
+        self._schedule_layered_main_render()
 
     def _sync_expiry_label(self) -> None:
         if (
@@ -37358,8 +41974,7 @@ class DpsWindow:
             return
         session = self.licensing.session
         tier = str(getattr(session, "card_tier", "normal") or "normal").casefold()
-        if self.membership_label.cget("text") != "匿名":
-            self.membership_label.configure(text="匿名")
+        self._sync_upload_profile_label()
         badge_label = getattr(self, "membership_badge_label", None)
         if badge_label is not None and badge_label.winfo_exists():
             badge = membership_label_for_card_tier(tier)
@@ -37389,6 +42004,83 @@ class DpsWindow:
         )
         if self.expiry_label.cget("text") != text:
             self.expiry_label.configure(text=text)
+
+    def _sync_upload_profile_label(self) -> None:
+        label = getattr(self, "membership_label", None)
+        if label is None:
+            return
+        try:
+            if not label.winfo_exists():
+                return
+        except (AttributeError, tk.TclError):
+            return
+        profile = getattr(self, "upload_profile", None)
+        nickname = (
+            str(profile.nickname or "").strip()
+            if isinstance(profile, UploadProfile)
+            else ""
+        )
+        text = nickname or "匿名"
+        edit_enabled = bool(nickname)
+        try:
+            font_role = "title"
+            for candidate in ("title", "strong", "small", "micro"):
+                candidate_font = self._ui_font(candidate)
+                if candidate_font.measure(text) <= 144:
+                    font_role = candidate
+                    break
+            else:
+                font_role = "sidebar_micro"
+            if getattr(label, "_profile_font_role", "") != font_role:
+                label.configure(font=self._ui_font(font_role))
+                label._profile_font_role = font_role
+        except (AttributeError, KeyError, tk.TclError):
+            pass
+        try:
+            if label.cget("text") != text:
+                label.configure(text=text)
+        except (AttributeError, tk.TclError):
+            return
+        try:
+            if getattr(label, "_profile_edit_enabled", None) != edit_enabled:
+                label.unbind("<Button-1>")
+                label.configure(cursor="hand2" if edit_enabled else "arrow")
+                if edit_enabled:
+                    label.bind(
+                        "<Button-1>",
+                        lambda _event: self._show_upload_profile_editor(),
+                    )
+                label._profile_edit_enabled = edit_enabled
+        except (AttributeError, tk.TclError):
+            pass
+        edit_button = getattr(self, "profile_edit_button", None)
+        if edit_button is None:
+            return
+        try:
+            if not edit_button.winfo_exists():
+                return
+            icon_dpi = getattr(self.icons, "window_dpi", None)
+            if (
+                getattr(edit_button, "_profile_edit_enabled", None) != edit_enabled
+                or getattr(edit_button, "_profile_edit_dpi", None) != icon_dpi
+            ):
+                edit_button.unbind("<Button-1>")
+                edit_color = "#8db8d8" if edit_enabled else "#496779"
+                edit_image = self.icons.toolbar("edit", 16, edit_color)
+                edit_button.configure(
+                    image=edit_image,
+                    cursor="hand2" if edit_enabled else "arrow",
+                )
+                edit_button.image = edit_image
+                edit_button._profile_edit_enabled = edit_enabled
+                edit_button._profile_edit_dpi = icon_dpi
+                if edit_enabled:
+                    edit_button.bind(
+                        "<Button-1>",
+                        lambda _event: self._show_upload_profile_editor(),
+                    )
+        except (AttributeError, tk.TclError):
+            pass
 
     def _sync_backend_sidebar_status(self) -> None:
         dot = getattr(self, "backend_connection_dot", None)
@@ -37571,19 +42263,10 @@ class DpsWindow:
                 for monster in bosses
             )
         )
-        started_at = first_damage_time
-        resolve_interval = getattr(self.model, "resolve_combat_interval", None)
-        if encounter_running and callable(resolve_interval):
-            try:
-                interval = resolve_interval(now)
-                interval_started_at = float(
-                    getattr(interval, "started_at_epoch", 0.0) or 0.0
-                )
-                if 0.0 < interval_started_at <= now:
-                    started_at = interval_started_at
-            except (AttributeError, TypeError, ValueError, OverflowError):
-                pass
-        elapsed = max(0.0, now - started_at) if started_at else 0.0
+        # The displayed timer already resolves local/shared clocks to a
+        # duration. A server start epoch must never be subtracted from local
+        # wall time: their offset otherwise gets added to the enrage budget.
+        elapsed = self.model.duration(now) if encounter_running else 0.0
 
         forced_invulnerability = bool(
             getattr(self.model, "long_gap_phase_suspended", False)
@@ -37730,8 +42413,11 @@ class DpsWindow:
                 f"{format_number(prediction.boss_max_hp)}  "
                 f"{prediction.boss_hp_percent:.1f}%",
             ),
-            ("已战斗时间", format_duration(prediction.elapsed_seconds)),
-            ("狂暴剩余时间", format_duration(prediction.time_to_enrage_seconds)),
+            (
+                "阶段已用时间" if getattr(prediction, "countdown_start_signal", "") else "已战斗时间",
+                format_duration(prediction.elapsed_seconds),
+            ),
+            ("狂暴剩余时间", format_duration(math.ceil(prediction.time_to_enrage_seconds))),
             (
                 "该时刻理论血量",
                 f"{format_number(theoretical_hp)}  ·  {theoretical_percent:.1f}%",
@@ -37813,7 +42499,11 @@ class DpsWindow:
 
     def _show_enrage_tooltip(self, _event=None) -> None:
         prediction = getattr(self, "enrage_prediction", None)
-        canvas = getattr(self, "enrage_prediction_canvas", None)
+        canvas = (
+            self.root
+            if self._layered_main_active()
+            else getattr(self, "enrage_prediction_canvas", None)
+        )
         if (
             prediction is None
             or canvas is None
@@ -37975,6 +42665,263 @@ class DpsWindow:
         )
 
     def _draw_monster_hp(self) -> None:
+        if self._layered_main_active():
+            self._schedule_layered_main_render()
+            return
+        canvas = self.monster_hp_canvas
+        canvas.delete("all")
+        self.enrage_prediction_hit_regions = []
+        if not bool(getattr(self, "show_boss_hp_bar", True)):
+            return
+
+        width = max(1, canvas.winfo_width())
+        height_reader = getattr(canvas, "winfo_height", None)
+        height = max(
+            1,
+            int(height_reader())
+            if callable(height_reader)
+            else self._main_px(MAIN_BOSS_HEIGHT),
+        )
+        current_monster = getattr(self.model, "current_monster", None)
+        monster = current_monster() if callable(current_monster) else None
+        if monster is None:
+            current_bosses = getattr(self.model, "current_bosses", None)
+            bosses = list(current_bosses()) if callable(current_bosses) else []
+            monster = bosses[0] if bosses else None
+        display_name = "暂无目标"
+        current_hp = None
+        maximum_hp = None
+        if monster is not None:
+            display_name = str(getattr(monster, "name", "") or "").strip()
+            if not display_name or boss_name_is_placeholder(display_name):
+                display_target_name = getattr(self.model, "display_target_name", None)
+                display_name = (
+                    str(display_target_name(getattr(monster, "entity_id", 0)) or "")
+                    if callable(display_target_name)
+                    else ""
+                )
+            display_name = display_name or "Boss"
+            current_hp = getattr(monster, "current_hp", None)
+            monster_max_hp = getattr(monster, "max_hp", None)
+            maximum_hp = (
+                monster_max_hp
+                if monster_max_hp is not None and monster_max_hp > 0
+                else None
+            )
+
+        prediction = getattr(self, "enrage_prediction", None)
+        prediction_ready = bool(
+            getattr(self, "boss_enrage_prediction_enabled", True)
+            and getattr(self, "enrage_prediction_visible", False)
+            and prediction is not None
+            and not bool(getattr(prediction, "calculating", False))
+        )
+
+        icon_logical_size = 46.0 * float(
+            getattr(self, "main_ui_scale", 1.0) or 1.0
+        )
+        icon_size = min(
+            self._main_px(46), max(self._main_px(30), height - self._main_px(4))
+        )
+        icons = getattr(self, "icons", None)
+        icon = (
+            icons.main_boss_icon(icon_logical_size)
+            if icons is not None
+            else None
+        )
+        icon_x = self._main_px(0)
+        icon_y = max(0, (height - icon_size) // 2)
+        bar_left = self._main_px(31) if icon is not None else self._main_px(1)
+        bar_right = max(bar_left + 1, width - self._main_px(1))
+        bar_top = self._main_px(18 if prediction_ready else 9)
+        bar_bottom = min(
+            height - self._main_px(2), bar_top + self._main_px(32)
+        )
+        bar_radius = max(self._main_px(7), (bar_bottom - bar_top) // 2)
+
+        ratio = 0.0
+        if current_hp is not None and maximum_hp is not None and maximum_hp > 0:
+            ratio = min(1.0, max(0.0, float(current_hp) / float(maximum_hp)))
+        elif current_hp is None and maximum_hp is not None:
+            ratio = 1.0
+        canvas_rounded_rectangle(
+            canvas,
+            bar_left - self._main_px(1),
+            bar_top - self._main_px(1),
+            bar_right + self._main_px(1),
+            bar_bottom + self._main_px(1),
+            bar_radius + self._main_px(1),
+            fill="#16040b",
+            outline="#650b2a",
+            width=max(2, self._main_px(3)),
+        )
+        canvas_rounded_rectangle(
+            canvas,
+            bar_left,
+            bar_top,
+            bar_right,
+            bar_bottom,
+            bar_radius,
+            fill="#250611",
+            outline="#f01c50",
+            width=max(1, self._main_px(2)),
+        )
+        if ratio > 0:
+            fill_right = bar_left + max(
+                self._main_px(2), int((bar_right - bar_left) * ratio)
+            )
+            canvas_rounded_rectangle(
+                canvas,
+                bar_left + 1,
+                bar_top + 1,
+                min(bar_right - 1, fill_right),
+                bar_bottom - 1,
+                min(bar_radius - 1, max(1, (fill_right - bar_left) // 2)),
+                fill="#700a2b" if current_hp is not None else "#3e1521",
+                outline="",
+            )
+        canvas_rounded_rectangle(
+            canvas,
+            bar_left + self._main_px(3),
+            bar_top + self._main_px(3),
+            bar_right - self._main_px(3),
+            bar_bottom - self._main_px(3),
+            max(1, bar_radius - self._main_px(3)),
+            fill="",
+            outline="#7f1737",
+            width=max(1, self._main_px(1)),
+        )
+
+        hp_text = "-- / --"
+        percent_text = "--"
+        if maximum_hp is not None:
+            hp_text = (
+                f"{format_team_health_number(current_hp)} / "
+                f"{format_team_health_number(maximum_hp)}"
+            )
+        if current_hp is not None and maximum_hp is not None and maximum_hp > 0:
+            percent = ratio * 100.0
+            percent_text = (
+                f"{percent:.0f}%"
+                if percent in (0.0, 100.0)
+                else f"{percent:.1f}%"
+            )
+
+        bar_width = max(1, bar_right - bar_left)
+        name_x = max(
+            bar_left + self._main_px(12),
+            icon_x + icon_size - self._main_px(2),
+        )
+        hp_x = bar_right - self._main_px(68)
+        name_text = self._fit_ui_text(
+            display_name,
+            max(self._main_px(48), hp_x - name_x - self._main_px(104)),
+            "main_strong",
+        )
+        middle_y = (bar_top + bar_bottom) // 2
+        canvas_outlined_text(
+            canvas,
+            name_x,
+            middle_y,
+            text=name_text,
+            fill="#fff5f6",
+            anchor="w",
+            font=self._ui_font("main_strong"),
+            outline_width=max(1, self._main_px(1)),
+        )
+        canvas_outlined_text(
+            canvas,
+            hp_x,
+            middle_y,
+            text=hp_text,
+            fill="#f3dfe2",
+            anchor="e",
+            font=self._ui_font("main_number_small"),
+            outline_width=max(1, self._main_px(1)),
+        )
+        canvas_outlined_text(
+            canvas,
+            bar_right - self._main_px(8),
+            middle_y,
+            text=percent_text,
+            fill="#ff5d78" if percent_text != "--" else "#bf8190",
+            anchor="e",
+            font=self._ui_font("main_number_strong"),
+            outline_width=max(1, self._main_px(1)),
+        )
+
+        if prediction_ready:
+            background, accent, foreground = self._enrage_state_palette(
+                prediction.state
+            )
+            marker_x = int(
+                round(
+                    bar_left
+                    + (bar_right - bar_left) * enrage_marker_ratio(prediction)
+                )
+            )
+            prediction_text = str(prediction.message or "节奏预测")
+            prediction_font = self._ui_font("main_micro")
+            try:
+                prediction_width = int(prediction_font.measure(f"⚠ {prediction_text}"))
+            except (AttributeError, TypeError, ValueError, tk.TclError):
+                prediction_width = self._main_px(118)
+            label_width = min(
+                max(self._main_px(106), prediction_width + self._main_px(18)),
+                max(self._main_px(120), int(bar_width * 0.62)),
+            )
+            label_right = bar_right
+            label_left = max(bar_left, label_right - label_width)
+            label_top = 0
+            label_bottom = self._main_px(18)
+            canvas_rounded_rectangle(
+                canvas,
+                label_left,
+                label_top,
+                label_right,
+                label_bottom,
+                self._main_px(8),
+                fill=background,
+                outline=accent,
+                width=max(1, self._main_px(1)),
+            )
+            canvas_outlined_text(
+                canvas,
+                (label_left + label_right) // 2,
+                (label_top + label_bottom) // 2,
+                text=self._fit_ui_text(
+                    f"⚠ {prediction_text}",
+                    label_width - self._main_px(10),
+                    "main_micro",
+                ),
+                fill=foreground,
+                anchor="center",
+                font=prediction_font,
+                outline_width=max(1, self._main_px(1)),
+            )
+            arrow_x = max(
+                label_left + self._main_px(8),
+                min(label_right - self._main_px(8), marker_x),
+            )
+            canvas.create_polygon(
+                arrow_x - self._main_px(4),
+                label_bottom - self._main_px(1),
+                arrow_x + self._main_px(4),
+                label_bottom - self._main_px(1),
+                arrow_x,
+                bar_top + self._main_px(2),
+                fill=accent,
+                outline=accent,
+            )
+            self.enrage_prediction_hit_regions.append(
+                (label_left, label_top, label_right, label_bottom)
+            )
+
+        create_image = getattr(canvas, "create_image", None)
+        if icon is not None and callable(create_image):
+            create_image(icon_x, icon_y, image=icon, anchor="nw")
+
+    def _draw_retired_monster_hp(self) -> None:
         canvas = self.monster_hp_canvas
         canvas.delete("all")
         self.enrage_prediction_hit_regions = []
@@ -38071,7 +43018,7 @@ class DpsWindow:
             hp_ceiling = (
                 max_hp
                 if max_hp is not None and max_hp > 0
-                else monster.observed_max_hp
+                else None
             )
             pending_hp = current_hp is None
             if current_hp is None:
@@ -38147,6 +43094,15 @@ class DpsWindow:
     def _draw_main_header(self) -> None:
         canvas = self.header_canvas
         canvas.delete("all")
+        # The approved schema has no visible table header or compact controls.
+        try:
+            canvas.configure(height=0)
+        except (AttributeError, tk.TclError):
+            pass
+        return
+
+        # Retained below as inert downgrade reference for old configuration
+        # semantics; it is never reached by the schema v1 renderer.
         width = max(1, canvas.winfo_width())
         columns = self._main_columns(width)
         compact = self.compact_mode
@@ -38420,7 +43376,7 @@ class DpsWindow:
             self.team_rating_preview_roster_signature = None
             return rows
         try:
-            members = set(current_members())
+            members = self._main_visible_roster_members()
         except (AttributeError, TypeError, ValueError):
             rows = []
             self.team_rating_preview_rows_cache = rows
@@ -38437,6 +43393,9 @@ class DpsWindow:
         ]
         self_id = getattr(model, "self_id", None)
         if self_id in members and self_id not in ordered:
+            ordered.insert(0, self_id)
+        elif self_id in ordered:
+            ordered.remove(self_id)
             ordered.insert(0, self_id)
         ordered.extend(
             sorted(actor_id for actor_id in members if actor_id not in ordered)
@@ -38489,18 +43448,167 @@ class DpsWindow:
         self.team_rating_preview_rows_dirty = False
         return rows
 
-    def _team_rating_preview_active(self) -> bool:
-        if getattr(self, "main_meter_mode", "dps") == "boss":
+    def _main_visible_roster_members(self) -> set[int]:
+        """Omit unresolved synthetic roster slots, never real zero-DPS members."""
+        model = self.model
+        reader = getattr(model, '_current_member_ids', None)
+        members = set(reader()) if callable(reader) else set()
+        self_id = getattr(model, 'self_id', None)
+        if self_id:
+            members.add(self_id)
+        names = getattr(model, 'entity_names', {})
+        professions = getattr(model, 'entity_professions', {})
+        ai_states = getattr(model, 'entity_ai_states', {})
+        result = set()
+        for actor_id in members:
+            if actor_id in getattr(model, 'non_player_actor_ids', set()):
+                continue
+            if actor_id == self_id or actor_id > 0:
+                result.add(actor_id)
+                continue
+            # A negative token ID with a genuine profile is still a member.
+            # Only empty, unbound counter slots are excluded from the HUD.
+            name = str(names.get(actor_id, '') or '').strip()
+            if ((name and re.fullmatch(r'玩家\s*\d+', name) is None)
+                    or professions.get(actor_id)
+                    or ai_states.get(actor_id) is True):
+                result.add(actor_id)
+        return result
+
+    def _main_display_is_cleared(self) -> bool:
+        cleared = getattr(self, 'main_manual_clear_state', None)
+        if cleared is None:
             return False
+        encounter_id, was_started = cleared
+        started = getattr(self.model, '_encounter_started', lambda: False)()
+        return encounter_id == str(getattr(self.model, 'encounter_id', '')) and (was_started or not started)
+
+    def _clear_main_display(self) -> None:
+        """Clear the overlay only; an ongoing battle still collects normally."""
+        encounter_id = str(getattr(self.model, 'encounter_id', ''))
+        started = bool(getattr(self.model, '_encounter_started', lambda: False)())
+        self.main_manual_clear_state = (encounter_id, started)
+        discarded = deque(getattr(self, 'main_cleared_encounter_ids', ()), maxlen=64)
+        old = (getattr(self, 'main_last_battle_result', None) or {}).get('encounter_id')
+        for value in (encounter_id if started else None, old):
+            if value and value not in discarded:
+                discarded.append(value)
+        self.main_cleared_encounter_ids = discarded
+        self.main_last_battle_result = None
+        self.main_last_live_display_snapshot = None
+        self.main_scroll_offset = 0
+        self._hide_enrage_tooltip()
+        self._render_layered_main_hud()
+
+    def _main_has_battle_values(self) -> bool:
+        if self._main_display_is_cleared():
+            return False
+        reader = getattr(self.model, '_encounter_started', None)
+        if callable(reader):
+            return bool(reader())
+        return bool(getattr(self.model, 'first_damage_time', 0)
+                    or getattr(self.model, 'first_healing_time', 0)
+                    or getattr(self.model, 'combat_end_time', 0))
+
+    def _main_battle_signal_active(self) -> bool:
+        """Use accepted fight-mode signals for UI priority, not DPS arming."""
+        if self._main_display_is_cleared():
+            return False
+        states = getattr(self.model, 'entity_combat_states', {})
+        if not isinstance(states, dict):
+            return False
+        self_id = getattr(self.model, 'self_id', None)
+        target_id = getattr(self.model, 'combat_target_id', None)
+        participants = self._main_visible_roster_members()
+        participants.update(value for value in (self_id, target_id) if value is not None)
+        return any(states.get(actor_id) is True for actor_id in participants)
+
+    def _remember_main_battle_result(self, record: dict) -> None:
+        """Retain only display fields; capture/reset/history are unchanged."""
+        if getattr(self, 'authorization_resetting', False) or getattr(self, 'closing', False):
+            return
+        if str(record.get('encounter_id', '')) in getattr(self, 'main_cleared_encounter_ids', ()):
+            return
+        participant_keys = ('actor_id', 'name', 'is_self', 'profession_id',
+                            'is_ai', 'extraordinary_rating', 'damage', 'dps',
+                            'taken', 'deaths')
+        participants = [
+            {key: row.get(key) for key in participant_keys}
+            for row in (record.get('participants') or ())
+            if isinstance(row, dict) and row.get('actor_id')
+        ]
+        known_ids = {int(row['actor_id']) for row in participants}
+        for healer in record.get('healers') or ():
+            if isinstance(healer, dict) and healer.get('actor_id') and int(healer['actor_id']) not in known_ids:
+                participants.append({key: healer.get(key) for key in participant_keys})
+                known_ids.add(int(healer['actor_id']))
+        if not participants:
+            return
+        previous = getattr(self, 'main_last_battle_result', None) or {}
+        ended = float(record.get('ended_at_epoch', 0) or 0)
+        if ended < float(previous.get('ended_at_epoch', 0) or 0):
+            return
+        self.main_last_battle_result = {
+            'encounter_id': record.get('encounter_id'),
+            'ended_at_epoch': ended,
+            'duration_seconds': record.get('duration_seconds', 0),
+            'dps_duration_seconds': record.get('dps_duration_seconds', 0),
+            'team_dps': record.get('team_dps', 0),
+            'participants': participants,
+            'monster': dict(record.get('monster') or {}),
+            'healers': [{key: row.get(key) for key in ('actor_id', 'hps', 'effective_healing')}
+                        for row in (record.get('healers') or ()) if isinstance(row, dict)],
+        }
+        # Preserve the last rendered dual target only for that same encounter.
+        last = getattr(self, 'main_last_live_display_snapshot', None)
+        if last and last.get('encounter_id') == record.get('encounter_id'):
+            self.main_last_battle_result['bosses'] = last.get('bosses', [])
+
+    def _main_retained_battle_active(self) -> bool:
+        return bool(getattr(self, 'main_last_battle_result', None)
+                    and not self._main_has_battle_values()
+                    and not self._main_battle_signal_active())
+
+    def _main_retained_battle_rows(self) -> list[dict]:
+        record = self.main_last_battle_result
+        healers = {int(row.get('actor_id', 0) or 0): row for row in record['healers']}
+        divisor = float(record.get('dps_duration_seconds') or dps_duration_seconds(record['duration_seconds']))
+        rows = []
+        for index, raw in enumerate(sorted(record['participants'], key=lambda r: -int(r.get('damage') or 0))):
+            actor_id = int(raw['actor_id'])
+            metric = self._profession_display_metric(raw.get('profession_id'))
+            if metric == 'hps':
+                healing = healers.get(actor_id, {})
+                total, rate = healing.get('effective_healing'), healing.get('hps')
+            elif metric == 'dt':
+                total = raw.get('taken')
+                rate = float(total) / divisor if total is not None and divisor else None
+            else:
+                total, rate = raw.get('damage'), raw.get('dps')
+            rows.append(dict(raw, name=f'玩家{index + 1}' if getattr(self, 'hide_names', False) else raw.get('name', ''),
+                             metric=metric, total_value=total, stat_value=rate))
+        return rows
+
+    def _team_rating_preview_active(self) -> bool:
         if not TEAM_RATING_PREVIEW_AVAILABLE or not bool(
             getattr(self, "team_rating_preview_enabled", False)
         ):
             return False
+        if self._main_display_is_cleared():
+            return True
+        # New display priority: live battle > retained result > pre-pull
+        # rating preview. Ending the fight no longer exposes equipment scores.
+        if self._main_battle_signal_active() or self._main_has_battle_values() or getattr(self, 'main_last_battle_result', None):
+            return False
         model = getattr(self, "model", None)
-        encounter_started = getattr(model, "_encounter_started", None)
-        if callable(encounter_started):
+        combat_in_progress = getattr(model, "combat_in_progress", None)
+        if not callable(combat_in_progress):
+            combat_in_progress = getattr(model, "active", None)
+        if not callable(combat_in_progress):
+            combat_in_progress = getattr(model, "_encounter_started", None)
+        if callable(combat_in_progress):
             try:
-                if encounter_started():
+                if combat_in_progress():
                     return False
             except (AttributeError, TypeError, ValueError):
                 return False
@@ -38523,6 +43631,220 @@ class DpsWindow:
         self.team_rating_preview_layout_active = active
         if changed:
             self._draw_main_header()
+
+    def _main_display_columns(
+        self, width: int, *, rating_preview: bool = False
+    ) -> dict[str, int]:
+        """Return stable right-aligned columns for the schema v1 player row."""
+
+        right = max(self._main_px(176), int(width) - self._main_px(3))
+        columns: dict[str, int] = {
+            "icon": self._main_px(2),
+            "name": self._main_px(40),
+        }
+        if bool(getattr(self, "show_deaths", True)):
+            columns["deaths"] = right
+            right -= self._main_px(36)
+        if bool(getattr(self, "show_main_totals", True)) and not rating_preview:
+            columns["total"] = right
+            right -= self._main_px(74)
+        columns["stat"] = right
+        stat_reserve = 116 if rating_preview else 96
+        columns["name_right"] = max(
+            columns["name"] + self._main_px(42),
+            right - self._main_px(stat_reserve),
+        )
+        return columns
+
+    def _main_combat_display_rows(
+        self, now: float | None = None
+    ) -> list[dict[str, object]]:
+        """Join existing DPS/HPS/DT sources without changing their values."""
+
+        now = time.time() if now is None else float(now)
+        current_stats = getattr(self.model, "current_stats", None)
+        raw_damage_rows = list(current_stats()) if callable(current_stats) else []
+        damage_by_actor = {
+            int(row.actor_id): row
+            for row in raw_damage_rows
+            if int(row.actor_id or 0) != 0
+        }
+        healing_summary = getattr(self, "latest_healing_summary", {})
+        raw_healers = (
+            healing_summary.get("healers", [])
+            if isinstance(healing_summary, dict)
+            else []
+        )
+        healing_by_actor = {
+            int(row.get("actor_id", 0) or 0): row
+            for row in raw_healers
+            if isinstance(row, dict) and int(row.get("actor_id", 0) or 0) != 0
+        }
+        current_taken_rows = getattr(self.model, "current_taken_rows", None)
+        raw_taken_rows = (
+            list(current_taken_rows()) if callable(current_taken_rows) else []
+        )
+        taken_by_actor = {
+            int(row.get("actor_id", 0) or 0): row
+            for row in raw_taken_rows
+            if isinstance(row, dict) and int(row.get("actor_id", 0) or 0) != 0
+        }
+
+        actor_ids: set[int] = (
+            set(damage_by_actor) | set(healing_by_actor)
+            | {actor_id for actor_id, row in taken_by_actor.items() if row.get('taken') is not None}
+            | set(getattr(self.model, 'encounter_member_ids', ()))
+        )
+        current_members = getattr(self.model, "_current_member_ids", None)
+        if callable(current_members):
+            try:
+                if not getattr(self.model, 'combat_end_time', 0):
+                    actor_ids.update(self._main_visible_roster_members())
+            except (AttributeError, TypeError, ValueError):
+                pass
+        actor_ids.difference_update(
+            getattr(self.model, "non_player_actor_ids", set())
+        )
+        actor_ids.discard(0)
+        self_id = getattr(self.model, 'self_id', None)
+        if self_id and self_id not in getattr(self.model, 'non_player_actor_ids', ()):
+            # Preserve the identified local member before their first hit or
+            # heal and through temporary roster refreshes.
+            actor_ids.add(self_id)
+
+        friend_order = [
+            int(actor_id)
+            for actor_id in getattr(self.model, "friend_order", [])
+            if int(actor_id or 0) != 0
+        ]
+        friend_index = {
+            actor_id: index for index, actor_id in enumerate(friend_order)
+        }
+        actor_ids_sorted = sorted(
+            actor_ids,
+            key=lambda actor_id: (
+                -int(
+                    getattr(damage_by_actor.get(actor_id), "damage", 0) or 0
+                ),
+                friend_index.get(actor_id, len(friend_index)),
+                actor_id,
+            ),
+        )
+        if self_id in actor_ids_sorted and self_id not in actor_ids_sorted[:MAX_PARTY_MEMBERS]:
+            # Keep DPS sorting among selected members; local identity must
+            # survive a briefly overfull roster during entity rebinding.
+            actor_ids_sorted = actor_ids_sorted[:MAX_PARTY_MEMBERS - 1] + [self_id]
+        else:
+            actor_ids_sorted = actor_ids_sorted[:MAX_PARTY_MEMBERS]
+        duration_reader = getattr(self.model, "duration", None)
+        if callable(duration_reader):
+            try:
+                raw_duration = duration_reader(now)
+            except TypeError:
+                raw_duration = duration_reader()
+        else:
+            raw_duration = 0.0
+        duration = dps_duration_seconds(raw_duration)
+        deaths = getattr(self.model, "member_death_counts", {})
+        profession_reader = getattr(self.model, "actor_profession_id", None)
+        rows: list[dict[str, object]] = []
+        for actor_id in actor_ids_sorted:
+            damage_row = damage_by_actor.get(actor_id)
+            healer_row = healing_by_actor.get(actor_id)
+            taken_row = taken_by_actor.get(actor_id)
+            profession_id = int(
+                (
+                    profession_reader(actor_id)
+                    if callable(profession_reader)
+                    else 0
+                )
+                or 0
+            )
+            if not profession_id and healer_row is not None:
+                profession_id = int(healer_row.get("profession_id", 0) or 0)
+            metric = self._profession_display_metric(profession_id)
+            stat_value: float | int | None
+            total_value: float | int | None
+            if metric == "hps":
+                stat_value = (
+                    healer_row.get("hps") if healer_row is not None else None
+                )
+                total_value = (
+                    healer_row.get("effective_healing")
+                    if healer_row is not None
+                    else None
+                )
+            elif metric == "dt":
+                total_value = (
+                    taken_row.get("taken") if taken_row is not None else None
+                )
+                stat_value = (
+                    float(total_value) / duration
+                    if total_value is not None and duration
+                    else None
+                )
+            else:
+                total_value = (
+                    int(damage_row.damage) if damage_row is not None else None
+                )
+                stat_value = (
+                    float(total_value) / duration
+                    if total_value is not None and duration
+                    else None
+                )
+            rows.append(
+                {
+                    "actor_id": actor_id,
+                    "profession_id": profession_id,
+                    "name": self._shown_actor_name(actor_id),
+                    "metric": metric,
+                    "stat_value": stat_value,
+                    "total_value": total_value,
+                    "damage_sort": int(
+                        getattr(damage_row, "damage", 0) or 0
+                    ),
+                    "deaths": int(deaths.get(actor_id, 0) or 0),
+                    "is_self": actor_id == getattr(self.model, "self_id", None),
+                }
+            )
+        return rows
+
+    def _main_display_rows(
+        self, now: float | None = None
+    ) -> tuple[list[dict[str, object]], bool]:
+        if self._main_retained_battle_active():
+            return self._main_retained_battle_rows(), False
+        rating_preview = self._team_rating_preview_active()
+        if not rating_preview:
+            rows = self._main_combat_display_rows(now)
+            if self._main_display_is_cleared():
+                rows = [dict(row, stat_value=None, total_value=None, sort_damage=0, deaths=0) for row in rows]
+            return rows, False
+        rows: list[dict[str, object]] = []
+        deaths = {} if self._main_display_is_cleared() else getattr(self.model, "member_death_counts", {})
+        for raw in self._team_rating_preview_rows():
+            actor_id = int(raw.get("actor_id", 0) or 0)
+            name = (
+                raw.get("anonymous_name", "")
+                if bool(getattr(self, "hide_names", False))
+                else raw.get("display_name", "")
+                or raw.get("anonymous_name", "")
+            )
+            rows.append(
+                {
+                    "actor_id": actor_id,
+                    "profession_id": int(raw.get("profession_id", 0) or 0),
+                    "name": str(name or ""),
+                    "metric": "rating",
+                    "rating": normalize_extraordinary_rating(
+                        raw.get("extraordinary_rating")
+                    ),
+                    "is_ai": self._main_actor_is_ai(actor_id, raw),
+                    "deaths": int(deaths.get(actor_id, 0) or 0),
+                    "is_self": actor_id == getattr(self.model, "self_id", None),
+                }
+            )
+        return rows, True
 
     def _main_columns(self, width: int) -> dict[str, int]:
         compact = bool(getattr(self, "compact_mode", False))
@@ -38592,9 +43914,16 @@ class DpsWindow:
         return columns
 
     def _main_row_height(self) -> int:
-        if bool(getattr(self, "compact_mode", False)):
-            return max(28, self.ui_font_size + 12)
-        return max(32, self.ui_font_size + 18)
+        if self._layered_main_active():
+            return max(
+                1,
+                logical_pixels_to_physical(
+                    HUD_ROW_HEIGHT
+                    * float(getattr(self, "main_ui_scale", 1.0) or 1.0),
+                    getattr(self, "window_dpi", DEFAULT_DPI),
+                ),
+            )
+        return self._main_px(max(MAIN_ROW_BASE_HEIGHT, self.ui_font_size + 22))
 
     def _scroll_main(self, event) -> str:
         if bool(getattr(self, "window_locked", False)):
@@ -38616,6 +43945,31 @@ class DpsWindow:
             direction = -1 if delta > 0 else 1
             steps = max(1, abs(delta) // 120)
         else:
+            return "break"
+        if self._layered_main_active():
+            regions = getattr(self, "layered_main_actor_regions", ())
+            if regions and hasattr(event, "x") and hasattr(event, "y") and not any(
+                left <= event.x <= right and top <= event.y <= bottom
+                for (left, top, right, bottom), _actor in regions
+            ):
+                return "break"
+            rows, _rating_preview = self._main_display_rows()
+            row_height = self._main_row_height()
+            viewport_height = row_height * clamp_visible_rows(
+                getattr(self, "main_visible_rows", HUD_MAX_VISIBLE_ROWS)
+            )
+            content_height = max(viewport_height, row_height * len(rows))
+            maximum_offset = max(0, content_height - viewport_height)
+            current_offset = min(
+                maximum_offset,
+                max(0, int(getattr(self, "main_scroll_offset", 0))),
+            )
+            self.main_scroll_content_height = content_height
+            self.main_scroll_offset = min(
+                maximum_offset,
+                max(0, current_offset + direction * steps * row_height),
+            )
+            self._schedule_layered_main_render()
             return "break"
         canvas = self.rows_canvas
         viewport_height = max(1, canvas.winfo_height())
@@ -38883,25 +44237,15 @@ class DpsWindow:
         return (str(name).strip() or "职业识别中", color)
 
     def _draw_main_rows(self) -> None:
-        overlay_active = bool(
-            self._main_content_overlay_requested()
-            and self.main_content_overlay_rows is not None
-            and self.main_content_overlay_rows.winfo_exists()
-            and self.main_content_overlay_rows.winfo_ismapped()
-        )
+        if self._layered_main_active():
+            self._hide_main_content_overlay()
+            self._schedule_layered_main_render()
+            return
+        self._hide_main_content_overlay()
         self._draw_main_rows_on_canvas(
             self.rows_canvas,
             update_scroll_state=True,
-            draw_bars=not overlay_active,
         )
-        overlay = self.main_content_overlay_rows
-        if overlay_active and overlay is not None:
-            self._draw_main_rows_on_canvas(
-                overlay,
-                update_scroll_state=False,
-                draw_content=False,
-                opaque_bar_layer=True,
-            )
 
     def _draw_main_rows_on_canvas(
         self,
@@ -38913,9 +44257,223 @@ class DpsWindow:
         draw_bars: bool = True,
         opaque_bar_layer: bool = False,
     ) -> None:
+        del draw_bars, opaque_bar_layer
         canvas.delete("all")
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
+        rows, rating_preview = self._main_display_rows()
+        if update_scroll_state:
+            self._sync_main_content_height(len(rows))
+            try:
+                height = max(1, int(canvas.cget("height")))
+            except (AttributeError, TypeError, ValueError, tk.TclError):
+                pass
+        row_height = self._main_row_height()
+        content_height = max(height, len(rows) * row_height)
+
+        if not rows:
+            if update_scroll_state:
+                self.main_scroll_offset = 0
+                self.main_scroll_content_height = height
+            if draw_empty_state and draw_content:
+                canvas_outlined_text(
+                    canvas,
+                    width // 2,
+                    height // 2,
+                    text=(
+                        "正在等待队伍资料"
+                        if rating_preview
+                        else "等待战斗数据"
+                    ),
+                    fill="#a5b1bf",
+                    outline="#071019",
+                    font=self._ui_font("main_strong"),
+                )
+            canvas.configure(scrollregion=(0, 0, width, height))
+            canvas.yview_moveto(0.0)
+            return
+
+        scroll_offset = min(
+            max(0, content_height - height),
+            max(0, int(getattr(self, "main_scroll_offset", 0))),
+        )
+        if update_scroll_state:
+            self.main_scroll_content_height = content_height
+            self.main_scroll_offset = scroll_offset
+        canvas.configure(
+            yscrollincrement=1,
+            scrollregion=(0, 0, width, content_height),
+        )
+        canvas.yview_moveto(scroll_offset / max(1, content_height))
+        if not draw_content:
+            return
+
+        columns = self._main_display_columns(
+            width, rating_preview=rating_preview
+        )
+        mask_opacity = clamp_percent(
+            getattr(self, "main_row_mask_opacity", 0), 0
+        )
+        mask_stipple = main_row_mask_stipple(mask_opacity)
+        icon_base_size = max(32, min(36, self.ui_font_size + 20))
+        icon_logical_size = icon_base_size * float(
+            getattr(self, "main_ui_scale", 1.0) or 1.0
+        )
+        icon_size = self._main_px(icon_base_size)
+        name_width = max(
+            self._main_px(24), columns["name_right"] - columns["name"]
+        )
+        for index, row in enumerate(rows):
+            top = index * row_height
+            bottom = top + row_height
+            actor_id = int(row.get("actor_id", 0) or 0)
+            is_self = bool(
+                row.get("is_self")
+                and getattr(self, "highlight_self", True)
+            )
+            if is_self:
+                actor_tags = (f"actor:{actor_id}", "main-row-mask")
+                radius = max(2, (bottom - top) // 2 - self._main_px(1))
+                canvas_rounded_rectangle(
+                    canvas,
+                    self._main_px(1),
+                    top + self._main_px(1),
+                    width - self._main_px(1),
+                    bottom - self._main_px(1),
+                    radius,
+                    fill="",
+                    outline="#079ee8",
+                    width=max(2, self._main_px(2)),
+                    tags=actor_tags,
+                )
+                canvas_rounded_rectangle(
+                    canvas,
+                    self._main_px(3),
+                    top + self._main_px(3),
+                    width - self._main_px(3),
+                    bottom - self._main_px(3),
+                    max(1, radius - self._main_px(2)),
+                    fill="",
+                    outline="#7bd5ff",
+                    width=max(1, self._main_px(1)),
+                    tags=actor_tags,
+                )
+            elif mask_opacity > 0:
+                rectangle_options = {
+                    "fill": "#08121b",
+                    "outline": "",
+                    "width": 0,
+                    "tags": (f"actor:{actor_id}", "main-row-mask"),
+                }
+                if mask_stipple:
+                    rectangle_options["stipple"] = mask_stipple
+                canvas.create_rectangle(0, top, width, bottom, **rectangle_options)
+
+            profession_id = int(row.get("profession_id", 0) or 0)
+            main_profession_icon = getattr(self.icons, "main_profession", None)
+            icon = (
+                main_profession_icon(profession_id, icon_logical_size)
+                if callable(main_profession_icon)
+                else self.icons.profession(profession_id, icon_logical_size)
+            )
+            canvas.create_image(
+                columns["icon"],
+                top + (row_height - icon_size) // 2,
+                image=icon,
+                anchor="nw",
+                tags=(f"actor:{actor_id}",),
+            )
+            actor_name = self._fit_ui_text(
+                row.get("name", "") or "玩家",
+                name_width,
+                "main_text",
+            )
+            canvas_outlined_text(
+                canvas,
+                columns["name"],
+                top + row_height // 2,
+                text=actor_name,
+                fill="#f4f7fb",
+                outline="#071019",
+                outline_width=max(1, self._main_px(1)),
+                anchor="w",
+                font=self._ui_font("main_text"),
+                tags=(f"actor:{actor_id}",),
+            )
+
+            if rating_preview:
+                rating = normalize_extraordinary_rating(row.get("rating"))
+                rating_text = "--" if rating is None else str(rating)
+                canvas_outlined_text(
+                    canvas,
+                    columns["stat"],
+                    top + row_height // 2,
+                    text=f"非凡评分：{rating_text}",
+                    fill="#f1c86f" if rating is not None else "#a8b1bc",
+                    outline="#071019",
+                    outline_width=max(1, self._main_px(1)),
+                    anchor="e",
+                    font=self._ui_font("main_number_strong"),
+                    tags=(f"actor:{actor_id}",),
+                )
+            else:
+                metric = str(row.get("metric", "dps") or "dps").casefold()
+                stat_color = {
+                    "hps": "#75e6a1",
+                    "dt": "#f1cf68",
+                }.get(metric, "#ffffff")
+                canvas_outlined_text(
+                    canvas,
+                    columns["stat"],
+                    top + row_height // 2,
+                    text=format_main_rate(row.get("stat_value")),
+                    fill=stat_color,
+                    outline="#071019",
+                    outline_width=max(1, self._main_px(1)),
+                    anchor="e",
+                    font=self._ui_font("main_number_strong"),
+                    tags=(f"actor:{actor_id}",),
+                )
+                if "total" in columns:
+                    canvas_outlined_text(
+                        canvas,
+                        columns["total"],
+                        top + row_height // 2,
+                        text=format_main_total(row.get("total_value")),
+                        fill="#c7d0da",
+                        outline="#071019",
+                        outline_width=max(1, self._main_px(1)),
+                        anchor="e",
+                        font=self._ui_font("main_number_small"),
+                        tags=(f"actor:{actor_id}",),
+                    )
+            if "deaths" in columns:
+                canvas_outlined_text(
+                    canvas,
+                    columns["deaths"],
+                    top + row_height // 2,
+                    text=f"☠ {max(0, int(row.get('deaths', 0) or 0))}",
+                    fill="#d2d7dd",
+                    outline="#071019",
+                    outline_width=max(1, self._main_px(1)),
+                    anchor="e",
+                    font=self._ui_font("main_number_small"),
+                    tags=(f"actor:{actor_id}",),
+                )
+
+        if update_scroll_state:
+            self._draw_main_scroll_indicator(width, height, content_height)
+
+    def _draw_retired_main_rows_on_canvas(
+        self,
+        canvas: tk.Canvas,
+        *,
+        update_scroll_state: bool,
+        draw_empty_state: bool = True,
+        draw_content: bool = True,
+        draw_bars: bool = True,
+        opaque_bar_layer: bool = False,
+    ) -> None:
         meter_mode = getattr(self, "main_meter_mode", "dps")
         rating_preview = self._team_rating_preview_active()
         healing_mode = meter_mode == "hps"
@@ -39566,8 +45124,8 @@ class DpsWindow:
         self.root.geometry(
             self._visible_geometry(
                 self.root.geometry(),
-                MINI_DEFAULT_WIDTH if self.compact_mode else 590,
-                MINI_DEFAULT_HEIGHT if self.compact_mode else 400,
+                max(self._main_minimum_width(), self._main_px(MAIN_DEFAULT_WIDTH)),
+                max(MAIN_MIN_HEIGHT, self._main_px(MAIN_DEFAULT_HEIGHT)),
             )
         )
         self.root.overrideredirect(True)
@@ -39640,26 +45198,20 @@ class DpsWindow:
         self.restore_geometry.pop(id(self.root), None)
         self._destroy_unlock_window()
 
-        was_compact = self.compact_mode
         self.window_locked = False
         self.compact_mode = False
         self.config["window_locked"] = False
         self.config["compact_mode"] = False
-        if was_compact:
-            self._apply_layout_mode()
+        self._apply_layout_mode()
 
-        width = max(590, self._main_minimum_width())
-        geometry = format_absolute_tk_geometry(width, 400, 32, 120)
-        compact_geometry = format_absolute_tk_geometry(
-            max(MINI_DEFAULT_WIDTH, self._compact_target_width()),
-            MINI_DEFAULT_HEIGHT,
-            32,
-            120,
+        width = max(
+            self._main_minimum_width(), self._main_px(MAIN_DEFAULT_WIDTH)
         )
+        height = max(MAIN_MIN_HEIGHT, self._main_px(MAIN_DEFAULT_HEIGHT))
+        geometry = format_absolute_tk_geometry(width, height, 32, 120)
         self.root.minsize(self._main_minimum_width(), MAIN_MIN_HEIGHT)
         self.root.geometry(geometry)
         self.config["geometry"] = geometry
-        self.config["compact_geometry"] = compact_geometry
         if float(getattr(self, "window_alpha", 1.0) or 0.0) <= 0.0:
             self.window_alpha = 1.0
             self.config["alpha"] = 1.0
@@ -39715,20 +45267,63 @@ class DpsWindow:
             import ctypes
 
             window.update_idletasks()
-            hwnd = ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
-            dark = ctypes.c_int(1)
-            corner = ctypes.c_int(2)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark))
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), ctypes.sizeof(corner))
-        except (AttributeError, OSError):
+            hwnd = DpsWindow._win32_root_handle(window)
+            if not hwnd:
+                return
+            style = DpsWindow._win32_extended_style(hwnd)
+            if style is not None:
+                overlay_style = window_exstyle_for_overlay(style)
+                if overlay_style != style:
+                    DpsWindow._set_win32_extended_style(hwnd, overlay_style)
+
+            # A transparent HUD must not inherit Windows 11's ordinary app
+            # rounding or drop shadow. Those effects expose the rectangular
+            # backing surface most clearly over a white desktop.
+            no_non_client = ctypes.c_int(1)  # DWMNCRP_DISABLED
+            no_rounding = ctypes.c_int(1)  # DWMWCP_DONOTROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                2,
+                ctypes.byref(no_non_client),
+                ctypes.sizeof(no_non_client),
+            )
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                33,
+                ctypes.byref(no_rounding),
+                ctypes.sizeof(no_rounding),
+            )
+        except (AttributeError, OSError, tk.TclError):
             pass
 
     def _apply_main_transparency(self) -> None:
         if self.closing or not self.root.winfo_exists():
             return
+        self.window_alpha = 1.0
+        if isinstance(getattr(self, 'config', None), dict):
+            self.config['alpha'] = 1.0
+        if self._layered_main_active():
+            try:
+                self.root.update_idletasks()
+                if bool(getattr(self, "window_locked", False)):
+                    self._set_window_click_through(self.root, True)
+            except tk.TclError:
+                return
+            # SourceConstantAlpha is applied by UpdateLayeredWindow; using
+            # Tk's -alpha or -transparentcolor here would switch the HWND back
+            # to SetLayeredWindowAttributes and reintroduce fringe artifacts.
+            self._schedule_layered_main_render()
+            return
         try:
             self.root.update_idletasks()
-            self.root.configure(bg=BG)
+            self.root.configure(bg=MAIN_TRANSPARENT_KEY)
+            if sys.platform == "win32":
+                try:
+                    self.root.attributes("-transparentcolor", MAIN_TRANSPARENT_KEY)
+                except tk.TclError:
+                    # Some Tk test doubles and older Windows Tk builds expose
+                    # alpha but not the color-key option. Alpha still applies.
+                    pass
             # A withdrawn root is still backed by an HWND. Keep that bootstrap
             # surface opaque; applying the configured alpha before the first
             # map can make DWM cache it at the wrong DPI and soften all text.
@@ -39772,6 +45367,12 @@ class DpsWindow:
             or not self.root.winfo_exists()
         ):
             return
+        self.window_alpha = 1.0
+        if self._layered_main_active():
+            if locked:
+                self._set_window_click_through(self.root, True)
+            self._schedule_layered_main_render()
+            return
         try:
             if self.root.state() != "normal":
                 return
@@ -39798,6 +45399,7 @@ class DpsWindow:
         elif kind == "identity":
             if self.model.ingest_identity(payload):
                 self._invalidate_team_rating_preview_rows(clear_profiles=True)
+                self._schedule_layered_main_render()
         elif kind == "actor_merge":
             if self.model.merge_actor(payload):
                 self._invalidate_team_rating_preview_rows(
@@ -39810,13 +45412,20 @@ class DpsWindow:
         elif kind == "party":
             if self.model.ingest_party(payload):
                 self._invalidate_team_rating_preview_rows()
+                self._schedule_layered_main_render()
         elif kind == "profile":
             if self.model.ingest_profile(payload):
                 self._invalidate_team_rating_preview_rows(
                     payload.get("entity_id", 0)
                 )
+        elif kind == "self_character":
+            self._handle_self_character(payload)
         elif kind == "monster":
-            self.model.ingest_monster(payload)
+            hp_changed = self.model.ingest_monster(payload)
+            if hp_changed and isinstance(payload, dict) and ('current_hp' in payload or 'max_hp' in payload):
+                # HP is already validated and bound by the parser/model.
+                # Paint it on receipt, without waiting for the DPS timer.
+                self._schedule_layered_main_render()
         elif kind == "team_stat":
             self.model.ingest_team_stat(payload)
         elif kind == "stage_summary":
@@ -39826,12 +45435,38 @@ class DpsWindow:
         elif kind == "enrage_countdown":
             self.model.ingest_enrage_countdown(payload)
         elif kind == "combat_state":
+            was_live = self._main_battle_signal_active()
             self.model.ingest_combat_state(payload)
+            if not was_live and self._main_battle_signal_active() and self._layered_main_active():
+                self._render_layered_main_hud()
+            else:
+                self._schedule_layered_main_render()
         elif kind == "life":
             self.model.ingest_life(payload)
         elif kind == "scene":
-            if self.model.ingest_scene(payload):
+            previous_encounter = str(getattr(self.model, 'encounter_id', '') or '')
+            changed = self.model.ingest_scene(payload)
+            if changed:
                 self._invalidate_team_rating_preview_rows()
+            if (changed or (isinstance(payload, dict) and payload.get('transition'))) and not getattr(self.model, 'long_gap_phase_suspended', False):
+                # The model owns scene reset/archive. Clear only the display
+                # copy and reject delayed final refreshes from the old map.
+                discarded = deque(getattr(self, 'main_cleared_encounter_ids', ()), maxlen=64)
+                for encounter in (previous_encounter,
+                                  (getattr(self, 'main_last_battle_result', None) or {}).get('encounter_id'),
+                                  (getattr(self, 'main_last_live_display_snapshot', None) or {}).get('encounter_id')):
+                    if encounter and encounter not in discarded:
+                        discarded.append(encounter)
+                self.main_cleared_encounter_ids = discarded
+                self.main_last_battle_result = None
+                self.main_last_live_display_snapshot = None
+                self.main_scroll_offset = 0
+                self.main_time_text = '00:00'
+                self.team_dps_text = '0'
+                self.latest_healing_summary = {'team_hps': 0.0, 'team_effective_healing': 0, 'healers': []}
+                self.enrage_prediction = None
+                self.enrage_prediction_visible = False
+                self._schedule_layered_main_render()
         elif kind == "tray_restore":
             self.show_from_tray()
         elif kind == "tray_restore_window":
@@ -39844,6 +45479,16 @@ class DpsWindow:
             self._handle_trial_claim_result(payload)
         elif kind == "feedback_result":
             self._handle_feedback_result(payload)
+        elif kind == "profile_resolve_result":
+            self._handle_profile_resolve_result(payload)
+        elif kind == "profile_mutation_result":
+            self._handle_profile_mutation_result(payload)
+        elif kind == "profile_link_code_result":
+            self._handle_profile_link_code_result(payload)
+        elif kind == "profile_uploads_result":
+            self._handle_profile_uploads_result(payload)
+        elif kind == "encounter_upload_result":
+            self._handle_encounter_upload_result(payload)
         elif kind == "update_check_result":
             self._handle_update_check_result(payload)
         elif kind == "rollback_check_result":
@@ -39899,9 +45544,11 @@ class DpsWindow:
         ):
             try:
                 self.worker.refresh_runtime_capability(payload)
-            except RuntimeCapabilityError:
+            except RuntimeCapabilityError as exc:
                 self._return_to_login(
-                    "采集授权续期失败，请重新登录。"
+                    SYSTEM_TIME_SYNC_MESSAGE
+                    if isinstance(exc, RuntimeCapabilityTimeError)
+                    else "采集授权续期失败，请重新登录。"
                 )
         elif kind == "license_required":
             self._return_to_login(str(payload))
@@ -39949,6 +45596,85 @@ class DpsWindow:
             return
         now = time.time()
         self.model.sample_team_damage(now)
+        self.model.flush_pending_member_deaths()
+        self.model.finalize_if_idle(now)
+        if self.combat_clock_worker is not None:
+            self.combat_clock_worker.submit(
+                self.model.combat_clock_snapshot(now)
+            )
+        self._flush_combat_history()
+
+        duration = self.model.duration(now)
+        dps_duration = dps_duration_seconds(duration)
+        damage_total = sum(row.damage for row in self.model.current_stats())
+        self.latest_healing_summary = self.model.healing_summary(duration)
+        combat_active = bool(self.model.combat_in_progress(now))
+        rating_preview = self._team_rating_preview_active()
+        self._sync_team_rating_preview_layout(rating_preview)
+
+        if self.show_combat_time:
+            self._set_main_time_value(format_duration(duration))
+        team_dps = damage_total / dps_duration if dps_duration else 0.0
+        if self.show_team_dps:
+            self._set_team_dps_value(f"{int(round(team_dps)):,}")
+
+        team_health = self.worker.team_stats_health_state()
+        encounter_known = bool(self.model._encounter_started())
+        recovering_team_data = team_health in {
+            "rearmed_waiting",
+            "reinstalling",
+            "reinstalled_waiting",
+        }
+        incomplete_team_data = team_health in {
+            "hook_missing",
+            "recovery_failed",
+            "unhealthy",
+        }
+        if self.connected and encounter_known and (
+            recovering_team_data or incomplete_team_data
+        ):
+            self._team_stats_warning_active = True
+            self.dot.configure(fg=WARN)
+            self.status_label.configure(
+                text=(
+                    "队伍数据正在恢复"
+                    if recovering_team_data
+                    else "队伍数据不完整"
+                ),
+                fg=WARN,
+            )
+        elif getattr(self, "_team_stats_warning_active", False):
+            self._team_stats_warning_active = False
+            if self.connected:
+                self.dot.configure(fg=ACCENT)
+                self.status_label.configure(text="运行中", fg=MUTED)
+
+        if self.heartbeat_worker is not None:
+            self.heartbeat_worker.update_state(
+                using=self.connected,
+                character_name=(
+                    self.model.display_name(int(self.model.self_id or 0))
+                    if self.model.self_id is not None
+                    else ""
+                ),
+                game_pid=self.game_pid,
+            )
+        self._update_enrage_prediction(now)
+        self._draw_monster_hp()
+        self._draw_main_rows()
+        self._render_skill_details()
+        self._sync_action_buttons()
+        self._sync_expiry_label()
+        self._sync_backend_sidebar_status()
+        self._sync_unlock_window_position()
+        self.root.after(180, self._render)
+
+    def _render_retired_main_modes(self) -> None:
+        if self.closing:
+            return
+        now = time.time()
+        self.model.sample_team_damage(now)
+        self.model.flush_pending_member_deaths()
         self.model.finalize_if_idle(now)
         if self.combat_clock_worker is not None:
             self.combat_clock_worker.submit(
@@ -40096,10 +45822,7 @@ class DpsWindow:
             if self.connected:
                 self.dot.configure(fg=ACCENT)
                 self.status_label.configure(text="运行中", fg=MUTED)
-        self.time_value.configure(
-            text=format_duration(duration),
-            fg=ACCENT if state == "战斗中" else TEXT,
-        )
+        self._set_main_time_value(format_duration(duration))
         if self.heartbeat_worker is not None:
             self.heartbeat_worker.update_state(
                 using=self.connected,
@@ -40147,14 +45870,10 @@ class DpsWindow:
         self._save_preferences()
 
     def _set_window_alpha(self, value, *, persist: bool = True) -> None:
-        try:
-            percent = float(value)
-        except (TypeError, ValueError, OverflowError):
-            return
-        if 0.0 <= percent <= 1.0:
-            percent *= 100.0
-        percent = min(100, max(MIN_WINDOW_ALPHA_PERCENT, round(percent)))
-        self.window_alpha = percent / 100.0
+        # Kept for old integrations only; the slider has been removed.
+        del value
+        percent = 100
+        self.window_alpha = 1.0
         # Reapply even when the stored value is unchanged. Windows can rebuild
         # a borderless HWND after lock/topmost changes while the Python value
         # remains correct but the native surface has returned to full opacity.
@@ -40184,6 +45903,7 @@ class DpsWindow:
             archive_reason="manual_reset",
         )
         self._flush_combat_history()
+        self.main_last_battle_result = None
         self._draw_main_rows()
         self._render_skill_details()
 
@@ -40839,6 +46559,8 @@ class DpsWindow:
         self.skill_combat_metrics_label = None
 
     def _save_preferences(self) -> None:
+        self.window_alpha = 1.0
+        self.config['alpha'] = 1.0
         recent_skill_names = list(self.model.runtime_skill_names.items())[-2048:]
         self.config["runtime_skill_names"] = {
             str(skill_id): name for skill_id, name in recent_skill_names
@@ -40860,6 +46582,39 @@ class DpsWindow:
         self.config[TEAM_RATING_PREVIEW_CONFIG_KEY] = bool(
             TEAM_RATING_PREVIEW_AVAILABLE
             and getattr(self, "team_rating_preview_enabled", False)
+        )
+        self.config[MAIN_DISPLAY_SCHEMA_CONFIG_KEY] = MAIN_DISPLAY_SCHEMA_VERSION
+        self.config[PROFESSION_DISPLAY_METRICS_CONFIG_KEY] = (
+            normalize_profession_display_metrics(
+                getattr(self, "profession_display_metrics", {})
+            )
+        )
+        self.config[MAIN_ROW_MASK_OPACITY_CONFIG_KEY] = clamp_percent(
+            getattr(self, "main_row_mask_opacity", 0), 0
+        )
+        self.config[MAIN_UI_SCALE_CONFIG_KEY] = clamp_main_ui_scale(
+            getattr(self, "main_ui_scale", 1.0)
+        )
+        self.config[MAIN_VISIBLE_ROWS_CONFIG_KEY] = clamp_visible_rows(
+            getattr(self, "main_visible_rows", HUD_MAX_VISIBLE_ROWS)
+        )
+        self.config[SHOW_BOSS_HP_BAR_CONFIG_KEY] = bool(
+            getattr(self, "show_boss_hp_bar", True)
+        )
+        self.config[SHOW_COMBAT_TIME_CONFIG_KEY] = bool(
+            getattr(self, "show_combat_time", True)
+        )
+        self.config[SHOW_MAIN_TOTALS_CONFIG_KEY] = bool(
+            getattr(self, "show_main_totals", True)
+        )
+        self.config[SHOW_TEAM_DPS_CONFIG_KEY] = bool(
+            getattr(self, "show_team_dps", True)
+        )
+        self.config[HIGHLIGHT_SELF_CONFIG_KEY] = bool(
+            getattr(self, "highlight_self", True)
+        )
+        self.config[SHOW_PVP_BUTTON_CONFIG_KEY] = bool(
+            getattr(self, "show_pvp_button", True)
         )
         self.config[BOSS_ENRAGE_PREDICTION_CONFIG_KEY] = bool(
             getattr(self, "boss_enrage_prediction_enabled", True)
@@ -40894,9 +46649,8 @@ class DpsWindow:
             getattr(self, "show_overheal_rate", True)
         )
         self.config.pop("show_healing_response", None)
-        self.config["main_meter_mode"] = getattr(
-            self, "main_meter_mode", "dps"
-        )
+        self.config.setdefault("main_meter_mode", "dps")
+        self.config["compact_mode"] = False
         self.config["target_boss_lookup_enabled"] = (
             bool(getattr(self, "target_boss_lookup_enabled", False))
         )
@@ -40998,6 +46752,90 @@ class DpsWindow:
                 return False
         return self.messages.empty()
 
+    def _show_shutdown_error(self, title: str, message: str) -> None:
+        """Keep final update failures inside the application's visual system."""
+
+        try:
+            window = tk.Toplevel(self.root)
+            self.notice_window = window
+            self.notice_parent = self.root
+            self.notice_modal = True
+            window.withdraw()
+            window.title(f"{UI_BRAND} · {title}")
+            window.configure(bg=ERROR)
+            width, height = 480, 226
+            x = max(0, (window.winfo_screenwidth() - width) // 2)
+            y = max(0, (window.winfo_screenheight() - height) // 2)
+            window.geometry(format_absolute_tk_geometry(width, height, x, y))
+            self._prepare_toplevel_dpi(window)
+            window.resizable(False, False)
+            window.attributes("-topmost", True)
+            window.attributes("-alpha", 1.0)
+            window.overrideredirect(True)
+
+            def exit_program() -> None:
+                self.notice_window = None
+                try:
+                    window.grab_release()
+                except tk.TclError:
+                    pass
+                try:
+                    window.destroy()
+                finally:
+                    self.root.destroy()
+
+            window.protocol("WM_DELETE_WINDOW", exit_program)
+            window.bind("<Escape>", lambda _event: exit_program())
+            card = tk.Frame(window, bg=MODAL_SURFACE)
+            card.pack(fill="both", expand=True, padx=1, pady=1)
+            header = tk.Frame(card, bg=MODAL_HEADER, height=48)
+            header.pack(fill="x")
+            header.pack_propagate(False)
+            tk.Frame(header, bg=ERROR, width=4).pack(side="left", fill="y")
+            tk.Label(
+                header,
+                text=title,
+                bg=MODAL_HEADER,
+                fg=TEXT,
+                anchor="w",
+                font=self._ui_font("title"),
+            ).pack(side="left", fill="both", expand=True, padx=14)
+            self._titlebar_icon_button(
+                header,
+                "close",
+                exit_program,
+                width=48,
+                height=48,
+                bg=MODAL_HEADER,
+                hover="#562631",
+                fg="#b8c3ce",
+            ).pack(side="right", fill="y")
+            content = tk.Frame(card, bg=MODAL_SURFACE)
+            content.pack(fill="both", expand=True, padx=22, pady=(18, 16))
+            tk.Label(
+                content,
+                text=message,
+                bg=MODAL_SURFACE,
+                fg=TEXT,
+                justify="left",
+                anchor="nw",
+                wraplength=432,
+                font=self._ui_font("small"),
+            ).pack(fill="both", expand=True)
+            self._history_modal_action(
+                content,
+                "退出程序",
+                exit_program,
+                danger=True,
+            ).pack(side="right")
+            window.deiconify()
+            window.lift()
+            window.grab_set()
+            window.focus_force()
+        except tk.TclError:
+            print(f"{title}: {message}", file=sys.stderr)
+            self.root.destroy()
+
     def _finish_close(self) -> None:
         if self.close_finalized:
             return
@@ -41044,6 +46882,7 @@ class DpsWindow:
         self._flush_combat_history(force=True)
         self._save_preferences()
         pending_install = getattr(self, "pending_update_install", None)
+        shutdown_error: tuple[str, str] | None = None
         if pending_install is not None:
             diagnostics = self.worker.diagnostic_snapshot()
             cleanup_verified = bool(
@@ -41051,7 +46890,7 @@ class DpsWindow:
             )
             if self.capture_started and not cleanup_verified:
                 self.pending_update_install = None
-                messagebox.showerror(
+                shutdown_error = (
                     "更新已取消",
                     (
                         "无法确认 Npcap 采集已经安全停止。本次不会强制安装，"
@@ -41060,7 +46899,6 @@ class DpsWindow:
                         else "无法确认所有采集 Hook 已安全恢复。为避免队友 DPS 和 DT 丢失，"
                         "本次不会强制安装。请先关闭游戏，再重新打开程序进行更新。"
                     ),
-                    parent=self.root,
                 )
             else:
                 update_path, target_path, previous_path = pending_install
@@ -41071,11 +46909,24 @@ class DpsWindow:
                         legacy_target_path=previous_path,
                     )
                 except OSError as exc:
-                    messagebox.showerror(
+                    shutdown_error = (
                         "无法启动更新程序",
                         f"更新包已下载，但安装程序启动失败：{exc}",
-                        parent=self.root,
                     )
+        if shutdown_error is not None:
+            self._show_shutdown_error(*shutdown_error)
+            return
+        layered_after = getattr(self, "layered_main_after_id", None)
+        if layered_after is not None:
+            try:
+                self.root.after_cancel(layered_after)
+            except tk.TclError:
+                pass
+            self.layered_main_after_id = None
+        layered_presenter = getattr(self, "layered_main_presenter", None)
+        if layered_presenter is not None:
+            layered_presenter.close()
+            self.layered_main_presenter = None
         self.root.destroy()
 
     def run(self) -> None:

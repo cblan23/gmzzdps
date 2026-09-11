@@ -18,14 +18,25 @@ from typing import Iterable
 import msgpack
 import zstandard
 
+from npcap_zstd_state import NativeZstdDecoder, ZstdSnapshot
+
 
 WINDOWS_EPOCH_SECONDS = 11_644_473_600
 FILETIME_TICKS_PER_SECOND = 10_000_000
 ZSTD_FRAME_HEADER = bytes.fromhex("28 b5 2f fd 00 38")
 ZSTD_EMPTY_LAST_BLOCK = b"\x01\x00\x00"
-RPC_MESSAGE_TYPES = frozenset({18, 22})
+RPC_NUMERIC_MESSAGE_TYPES = frozenset({18, 22})
+# The same application stream also carries name-addressed RPC envelopes.  The
+# legacy dispatcher exposes these calls directly (for example team position
+# refreshes), so retaining them is required for the Npcap backend to preserve
+# the same scene/roster evidence.
+RPC_NAMED_MESSAGE_TYPES = frozenset({12, 17})
+RPC_MESSAGE_TYPES = RPC_NUMERIC_MESSAGE_TYPES | RPC_NAMED_MESSAGE_TYPES
 MAX_DORAEMON_FRAME_BYTES = 256 * 1024
 MAX_APPLICATION_MESSAGE_BYTES = 16 * 1024 * 1024
+MAX_ZSTD_RECOVERY_CANDIDATES = 32
+MAX_ZSTD_RECOVERY_FRAMES = 96
+MAX_ZSTD_RECOVERY_PLAIN_BYTES = 2 * 1024 * 1024
 
 
 # Verified by matching the passive Npcap payloads against decoded records from
@@ -97,6 +108,22 @@ class ProtocolDiagnostics:
     application_messages: int = 0
     retained_records: int = 0
     unknown_method_messages: int = 0
+    native_zstd_restores: int = 0
+    native_zstd_errors: int = 0
+    native_zstd_validations: int = 0
+    native_zstd_rejections: int = 0
+    zstd_candidate_attempts: int = 0
+    zstd_candidate_rejections: int = 0
+    zstd_candidate_validations: int = 0
+
+
+@dataclass
+class _ZstdRecoveryCandidate:
+    decoder: object
+    chunks: list[DecodedFrame]
+    probe: bytearray
+    frames: int = 0
+    plain_bytes: int = 0
 
 
 def epoch_to_filetime(timestamp_epoch: float) -> int:
@@ -139,6 +166,26 @@ def _valid_rpc_shape(value: object) -> bool:
         and isinstance(value[1], list)
         and len(value[1]) >= 2
     )
+
+
+def _valid_named_method(value: object) -> bool:
+    if not isinstance(value, str) or not 1 <= len(value) <= 96:
+        return False
+    return bool(
+        value.isascii()
+        and (value[0].isalpha() or value[0] == "_")
+        and all(char.isalnum() or char == "_" for char in value)
+    )
+
+
+def _rpc_payload_prefix_valid(data: bytes | bytearray, offset: int) -> bool:
+    """Reject accidental length/type headers found inside arbitrary payloads."""
+    payload_offset = int(offset) + 6
+    if payload_offset >= len(data):
+        return True
+    # Every verified Doraemon RPC envelope is a fixed two-element MessagePack
+    # array: metadata followed by the call descriptor.
+    return data[payload_offset] == 0x92
 
 
 class DoraemonFrameDecoder:
@@ -201,6 +248,14 @@ class NpcapProtocolDecoder:
     def __init__(self, retained_methods: Iterable[str] | None = None) -> None:
         self.frames = DoraemonFrameDecoder()
         self.zstd = None
+        self.native_zstd: NativeZstdDecoder | None = None
+        self.native_zstd_validated = False
+        self.native_zstd_chunks: list[DecodedFrame] = []
+        self.native_zstd_probe = bytearray()
+        self.native_zstd_frames = 0
+        self.native_zstd_plain_bytes = 0
+        self.zstd_candidates: list[_ZstdRecoveryCandidate] = []
+        self.state_resync_requested = False
         self.application = bytearray()
         self.application_origins: deque[list[float | int]] = deque()
         self.record_sequence = 0
@@ -214,56 +269,248 @@ class NpcapProtocolDecoder:
     def reset_transport(self) -> None:
         self.frames.reset()
         self.zstd = None
+        if self.native_zstd is not None:
+            self.native_zstd.close()
+            self.native_zstd = None
+        self.native_zstd_validated = False
+        self.native_zstd_chunks.clear()
+        self.native_zstd_probe.clear()
+        self.native_zstd_frames = 0
+        self.native_zstd_plain_bytes = 0
+        self.zstd_candidates.clear()
         self.application.clear()
         self.application_origins.clear()
+        self.state_resync_requested = False
+
+    def install_zstd_snapshot(self, snapshot: ZstdSnapshot) -> None:
+        self.reset_transport()
+        self.native_zstd = NativeZstdDecoder(snapshot)
+        self.diagnostics.native_zstd_restores += 1
+
+    def consume_state_resync_request(self) -> bool:
+        requested = self.state_resync_requested
+        self.state_resync_requested = False
+        return requested
+
+    def _reject_native_zstd(self, *, error: bool) -> None:
+        if self.native_zstd is not None:
+            self.native_zstd.close()
+            self.native_zstd = None
+        self.native_zstd_validated = False
+        self.native_zstd_chunks.clear()
+        self.native_zstd_probe.clear()
+        self.native_zstd_frames = 0
+        self.native_zstd_plain_bytes = 0
+        self.application.clear()
+        self.application_origins.clear()
+        self.state_resync_requested = True
+        if error:
+            self.diagnostics.native_zstd_errors += 1
+        else:
+            self.diagnostics.native_zstd_rejections += 1
 
     @staticmethod
-    def _standalone(block: bytes) -> bool:
-        try:
-            zstandard.ZstdDecompressor().decompress(
-                ZSTD_FRAME_HEADER + _zstd_block(block, last=True),
-                max_output_size=MAX_APPLICATION_MESSAGE_BYTES,
-            )
-            return True
-        except (ValueError, zstandard.ZstdError):
-            return False
-
-    def _start_zstd(self, block: bytes) -> bytes:
+    def _start_zstd(block: bytes):
         decoder = zstandard.ZstdDecompressor().decompressobj()
         plain = decoder.decompress(
             ZSTD_FRAME_HEADER + _zstd_block(block, last=False)
         )
-        self.zstd = decoder
+        return decoder, plain
+
+    @staticmethod
+    def _probe_rpc(data: bytearray) -> bool:
+        earliest_incomplete: int | None = None
+        cursor = 0
+        while cursor + 6 <= len(data):
+            size, message_type = struct.unpack_from("<IH", data, cursor)
+            end = cursor + 4 + int(size)
+            if not (
+                2 <= size <= MAX_APPLICATION_MESSAGE_BYTES
+                and message_type in RPC_MESSAGE_TYPES
+                and _rpc_payload_prefix_valid(data, cursor)
+            ):
+                cursor += 1
+                continue
+            if end > len(data):
+                if earliest_incomplete is None:
+                    earliest_incomplete = cursor
+                cursor += 1
+                continue
+            try:
+                value = msgpack.unpackb(
+                    bytes(data[cursor + 6 : end]),
+                    raw=False,
+                    strict_map_key=False,
+                    unicode_errors="replace",
+                )
+            except (
+                ValueError,
+                msgpack.ExtraData,
+                msgpack.FormatError,
+                UnicodeDecodeError,
+            ):
+                cursor += 1
+                continue
+            if _valid_rpc_shape(value):
+                call = value[1]
+                if (
+                    message_type in RPC_NUMERIC_MESSAGE_TYPES
+                    and isinstance(call[1], int)
+                ) or (
+                    message_type in RPC_NAMED_MESSAGE_TYPES
+                    and _valid_named_method(call[1])
+                ):
+                    return True
+            cursor += 1
+        retain_from = (
+            earliest_incomplete
+            if earliest_incomplete is not None
+            else max(0, len(data) - 5)
+        )
+        if retain_from:
+            del data[:retain_from]
+        return False
+
+    def _advance_candidate(
+        self,
+        candidate: _ZstdRecoveryCandidate,
+        block: bytes,
+        sequence: int,
+        timestamp_epoch: float,
+        *,
+        first: bool = False,
+    ) -> bool:
+        try:
+            if first:
+                decoder, plain = self._start_zstd(block)
+                candidate.decoder = decoder
+            else:
+                plain = candidate.decoder.decompress(
+                    _zstd_block(block, last=False)
+                )
+        except (ValueError, zstandard.ZstdError):
+            return False
+        candidate.frames += 1
+        candidate.plain_bytes += len(plain)
+        chunk = DecodedFrame(
+            sequence=int(sequence),
+            timestamp_epoch=float(timestamp_epoch),
+            data=plain,
+        )
+        candidate.chunks.append(chunk)
+        candidate.probe.extend(plain)
+        return True
+
+    def _recover_zstd(
+        self, block: bytes, sequence: int, timestamp_epoch: float
+    ) -> list[DecodedFrame]:
+        survivors = []
+        validated: _ZstdRecoveryCandidate | None = None
+        for candidate in self.zstd_candidates:
+            if not self._advance_candidate(
+                candidate, block, sequence, timestamp_epoch
+            ):
+                self.diagnostics.zstd_candidate_rejections += 1
+                continue
+            if self._probe_rpc(candidate.probe):
+                validated = candidate
+                break
+            if (
+                candidate.frames < MAX_ZSTD_RECOVERY_FRAMES
+                and candidate.plain_bytes < MAX_ZSTD_RECOVERY_PLAIN_BYTES
+            ):
+                survivors.append(candidate)
+            else:
+                self.diagnostics.zstd_candidate_rejections += 1
+
+        if validated is None:
+            candidate = _ZstdRecoveryCandidate(
+                decoder=None,
+                chunks=[],
+                probe=bytearray(),
+            )
+            try:
+                started = self._advance_candidate(
+                    candidate,
+                    block,
+                    sequence,
+                    timestamp_epoch,
+                    first=True,
+                )
+            except (ValueError, zstandard.ZstdError):
+                started = False
+            if started:
+                self.diagnostics.zstd_candidate_attempts += 1
+                if self._probe_rpc(candidate.probe):
+                    validated = candidate
+                elif len(survivors) < MAX_ZSTD_RECOVERY_CANDIDATES:
+                    survivors.append(candidate)
+
+        if validated is None:
+            self.zstd_candidates = survivors
+            return []
+
+        self.zstd = validated.decoder
+        self.zstd_candidates.clear()
         self.application.clear()
         self.application_origins.clear()
         self.diagnostics.zstd_resyncs += 1
-        return plain
+        self.diagnostics.zstd_candidate_validations += 1
+        return validated.chunks
 
-    def _decompress(self, block: bytes) -> bytes | None:
-        if self.zstd is None:
-            if not self._standalone(block):
-                return None
+    def _decompress(
+        self, block: bytes, sequence: int, timestamp_epoch: float
+    ) -> list[DecodedFrame]:
+        if self.native_zstd is not None:
             try:
-                return self._start_zstd(block)
-            except (ValueError, zstandard.ZstdError):
-                self.diagnostics.zstd_errors += 1
-                self.zstd = None
-                return None
+                plain = self.native_zstd.decompress(block)
+            except (OSError, RuntimeError, ValueError):
+                self._reject_native_zstd(error=True)
+                return []
+            else:
+                chunk = DecodedFrame(
+                    sequence=int(sequence),
+                    timestamp_epoch=float(timestamp_epoch),
+                    data=plain,
+                )
+                if self.native_zstd_validated:
+                    return [chunk]
+                self.native_zstd_frames += 1
+                self.native_zstd_plain_bytes += len(plain)
+                self.native_zstd_chunks.append(chunk)
+                self.native_zstd_probe.extend(plain)
+                if self._probe_rpc(self.native_zstd_probe):
+                    chunks = self.native_zstd_chunks
+                    self.native_zstd_chunks = []
+                    self.native_zstd_probe.clear()
+                    self.native_zstd_validated = True
+                    self.diagnostics.native_zstd_validations += 1
+                    return chunks
+                if (
+                    self.native_zstd_frames >= MAX_ZSTD_RECOVERY_FRAMES
+                    or self.native_zstd_plain_bytes
+                    >= MAX_ZSTD_RECOVERY_PLAIN_BYTES
+                ):
+                    self._reject_native_zstd(error=False)
+                return []
+
+        if self.zstd is None:
+            return self._recover_zstd(block, sequence, timestamp_epoch)
         try:
-            return self.zstd.decompress(_zstd_block(block, last=False))
+            plain = self.zstd.decompress(_zstd_block(block, last=False))
         except (ValueError, zstandard.ZstdError):
             self.diagnostics.zstd_errors += 1
             self.zstd = None
             self.application.clear()
             self.application_origins.clear()
-            if not self._standalone(block):
-                return None
-            try:
-                return self._start_zstd(block)
-            except (ValueError, zstandard.ZstdError):
-                self.diagnostics.zstd_errors += 1
-                self.zstd = None
-                return None
+            return self._recover_zstd(block, sequence, timestamp_epoch)
+        return [
+            DecodedFrame(
+                sequence=int(sequence),
+                timestamp_epoch=float(timestamp_epoch),
+                data=plain,
+            )
+        ]
 
     def _application_consume(self, length: int) -> None:
         remaining = int(length)
@@ -296,6 +543,7 @@ class NpcapProtocolDecoder:
             plausible = bool(
                 2 <= size <= MAX_APPLICATION_MESSAGE_BYTES
                 and message_type in RPC_MESSAGE_TYPES
+                and _rpc_payload_prefix_valid(self.application, 0)
             )
             if not plausible:
                 self._application_consume(1)
@@ -328,22 +576,39 @@ class NpcapProtocolDecoder:
             self._application_consume(end)
             self.diagnostics.application_messages += 1
             call = value[1]
-            try:
-                entity_id = int(call[0])
-                method_id = int(call[1])
-            except (TypeError, ValueError, OverflowError):
-                continue
-            method = METHOD_ID_NAMES.get(method_id, "")
-            if not method:
-                self.diagnostics.unknown_method_messages += 1
+            method_id: int | None = None
+            entity_id = 0
+            if message_type in RPC_NUMERIC_MESSAGE_TYPES:
+                try:
+                    entity_id = int(call[0])
+                    method_id = int(call[1])
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                method = METHOD_ID_NAMES.get(method_id, "")
+                if not method:
+                    self.diagnostics.unknown_method_messages += 1
+                    continue
+            elif (
+                message_type in RPC_NAMED_MESSAGE_TYPES
+                and _valid_named_method(call[1])
+            ):
+                method = str(call[1])
+                try:
+                    entity_id = int(call[0])
+                except (TypeError, ValueError, OverflowError):
+                    # Name-addressed calls commonly use a player token or an
+                    # empty string rather than a numeric ScriptEntity ID.
+                    # The method arguments remain useful, while zero keeps the
+                    # established parser from inventing a pointer binding.
+                    entity_id = 0
+            else:
                 continue
             if self.retained_methods is not None and method not in self.retained_methods:
                 continue
             arguments = call[2] if len(call) > 2 and isinstance(call[2], list) else []
             self.record_sequence += 1
             timestamp_epoch = float(timestamp_epoch)
-            records.append(
-                {
+            record = {
                     "event_time": epoch_to_event_time(timestamp_epoch),
                     "filetime_100ns": epoch_to_filetime(timestamp_epoch),
                     "sequence": self.record_sequence,
@@ -358,11 +623,14 @@ class NpcapProtocolDecoder:
                     "decode_delay_ms": 0.0,
                     "arguments_synchronized": True,
                     "npcap_message_type": int(message_type),
-                    "npcap_method_id": method_id,
                     "npcap_kcp_sequence": int(kcp_sequence),
                     "capture_source": "npcap",
                 }
-            )
+            if method_id is not None:
+                record["npcap_method_id"] = method_id
+            else:
+                record["npcap_method_name"] = method
+            records.append(record)
             self.diagnostics.retained_records += 1
         return records
 
@@ -373,11 +641,11 @@ class NpcapProtocolDecoder:
         records: list[dict] = []
         for frame in self.frames.feed(plaintext, sequence, timestamp_epoch):
             self.diagnostics.doraemon_frames += 1
-            plain = self._decompress(frame.data)
-            if plain is None:
-                continue
-            self._append_application(
-                plain, frame.sequence, frame.timestamp_epoch
-            )
-            records.extend(self._rpc_records())
+            for plain in self._decompress(
+                frame.data, frame.sequence, frame.timestamp_epoch
+            ):
+                self._append_application(
+                    plain.data, plain.sequence, plain.timestamp_epoch
+                )
+                records.extend(self._rpc_records())
         return records

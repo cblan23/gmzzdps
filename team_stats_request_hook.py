@@ -1346,6 +1346,19 @@ class TeamStatsRequestHook:
     def alive(self) -> bool:
         return bool(self.process and process_alive(self.process))
 
+    def is_attached(self) -> bool:
+        """Return whether the call-server entry still targets this hook."""
+        if (
+            not self.installed
+            or not self.alive
+            or not self.target
+            or not self.code
+        ):
+            return False
+        expected = build_absolute_patch(self.code, len(self.prologue))
+        actual = read_region(self.process, self.target, len(expected))
+        return bool(actual == expected)
+
     def _build_installed_stub(self, state: int, code: int) -> bytes:
         trampoline = code + TRAMPOLINE_OFFSET
         if self.stable_primary_only:
@@ -2058,16 +2071,27 @@ class TeamStatsRequestHook:
         if self.process and owned and self.alive:
             suspended: list[int] = []
             try:
-                suspended = suspend_game_threads(self.pid)
-                write_code(self.process, self.target, self.prologue)
-                if (
-                    read_region(
-                        self.process, self.target, len(self.prologue)
-                    )
-                    != self.prologue
-                ):
+                expected_patch = build_absolute_patch(
+                    self.code, len(self.prologue)
+                )
+                actual = read_region(
+                    self.process, self.target, len(expected_patch)
+                )
+                if actual == expected_patch:
+                    suspended = suspend_game_threads(self.pid)
+                    write_code(self.process, self.target, self.prologue)
+                    if (
+                        read_region(
+                            self.process, self.target, len(self.prologue)
+                        )
+                        != self.prologue
+                    ):
+                        raise RuntimeError(
+                            "team-stat request hook restoration verification failed"
+                        )
+                elif actual != self.prologue:
                     raise RuntimeError(
-                        "team-stat request hook restoration verification failed"
+                        "team-stat request entry is owned by another hook"
                     )
                 self.installed = False
             finally:

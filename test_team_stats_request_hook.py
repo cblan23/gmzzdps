@@ -198,6 +198,36 @@ class TeamStatsRequestHookTests(unittest.TestCase):
         self.assertEqual(status["captured_request_count"], 0)
         read.assert_called_once_with(hook.process, hook.state, 0x40)
 
+    def test_attachment_check_reads_only_the_installed_entry_patch(self):
+        hook = TeamStatsRequestHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            stable_primary_only=True,
+        )
+        hook.process = 99
+        hook.target = 0x14012_3000
+        hook.code = 0x7FF6_0000_1000
+        hook.installed = True
+        expected = build_absolute_patch(hook.code, len(hook.prologue))
+
+        with (
+            patch.object(hook_module, "process_alive", return_value=True),
+            patch.object(
+                hook_module, "read_region", return_value=expected
+            ) as read,
+        ):
+            self.assertTrue(hook.is_attached())
+
+        read.assert_called_once_with(hook.process, hook.target, len(expected))
+
+        with (
+            patch.object(hook_module, "process_alive", return_value=True),
+            patch.object(
+                hook_module, "read_region", return_value=hook.prologue
+            ),
+        ):
+            self.assertFalse(hook.is_attached())
+
     def test_rearm_shifts_cadence_without_issuing_a_request(self):
         hook = TeamStatsRequestHook(
             profile=RUNTIME_PROFILE,
@@ -628,6 +658,9 @@ class TeamStatsRequestHookTests(unittest.TestCase):
         hook.code = 0x7FF6_0000_1000
         hook.installed = True
         hook.adopted = True
+        expected_patch = build_absolute_patch(
+            hook.code, len(CALL_SERVER_PROLOGUE)
+        )
 
         with (
             patch.object(hook_module, "process_alive", return_value=True),
@@ -637,7 +670,7 @@ class TeamStatsRequestHookTests(unittest.TestCase):
             patch.object(
                 hook_module,
                 "read_region",
-                return_value=CALL_SERVER_PROLOGUE,
+                side_effect=(expected_patch, CALL_SERVER_PROLOGUE),
             ),
             patch.object(hook_module.kernel32, "CloseHandle"),
         ):
@@ -647,6 +680,36 @@ class TeamStatsRequestHookTests(unittest.TestCase):
             99, hook.target, CALL_SERVER_PROLOGUE
         )
         resume.assert_called_once_with([7])
+
+    def test_close_does_not_rewrite_an_already_detached_entry(self):
+        hook = TeamStatsRequestHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            takeover_existing=True,
+        )
+        hook.pid = 1234
+        hook.process = 99
+        hook.target = 0x14012_3000
+        hook.state = 0x7FF6_0010_0000
+        hook.code = 0x7FF6_0000_1000
+        hook.installed = True
+
+        with (
+            patch.object(hook_module, "process_alive", return_value=True),
+            patch.object(
+                hook_module,
+                "read_region",
+                return_value=CALL_SERVER_PROLOGUE,
+            ),
+            patch.object(hook_module, "suspend_game_threads") as suspend,
+            patch.object(hook_module, "write_code") as write,
+            patch.object(hook_module.kernel32, "CloseHandle"),
+        ):
+            hook.close()
+
+        suspend.assert_not_called()
+        write.assert_not_called()
+        self.assertFalse(hook.installed)
 
     def test_raw_record_parser_preserves_every_captured_field(self):
         record = parse_request_record(request_record(7), 7)

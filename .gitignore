@@ -23,6 +23,9 @@ research-v0.0.15/joker-protocol-evidence.json
 # Local development and Codex work products
 /.codex-reference/
 /.codex-tmp/
+/.codex-*/
+/.codex-*
+/combat_upload_state.json
 /available-cards-*.txt
 /runtime-profile.dev.json
 /research-v0.1.2/

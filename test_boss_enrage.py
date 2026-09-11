@@ -131,7 +131,7 @@ class BossEnrageTests(unittest.TestCase):
         self.assertEqual(result.countdown_paused_seconds, 0.0)
         self.assertEqual(result.blended_hp_per_second, 0.0)
 
-    def test_same_encounter_time_correction_cannot_move_schedule_backwards(self):
+    def test_same_encounter_clock_correction_keeps_countdown_consistent(self):
         forecast = predictor(enrage_seconds=120.0)
         initial = forecast.update(
             encounter_key="pull-1",
@@ -162,8 +162,8 @@ class BossEnrageTests(unittest.TestCase):
         self.assertIsNotNone(corrected_backwards)
         self.assertIsNotNone(next_tick)
         self.assertIsNotNone(new_encounter)
-        self.assertEqual(corrected_backwards.elapsed_seconds, 40.0)
-        self.assertEqual(corrected_backwards.time_to_enrage_seconds, 80.0)
+        self.assertEqual(corrected_backwards.elapsed_seconds, 12.0)
+        self.assertEqual(corrected_backwards.time_to_enrage_seconds, 108.0)
         self.assertEqual(next_tick.elapsed_seconds, 41.0)
         self.assertEqual(new_encounter.elapsed_seconds, 2.0)
 

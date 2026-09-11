@@ -45,6 +45,8 @@ function Find-CodeSigningCertificate([string]$Thumbprint) {
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python = Join-Path $ProjectDir ".venv-build310\Scripts\python.exe"
 $CapstoneDll = Join-Path $ProjectDir ".venv-build310\Lib\site-packages\capstone\lib\capstone.dll"
+$NpcapZstdRestoreDll = Join-Path $ProjectDir "npcap_zstd_restore.dll"
+$ZstdLicensePath = Join-Path $ProjectDir "third_party_licenses\zstandard-BSD.txt"
 $SourcePath = Join-Path $ProjectDir "dps_meter.pyw"
 $DevelopmentRuntimeProfilePath = Join-Path $ProjectDir "runtime-profile.dev.json"
 $ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)"
@@ -219,6 +221,7 @@ if ($NpcapVariant) {
         "npcap_capture_process.py",
         "npcap_protocol.py",
         "npcap_key_state.py",
+        "npcap_zstd_state.py",
         "npcap_rc4_decode.py",
         "npcap_shadow_capture.py",
         "proc_inspect.py"
@@ -336,6 +339,10 @@ $ResourceFiles += [pscustomobject]@{
     Source = $SanitizedBossCatalogPath
     Target = "assets/bosses/boss_icon_sources.json"
 }
+$ResourceFiles += [pscustomobject]@{
+    Source = Join-Path $AssetRoot "bosses\hud\manifest.json"
+    Target = "assets/bosses/hud/manifest.json"
+}
 foreach ($Name in @(
     "skill_names.json",
     "skill_metadata.json",
@@ -379,6 +386,14 @@ if ($NpcapVariant) {
     $ResourceFiles += [pscustomobject]@{
         Source = $CaptureVariantPath
         Target = "_capture_variant.json"
+    }
+    $ResourceFiles += [pscustomobject]@{
+        Source = $NpcapZstdRestoreDll
+        Target = "npcap_zstd_restore.dll"
+    }
+    $ResourceFiles += [pscustomobject]@{
+        Source = $ZstdLicensePath
+        Target = "third_party_licenses/zstandard-BSD.txt"
     }
 }
 $ResourceFiles += [pscustomobject]@{
@@ -445,11 +460,16 @@ try {
         "--output-filename=$OutputName",
         "--windows-icon-from-ico=assets/app_icon.ico",
         "--include-package=capstone",
+        "--include-module=main_hud",
+        "--include-module=main_hud_artwork",
+        "--include-module=profile_upload",
         "--include-data-files=$CapstoneDll=capstone/lib/capstone.dll",
         "--include-data-files=assets/*.png=assets/",
         "--include-data-files=assets/professions/*.png=assets/professions/",
         "--include-data-files=assets/skills/*.png=assets/skills/",
         "--include-data-files=assets/bosses/*.png=assets/bosses/",
+        "--include-data-files=assets/bosses/hud/*.png=assets/bosses/hud/",
+        "--include-data-files=assets/bosses/hud/manifest.json=assets/bosses/hud/manifest.json",
         "--include-data-files=assets/app_icon.ico=assets/app_icon.ico",
         "--include-data-files=$SanitizedIconManifestPath=assets/icon_sources.json",
         "--include-data-files=$SanitizedBossCatalogPath=assets/bosses/boss_icon_sources.json",
@@ -472,6 +492,7 @@ try {
             "--include-module=npcap_capture_process",
             "--include-module=npcap_protocol",
             "--include-module=npcap_key_state",
+            "--include-module=npcap_zstd_state",
             "--include-module=npcap_rc4_decode",
             "--include-module=npcap_shadow_capture",
             "--include-package=msgpack",
@@ -494,6 +515,8 @@ try {
         $NuitkaArguments = @(
             $NuitkaArguments[0..($NuitkaArguments.Count - 2)]
             "--include-data-files=$CaptureVariantPath=_capture_variant.json"
+            "--include-data-files=$NpcapZstdRestoreDll=npcap_zstd_restore.dll"
+            "--include-data-files=$ZstdLicensePath=third_party_licenses/zstandard-BSD.txt"
             $NuitkaArguments[-1]
         )
     }
@@ -504,7 +527,18 @@ try {
             $NuitkaArguments[-1]
         )
     }
-    & $Python @NuitkaArguments
+    # Nuitka writes normal progress to stderr. Under redirected PowerShell
+    # streams that becomes NativeCommandError; use its exit code as the build
+    # verdict so successful compilation is not aborted before manifest/hash
+    # generation. All nonzero compiler exit codes still fail below.
+    $CompilerErrorActionPreferenceOriginal = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Python @NuitkaArguments
+    }
+    finally {
+        $ErrorActionPreference = $CompilerErrorActionPreferenceOriginal
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "Nuitka build failed with exit code $LASTEXITCODE"
     }

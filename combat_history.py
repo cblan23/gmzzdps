@@ -405,6 +405,21 @@ def authoritative_team_combat_seconds(
     return float(maximum), f"maximum_member_{source}", values
 
 
+def settlement_clock_covers_boss_phases(template_ids, duration: float, observed_seconds: float) -> bool:
+    """A final-form clock cannot shorten damage spanning verified Boss phases."""
+    from network_state import BOSS_PHASE_TEMPLATE_TRANSITIONS
+    from history_index import FIRST_BELIEVER_PHASE_TEMPLATE_IDS
+    templates = set()
+    for value in template_ids:
+        try:
+            templates.add(int(value or 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    multiple_phases = any(set(pair).issubset(templates) for pair in BOSS_PHASE_TEMPLATE_TRANSITIONS)
+    multiple_phases |= len(templates & FIRST_BELIEVER_PHASE_TEMPLATE_IDS) > 1
+    return not multiple_phases or duration + 5.0 >= observed_seconds
+
+
 def _parsed_profession_id(value: object) -> int:
     try:
         profession_id = int(value or 0)
@@ -1293,6 +1308,18 @@ class CombatHistoryStore:
             if started_at > 0 and ended_at >= started_at
             else 0.0
         )
+        local_interval = record.get('local_event_interval', {})
+        try:
+            observed_seconds = float(local_interval.get('duration_seconds', local_duration) or local_duration) if isinstance(local_interval, dict) else local_duration
+        except (TypeError, ValueError, OverflowError):
+            observed_seconds = local_duration
+        if not math.isfinite(observed_seconds) or observed_seconds < 0:
+            observed_seconds = local_duration
+        if not settlement_clock_covers_boss_phases(
+            (target.get('template_id', 0) for target in record.get('targets', []) if isinstance(target, dict)),
+            duration, observed_seconds,
+        ):
+            return record, False
         interval = ResolvedCombatInterval.from_duration(
             duration,
             ended_at_epoch=ended_at,

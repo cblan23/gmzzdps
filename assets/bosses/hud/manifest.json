@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "generator": "gpt-image-2 (API)",
+  "scope": "HUD display only; no combat identity inference",
+  "templates": {
+    "7100004": "head-enemy-02.png",
+    "7100008": "clown.png",
+    "7100201": "anxia.png",
+    "7100202": "mr-barney.png",
+    "7100203": "anxia.png",
+    "7100208": "anxia.png",
+    "7100209": "mr-barney.png",
+    "7100210": "anxia.png",
+    "7100215": "descendant-guardian.png",
+    "7100625": "war-dragon.png",
+    "7100628": "war-dragon.png",
+    "7100632": "training-dummy.png",
+    "7101004": "training-dummy.png",
+    "7101017": "training-dummy.png",
+    "7101018": "clown.png",
+    "7101025": "training-dummy.png",
+    "7101026": "head-enemy-02.png",
+    "7101027": "head-enemy-02.png",
+    "7101029": "training-dummy.png",
+    "7101030": "training-dummy.png",
+    "7102030": "head-enemy-02.png",
+    "7102046": "head-enemy-02.png",
+    "7102047": "clown.png",
+    "7102048": "clown.png",
+    "7102400": "astrologer.png",
+    "7102401": "astrologer.png",
+    "7102402": "astrologer.png",
+    "7102403": "astrologer.png",
+    "7102404": "astrologer.png",
+    "7102405": "astrologer.png",
+    "7102834": "head-enemy-02.png",
+    "7102835": "clown.png",
+    "7102873": "clown.png",
+    "7102932": "viscountess.png",
+    "7102936": "viscountess.png",
+    "7102938": "descendant-guardian.png",
+    "7102980": "yhxt-stage.png",
+    "7102990": "viscountess.png",
+    "7102991": "viscountess.png",
+    "7103001": "head-enemy-02.png",
+    "7103008": "clown.png",
+    "7103012": "clown.png",
+    "7103206": "ancestral-knight.png",
+    "7103210": "ancestral-knight.png",
+    "7103301": "head-enemy-02.png",
+    "7103309": "clown.png",
+    "7103312": "clown.png",
+    "7103401": "ancestral-knight.png",
+    "7103402": "ancestral-knight.png",
+    "7106130": "viscountess.png",
+    "7107030": "karl-edgar.png",
+    "7107081": "karl-edgar.png",
+    "7107105": "lambert-noose.png",
+    "7107121": "lambert-noose.png",
+    "7107352": "head-enemy-04.png",
+    "7107450": "head-enemy-04.png",
+    "7109004": "head-enemy-02.png",
+    "7109005": "clown.png",
+    "7109801": "mutated-hound.png",
+    "7109821": "mutated-hound.png",
+    "7110581": "rock-king.png",
+    "7110641": "rock-king.png",
+    "7110642": "rock-king.png",
+    "7110810": "drill-memory.png",
+    "7110817": "drill-memory.png",
+    "7110820": "johnny-memory.png",
+    "7110825": "johnny-memory.png",
+    "7111001": "bunny-memory.png",
+    "7114223": "training-dummy.png",
+    "7114225": "training-dummy.png",
+    "7114227": "training-dummy.png",
+    "7114233": "training-dummy.png",
+    "7115020": "johnny-memory.png",
+    "7115026": "johnny-memory.png",
+    "7115040": "war-dragon.png",
+    "7115041": "war-dragon.png",
+    "7115042": "war-dragon.png",
+    "7115060": "bunny-memory.png",
+    "7115075": "bunny-memory.png",
+    "7115080": "drill-memory.png",
+    "7115090": "drill-memory.png",
+    "7115300": "bunny-memory.png",
+    "7115310": "bunny-memory.png",
+    "7265156": "dream-catcher.png"
+  },
+  "portraits": {
+    "karl-edgar.png": {
+      "name": "卡尔·埃德加",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "8d31b913d7ecb810fb18f7f714cb185c08709043e986946f9b0b72113fa006a7",
+      "source": "client_portrait_redraw"
+    },
+    "lambert-noose.png": {
+      "name": "朗伯·绞索",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "d13d25c104d2d67c9b405bee1112a76efcb206046350fce6ddc56605c7f35a29",
+      "source": "client_portrait_redraw"
+    },
+    "rock-king.png": {
+      "name": "洛克·金",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "cb3a09e2152aa8d38f64067d03d4b3e0b39ec3b0d3f3df20b2914c2fbda5e0b7",
+      "source": "client_portrait_redraw"
+    },
+    "head-enemy-04.png": {
+      "name": "亚巴顿",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "06c016a030fb4b063a5202e0051be233f874541ebebd2ba24a9b123acb4366c7",
+      "source": "client_portrait_redraw"
+    },
+    "head-enemy-02.png": {
+      "name": "瑞尔比伯",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "687d400f7a1bb256cce112a625af907e08d7d106ec2534714af082bc5d511604",
+      "source": "client_portrait_redraw"
+    },
+    "clown.png": {
+      "name": "小丑",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "1b6216adbed16c3217fcca648c3d3e772a30d9c234f6c38fe71df5fdedd6fc8a",
+      "source": "client_portrait_redraw"
+    },
+    "mutated-hound.png": {
+      "name": "异化猎犬",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "6f2759423460bc5ff0b6e11169d494741ff729f8564974041b242a79c558f7fa",
+      "source": "client_portrait_redraw"
+    },
+    "ancestral-knight.png": {
+      "name": "先祖铠甲／伯德温",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "dccddb16907ec3c50df4506e97506b2fb31e88297e1ba20bc0e585b8732d8fbc",
+      "source": "client_portrait_redraw"
+    },
+    "astrologer.png": {
+      "name": "星象仪者",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "bccd83a4db38d1baae010040dafd62e51f5314299dc26b9c5cc8de9e4ca77042",
+      "source": "client_portrait_redraw"
+    },
+    "descendant-guardian.png": {
+      "name": "子嗣守护",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "9d0a57df8732134d0075067e3f0dc606cd7c68e6e3f99247f44202e67fc690b1",
+      "source": "client_portrait_redraw"
+    },
+    "yhxt-stage.png": {
+      "name": "一号信徒",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "3d5f79e8e63e2b7bdc7a9983b25e65e55c33fad6635b4c7d56d621a2527e48b6",
+      "source": "client_portrait_redraw"
+    },
+    "anxia.png": {
+      "name": "安西娅",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "6e0cac343f450e8bc6562c15b2b9c965952b9d6ab9913935b1940851dd60105e",
+      "source": "client_portrait_redraw"
+    },
+    "mr-barney.png": {
+      "name": "巴尼先生",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "673417d7f199edf8b772ee0110e9cdf0934128249541d4cca0afd5753a5c3b5b",
+      "source": "client_portrait_redraw"
+    },
+    "viscountess.png": {
+      "name": "子爵夫人",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "e21ba44e16635c50bec5f74a0611269da4655286478251805a654890516cf112",
+      "source": "client_portrait_redraw"
+    },
+    "johnny-memory.png": {
+      "name": "强尼",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "e793493fed88e6c1abc6d768873ce5a7bf8ca12670c766fa08f059fc89a241c4",
+      "source": "client_portrait_redraw"
+    },
+    "drill-memory.png": {
+      "name": "钻头",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "9097bf69b28c2b721e3c72a3f4e9f7189b4b2ae72d9d44d488b8859066125fa6",
+      "source": "client_portrait_redraw"
+    },
+    "bunny-memory.png": {
+      "name": "邦尼",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "0e35d26374d97f556641e0dd844f1e137efda5a5b65e4b07ffd9c0791db039e6",
+      "source": "client_portrait_redraw"
+    },
+    "war-dragon.png": {
+      "name": "战争巨龙",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "71ed95882e977aff017fc939a579c78457a571acf1aebb9996882ba6ac762bd0",
+      "source": "client_portrait_redraw"
+    },
+    "training-dummy.png": {
+      "name": "木桩",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "790e2b597ee680e3df742a4ef0b95ec5dbaa394e45bf571fea2d44c6fff70558",
+      "source": "client_portrait_redraw"
+    },
+    "dream-catcher.png": {
+      "name": "梦境捕手（原创示意）",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "d647e916beffcc0665150601b6d436da6df2e169fa66b250bca359fb31d93010",
+      "source": "original_symbolic_design"
+    }
+  },
+  "coverage": {
+    "mapped_templates": 84,
+    "runtime_templates": 83,
+    "portraits": 20,
+    "missing_runtime_templates": {}
+  }
+}

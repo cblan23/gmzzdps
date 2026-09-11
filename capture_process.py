@@ -231,8 +231,9 @@ class TeamStatsResponseHealth:
             if not isinstance(record, dict):
                 continue
             try:
-                damage = int(
-                    record.get("damage", record.get("raw_damage", 0)) or 0
+                damage = max(
+                    int(record.get("damage", 0) or 0),
+                    int(record.get("raw_damage", 0) or 0),
                 )
             except (TypeError, ValueError, OverflowError):
                 damage = 0
@@ -1186,6 +1187,11 @@ def _capture_forever(
                         if team_hook is not None:
                             try:
                                 team_hook.set_enabled(True)
+                                rearm = getattr(
+                                    team_hook, "rearm_request_schedule", None
+                                )
+                                if callable(rearm):
+                                    rearm(settle_seconds=0.05)
                             except Exception:
                                 _put(
                                     output_queue,
@@ -1256,6 +1262,39 @@ def _capture_forever(
 
                 team_status = None
                 if now >= next_team_status_at:
+                    if team_hook is not None:
+                        attached_check = getattr(
+                            team_hook, "is_attached", None
+                        )
+                        try:
+                            team_attached = (
+                                bool(attached_check())
+                                if callable(attached_check)
+                                else True
+                            )
+                        except Exception:
+                            team_attached = False
+                        if not team_attached:
+                            _put(
+                                output_queue,
+                                "diagnostic",
+                                {
+                                    "component": "team_detached",
+                                    "details": "request_entry_detached",
+                                },
+                            )
+                            previous_team_hook = team_hook
+                            if _close_hook(
+                                output_queue, "team", previous_team_hook
+                            ):
+                                team_hook = None
+                                team_response_health.mark_hook_missing()
+                                next_team_install_at = 0.0
+                                if (
+                                    current_team_stats_mode
+                                    == TEAM_STATS_MODE_TEAM
+                                ):
+                                    try_install_team_hook()
                     raw_team_status: dict[str, object] = {
                         "enabled": False,
                         "request_count": team_response_health.last_request_count,

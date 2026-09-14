@@ -16,11 +16,16 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
+try:
+    from . import bot_cards
+except ImportError:
+    import bot_cards
 
 from profile_upload import (
     PROFILE_ERROR_MESSAGES,
@@ -78,11 +83,18 @@ COMBAT_CLOCK_RETENTION_SECONDS = 7 * 24 * 60 * 60
 COMBAT_CLOCK_V2_CLIENT_LIVE_SECONDS = 15.0
 COMBAT_CLOCK_V2_MAX_REVISION = (1 << 63) - 1
 COMBAT_CLOCK_CLEANUP_INTERVAL_SECONDS = 60.0
+COMBAT_CLOCK_CLEANUP_BATCH_SIZE = 256
 SQLITE_BUSY_TIMEOUT_MS = 5000
 SQLITE_BUSY_RETRY_ATTEMPTS = 2
 SQLITE_BUSY_RETRY_DELAY_SECONDS = 0.05
 SQLITE_WRITE_QUEUE_TIMEOUT_SECONDS = 5.0
 _DATABASE_WRITE_LOCK = threading.RLock()
+_DATABASE_CONTEXT = threading.local()
+_DATABASE_METRICS_LOCK = threading.Lock()
+_DATABASE_WRITE_OWNER = None
+_DATABASE_METRICS = {"transactions": 0, "timeouts": 0, "waiting": 0,
+                     "max_wait_ms": 0.0, "max_hold_ms": 0.0}
+_DATABASE_SLOW_WRITES = deque(maxlen=16)
 _COMBAT_CLOCK_CLEANUP_STATE: tuple[str, float] | None = None
 PROFILE_HMAC_KEY_PATH = os.environ.get("GMZZ_PROFILE_HMAC_KEY_PATH", "").strip()
 _PROFILE_HMAC_KEY_LOCK = threading.Lock()
@@ -137,11 +149,11 @@ try:
         60,
         min(
             300,
-            int(os.environ.get("GMZZ_MONITOR_RUNTIME_CAPABILITY_TTL", "120")),
+            int(os.environ.get("GMZZ_MONITOR_RUNTIME_CAPABILITY_TTL", "240")),
         ),
     )
 except (TypeError, ValueError, OverflowError):
-    RUNTIME_CAPABILITY_TTL_SECONDS = 120
+    RUNTIME_CAPABILITY_TTL_SECONDS = 240
 MAX_UPDATE_BYTES = 256 * 1024 * 1024
 ROLLBACK_VERSION_PATTERN = re.compile(
     r"^(?P<numeric>\d+(?:\.\d+){2,3})(?P<suffix>[a-z]?)$",
@@ -158,6 +170,7 @@ FEEDBACK_CATEGORIES = {
     "other": "其他问题",
 }
 CARD_TYPES = {
+    "bot_8h": ("机器人发卡专用", 8 * 60 * 60, False),
     "test_2h": ("测试2小时卡", 2 * 60 * 60, False),
     "daily": ("天卡", 24 * 60 * 60, False),
     "weekly": ("周卡", 7 * 24 * 60 * 60, False),
@@ -637,7 +650,15 @@ def _load_update_metadata_file(
         "size": size,
         "notes": clean_multiline_text(value.get("notes"), 1000),
         "required": bool(value.get("required")),
+        "cdn_download_url": "",
+        "legacy_cdn_redirect": False,
     }
+    cdn_url = str(value.get("cdn_download_url", "")).strip()
+    if cdn_url:
+        expected = f"https://downloads.daodaogame.vip/releases/{build_id}/Dps-Logs-v{display_version}.exe"
+        if cdn_url == expected:
+            metadata["cdn_download_url"] = cdn_url
+            metadata["legacy_cdn_redirect"] = value.get("legacy_cdn_redirect") is True
     return metadata, update_path
 
 
@@ -841,15 +862,49 @@ def database():
 
 @contextmanager
 def _database_write_guard():
-    acquired = _DATABASE_WRITE_LOCK.acquire(
-        timeout=SQLITE_WRITE_QUEUE_TIMEOUT_SECONDS
-    )
+    global _DATABASE_WRITE_OWNER
+    started = time.monotonic()
+    operation = getattr(_DATABASE_CONTEXT, "operation", "background")
+    with _DATABASE_METRICS_LOCK:
+        _DATABASE_METRICS["waiting"] += 1
+    try:
+        acquired = _DATABASE_WRITE_LOCK.acquire(timeout=SQLITE_WRITE_QUEUE_TIMEOUT_SECONDS)
+    finally:
+        with _DATABASE_METRICS_LOCK:
+            _DATABASE_METRICS["waiting"] -= 1
+    granted = time.monotonic()
+    wait_ms = (granted - started) * 1000
+    with _DATABASE_METRICS_LOCK:
+        _DATABASE_METRICS["max_wait_ms"] = max(_DATABASE_METRICS["max_wait_ms"], wait_ms)
     if not acquired:
+        with _DATABASE_METRICS_LOCK:
+            _DATABASE_METRICS["timeouts"] += 1
+            _DATABASE_SLOW_WRITES.append({"at": now_epoch(), "operation": operation,
+                "wait_ms": round(wait_ms, 2), "timeout": True,
+                "holder": _DATABASE_WRITE_OWNER[0] if _DATABASE_WRITE_OWNER else None})
         raise sqlite3.OperationalError("database write queue is busy")
+    previous_owner = _DATABASE_WRITE_OWNER
+    _DATABASE_WRITE_OWNER = (operation, granted)
     try:
         yield
     finally:
+        hold_ms = (time.monotonic() - granted) * 1000
+        _DATABASE_WRITE_OWNER = previous_owner
         _DATABASE_WRITE_LOCK.release()
+        with _DATABASE_METRICS_LOCK:
+            _DATABASE_METRICS["transactions"] += 1
+            _DATABASE_METRICS["max_hold_ms"] = max(_DATABASE_METRICS["max_hold_ms"], hold_ms)
+            if wait_ms >= 250 or hold_ms >= 250:
+                _DATABASE_SLOW_WRITES.append({"at": now_epoch(), "operation": operation,
+                    "wait_ms": round(wait_ms, 2), "hold_ms": round(hold_ms, 2), "timeout": False})
+
+
+def database_write_metrics() -> dict:
+    with _DATABASE_METRICS_LOCK:
+        owner = _DATABASE_WRITE_OWNER
+        return {**_DATABASE_METRICS, "recent_slow": list(_DATABASE_SLOW_WRITES),
+                "holder": owner[0] if owner else None,
+                "held_ms": round((time.monotonic()-owner[1])*1000, 2) if owner else 0.0}
 
 
 @contextmanager
@@ -858,7 +913,12 @@ def write_database():
     with _database_write_guard():
         with database() as connection:
             _retry_database_operation(lambda: connection.execute("BEGIN IMMEDIATE"))
-            yield connection
+            depth = getattr(_DATABASE_CONTEXT, "write_depth", 0)
+            _DATABASE_CONTEXT.write_depth = depth + 1
+            try:
+                yield connection
+            finally:
+                _DATABASE_CONTEXT.write_depth = depth
 
 
 def cleanup_expired_combat_clocks(
@@ -873,8 +933,12 @@ def cleanup_expired_combat_clocks(
         if 0.0 <= elapsed < COMBAT_CLOCK_CLEANUP_INTERVAL_SECONDS:
             return False
     cutoff = timestamp - COMBAT_CLOCK_RETENTION_SECONDS
-    connection.execute("DELETE FROM combat_clocks WHERE last_seen<?", (cutoff,))
-    connection.execute("DELETE FROM combat_clocks_v2 WHERE last_seen<?", (cutoff,))
+    for table in ("combat_clocks", "combat_clocks_v2"):
+        connection.execute(
+            f"DELETE FROM {table} WHERE clock_id IN "
+            f"(SELECT clock_id FROM {table} WHERE last_seen<? ORDER BY last_seen LIMIT ?)",
+            (cutoff, COMBAT_CLOCK_CLEANUP_BATCH_SIZE),
+        )
     _COMBAT_CLOCK_CLEANUP_STATE = (database_key, timestamp)
     return True
 
@@ -990,6 +1054,8 @@ def initialize_database() -> None:
                 ON feedbacks(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_combat_clocks_match
                 ON combat_clocks(party_key, target_key, last_seen DESC);
+            CREATE INDEX IF NOT EXISTS idx_combat_clocks_cleanup
+                ON combat_clocks(last_seen);
             CREATE INDEX IF NOT EXISTS idx_combat_clock_clients_clock
                 ON combat_clock_clients(clock_id, last_seen DESC);
             CREATE TABLE IF NOT EXISTS combat_clocks_v2 (
@@ -1023,6 +1089,8 @@ def initialize_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_combat_clocks_v2_match
                 ON combat_clocks_v2(party_key, target_key, last_seen DESC);
+            CREATE INDEX IF NOT EXISTS idx_combat_clocks_v2_cleanup
+                ON combat_clocks_v2(last_seen);
             CREATE INDEX IF NOT EXISTS idx_combat_clock_clients_v2_clock
                 ON combat_clock_clients_v2(clock_id, last_seen DESC);
             """
@@ -1047,6 +1115,8 @@ def initialize_database() -> None:
             connection.execute(
                 "ALTER TABLE sessions ADD COLUMN lease_sequence INTEGER NOT NULL DEFAULT 0"
             )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_card_active "
+                           "ON sessions(card_hash, ended_at, last_seen)")
         trial_claim_columns = {
             str(row["name"])
             for row in connection.execute(
@@ -1131,6 +1201,7 @@ def initialize_database() -> None:
                     "莫雪的小伙伴",
                 ),
             )
+        bot_cards.initialize(connection)
     if os.name != "nt":
         os.chmod(DATABASE_PATH, 0o600)
 
@@ -1162,6 +1233,12 @@ class MonitorHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _json(self, status: int, value: dict) -> None:
+        if getattr(_DATABASE_CONTEXT, "write_depth", 0):
+            # Serialize/write only after the transaction commits and unlocks.
+            if getattr(self, "_pending_json_response", None) is not None:
+                raise RuntimeError("multiple responses in one write transaction")
+            self._pending_json_response = (status, value)
+            return
         payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
@@ -1199,15 +1276,33 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
     def _run_request(self, operation) -> None:
         self._response_started = False
+        self._pending_json_response = None
+        previous_operation = getattr(_DATABASE_CONTEXT, "operation", "background")
+        path = urlsplit(getattr(self, "path", "")).path
+        categories = {"/api/v1/dps/session/start": "session_start",
+                      "/api/v1/dps/session/heartbeat": "heartbeat",
+                      "/api/v1/dps/session/end": "session_end",
+                      "/api/v1/dps/combat/clock": "combat_clock_v1",
+                      "/api/v2/dps/combat/clock": "combat_clock_v2"}
+        _DATABASE_CONTEXT.operation = categories.get(path, "admin" if "/admin/" in path else "other")
         try:
             operation()
         except sqlite3.OperationalError as error:
+            self._pending_json_response = None
             if not database_is_busy(error):
                 raise
             try:
                 self._database_busy_response(error)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
+        else:
+            pending = self._pending_json_response
+            self._pending_json_response = None
+            if pending is not None:
+                self._json(*pending)
+        finally:
+            self._pending_json_response = None
+            _DATABASE_CONTEXT.operation = previous_operation
 
     def _html(self, status: int, value: str) -> None:
         payload = value.encode("utf-8")
@@ -1265,6 +1360,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     "/api/v1/dps/update/download" if available else ""
                 ),
                 "sha256": metadata["sha256"] if available else "",
+                "cdn_download_url": metadata.get("cdn_download_url", "") if available else "",
                 "size": metadata["size"] if available else 0,
                 "filename": metadata["filename"] if available else "",
                 "notes": metadata["notes"] if available else "",
@@ -1328,6 +1424,17 @@ class MonitorHandler(BaseHTTPRequestHandler):
             )
             return
         metadata, update_path = loaded
+        if metadata.get("legacy_cdn_redirect") and metadata.get("cdn_download_url"):
+            # The metadata loader accepts only this account's immutable CDN
+            # build URL. Keep this opt-in: legacy urllib carries request headers
+            # across origins; administrators must choose this compatibility mode.
+            self._response_started = True
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", metadata["cdn_download_url"])
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self._send_update_file(metadata, update_path)
 
     def _download_rollback(self, version: str) -> None:
@@ -1351,9 +1458,43 @@ class MonitorHandler(BaseHTTPRequestHandler):
     def _send_update_file(
         self, metadata: dict[str, object], update_path: Path
     ) -> None:
-        self.send_response(HTTPStatus.OK)
+        size = int(metadata["size"])
+        start, end = 0, size - 1
+        etag = '"' + str(metadata["sha256"]) + '"'
+        range_header = self.headers.get("Range", "")
+        if_range = self.headers.get("If-Range", "")
+        partial = False
+        if range_header and (not if_range or if_range == etag):
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+            try:
+                if match is None or not any(match.groups()):
+                    raise ValueError()
+                left, right = match.groups()
+                if left:
+                    start = int(left)
+                    end = min(int(right), size - 1) if right else size - 1
+                else:
+                    suffix = int(right)
+                    if suffix <= 0:
+                        raise ValueError()
+                    start = max(0, size - suffix)
+                if not 0 <= start <= end < size:
+                    raise ValueError()
+                partial = True
+            except ValueError:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+        self.send_response(HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(metadata["size"]))
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("ETag", etag)
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         encoded_filename = quote(str(metadata["filename"]), safe="")
         fallback_filename = update_download_fallback_filename(
             metadata["latest_version"]
@@ -1370,11 +1511,14 @@ class MonitorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             with update_path.open("rb") as handle:
-                while True:
-                    chunk = handle.read(256 * 1024)
+                handle.seek(start)
+                remaining = end - start + 1
+                while remaining:
+                    chunk = handle.read(min(256 * 1024, remaining))
                     if not chunk:
                         break
                     self.wfile.write(chunk)
+                    remaining -= len(chunk)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
@@ -1532,7 +1676,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/v1/dps/admin/status":
             if self._require_admin():
-                self._admin_status()
+                card_mode = parse_qs(parsed.query).get('cards', ['1'])[0]
+                self._admin_status(include_cards=card_mode != '0', visible_cards_only=card_mode in ('0', 'visible'),
+                                   card_query=parse_qs(parsed.query) if card_mode == 'visible' else None)
             return
         if path == "/api/v1/dps/admin/feedback":
             if self._require_admin():
@@ -1557,6 +1703,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/v1/dps/session/heartbeat":
             self._heartbeat()
+            return
+        if path in ('/api/v1/dps/bot/claim', '/api/v1/dps/bot/stats'):
+            self._bot_card_api(path.endswith('/stats'))
             return
         if path == "/api/v1/dps/session/end":
             self._end_session()
@@ -3310,7 +3459,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _admin_status(self) -> None:
+    def _admin_status(self, *, include_cards: bool = True, visible_cards_only: bool = False, card_query=None) -> None:
         timestamp = now_epoch()
         threshold = timestamp - ONLINE_WINDOW
         with database() as connection:
@@ -3348,10 +3497,23 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 """
                 SELECT * FROM cards
                 WHERE deleted_at IS NULL
+                    AND (?=0 OR (revoked=0 AND (permanent=1 OR COALESCE(expires_at,0)=0 OR expires_at>?)))
                 ORDER BY created_at DESC
                 LIMIT 5000
-                """
-            ).fetchall()
+                """, (int(visible_cards_only), timestamp),
+            ).fetchall() if include_cards else []
+            card_counts = connection.execute(
+                """SELECT
+                SUM(CASE WHEN revoked=0 AND (permanent=1 OR COALESCE(expires_at,0)=0 OR expires_at>?)
+                    AND COALESCE(activated_at,0)>0 THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN revoked=0 AND (permanent=1 OR COALESCE(expires_at,0)=0 OR expires_at>?)
+                    AND COALESCE(activated_at,0)=0 THEN 1 ELSE 0 END) AS unused
+                FROM (SELECT revoked,permanent,expires_at,activated_at FROM cards
+                    WHERE deleted_at IS NULL
+                        AND (?=0 OR (revoked=0 AND (permanent=1 OR COALESCE(expires_at,0)=0 OR expires_at>?)))
+                    ORDER BY created_at DESC LIMIT 5000)""",
+                (timestamp, timestamp, int(visible_cards_only), timestamp),
+            ).fetchone()
             feedback_counts = connection.execute(
                 "SELECT COUNT(*) AS total FROM feedbacks"
             ).fetchone()
@@ -3474,6 +3636,24 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     "deletable": not is_partner_card(row["card_key"]),
                 }
             )
+        card_total = len(cards)
+        card_page = 1
+        card_page_count = 1
+        if card_query is not None:
+            term = clean_text(card_query.get('search', [''])[0], 128).casefold()
+            state = clean_text(card_query.get('state', [''])[0], 16)
+            sold = clean_text(card_query.get('sold', [''])[0], 16)
+            cards = [c for c in cards if (not state or c['state'] == state)
+                     and (not sold or (sold == 'sold' and c['sold']) or (sold == 'unsold' and not c['sold']))
+                     and (not term or term in ' '.join(str(c.get(k, '')) for k in
+                          ('card_key', 'note', 'remark', 'bound_client_id')).casefold())]
+            card_total = len(cards)
+            card_page_count = max(1, math.ceil(card_total / 50))
+            try:
+                card_page = min(card_page_count, max(1, int(card_query.get('page', ['1'])[0])))
+            except (ValueError, TypeError, OverflowError):
+                card_page = 1
+            cards = cards[(card_page-1)*50:card_page*50]
         self._json(
             HTTPStatus.OK,
             {
@@ -3481,6 +3661,10 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 "server_time": timestamp,
                 "heartbeat_interval": HEARTBEAT_INTERVAL,
                 "online_window": ONLINE_WINDOW,
+                "card_total": card_total,
+                "card_page": card_page,
+                "card_page_count": card_page_count,
+                "cards_paginated": card_query is not None,
                 "device_rebind_enabled": bool(CARD_DEVICE_REBIND_ENABLED),
                 "default_rebind_cooldown_seconds": CARD_REBIND_COOLDOWN_SECONDS,
                 "logged_in": int(totals["logged_in"] or 0),
@@ -3488,8 +3672,10 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 "seen_24h": int(totals["seen_24h"] or 0),
                 "sessions": sessions,
                 "cards": cards,
-                "active_cards": sum(card["state"] == "active" for card in cards),
-                "unused_cards": sum(card["state"] == "unused" for card in cards),
+                "cards_included": include_cards,
+                "database_writes": database_write_metrics(),
+                "active_cards": int(card_counts['active'] or 0),
+                "unused_cards": int(card_counts['unused'] or 0),
                 "feedback_total": int(feedback_counts["total"] or 0),
             },
         )
@@ -3517,6 +3703,33 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     (now_epoch(), client_id),
                 )
         self._json(HTTPStatus.OK, {"ok": True, "changed": bool(changed)})
+
+    def _bot_card_api(self, statistics=False) -> None:
+        expected=os.environ.get('CARD_API_TOKEN','')
+        if len(expected)<32 or not hmac.compare_digest(self._bearer_token(),expected):
+            self._json(HTTPStatus.UNAUTHORIZED,dict(success=False,code='UNAUTHORIZED'))
+            return
+        body=self._body()
+        if not isinstance(body,dict):return
+        groups={v.strip() for v in os.environ.get('ALLOWED_GROUPS','').split(',') if v.strip()}
+        admins={v.strip() for v in os.environ.get('ADMIN_QQS','').split(',') if v.strip()}
+        if statistics:
+            if str(body.get('admin_qq','')) not in admins:
+                self._json(HTTPStatus.FORBIDDEN,dict(success=False,code='ADMIN_REQUIRED'));return
+            with database() as connection:result=bot_cards.stats(connection,now_epoch())
+        else:
+            qq,group=str(body.get('qq','')),str(body.get('group_id',''))
+            rid=str(body.get('request_id',''))
+            if not re.fullmatch(r'[1-9][0-9]{4,15}',qq) or not re.fullmatch(r'[a-zA-Z0-9:_-]{1,128}',rid):
+                self._json(HTTPStatus.BAD_REQUEST,dict(success=False,code='BAD_REQUEST'));return
+            if group not in groups:
+                self._json(HTTPStatus.FORBIDDEN,dict(success=False,code='GROUP_NOT_ALLOWED'));return
+            try:
+                with write_database() as connection:
+                    result=bot_cards.claim(connection,qq,group,rid,now_epoch(),generate_card_key,token_digest)
+            except ValueError:
+                self._json(HTTPStatus.CONFLICT,dict(success=False,code='REQUEST_CONFLICT'));return
+        self._json(HTTPStatus.OK,result)
 
     def _create_cards(self) -> None:
         body = self._body()
@@ -3992,7 +4205,7 @@ function switchTab(name){
   byId('onlineTab').classList.toggle('active',online);
   byId('cardsTab').classList.toggle('active',cards);
   byId('feedbackTab').classList.toggle('active',feedback);
-  if(cards){renderCards();requestAnimationFrame(syncCardScrollWidth)}
+  if(cards){renderCards();requestAnimationFrame(syncCardScrollWidth);load()}
   if(feedback)loadFeedback();
 }
 byId('onlineTab').onclick=function(){switchTab('online')};
@@ -4091,18 +4304,11 @@ function renderOnline(){
   bindActions();
 }
 function renderCards(){
-  const term=byId('cardSearch').value.trim().toLowerCase();
-  const state=byId('cardStateFilter').value;
-  const sold=byId('cardSoldFilter').value;
-  const cards=allCards.filter(function(x){
-    const matchesSold=!sold||(sold==='sold'&&x.sold)||(sold==='unsold'&&!x.sold);
-    return (!state||x.state===state)&&matchesSold&&(!term||(x.card_key+' '+x.note+' '+(x.remark||'')+' '+x.bound_client_id).toLowerCase().includes(term));
-  });
-  const pageCount=Math.max(1,Math.ceil(cards.length/CARD_PAGE_SIZE));
-  cardPage=Math.min(Math.max(1,cardPage),pageCount);
-  const pageCards=cards.slice((cardPage-1)*CARD_PAGE_SIZE,cardPage*CARD_PAGE_SIZE);
+  const cards=allCards;
+  const pageCount=serverCardPageCount;
+  const pageCards=cards;
   visibleCardIds=pageCards.filter(function(x){return !x.permanent}).map(function(x){return x.card_id});
-  byId('cardCount').textContent=cards.length+' / '+allCards.length;
+  byId('cardCount').textContent=serverCardTotal+' 张';
   byId('cardPageInfo').textContent=cardPage+' / '+pageCount;
   byId('prevCardPage').disabled=cardPage<=1;
   byId('nextCardPage').disabled=cardPage>=pageCount;
@@ -4191,17 +4397,25 @@ byId('cardScrollTop').onscroll=function(){if(syncingScroll)return;syncingScroll=
 byId('cardTableWrap').onscroll=function(){if(syncingScroll)return;syncingScroll=true;byId('cardScrollTop').scrollLeft=byId('cardTableWrap').scrollLeft;requestAnimationFrame(function(){syncingScroll=false})};
 window.addEventListener('resize',syncCardScrollWidth);
 
+let statusLoading=false,statusReloadQueued=false,serverCardTotal=0,serverCardPageCount=1;
 async function load(){
+  if(statusLoading){statusReloadQueued=true;return}
+  statusLoading=true;
+  const includeCards=!byId('cardsPanel').hidden;
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),15000);
   try{
-    const r=await fetch('/api/v1/dps/admin/status',{cache:'no-store'});
+    const query=new URLSearchParams({cards:includeCards?'visible':'0',page:String(cardPage),search:byId('cardSearch').value.trim(),state:byId('cardStateFilter').value,sold:byId('cardSoldFilter').value});
+    const requestKey=query.toString();
+    const r=await fetch('/api/v1/dps/admin/status?'+requestKey,{cache:'no-store',signal:controller.signal});
     if(!r.ok)throw new Error(r.status);
     const d=await r.json();
+    if(includeCards&&(String(cardPage)!==query.get('page')||byId('cardSearch').value.trim()!==query.get('search')||byId('cardStateFilter').value!==query.get('state')||byId('cardSoldFilter').value!==query.get('sold'))){statusReloadQueued=true;return}
     serverNow=d.server_time;
     deviceRebindEnabled=!!d.device_rebind_enabled;
-    allCards=d.cards||[];
+    if(d.cards_included!==false){allCards=d.cards||[];serverCardTotal=d.card_total||0;serverCardPageCount=d.card_page_count||1;cardPage=d.card_page||1}
     allSessions=d.sessions||[];
-    const liveIds=new Set(allCards.map(function(x){return x.card_id}));
-    Array.from(selectedCardIds).forEach(function(id){if(!liveIds.has(id))selectedCardIds.delete(id)});
+    // Keep selections on other pages; the server validates batch actions.
     byId('logged').textContent=d.logged_in;
     byId('using').textContent=d.using_now;
     byId('seen').textContent=d.seen_24h;
@@ -4209,16 +4423,18 @@ async function load(){
     byId('refresh').textContent='每 30 秒自动刷新 · '+new Date(d.server_time*1000).toLocaleTimeString();
     renderOnline();
     if(!byId('cardsPanel').hidden)renderCards();
-  }catch(e){byId('refresh').textContent='连接失败'}
+  }catch(e){byId('refresh').textContent=e.name==='AbortError'?'刷新超时，保留上次数据':'连接失败，保留上次数据'}
+  finally{clearTimeout(timeout);statusLoading=false;if(statusReloadQueued){statusReloadQueued=false;load()}}
 }
 
-function resetCardPageAndRender(){cardPage=1;renderCards()}
+let cardSearchTimer;
+function resetCardPageAndRender(){cardPage=1;clearTimeout(cardSearchTimer);cardSearchTimer=setTimeout(load,250)}
 byId('onlineCardSearch').oninput=renderOnline;
 byId('cardSearch').oninput=resetCardPageAndRender;
 byId('cardStateFilter').onchange=resetCardPageAndRender;
 byId('cardSoldFilter').onchange=resetCardPageAndRender;
-byId('prevCardPage').onclick=function(){if(cardPage>1){cardPage-=1;renderCards()}};
-byId('nextCardPage').onclick=function(){cardPage+=1;renderCards()};
+byId('prevCardPage').onclick=function(){if(cardPage>1){cardPage-=1;load()}};
+byId('nextCardPage').onclick=function(){if(cardPage<serverCardPageCount){cardPage+=1;load()}};
 byId('selectVisibleCards').onchange=function(){
   visibleCardIds.forEach(function(id){if(byId('selectVisibleCards').checked)selectedCardIds.add(id);else selectedCardIds.delete(id)});
   renderCards();
@@ -4255,6 +4471,7 @@ byId('createForm').onsubmit=async function(event){
     await load();
   }catch(e){alert('新增失败：'+e.message)}
 };
+byId('createCardType').add(new Option('机器人发卡专用（8小时）','bot_8h'));
 syncCreateCardForm();
 byId('closeModal').onclick=function(){byId('resultModal').hidden=true};
 byId('resultModal').onclick=function(event){if(event.target===byId('resultModal'))byId('resultModal').hidden=true};

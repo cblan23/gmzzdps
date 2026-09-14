@@ -41,6 +41,8 @@ import tkinter.font as tkfont
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageTk
 
 from boss_damage import BossDamageTracker
+from hud_render_cache import HudRenderCache, hud_render_delay
+from license_recovery import LicenseRecovery
 from boss_enrage import (
     BossEnragePredictor,
     EnragePrediction,
@@ -233,7 +235,7 @@ SHARED_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", APP_DIR)) / "GMZZDpsMeter"
 DATA_DIR = (
     (
         Path(os.environ.get("LOCALAPPDATA", APP_DIR))
-        / (CAPTURE_DATA_DIRECTORY or "GMZZDpsMeterNpcap")
+        / (CAPTURE_DATA_DIRECTORY or "GMZZDpsMeter")
         if IS_NPCAP_BACKEND
         else SHARED_DATA_DIR
     )
@@ -241,9 +243,12 @@ DATA_DIR = (
     else APP_DIR
 )
 CONFIG_PATH = DATA_DIR / "dps_config.json"
+if not IS_FROZEN and os.environ.get("GMZZ_DPS_DATA_DIR"):
+    DATA_DIR = Path(os.environ["GMZZ_DPS_DATA_DIR"]).resolve()
+    CONFIG_PATH = DATA_DIR / "dps_config.json"
 SHARED_CONFIG_PATH = (
     SHARED_DATA_DIR / "dps_config.json"
-    if IS_NPCAP_BACKEND
+    if IS_NPCAP_BACKEND and IS_FROZEN
     else CONFIG_PATH
 )
 DEVICE_ID_PATH = SHARED_DATA_DIR / "device_id"
@@ -270,10 +275,10 @@ UPLOAD_STATE_PATH = DATA_DIR / "combat_upload_state.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘 Dps-Logs"
-APP_VERSION = "0.2.3b"
+APP_VERSION = "0.2.3d"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.2.3+20260911.5"
+CLIENT_BUILD = "0.2.3+20260912.3"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
     "runtime-profile.dev.json"
@@ -547,7 +552,7 @@ FIRST_BELIEVER_ANXIA_TEMPLATE_IDS = frozenset(
     {7_100_201, 7_100_203, 7_100_208, 7_100_210}
 )
 FIRST_BELIEVER_ANXIA_SUCCESSOR_TEMPLATE_IDS = frozenset({7_100_203, 7_100_210})
-LICENSE_HEARTBEAT_FAILURE_GRACE_SECONDS = 50.0
+LICENSE_HEARTBEAT_FAILURE_GRACE_SECONDS = 180.0
 COMBAT_CLOCK_ACTIVE_INTERVAL_SECONDS = 1.0
 COMBAT_CLOCK_OPENING_WINDOW_SECONDS = 8.0
 COMBAT_CLOCK_STEADY_INTERVAL_SECONDS = 8.0
@@ -3017,6 +3022,7 @@ class CombatModel:
         self.team_healing_states: dict[int, TeamHealingState] = {}
         self.stage_actor_taken: dict[int, int] = {}
         self.team_server_time = 0
+        self.team_counter_regressions: list[dict] = []
         self.team_server_update_100ns = 0
         self.encounter_start_signal_100ns = 0
         self.enrage_countdown_signal = ""
@@ -3071,6 +3077,8 @@ class CombatModel:
         self.combat_target_id: int | None = None
         self.pending_active_boss_id: int | None = None
         self.pending_active_boss_time_100ns = 0
+        self.closed_encounter_target_ids: set[int] = set()
+        self.awaiting_post_exit_context = False
         # Karl Edgar's opening and final form are separated by two real scene
         # refreshes.  Keep the encounter alive across that verified intermission,
         # but freeze every accepted combat counter until the final form appears.
@@ -3300,6 +3308,17 @@ class CombatModel:
         archive_current_record: bool = True,
     ) -> None:
         preserved_target_id: int | None = None
+        if archive_reason in {"party_exit", "space_transition", "scene_change"} and self._encounter_started():
+            # Exit notifications precede the last callbacks/cumulative replies.
+            # Those callbacks belong to the closed pull, not a new encounter.
+            closed_targets = set(self.encounter_target_ids)
+            closed_targets.update(self._encounter_damage_target_ids())
+            if self.combat_target_id:
+                closed_targets.add(self.combat_target_id)
+            self.closed_encounter_target_ids = set(sorted(
+                self.closed_encounter_target_ids | closed_targets
+            )[-256:])
+            self.awaiting_post_exit_context = True
         carried_skill_cast_events: list[dict] = []
         if archive_reason in {"new_encounter", "team_counter_reset"}:
             previous_end = (
@@ -3397,6 +3416,7 @@ class CombatModel:
         self.enrage_countdown_signal = ""
         self.enrage_countdown_start_100ns = 0
         self.team_zero_baseline_signal_100ns = 0
+        self.team_counter_regressions.clear()
         self.events.clear()
         self.skill_cast_events.clear()
         self.skill_cast_event_keys.clear()
@@ -3878,6 +3898,8 @@ class CombatModel:
 
     def ingest_heal(self, event: dict) -> bool:
         """Ingest one exact HealSyncV2 callback without changing DPS clocks."""
+        if self.awaiting_post_exit_context:
+            return False
         try:
             healer_id = int(event.get("healer_id", 0) or 0)
             target_id = int(event.get("target_id", 0) or 0)
@@ -6520,8 +6542,6 @@ class CombatModel:
             for boss in boss_monsters
         ):
             return False
-        if not self._all_encounter_combatants_out():
-            return False
         end_time = max(
             self._event_seconds({"filetime_100ns": boss.death_time_100ns})
             for boss in boss_monsters
@@ -7334,6 +7354,11 @@ class CombatModel:
         }
 
     def build_combat_record(self, reason: str = "completed") -> dict | None:
+        if self.combat_end_time and self.combat_end_reason == "target_defeated":
+            # Leaving the party/map or closing the app may flush the archive
+            # before the idle timer does. The flush trigger cannot overwrite
+            # an already confirmed victory and hide its upload action.
+            reason = "target_defeated"
         signature = self._archive_signature()
         if signature is None:
             return None
@@ -7745,6 +7770,7 @@ class CombatModel:
                     reverse=True,
                 )
             ],
+            "unconfirmed_team_counter_regressions": list(self.team_counter_regressions),
             "team_cumulative_states": [
                 {
                     "actor_id": actor_id,
@@ -8232,6 +8258,8 @@ class CombatModel:
             or event.get("player_attacker") is False
             or attacker in self.non_player_actor_ids
         ):
+            return
+        if target in self.closed_encounter_target_ids:
             return
         event = dict(event)
         event["skill_id"] = self.normalize_damage_skill_id(
@@ -10250,6 +10278,8 @@ class CombatModel:
             self.member_death_states.clear()
             self.member_life_times.clear()
         self.scene_id = scene_id
+        self.awaiting_post_exit_context = False
+        self.closed_encounter_target_ids.difference_update(visible_entity_ids)
         return changed
 
     def rebind_team_actors(self, update: dict) -> bool:
@@ -10883,6 +10913,8 @@ class CombatModel:
         if not entity_id:
             return False
 
+        if entity_id in self.closed_encounter_target_ids:
+            return False
         profile = dict(update)
         profile.update(
             {
@@ -10908,6 +10940,7 @@ class CombatModel:
         if not self._is_priority_target(entity_id):
             return changed
 
+        self.awaiting_post_exit_context = False
         current_id = int(self.combat_target_id or 0)
         if entity_id in self._current_boss_target_ids():
             self.pending_active_boss_id = None
@@ -11012,6 +11045,24 @@ class CombatModel:
             return False
         in_combat = bool(update.get("in_combat"))
         previous = self.entity_combat_states.get(entity_id)
+        if (
+            in_combat
+            and previous is False
+            and self.combat_end_reason in {"party_wipe", "target_reset"}
+            and self.combat_end_time
+            and entity_id == self.combat_target_id
+            and self._is_priority_target(entity_id)
+            and self._event_seconds(update) > self.combat_end_time
+        ):
+            # The confirmed Boss has left combat and entered again after a
+            # failed pull. Archive that attempt and clear its metrics now,
+            # before the first damage/snapshot arrives in the new attempt.
+            # Ordinary phase transitions and unrelated entities cannot reset it.
+            self.reset(
+                keep_identity=True,
+                keep_monsters=True,
+                archive_reason=self.combat_end_reason,
+            )
         self.entity_combat_states[entity_id] = in_combat
         self.entity_combat_state_times[entity_id] = timestamp
         self.latest_network_time_100ns = max(
@@ -11379,6 +11430,10 @@ class CombatModel:
         if confirmed_non_player:
             non_player_changed = self._mark_non_player_actor(entity_id)
             changed |= non_player_changed
+        if entity_id in self.closed_encounter_target_ids:
+            return changed
+        if self._is_priority_target(entity_id):
+            self.awaiting_post_exit_context = False
         requires_recompute = bool(
             non_player_changed
             or was_priority_target != self._is_priority_target(entity_id)
@@ -11637,6 +11692,21 @@ class CombatModel:
         encounter_age = event_time - self.first_damage_time
         return 0.0 <= encounter_age <= OPENING_TEAM_COUNTER_REBASE_SECONDS
 
+    def _live_boss_counter_regression(self) -> bool:
+        """An individual regressed counter cannot reset a demonstrably live pull."""
+        if (not self.first_damage_time or self.combat_end_time
+                or self.pending_active_boss_id or self.boss_reset_pending_100ns):
+            return False
+        monster = self.monsters.get(int(self.combat_target_id or 0))
+        if monster is None or monster.death_confirmed or self._is_dummy_target(monster.entity_id):
+            return False
+        if monster.current_hp is not None and monster.current_hp <= 0:
+            return False
+        ceiling = self._monster_max_hp(monster)
+        wounded = bool(monster.current_hp is not None and ceiling > 0
+                       and 0 < monster.current_hp < ceiling * .995)
+        return wounded or self.entity_combat_states.get(monster.entity_id) is True
+
     def _begin_team_counter_reset(
         self, server_time: int, timestamp: int
     ) -> None:
@@ -11851,6 +11921,8 @@ class CombatModel:
             state.baseline_snapshot_time_100ns = signal
 
     def ingest_team_stat(self, update: dict) -> bool:
+        if self.awaiting_post_exit_context:
+            return False
         invalid = [key for key in ('absolute_damage', 'absolute_taken', 'absolute_effective_healing')
                    if key in update and parse_combat_amount(update[key]) is None]
         if invalid:
@@ -12173,6 +12245,24 @@ class CombatModel:
                 state.carried_damage = state.accepted_damage
                 state.baseline_absolute = absolute_damage
                 state.baseline_snapshot_time_100ns = timestamp
+            elif self._live_boss_counter_regression():
+                # Common field 10 is per-member, not a team encounter ID.
+                # A partial/lower member row while the same Boss is alive is
+                # insufficient evidence to discard all events and restart the
+                # clock. Retain the last verified total; do not sum the lower
+                # value or invent an offset. Real wipe/refill/new-target paths
+                # still reset the encounter using their independent evidence.
+                self.team_counter_regressions.append({
+                    "actor_id": actor_id, "filetime_100ns": timestamp,
+                    "previous_absolute": state.last_absolute,
+                    "received_absolute": absolute_damage,
+                    "previous_server_time": state.server_time,
+                    "received_server_time": server_time,
+                    "omitted_zero": omitted_zero,
+                    "policy": "retain_verified_total_until_counter_recovers_or_encounter_resets",
+                })
+                del self.team_counter_regressions[:-16]
+                return False
             else:
                 self._begin_team_counter_reset(
                     server_time or self.team_server_time,
@@ -16106,6 +16196,7 @@ class LicenseHeartbeatWorker(threading.Thread):
         stop_event: threading.Event,
     ):
         super().__init__(name="DpsLicenseHeartbeat", daemon=True)
+        self.recovery = LicenseRecovery(LICENSE_HEARTBEAT_FAILURE_GRACE_SECONDS)
         self.licensing = licensing
         self.messages = messages
         self.stop_event = stop_event
@@ -16127,7 +16218,6 @@ class LicenseHeartbeatWorker(threading.Thread):
             return self.using, self.character_name, self.game_pid
 
     def run(self) -> None:
-        last_success = time.monotonic()
         interval = 30
         try:
             while not self.stop_event.is_set():
@@ -16139,18 +16229,9 @@ class LicenseHeartbeatWorker(threading.Thread):
                         game_pid=game_pid,
                     )
                 except LicensingConnectionError:
-                    if (
-                        time.monotonic() - last_success
-                        >= LICENSE_HEARTBEAT_FAILURE_GRACE_SECONDS
-                    ):
-                        self.messages.put(
-                            (
-                                "license_required",
-                                "授权服务器连接中断，请重新输入卡号。",
-                            )
-                        )
-                        return
-                    self.stop_event.wait(10.0)
+                    delay = self.recovery.failed()
+                    self.messages.put(("license_reconnecting", None))
+                    self.stop_event.wait(delay)
                     continue
                 if not result.authorized:
                     self.messages.put(
@@ -16160,6 +16241,7 @@ class LicenseHeartbeatWorker(threading.Thread):
                         )
                     )
                     return
+                self.recovery.succeeded()
                 if result.runtime_capability is not None:
                     self.messages.put(
                         (
@@ -16167,7 +16249,7 @@ class LicenseHeartbeatWorker(threading.Thread):
                             result.runtime_capability,
                         )
                     )
-                last_success = time.monotonic()
+                self.messages.put(("license_reconnected", None))
                 interval = result.heartbeat_interval
                 self.stop_event.wait(interval)
         finally:
@@ -16983,6 +17065,10 @@ class HookWorker(threading.Thread):
         return lines[-1] if lines else details
 
     def _create_network_parser(self, game_pid: int) -> NetworkPacketParser:
+        parser_class = NetworkPacketParser
+        if IS_NPCAP_BACKEND:
+            from npcap_parser_adapter import NpcapParserAdapter
+            parser_class = NpcapParserAdapter
         remembered_self_token = ""
         try:
             remembered_game_pid = int(
@@ -16994,7 +17080,7 @@ class HookWorker(threading.Thread):
             remembered_self_token = str(
                 self.self_identity_cache.get("user_token", "")
             ).strip()
-        return NetworkPacketParser(
+        return parser_class(
             self.team_profile_cache,
             self.monster_catalog,
             target_identity_catalog=self.target_identity_catalog,
@@ -17110,6 +17196,9 @@ class HookWorker(threading.Thread):
         native_boss_records = list(
             batch.get("native_boss_records", []) or []
         )
+        # Passive capture supplies read-only initialization in the same entity
+        # schema. No native damage or game hook is enabled by these records.
+        native_boss_records.extend(batch.get("entity_metadata_records", []) or [])
         native_name_records = list(
             batch.get("native_name_records", []) or []
         )
@@ -17186,6 +17275,10 @@ class HookWorker(threading.Thread):
             self._record_team_stats_response_diagnostics(
                 record, parsed_updates
             )
+
+        if time.monotonic() - getattr(self, '_last_capture_log_flush', 0.0) >= 1.0:
+            log_handle.flush()
+            self._last_capture_log_flush = time.monotonic()
 
         team_status = batch.get("team_status")
         if isinstance(team_status, dict):
@@ -17580,8 +17673,8 @@ class HookWorker(threading.Thread):
                 elif kind == "runtime_capability_expired":
                     self._update_diagnostics(stage="runtime_capability_expired")
                     self.emit(
-                        "license_required",
-                        SYSTEM_TIME_SYNC_MESSAGE,
+                        "license_capture_expired",
+                        None,
                     )
                 elif kind == "stopped":
                     received_stopped = True
@@ -18865,6 +18958,7 @@ class DpsWindow:
             except Exception:
                 pass
         self._register_configured_toggle_hotkey()
+        self._apply_clear_hotkey(persist=False)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(50, self._drain_messages)
         self.root.after(160, self._render)
@@ -20755,19 +20849,13 @@ class DpsWindow:
 
         def download() -> None:
             last_progress_at = 0.0
-            last_percentage = -1
 
             def report_progress(written: int, total: int) -> None:
-                nonlocal last_progress_at, last_percentage
-                percentage = min(100, int(written * 100 / total)) if total > 0 else 0
+                nonlocal last_progress_at
                 now = time.monotonic()
-                if (
-                    percentage == last_percentage
-                    or (percentage < 100 and now - last_progress_at < 0.1)
-                ):
+                if 0 < written < total and now - last_progress_at < 0.2:
                     return
                 last_progress_at = now
-                last_percentage = percentage
                 self.control_messages.put(
                     ("update_download_progress", (written, total))
                 )
@@ -20809,7 +20897,7 @@ class DpsWindow:
             text = (
                 "下载完成，正在校验文件…"
                 if percentage >= 100
-                else f"正在下载 {percentage}%…"
+                else f"正在下载 {written / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} MB（{percentage}%）…"
             )
         self.update_status_label.configure(text=text, fg=MUTED)
 
@@ -20946,6 +21034,8 @@ class DpsWindow:
         if self.closing or self.authorization_resetting:
             return
         self.authorization_resetting = True
+        self.license_network_paused = False
+        self.license_network_reconnecting = False
         self._set_window_click_through(self.root, False)
         self._destroy_unlock_window()
         self.connected = False
@@ -21843,7 +21933,9 @@ class DpsWindow:
             self._render_layered_main_hud()
 
         try:
-            self.layered_main_after_id = self.root.after(max(0, int(delay)), render)
+            wait_ms = hud_render_delay(time.perf_counter(),
+                getattr(self, "layered_main_paint_finished_at", 0.0), delay)
+            self.layered_main_after_id = self.root.after(wait_ms, render)
         except (AttributeError, tk.TclError):
             self.layered_main_after_id = None
 
@@ -21996,6 +22088,9 @@ class DpsWindow:
             "topmost": bool(topmost),
             "locked": bool(getattr(self, "window_locked", False)),
             "hover_action": str(getattr(self, "layered_main_hover_action", "") or ""),
+            "clear_disabled": self._main_clear_blocked(),
+            "connection_notice": ('战斗已保存，等待授权重连' if getattr(self, 'license_network_paused', False)
+                                  else '正在重连授权服务器' if getattr(self, 'license_network_reconnecting', False) else ''),
         }
 
     def _render_layered_main_hud(self) -> None:
@@ -22006,6 +22101,7 @@ class DpsWindow:
         ):
             return
         self.layered_main_rendering = True
+        paint_started = time.perf_counter()
         try:
             if self.root.state() != "normal":
                 return
@@ -22022,8 +22118,11 @@ class DpsWindow:
                     encounter_id=getattr(self.model, 'encounter_id', ''),
                     bosses=snapshot.get('bosses', []),
                 )
-            result = renderer.render(
-                snapshot,
+            cache = getattr(self, "layered_main_frame_cache", None)
+            if cache is None:
+                cache = self.layered_main_frame_cache = HudRenderCache()
+            result = cache.render(
+                renderer, snapshot,
                 pixel_scale=pixel_scale,
                 font_size=int(getattr(self, "ui_font_size", 14) or 14),
             )
@@ -22079,6 +22178,11 @@ class DpsWindow:
                 self.layered_main_last_error = error
             return
         finally:
+            finished = time.perf_counter()
+            self.layered_main_paint_finished_at = finished
+            self.layered_main_paint_ms = (finished - paint_started) * 1000.0
+            self.layered_main_peak_paint_ms = max(
+                getattr(self, "layered_main_peak_paint_ms", 0.0), self.layered_main_paint_ms)
             self.layered_main_rendering = False
 
     def _layered_main_region_at(self, x: int, y: int) -> str:
@@ -23724,7 +23828,9 @@ class DpsWindow:
                     "actor_id": str(item.get("actor_id", "")),
                     "name": str(item.get("name", "")),
                     "is_self": bool(item.get("is_self", False)),
+                    "is_ai": bool(item.get("is_ai", False)),
                     "profession_id": item.get("profession_id"),
+                    "extraordinary_rating": item.get("extraordinary_rating"),
                     "damage": int(item.get("damage", 0) or 0),
                     "dps": float(item.get("dps", 0.0) or 0.0),
                     "share": float(item.get("share", 0.0) or 0.0),
@@ -23736,6 +23842,10 @@ class DpsWindow:
                     "penetration_hits": item.get("penetration_hits"),
                     "penetration_rate": item.get("penetration_rate"),
                     "deaths": int(item.get("deaths", 0) or 0),
+                    "revives": int(item.get("revives", 0) or 0),
+                    "death_duration_seconds": float(
+                        item.get("death_duration_seconds", 0.0) or 0.0
+                    ),
                     "skills": [
                         dict(skill)
                         for skill in item.get("skills", [])
@@ -23748,6 +23858,35 @@ class DpsWindow:
                     ],
                 }
             )
+        raw_boss_damage = record.get("boss_damage")
+        raw_death_log = (
+            raw_boss_damage.get("death_event_log")
+            if isinstance(raw_boss_damage, dict)
+            else None
+        )
+        death_event_log: dict[str, object] = {}
+        if isinstance(raw_death_log, dict):
+            raw_rows = raw_death_log.get("rows")
+            rows = []
+            if isinstance(raw_rows, list):
+                for raw_row in raw_rows[:512]:
+                    if not isinstance(raw_row, (list, tuple)) or len(raw_row) < 2:
+                        continue
+                    rows.append(list(raw_row[:3]))
+            if rows:
+                death_event_log = {
+                    "version": int(raw_death_log.get("version", 1) or 1),
+                    "columns": list(
+                        raw_death_log.get(
+                            "columns", ["time_ms", "actor_id", "name"]
+                        )
+                    )[:3],
+                    "origin_started_at_epoch": float(
+                        raw_death_log.get("origin_started_at_epoch", 0.0) or 0.0
+                    ),
+                    "rows": rows,
+                    "truncated": len(raw_rows) > len(rows),
+                }
         return {
             "schema_version": record.get("schema_version"),
             "encounter_id": str(record.get("encounter_id", "")),
@@ -23782,6 +23921,10 @@ class DpsWindow:
                 if isinstance(target, dict)
             ],
             "participants": participants,
+            # Feedback previously carried only the final death count. Keeping
+            # this small event list makes Boss-mechanic false positives
+            # diagnosable without uploading the user's full capture log.
+            "death_event_log": death_event_log,
             "damage_accounting": (
                 dict(record.get("damage_accounting", {}))
                 if isinstance(record.get("damage_accounting"), dict)
@@ -31978,6 +32121,37 @@ class DpsWindow:
         )
         releases = (
             (
+                "v0.2.3d",
+                "v0.2.3d 更新日志\n"
+                "在线更新接入 CDN 加速，新版直接下载固定版本文件并校验完整性\n"
+                "修复混合真人与人机队伍中，单人累计回包回退导致整队计时重置、DPS异常升高的问题\n"
+                "优化在线更新：断线保留下载进度并支持续传，慢速下载不再因五分钟总时限被中断\n"
+                "优化下载进度显示，区分维护暂停、连接中断与完整文件校验失败\n"
+                "服务端优化数据库写锁范围与过期清理，减少并发写入排队\n"
+                "新增清除快捷键，可在设置中自定义，统一快捷键控件样式\n"
+                "战斗期间禁止清除，修复部分清除后重新开战不显示秒伤的问题\n"
+                "修复部分入队场景非凡评分缺失的问题，评分更新后及时刷新显示\n"
+                "修复已确认 Boss 击败后统计计时仍继续的问题\n"
+                "修复团灭后重新开战，死亡次数和复活次数未及时重置的问题\n"
+                "战士、观众个人 DPS 高于 5000 时，仅该玩家自动显示 DPS；不修改职业配置\n"
+                "优化主窗口重复画面缓存与刷新调度，减少显示层开销\n"
+                "优化网络异常重连：有效授权期内保留采集，超过宽限或授权到期后保存战斗并暂停，续期成功后恢复\n"
+                "已知问题：子爵夫人白魂/黑夜机制误计死亡仍在排查，需要对应原始日志确认",
+            ),
+            (
+                "v0.2.3c",
+                "v0.2.3c 更新日志\n"
+                "主窗口 Boss 等级旁增加 Boss 名称显示\n"
+                "修复战斗中及战斗详情里，本人偶尔消失、被同职业队友替代的问题\n"
+                "修复统计回包暂时缺少成员时，队员被误移除、伤害归属错误的问题\n"
+                "修复部分情况下最新非凡评分被旧缓存覆盖的问题\n"
+                "修复高 DPI 缩放下，清理战斗记录弹窗按钮显示不全、无法点击的问题\n"
+                "修复团灭后重新开战，死亡次数未及时重置的问题\n"
+                "修复 Boss 击败后立即退队、切图或退出程序，上传入口不显示的问题\n"
+                "修复战斗记录中子爵夫人被错误标识为一号信徒的问题\n"
+                "修复退队后的旧战斗回包生成额外短时战斗记录的问题",
+            ),
+            (
                 "v0.2.3b",
                 "v0.2.3b 更新日志 已支持在线更新 群文件下载\n"
                 "新增主窗口清空按钮，可立即清空当前显示；开启非凡评分预览时，清空后回到评分展示（听劝）\n"
@@ -32364,55 +32538,11 @@ class DpsWindow:
             master=master,
             value=self.toggle_visibility_hotkey_enabled,
         )
-        hotkey_cell = tk.Frame(shortcuts, bg=PANEL)
-        hotkey_cell.pack(fill="x", padx=8, pady=(12, 0))
-        tk.Frame(hotkey_cell, bg=BORDER, height=1).pack(side="bottom", fill="x")
-        hotkey_control = ModernCheckControl(
-            hotkey_cell,
-            "隐藏/显示快捷键",
-            self.settings_hotkey_enabled_var,
-            font=self._ui_font("settings"),
-            background=PANEL,
-            foreground=TEXT,
-            help_text="单键支持 Home、End、Insert、Delete、PageUp、PageDown、Pause、F1-F12。",
-            help_font=self._ui_font("small"),
-        )
-        hotkey_control.pack(side="left", fill="both", expand=True, pady=(8, 7))
-        hotkey_actions = tk.Frame(hotkey_cell, bg=PANEL)
-        hotkey_actions.pack(side="right", pady=(10, 11))
-        clear_hotkey = self._label_button(
-            hotkey_actions,
-            "清除",
+        self.settings_hotkey_value_label, self.settings_hotkey_status_label = self._build_settings_hotkey_row(
+            shortcuts, "隐藏/显示快捷键", self.settings_hotkey_enabled_var,
             self._clear_toggle_visibility_hotkey,
-            width=58,
-            bg=PANEL,
-            hover=PANEL_2,
-            fg=MUTED,
-            font=self._ui_font("settings"),
+            "单键支持 Home、End、Insert、Delete、PageUp、PageDown、Pause、F1-F12。",
         )
-        clear_hotkey.pack(side="right", fill="y", padx=(8, 0))
-        self.settings_hotkey_value_label = tk.Label(
-            hotkey_actions,
-            text="",
-            width=22,
-            bg=PANEL_2,
-            fg=ACCENT,
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            highlightcolor=ACCENT,
-            cursor="hand2",
-            takefocus=True,
-            font=self._ui_font("settings_strong"),
-        )
-        self.settings_hotkey_value_label.pack(side="right", fill="y")
-        self.settings_hotkey_status_label = tk.Label(
-            hotkey_actions,
-            text="",
-            bg=PANEL,
-            fg=ERROR,
-            font=self._ui_font("small"),
-        )
-        self.settings_hotkey_status_label.pack(side="right", padx=(0, 8))
         self.settings_hotkey_value_label.bind(
             "<Button-1>", self._begin_toggle_hotkey_capture
         )
@@ -32431,6 +32561,7 @@ class DpsWindow:
         self._sync_toggle_hotkey_controls()
 
 
+        self._build_clear_hotkey_control(shortcuts)
         for attribute, _enabled in variables:
             getattr(self, attribute).trace_add("write", self._apply_live_ui_settings)
 
@@ -33065,6 +33196,103 @@ class DpsWindow:
             help_font=self._ui_font("small"),
         )
         control.pack(fill="both", expand=True, padx=4, pady=(8, 7))
+
+    def _apply_clear_hotkey(self, *, persist=True) -> bool:
+        key = normalize_toggle_hotkey(self.config.get('clear_display_hotkey', ''))
+        enabled = bool(self.config.get('clear_display_hotkey_enabled', False)) and bool(key)
+        parameters = toggle_hotkey_windows_parameters(key) if enabled else (0, 0)
+        tray = getattr(self, 'tray_icon', None)
+        try:
+            success = bool(tray and parameters and tray.set_hotkey(*parameters, action='clear'))
+        except (AttributeError, OSError, RuntimeError):
+            success = False
+        if persist and success:
+            save_config(self.config)
+        return success
+
+    def _build_settings_hotkey_row(self, parent, text, variable, on_clear, help_text):
+        row = tk.Frame(parent, bg=PANEL)
+        row.pack(fill='x', padx=8, pady=(12, 0))
+        tk.Frame(row, bg=BORDER, height=1).pack(side='bottom', fill='x')
+        control = ModernCheckControl(row, text, variable, font=self._ui_font('settings'),
+                                     background=PANEL, foreground=TEXT,
+                                     help_text=help_text, help_font=self._ui_font('small'))
+        control.pack(side='left', fill='both', expand=True, pady=(8, 7))
+        actions = tk.Frame(row, bg=PANEL)
+        actions.pack(side='right', pady=(10, 11))
+        button = self._label_button(actions, '清除', on_clear, width=58,
+                                    bg=PANEL, hover=PANEL_2, fg=MUTED, font=self._ui_font('settings'))
+        button.pack(side='right', fill='y', padx=(8, 0))
+        label = tk.Label(actions, text='', width=22, bg=PANEL_2, fg=ACCENT,
+                         highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT,
+                         cursor='hand2', takefocus=True, font=self._ui_font('settings_strong'))
+        label.pack(side='right', fill='y')
+        status = tk.Label(actions, text='', bg=PANEL, fg=ERROR, font=self._ui_font('small'))
+        status.pack(side='right', padx=(0, 8))
+        return label, status
+
+    def _build_clear_hotkey_control(self, parent) -> None:
+        enabled = tk.BooleanVar(master=parent, value=bool(self.config.get('clear_display_hotkey_enabled', False)))
+        captured = [False]
+        syncing = [False]
+        label, status = self._build_settings_hotkey_row(
+            parent, '清除快捷键', enabled, lambda: clear(),
+            '清除主窗口显示，战斗期间不可用。支持与隐藏/显示相同的按键组合。')
+        def sync(error=''):
+            syncing[0] = True
+            enabled.set(bool(self.config.get('clear_display_hotkey_enabled', False)))
+            syncing[0] = False
+            if label.winfo_exists():
+                label.configure(text='请按下快捷键…' if captured[0] else self.config.get('clear_display_hotkey') or '未设置',
+                                fg=ACCENT if captured[0] or enabled.get() else MUTED,
+                                highlightbackground=ERROR if error else ACCENT if captured[0] else BORDER)
+                status.configure(text=error, fg=ERROR)
+        def toggle(*_args):
+            if syncing[0]:return
+            old = self.config.get('clear_display_hotkey_enabled', False)
+            self.config['clear_display_hotkey_enabled'] = enabled.get()
+            if (enabled.get() and not self.config.get('clear_display_hotkey')) or not self._apply_clear_hotkey():
+                self.config['clear_display_hotkey_enabled'] = old
+                sync('请先录入可用按键')
+            else:sync()
+        def clear():
+            tray = getattr(self, 'tray_icon', None)
+            if tray and not tray.set_hotkey(0, 0, action='clear'):
+                sync('无法清除快捷键，请重试');return
+            captured[0] = False
+            self.config['clear_display_hotkey'] = ''
+            self.config['clear_display_hotkey_enabled'] = False
+            save_config(self.config)
+            sync()
+        def cancel(_event=None):
+            if captured[0]:
+                captured[0] = False
+                self._apply_clear_hotkey(persist=False)
+                sync()
+        def begin(_event):
+            tray = getattr(self, 'tray_icon', None)
+            if tray and not tray.set_hotkey(0, 0, action='clear'):
+                sync('无法暂停快捷键');return 'break'
+            captured[0] = True
+            sync()
+            label.focus_set()
+            return 'break'
+        def keypress(event):
+            if not captured[0]:return
+            if str(event.keysym).lower() == 'escape':cancel();return 'break'
+            candidate = toggle_hotkey_from_tk_event(event.keysym, event.state)
+            if not candidate:return 'break'
+            previous = (self.config.get('clear_display_hotkey',''), self.config.get('clear_display_hotkey_enabled',False))
+            self.config['clear_display_hotkey'], self.config['clear_display_hotkey_enabled'] = candidate, True
+            if self._apply_clear_hotkey():
+                captured[0] = False;sync()
+            else:
+                self.config['clear_display_hotkey'], self.config['clear_display_hotkey_enabled'] = previous
+                sync('按键已占用，请重选')
+            return 'break'
+        label.bind('<Button-1>',begin);label.bind('<KeyPress>',keypress);label.bind('<FocusOut>',cancel)
+        enabled.trace_add('write', toggle)
+        sync()
 
     def _set_native_toggle_hotkey(self, hotkey: str) -> bool:
         tray_icon = getattr(self, "tray_icon", None)
@@ -34142,6 +34370,10 @@ class DpsWindow:
                     "penetration_hits",
                     "penetration_rate",
                     "deaths",
+                    "revives",
+                    "death_duration_seconds",
+                    "is_ai",
+                    "extraordinary_rating",
                 )
             }
             skills = [
@@ -41083,18 +41315,48 @@ class DpsWindow:
         )
 
     def _show_history_cleanup_dialog(self) -> None:
-        _panel, body, _overlay = self._open_history_modal(
+        _panel, body, overlay = self._open_history_modal(
             "清理战斗记录", width=470, height=420
         )
-        tk.Label(
+        intro = tk.Label(
             body,
             text="选择需要清理的范围。此操作只影响当前电脑。",
             bg=PANEL,
             fg=MUTED,
             anchor="w",
             font=self._ui_font("small"),
-        ).pack(fill="x", pady=(0, 8))
+        )
+        intro.pack(fill="x", pady=(0, 8))
         choice_var = tk.StringVar(master=self.history_window, value="selected")
+        # Reserve actions before laying out choices. At high DPI or in a short
+        # host window only the options scroll; confirmation remains reachable.
+        footer = tk.Frame(body, bg=PANEL)
+        footer.pack(side="bottom", fill="x", pady=(8, 0))
+        self._history_modal_action(
+            footer, "确认清理", lambda: self._confirm_history_cleanup(choice_var.get()), danger=True,
+        ).pack(side="right")
+        self._history_modal_action(
+            footer, "取消", self._close_history_modal,
+        ).pack(side="right", padx=(0, 8))
+        options_host = tk.Frame(body, bg=PANEL)
+        options_host.pack(fill="both", expand=True)
+        options_canvas = tk.Canvas(options_host, bg=PANEL, bd=0, highlightthickness=0, width=420)
+        scrollbar = ModernScrollbar(options_host, command=options_canvas.yview, background=PANEL, width=9)
+        scrollbar.pack(side="right", fill="y")
+        options_canvas.pack(side="left", fill="both", expand=True)
+        options_canvas.configure(yscrollcommand=scrollbar.set)
+        choices = tk.Frame(options_canvas, bg=PANEL)
+        choices_id = options_canvas.create_window(0, 0, window=choices, anchor="nw")
+        choices.bind('<Configure>', lambda _event: options_canvas.configure(scrollregion=options_canvas.bbox('all')))
+        options_canvas.bind('<Configure>', lambda event: options_canvas.itemconfigure(choices_id, width=max(1, event.width)))
+
+        def scroll_options(event):
+            delta = int(getattr(event, 'delta', 0) or 0)
+            if delta:
+                options_canvas.yview_scroll(-1 if delta > 0 else 1, 'units')
+            return 'break'
+
+        options_canvas.bind('<MouseWheel>', scroll_options)
         descriptions = (
             (
                 "selected",
@@ -41107,7 +41369,7 @@ class DpsWindow:
         )
         for value, caption, description in descriptions:
             row = ModernChoiceCard(
-                body,
+                choices,
                 caption,
                 choice_var,
                 value,
@@ -41119,17 +41381,26 @@ class DpsWindow:
                 height=58,
             )
             row.pack(fill="x", pady=3)
-        footer = tk.Frame(body, bg=PANEL)
-        footer.pack(fill="x", pady=(8, 0))
-        self._history_modal_action(
-            footer,
-            "确认清理",
-            lambda: self._confirm_history_cleanup(choice_var.get()),
-            danger=True,
-        ).pack(side="right")
-        self._history_modal_action(
-            footer, "取消", self._close_history_modal
-        ).pack(side="right", padx=(0, 8))
+            stack = [row]
+            while stack:
+                widget = stack.pop()
+                widget.bind('<MouseWheel>', scroll_options, add='+')
+                stack.extend(widget.winfo_children())
+        body.update_idletasks()
+        options_canvas.configure(height=choices.winfo_reqheight())
+        self._fit_history_modal_contents(body)
+        shell = self.history_modal_layout[0]
+        wanted_width, wanted_height = int(shell.cget('width')), int(shell.cget('height'))
+
+        def fit_host(_event=None):
+            if not overlay.winfo_exists():
+                return
+            shell.configure(width=min(wanted_width, max(280, overlay.winfo_width()-24)),
+                            height=min(wanted_height, max(220, overlay.winfo_height()-24)))
+            intro.configure(wraplength=max(180, min(wanted_width, overlay.winfo_width()-24)-46))
+
+        overlay.bind('<Configure>', fit_host, add='+')
+        fit_host()
 
     def _confirm_history_cleanup(self, scope: str) -> None:
         self._close_history_modal()
@@ -43479,12 +43750,31 @@ class DpsWindow:
         cleared = getattr(self, 'main_manual_clear_state', None)
         if cleared is None:
             return False
+        if self._main_clear_blocked():
+            self.main_manual_clear_state = None
+            current = str(getattr(self.model, 'encounter_id', ''))
+            self.main_cleared_encounter_ids = deque(
+                (value for value in getattr(self, 'main_cleared_encounter_ids', ()) if value != current), maxlen=64)
+            return False
         encounter_id, was_started = cleared
         started = getattr(self.model, '_encounter_started', lambda: False)()
         return encounter_id == str(getattr(self.model, 'encounter_id', '')) and (was_started or not started)
 
+    def _main_clear_blocked(self) -> bool:
+        reader = getattr(self.model, 'combat_in_progress', None)
+        if callable(reader) and reader():
+            return True
+        if getattr(self.model, 'combat_end_time', 0):
+            return False
+        states = getattr(self.model, 'entity_combat_states', {})
+        members = self._main_visible_roster_members()
+        members.add(getattr(self.model, 'combat_target_id', None))
+        return isinstance(states, dict) and any(states.get(actor) is True for actor in members)
+
     def _clear_main_display(self) -> None:
-        """Clear the overlay only; an ongoing battle still collects normally."""
+        """Clear only outside battle; never hide the next pull's live values."""
+        if self._main_clear_blocked():
+            return
         encounter_id = str(getattr(self.model, 'encounter_id', ''))
         started = bool(getattr(self.model, '_encounter_started', lambda: False)())
         self.main_manual_clear_state = (encounter_id, started)
@@ -43569,6 +43859,17 @@ class DpsWindow:
                     and not self._main_has_battle_values()
                     and not self._main_battle_signal_active())
 
+    def _main_player_display_metric(self, profession_id: object, dps: object) -> str:
+        selected = self._profession_display_metric(profession_id)
+        try:
+            profession = int(profession_id or 0)
+            rate = float(dps)
+        except (TypeError, ValueError, OverflowError):
+            return selected
+        if profession in (AUDIENCE_PROFESSION_ID, WARRIOR_PROFESSION_ID) and math.isfinite(rate) and rate > 5000:
+            return 'dps'
+        return selected
+
     def _main_retained_battle_rows(self) -> list[dict]:
         record = self.main_last_battle_result
         healers = {int(row.get('actor_id', 0) or 0): row for row in record['healers']}
@@ -43576,7 +43877,7 @@ class DpsWindow:
         rows = []
         for index, raw in enumerate(sorted(record['participants'], key=lambda r: -int(r.get('damage') or 0))):
             actor_id = int(raw['actor_id'])
-            metric = self._profession_display_metric(raw.get('profession_id'))
+            metric = self._main_player_display_metric(raw.get('profession_id'), raw.get('dps'))
             if metric == 'hps':
                 healing = healers.get(actor_id, {})
                 total, rate = healing.get('effective_healing'), healing.get('hps')
@@ -43762,7 +44063,8 @@ class DpsWindow:
             )
             if not profession_id and healer_row is not None:
                 profession_id = int(healer_row.get("profession_id", 0) or 0)
-            metric = self._profession_display_metric(profession_id)
+            player_dps = float(damage_row.damage) / duration if damage_row is not None and duration else None
+            metric = self._main_player_display_metric(profession_id, player_dps)
             stat_value: float | int | None
             total_value: float | int | None
             if metric == "hps":
@@ -45418,6 +45720,10 @@ class DpsWindow:
                 self._invalidate_team_rating_preview_rows(
                     payload.get("entity_id", 0)
                 )
+                if any(key in payload for key in ('extraordinary_rating', 'is_ai', 'name', 'profession_id')):
+                    # Received roster/rating data should be painted immediately,
+                    # not wait behind the regular summary/housekeeping timer.
+                    self._schedule_layered_main_render()
         elif kind == "self_character":
             self._handle_self_character(payload)
         elif kind == "monster":
@@ -45473,6 +45779,9 @@ class DpsWindow:
             self.restore_window_from_tray()
         elif kind == "hotkey_toggle_visibility":
             self.toggle_application_visibility()
+        elif kind == "hotkey_clear_display":
+            if not self.closing and not getattr(self, 'authorization_resetting', False):
+                self._clear_main_display()
         elif kind == "tray_exit":
             self.close()
         elif kind == "trial_claim_result":
@@ -45539,11 +45848,18 @@ class DpsWindow:
             self.status_label.configure(
                 text=chinese_error_message(payload), fg=ERROR
             )
+        elif kind == "license_reconnecting":
+            self.license_network_reconnecting = True
+        elif kind == "license_capture_expired":
+            self._pause_for_license_network()
+        elif kind == "license_reconnected":
+            self.license_network_reconnecting = False
         elif kind == "runtime_capability" and isinstance(
             payload, RuntimeCapability
         ):
             try:
-                self.worker.refresh_runtime_capability(payload)
+                if not getattr(self, "license_network_paused", False):
+                    self.worker.refresh_runtime_capability(payload)
             except RuntimeCapabilityError as exc:
                 self._return_to_login(
                     SYSTEM_TIME_SYNC_MESSAGE
@@ -45580,11 +45896,55 @@ class DpsWindow:
         except queue.Empty:
             queue_drained = True
         if not self.closing:
+            self._check_license_network_recovery()
             # Continuous combat can keep the capture queue non-empty forever.
             # Control results are handled first, then combat is bounded so Tk
             # still receives paint and input events between batches.
             delay = 50 if queue_drained and control_drained else 1
             self.root.after(delay, self._drain_messages)
+
+    def _pause_for_license_network(self) -> None:
+        if self.closing or self.authorization_resetting or getattr(self, 'license_network_paused', False):
+            return
+        self.license_network_paused = True
+        self.license_network_saved = False
+        policy = getattr(getattr(self, 'heartbeat_worker', None), 'recovery', None)
+        self.license_resume_after_renewal = getattr(policy, 'successful_renewals', 0) + 1
+        self.stop_event.set()
+        self.connected = False
+
+    def _check_license_network_recovery(self) -> None:
+        heartbeat = getattr(self, 'heartbeat_worker', None)
+        if getattr(self, 'authorization_resetting', False) or self.closing or heartbeat is None:
+            return
+        policy = getattr(heartbeat, 'recovery', None)
+        if policy is None:
+            return
+        if policy.must_pause(self.licensing.session):
+            self._pause_for_license_network()
+        if getattr(self, 'license_network_paused', False):
+            self.connected = False
+            if self.worker.is_alive():
+                return  # Let Hook cleanup finish; never force terminate it.
+            if not getattr(self, 'license_network_saved', False):
+                if not self._ingest_pending_capture_messages():
+                    return
+                record = self.model.build_combat_record('capture_stopped')
+                if record:
+                    self._remember_main_battle_result(record)
+                self.model.reset(keep_identity=True, archive_reason='capture_stopped')
+                self._flush_combat_history(force=True)
+                self.license_network_saved = True
+                self.capture_started = False
+            if (not policy.reconnecting and not policy.must_pause(self.licensing.session)
+                    and policy.successful_renewals >= getattr(self, 'license_resume_after_renewal', 0)):
+                self.license_network_paused = False
+                self.license_network_reconnecting = False
+                self._start_capture()
+        if getattr(self, 'license_network_paused', False):
+            self.status_label.configure(text='战斗已保存，等待授权恢复', fg=WARN)
+        elif policy.reconnecting:
+            self.status_label.configure(text='正在重连授权服务器', fg=WARN)
 
     def _ingest_combat_event(self, payload: object) -> None:
         if not isinstance(payload, dict):

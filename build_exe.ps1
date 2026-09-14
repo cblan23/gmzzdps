@@ -4,6 +4,7 @@ param(
     [string]$BuildId = "",
     [string]$RuntimeProfileId = "",
     [switch]$NpcapVariant,
+    [switch]$PassiveCapture,
     [switch]$OfficialRelease,
     [switch]$ProtectedRelease,
     [string]$CapabilitySigningKeyId = "",
@@ -14,6 +15,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# The user restored Hook as the normal backend while the identity bug is fixed.
+# Preserve explicit passive builds without discarding the migration work.
+$UseNpcapBackend = $NpcapVariant -or $PassiveCapture
 
 function Write-Utf8NoBom([string]$Path, [string]$Value) {
     $Encoding = New-Object System.Text.UTF8Encoding($false)
@@ -216,7 +220,7 @@ $CompiledCaptureSourceNames = @(
     "capture_backend.py",
     "runtime_capability.py"
 )
-if ($NpcapVariant) {
+if ($UseNpcapBackend) {
     $CompiledCaptureSourceNames += @(
         "npcap_capture_process.py",
         "npcap_protocol.py",
@@ -224,6 +228,12 @@ if ($NpcapVariant) {
         "npcap_zstd_state.py",
         "npcap_rc4_decode.py",
         "npcap_shadow_capture.py",
+        "npcap_receiver.py",
+        "npcap_entity_metadata.py",
+        "npcap_parser_adapter.py",
+        "npcap_method_tables.py",
+        "npcap_runtime.py",
+        "passive_transport.py",
         "proc_inspect.py"
     )
 } else {
@@ -366,15 +376,15 @@ if (-not $ProtectedRelease) {
     }
 }
 $CaptureVariantPath = $null
-if ($NpcapVariant) {
+if ($UseNpcapBackend) {
     $CaptureVariantPath = Join-Path $TemporaryDirectory "_capture_variant.json"
     $CaptureVariant = [ordered]@{
         schema_version = 1
         backend = "npcap"
         display_version = $AppVersion
-        data_directory = "GMZZDpsMeterNpcap"
-        mutex_name = "Local\DaodaoMysteryDpsLogsNpcap"
-        tray_class_prefix = "GMZZDpsNpcapTray_"
+        data_directory = $(if ($NpcapVariant) { "GMZZDpsMeterNpcap" } else { "GMZZDpsMeter" })
+        mutex_name = $(if ($NpcapVariant) { "Local\DaodaoMysteryDpsLogsNpcap" } else { "" })
+        tray_class_prefix = $(if ($NpcapVariant) { "GMZZDpsNpcapTray_" } else { "" })
         packet_capture = "npcap"
         packet_transmit_functions_loaded = $false
         server_requests_added = 0
@@ -463,6 +473,8 @@ try {
         "--include-module=main_hud",
         "--include-module=main_hud_artwork",
         "--include-module=profile_upload",
+        "--include-module=resumable_update",
+        "--include-module=update_cdn",
         "--include-data-files=$CapstoneDll=capstone/lib/capstone.dll",
         "--include-data-files=assets/*.png=assets/",
         "--include-data-files=assets/professions/*.png=assets/professions/",
@@ -487,7 +499,7 @@ try {
         "--copyright=$ProductName",
         "dps_meter.pyw"
     )
-    $BackendArguments = if ($NpcapVariant) {
+    $BackendArguments = if ($UseNpcapBackend) {
         @(
             "--include-module=npcap_capture_process",
             "--include-module=npcap_protocol",
@@ -495,6 +507,12 @@ try {
             "--include-module=npcap_zstd_state",
             "--include-module=npcap_rc4_decode",
             "--include-module=npcap_shadow_capture",
+            "--include-module=npcap_receiver",
+            "--include-module=npcap_entity_metadata",
+            "--include-module=npcap_parser_adapter",
+            "--include-module=npcap_method_tables",
+            "--include-module=npcap_runtime",
+            "--include-module=passive_transport",
             "--include-package=msgpack",
             "--include-package=zstandard",
             "--nofollow-import-to=capture_process",
@@ -511,7 +529,7 @@ try {
         $BackendArguments
         $NuitkaArguments[-1]
     )
-    if ($NpcapVariant) {
+    if ($UseNpcapBackend) {
         $NuitkaArguments = @(
             $NuitkaArguments[0..($NuitkaArguments.Count - 2)]
             "--include-data-files=$CaptureVariantPath=_capture_variant.json"
@@ -542,7 +560,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Nuitka build failed with exit code $LASTEXITCODE"
     }
-    if ($NpcapVariant) {
+    if ($UseNpcapBackend) {
         $NuitkaReportText = Get-Content -LiteralPath (
             Join-Path $TemporaryDirectory "nuitka-report.xml"
         ) -Raw -Encoding UTF8
@@ -617,7 +635,7 @@ try {
         runtime_profile_id = $RuntimeProfileId
         official = [bool]$OfficialRelease
         protected = [bool]$ProtectedRelease
-        capture_backend = $(if ($NpcapVariant) { "npcap" } else { "legacy" })
+        capture_backend = $(if ($UseNpcapBackend) { "npcap" } else { "legacy" })
         capability_signing_key_id = $CapabilitySigningKeyId
         capability_public_keys = $CapabilityPublicKeys
         filename = $OutputName

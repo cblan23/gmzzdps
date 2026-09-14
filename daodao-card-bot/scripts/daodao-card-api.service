@@ -1,0 +1,18 @@
+[Unit]
+Description=Daodao authoritative card API
+After=network-online.target
+[Service]
+User=daodao-card-bot
+WorkingDirectory=/opt/daodao-card-bot
+ExecStart=/opt/daodao-card-bot/.venv/bin/python -m app.api
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/daodao-card-bot/data /opt/daodao-card-bot/logs
+MemoryMax=192M
+CPUQuota=30%
+[Install]
+WantedBy=multi-user.target

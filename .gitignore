@@ -7,6 +7,17 @@ device_id
 logs/
 combat_history/
 *.log
+*.pcap
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
 
 # Captures, diagnostics and local screenshots
 *.etl
@@ -37,6 +48,9 @@ dist*/
 release-*/
 %TEMP%/
 __pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.py[cod]
 *.xml
 

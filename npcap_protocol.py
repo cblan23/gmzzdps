@@ -10,7 +10,10 @@ that the existing combat parser consumes.
 from __future__ import annotations
 
 import struct
-from collections import deque
+import time
+import uuid
+from itertools import islice
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
@@ -19,6 +22,7 @@ import msgpack
 import zstandard
 
 from npcap_zstd_state import NativeZstdDecoder, ZstdSnapshot
+from npcap_method_tables import LOCAL_ROLE_RPC_METHODS, NPC_RPC_METHODS
 
 
 WINDOWS_EPOCH_SECONDS = 11_644_473_600
@@ -50,8 +54,11 @@ METHOD_ID_NAMES: dict[int, str] = {
     32: "OnMsgAddBuffNew",
     79: "OnMsgEndureExitHit",
     80: "OnMsgSyncCurrentHp",
-    86: "OnMsgEntityRelive",
-    87: "OnMsgEntityDead",
+    # 86/87 were inferred from a small timing correlation, not a verified
+    # entity-class method table. Live captures show repeated full-HP events
+    # and a two-argument duration payload at 86, unlike the four-argument
+    # legacy revive payload. Keep them unknown until their class is verified;
+    # otherwise normal mechanisms become fabricated deaths and end battles.
     90: "OnMsgDamageSyncV2",
     91: "OnMsgHealSyncV2",
     94: "OnMsgBeatenSyncV2",
@@ -66,7 +73,6 @@ METHOD_ID_NAMES: dict[int, str] = {
     212: "OnUpdateTeamGroupMemberProps",
     213: "OnUpdateTeamGroupSelfProps",
     214: "OnMsgOtherJoinTeamGroup",
-    217: "OnMsgBeforeEnterNewSpace",
     220: "RetGetTeamApplyDesc",
     271: "OnMsgSyncTeamGroupMemberFreqProp",
     338: "RetCommonCombatStatisticsByTeam",
@@ -83,10 +89,8 @@ METHOD_ID_NAMES: dict[int, str] = {
     1119: "OnMsgCastSkillNew",
     1121: "RetCastSkillSuccessNew",
     1127: "OnMsgSkillEnterTeamGCD",
-    1381: "RetStopEditTarotTeamSceneCustom",
     1613: "OnMsgRefreshSceneObjects",
     2006: "RetGetServerLevelInfo",
-    2239: "RetStopEditTarotTeamSceneCustom",
     2261: "OnMsgPostAkEvent",
 }
 
@@ -168,6 +172,23 @@ def _valid_rpc_shape(value: object) -> bool:
     )
 
 
+def _bounded_unknown_sample(value, remaining=None, depth=0):
+    remaining = [256] if remaining is None else remaining
+    if remaining[0] <= 0 or depth > 5:
+        return '<truncated>'
+    remaining[0] -= 1
+    if isinstance(value, str):
+        return value[:256]
+    if isinstance(value, bytes):
+        return {'bytes_hex': value[:64].hex(), 'length': len(value)}
+    if isinstance(value, dict):
+        return {str(key)[:64]: _bounded_unknown_sample(item, remaining, depth+1)
+                for key, item in islice(value.items(), 24)}
+    if isinstance(value, (list, tuple)):
+        return [_bounded_unknown_sample(item, remaining, depth+1) for item in value[:24]]
+    return value
+
+
 def _valid_named_method(value: object) -> bool:
     if not isinstance(value, str) or not 1 <= len(value) <= 96:
         return False
@@ -245,7 +266,14 @@ class DoraemonFrameDecoder:
 class NpcapProtocolDecoder:
     """Stateful Doraemon/Zstd/MessagePack decoder for one inbound RC4 stream."""
 
-    def __init__(self, retained_methods: Iterable[str] | None = None) -> None:
+    def __init__(self, retained_methods: Iterable[str] | None = None, *, stream_id: str | None = None, capture_unknown: bool = False) -> None:
+        self.capture_unknown = capture_unknown
+        self.unknown_records = deque(maxlen=64)
+        self.sampled_unknown_ids = set()
+        self.stream_id = stream_id or uuid.uuid4().hex
+        self.transport_generation = 0
+        self.application_offset = 0
+        self.capture_timestamps: OrderedDict[int, int] = OrderedDict()
         self.frames = DoraemonFrameDecoder()
         self.zstd = None
         self.native_zstd: NativeZstdDecoder | None = None
@@ -267,6 +295,9 @@ class NpcapProtocolDecoder:
         )
 
     def reset_transport(self) -> None:
+        self.transport_generation += 1
+        self.application_offset = 0
+        self.capture_timestamps.clear()
         self.frames.reset()
         self.zstd = None
         if self.native_zstd is not None:
@@ -514,6 +545,7 @@ class NpcapProtocolDecoder:
 
     def _application_consume(self, length: int) -> None:
         remaining = int(length)
+        self.application_offset += remaining
         del self.application[:remaining]
         while remaining and self.application_origins:
             origin = self.application_origins[0]
@@ -573,10 +605,12 @@ class NpcapProtocolDecoder:
                 continue
 
             _available, kcp_sequence, timestamp_epoch = self.application_origins[0]
+            message_offset = self.application_offset
             self._application_consume(end)
             self.diagnostics.application_messages += 1
             call = value[1]
             method_id: int | None = None
+            method_scope = ''
             entity_id = 0
             if message_type in RPC_NUMERIC_MESSAGE_TYPES:
                 try:
@@ -584,9 +618,21 @@ class NpcapProtocolDecoder:
                     method_id = int(call[1])
                 except (TypeError, ValueError, OverflowError):
                     continue
-                method = METHOD_ID_NAMES.get(method_id, "")
+                if method_id in LOCAL_ROLE_RPC_METHODS:
+                    method = LOCAL_ROLE_RPC_METHODS[method_id]
+                    method_scope = 'player_entity' if method_id in (2244, 2245) else 'local_role'
+                elif method_id in NPC_RPC_METHODS:
+                    method = NPC_RPC_METHODS[method_id]
+                    method_scope = 'npc'
+                else:
+                    method = METHOD_ID_NAMES.get(method_id, "")
                 if not method:
                     self.diagnostics.unknown_method_messages += 1
+                    if self.capture_unknown and method_id not in self.sampled_unknown_ids and len(self.sampled_unknown_ids) < 64:
+                        self.sampled_unknown_ids.add(method_id)
+                        self.unknown_records.append({'method_id': method_id, 'entity_id': entity_id,
+                                                     'arguments': _bounded_unknown_sample(call[2]) if len(call) > 2 else [],
+                                                     'message_type': int(message_type)})
                     continue
             elif (
                 message_type in RPC_NAMED_MESSAGE_TYPES
@@ -608,9 +654,12 @@ class NpcapProtocolDecoder:
             arguments = call[2] if len(call) > 2 and isinstance(call[2], list) else []
             self.record_sequence += 1
             timestamp_epoch = float(timestamp_epoch)
+            timestamp_ns = self.capture_timestamps.get(int(kcp_sequence), int(timestamp_epoch * 1_000_000_000))
             record = {
                     "event_time": epoch_to_event_time(timestamp_epoch),
-                    "filetime_100ns": epoch_to_filetime(timestamp_epoch),
+                    "filetime_100ns": WINDOWS_EPOCH_SECONDS * FILETIME_TICKS_PER_SECOND + timestamp_ns // 100,
+                    "capture_timestamp_ns": timestamp_ns,
+                    "capture_event_id": f'{self.stream_id}:{self.transport_generation}:{int(kcp_sequence)}:{message_offset}',
                     "sequence": self.record_sequence,
                     "function": "npcap::doraemon::rpc",
                     # NetworkPacketParser treats this as an opaque, stable
@@ -621,8 +670,11 @@ class NpcapProtocolDecoder:
                     "method": method,
                     "decoded_arguments": arguments,
                     "decode_delay_ms": 0.0,
+                    "capture_decode_latency_ms": max(0.0, (time.time_ns() - timestamp_ns) / 1_000_000),
                     "arguments_synchronized": True,
                     "npcap_message_type": int(message_type),
+                    "npcap_message_bytes": end,
+                    "npcap_method_scope": method_scope,
                     "npcap_kcp_sequence": int(kcp_sequence),
                     "capture_source": "npcap",
                 }
@@ -630,13 +682,19 @@ class NpcapProtocolDecoder:
                 record["npcap_method_id"] = method_id
             else:
                 record["npcap_method_name"] = method
+                if isinstance(call[0], str) and len(call[0]) <= 128:
+                    record['npcap_recipient'] = call[0]
             records.append(record)
             self.diagnostics.retained_records += 1
         return records
 
     def feed_push(
-        self, plaintext: bytes, sequence: int, timestamp_epoch: float
+        self, plaintext: bytes, sequence: int, timestamp_epoch: float, *, timestamp_ns: int | None = None
     ) -> list[dict]:
+        if timestamp_ns is not None:
+            self.capture_timestamps[int(sequence)] = int(timestamp_ns)
+            while len(self.capture_timestamps) > 65536:
+                self.capture_timestamps.popitem(last=False)
         self.diagnostics.decrypted_pushes += 1
         records: list[dict] = []
         for frame in self.frames.feed(plaintext, sequence, timestamp_epoch):

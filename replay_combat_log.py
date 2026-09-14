@@ -273,12 +273,14 @@ def main() -> int:
     )
     parser.add_argument("--anonymous-output", type=Path)
     parser.add_argument("--anonymous-only", action="store_true")
+    parser.add_argument('--records-output', type=Path, help='write replayed encounter array to a NEW private JSON file')
+    parser.add_argument('--cold-cache', action='store_true', help='do not borrow current character/party caches for replay')
     args = parser.parse_args()
     selected_templates = set(args.template)
 
     config = APP["load_config"]()
-    identity = read_object(APP["SELF_IDENTITY_CACHE_PATH"])
-    team_profiles = read_object(APP["TEAM_PROFILE_CACHE_PATH"])
+    identity = {} if args.cold_cache else read_object(APP["SELF_IDENTITY_CACHE_PATH"])
+    team_profiles = {} if args.cold_cache else read_object(APP["TEAM_PROFILE_CACHE_PATH"])
     target_identity_catalog = APP["load_target_identity_catalog"]()
     packet_parser = NetworkPacketParser(
         team_profiles,
@@ -592,6 +594,9 @@ def main() -> int:
         if isinstance(record, dict)
     }
     records = list(latest_by_id.values())
+    if args.records_output:
+        with args.records_output.open('x', encoding='utf-8') as output:
+            json.dump(records, output, ensure_ascii=False, indent=2)
     selected = [
         record
         for record in records

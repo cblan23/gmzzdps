@@ -7,6 +7,15 @@ from test_main_hud_behavior import make_window, completed_record
 
 
 class ClearDisplayTests(unittest.TestCase):
+    def test_clear_finished_result_cannot_mask_reentry_with_same_encounter(self):
+        window = self.window()
+        window.model.combat_end_time = 100
+        window._clear_main_display()
+        self.assertTrue(window._main_display_is_cleared())
+        window.model.combat_end_time = 0
+        self.assertFalse(window._main_display_is_cleared())
+        self.assertNotIn('fight-1', window.main_cleared_encounter_ids)
+
     def window(self):
         window, _ = make_window()
         window.model.encounter_id = 'fight-1'
@@ -16,16 +25,15 @@ class ClearDisplayTests(unittest.TestCase):
         window.model.reset = mock.Mock()
         return window
 
-    def test_clear_during_battle_returns_to_rating_without_resetting_collected_damage(self):
+    def test_clear_during_battle_is_ignored_without_resetting_collected_damage(self):
         window = self.window()
         before = [row.damage for row in window.model.current_stats()]
         window._clear_main_display()
         rows, rating = window._main_display_rows()
-        self.assertTrue(rating)
-        self.assertEqual(rows[0]['rating'], 123456)
-        self.assertEqual(window._layered_main_snapshot()['team_dps'], '0')
+        self.assertFalse(rating)
+        self.assertGreater(rows[0]['stat_value'], 0)
         window.model.reset.assert_not_called()
-        window._render_layered_main_hud.assert_called_once()
+        window._render_layered_main_hud.assert_not_called()
         self.assertEqual([row.damage for row in window.model.current_stats()], before)
         window.model.encounter_id = 'fight-2'
         self.assertFalse(window._main_display_rows()[1])
@@ -34,6 +42,7 @@ class ClearDisplayTests(unittest.TestCase):
     def test_clear_without_rating_stays_blank_despite_late_refreshes(self):
         window = self.window()
         window.team_rating_preview_enabled = False
+        window.model.combat_end_time = 100
         window._clear_main_display()
         rows, rating = window._main_display_rows()
         self.assertFalse(rating)
@@ -59,13 +68,13 @@ class PortraitTests(unittest.TestCase):
     def setUpClass(cls):
         cls.renderer = MainHudRenderer(ROOT / 'assets', COLORS)
 
-    def test_portraits_follow_exact_template_and_keep_names_hidden_and_levels_visible(self):
+    def test_portraits_follow_exact_template_and_keep_names_and_levels_visible(self):
         state = snapshot()
         state.update(boss_template_id=7102990, boss_level=72, boss_name='子爵夫人')
         with mock.patch.object(self.renderer, '_label', wraps=self.renderer._label) as labels:
             first = self.renderer.render(state)
         texts = [call.args[0] for call in labels.call_args_list]
-        self.assertNotIn('子爵夫人', texts)
+        self.assertIn('子爵夫人', texts)
         self.assertIn('Lv.72', texts)
         state['boss_template_id'] = 7102991
         self.assertTrue(self.renderer.render(state).image.tobytes() == first.image.tobytes())

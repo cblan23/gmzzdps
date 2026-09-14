@@ -1,0 +1,39 @@
+services:
+  napcat:
+    image: ${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}
+    hostname: daodao-assistant
+    entrypoint: ["bash", "-c", "unzip -n -q /app/NapCat.Shell.zip -d /app/napcat && exec bash /app/entrypoint.sh"]
+    restart: unless-stopped
+    environment:
+      ACCOUNT: ${BOT_QQ:-}
+      WEBUI_TOKEN: ${NAPCAT_WEBUI_TOKEN:?Set WebUI token}
+      NAPCAT_UID: 1000
+      NAPCAT_GID: 1000
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:6099:6099"
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - ./data/napcat:/app/napcat/config
+      - ./data/qq:/app/.config/QQ
+      - ./data/runtime/napcat.mjs:/app/napcat/napcat.mjs:ro
+    mem_limit: 768m
+    cpus: 0.8
+    logging:
+      driver: none
+  bot:
+    profiles: [container-bot]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NAPCAT_WS_URL: ws://napcat:3001
+    volumes:
+      - ./logs:/app/logs
+    mem_limit: 256m
+    cpus: 0.4
+    logging:
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "3"

@@ -1,0 +1,9 @@
+.env
+*.db
+*.db-*
+logs/
+data/
+backups/
+.venv/
+__pycache__/
+config.yaml

@@ -19,6 +19,7 @@ def main():
     cli.add_argument('--source', type=Path, required=True)
     cli.add_argument('--version', default='0.2.3')
     cli.add_argument('--build-id', required=True)
+    cli.add_argument('--backend', choices=('npcap', 'legacy'), default='npcap')
     args = cli.parse_args()
     directory = args.directory.resolve()
     manifest = read_json(directory / f'release-manifest-{args.build_id}.json')
@@ -33,7 +34,7 @@ def main():
     assert manifest['version'] == update['display_version'] == args.version
     assert update['latest_version'] == re.fullmatch(r'(\d+(?:\.\d+){2,3})[a-z]?', args.version).group(1)
     assert manifest['protected'] and update['protected']
-    assert manifest['capture_backend'] == 'legacy'
+    assert manifest['capture_backend'] == args.backend
     assert len(allowed) == 1 and allowed[0]['build_id'] == args.build_id
     assert allowed[0]['enabled'] and allowed[0]['protected']
     assert not manifest['source_included'] and not manifest['tests_included']
@@ -46,7 +47,10 @@ def main():
         for name in ('manifest.json', *set(mappings.values())):
             relative = f'assets/bosses/hud/{name}'
             assert resources[relative] == hashlib.sha256((args.source / relative).read_bytes()).hexdigest()
-    assert not any('runtime-profile' in name or '_capture_variant' in name or 'dps_config' in name for name in resources)
+    assert not any('runtime-profile' in name or 'dps_config' in name for name in resources)
+    if args.backend == 'npcap':
+        assert '_capture_variant.json' in resources
+        assert resources['npcap_zstd_restore.dll'] == hashlib.sha256((args.source / 'npcap_zstd_restore.dll').read_bytes()).hexdigest()
     notes = (args.source / f'release-notes-v{args.version}.txt').read_text(encoding='utf-8-sig').strip()
     assert notes == update['notes']
     assert notes == (directory / f'更新日志-v{args.version}.txt').read_text(encoding='utf-8-sig').strip()
@@ -59,7 +63,7 @@ def main():
                     embedded = text
     assert embedded == notes, 'Embedded and updater release notes differ'
     print(json.dumps(dict(version=args.version, build_id=args.build_id, size=manifest['size'],
-                          sha256=digest, protected=True, capture_backend='legacy',
+                          sha256=digest, protected=True, capture_backend=args.backend,
                           notes_lines=len(notes.splitlines()), status='verified'), ensure_ascii=False))
 
 

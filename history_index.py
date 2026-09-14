@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 
-HISTORY_INDEX_SCHEMA_VERSION = 13
+HISTORY_INDEX_SCHEMA_VERSION = 14
 HISTORY_INDEX_FILENAME = "history-index.sqlite3"
 
 RESULT_DEFEATED = "defeated"
@@ -456,12 +456,6 @@ class DungeonCatalog:
         if icon:
             return icon
 
-        parsed_stage_id = _as_int(stage_id)
-        if parsed_stage_id:
-            icon = _text(self.stages.get(parsed_stage_id, {}).get("icon"))
-            if icon:
-                return icon
-
         raw_candidates = self.stage_name_index.get(_text(name).casefold())
         candidates = (
             [raw_candidates]
@@ -486,7 +480,9 @@ class DungeonCatalog:
             ]
         icons = {_text(candidate.get("icon")) for candidate in candidates}
         icons.discard("")
-        return next(iter(icons)) if len(icons) == 1 else ""
+        if len(icons) == 1:
+            return next(iter(icons))
+        return _text(self.stages.get(_as_int(stage_id), {}).get("icon"))
 
 
 def normalize_battle_result(record: dict) -> str:
@@ -723,12 +719,17 @@ def build_history_summary(
         dungeon["source"] = "boss_mapping_correction"
     if not _text(dungeon.get("stage_name")):
         dungeon["stage_name"] = _text(primary_boss.get("name"))
-    elif len(bosses) == 1 and _text(primary_boss.get('name')):
+    elif len(set(boss_names)) == 1 and _text(primary_boss.get('name')):
         # Entry-stage IDs can lag one boss. A real, mapped target has stronger
         # evidence than that stale label, without guessing another difficulty.
         metadata = catalog.boss_metadata(primary_boss.get('template_id'))
         mapped_stages = {_as_int(value) for value in metadata.get('stage_ids', ())}
-        if mapped_stages and _as_int(dungeon.get('stage_id')) not in mapped_stages:
+        known_name = _text(primary_boss.get('name')) in {
+            name for names in HISTORY_DUNGEON_BOSSES.values() for name in names
+        }
+        if (mapped_stages and _as_int(dungeon.get('stage_id')) not in mapped_stages) or (
+            known_name and canonical_history_boss_name(dungeon.get('stage_name')) != _text(primary_boss.get('name'))
+        ):
             dungeon['stage_name'] = _text(primary_boss.get('name'))
             dungeon['source'] = 'boss_identity_over_stale_stage'
     participant, healer, taken, identity_source = _self_rows(record)

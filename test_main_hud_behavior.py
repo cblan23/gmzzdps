@@ -130,6 +130,20 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(updates, [packet])
         self.assertEqual(paints, [True])
 
+    def test_received_rating_schedules_paint_without_summary_timer(self):
+        window, _ = make_window()
+        window.model.started = False
+        window.model.entity_extraordinary_ratings = {}
+        def profile(value):
+            window.model.entity_extraordinary_ratings[value['entity_id']] = value['extraordinary_rating']
+            return True
+        window.model.ingest_profile = profile
+        paints = []
+        window._schedule_layered_main_render = lambda: paints.append(True)
+        window._dispatch_message('profile', dict(entity_id=2, extraordinary_rating=83428))
+        self.assertEqual(paints, [True])
+        self.assertEqual(window._main_extraordinary_rating(2), 83428)
+
     def test_same_map_model_reset_retains_finished_battle_until_new_pull(self):
         window, _ = make_window()
         record = completed_record()
@@ -188,6 +202,10 @@ class MainHudBehaviorTests(unittest.TestCase):
     def test_retained_hps_and_dt_are_read_from_existing_record_fields(self):
         window, _ = make_window()
         record = completed_record()
+        # Keep this configured-metric test below the per-player DPS override.
+        for actor in record['participants']:
+            actor['damage'] //= 10
+            actor['dps'] /= 10
         record['participants'][0]['profession_id'] = 1200002
         record['participants'][1]['profession_id'] = 1200006
         record['healers'] = [dict(actor_id=1, hps=31_500, effective_healing=945_000)]

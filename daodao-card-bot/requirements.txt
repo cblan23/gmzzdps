@@ -1,0 +1,2 @@
+ncatbot==4.4.1.post1
+qrcode[pil]==8.2

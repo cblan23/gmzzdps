@@ -35,7 +35,7 @@ FREE_TRIAL_END = datetime(2026, 9, 3, 23, 59, 59, tzinfo=CHINA_TIMEZONE)
 DEFAULT_SERVER_URL = "https://daodaogame.vip"
 REQUEST_TIMEOUT_SECONDS = 6.0
 ENCOUNTER_UPLOAD_TIMEOUT_SECONDS = 45.0
-UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 300.0
+UPDATE_DOWNLOAD_READ_TIMEOUT_SECONDS = 30.0
 CLIENT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 TRIAL_CARD_PATTERN = re.compile(r"^GMZZ[A-HJ-NP-Z2-9]{26}$")
 CA_BUNDLE_PATH = Path(__file__).resolve().with_name("cacert.pem")
@@ -283,6 +283,7 @@ class UpdateInfo:
     publisher_thumbprint: str = ""
     signature_required: bool = False
     rollback: bool = False
+    cdn_download_url: str = ""
 
 
 class LicensingConnectionError(RuntimeError):
@@ -608,7 +609,7 @@ class ServerLicensingGateway:
                 context.load_verify_locations(cafile=str(CA_BUNDLE_PATH))
             self.ssl_context = context
 
-    def _open_get(self, path: str):
+    def _open_get(self, path: str, *, extra_headers=None, timeout=None):
         headers = {
             "Accept": "application/json, application/octet-stream",
             "User-Agent": f"GMZZ-DPS/{self.app_version}",
@@ -617,12 +618,14 @@ class ServerLicensingGateway:
             headers["X-DPS-Build-ID"] = self.build_id
         if self._access_token:
             headers["Authorization"] = f"Bearer {self._access_token}"
+        if extra_headers:
+            headers.update(extra_headers)
         request = Request(
             self.server_url + path,
             headers=headers,
             method="GET",
         )
-        options = {"timeout": self.timeout}
+        options = {"timeout": self.timeout if timeout is None else timeout}
         if self.ssl_context is not None:
             options["context"] = self.ssl_context
         return urlopen(request, **options)
@@ -892,6 +895,8 @@ class ServerLicensingGateway:
             access_token=session.access_token,
             allow_forbidden=True,
         )
+        if not isinstance(value.get("authorized"), bool):
+            raise LicensingConnectionError("授权服务器返回了无效的心跳响应。")
         runtime_capability = None
         if value.get("authorized"):
             runtime_capability = self._runtime_capability(
@@ -908,15 +913,14 @@ class ServerLicensingGateway:
                     "服务器返回了重复或过期的采集授权。"
                 )
             if self.require_runtime_capability and runtime_capability is None:
-                return HeartbeatResult(
-                    False,
-                    message="正式客户端的采集授权未能续期，请重新登录。",
-                )
+                raise LicensingConnectionError("正式客户端的采集授权未能续期，正在重试。")
+        try:
+            heartbeat_interval = max(10, min(120, int(value.get("heartbeat_interval", 30) or 30)))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise LicensingConnectionError("授权服务器返回了无效的心跳间隔。") from exc
         return HeartbeatResult(
             authorized=bool(value.get("authorized")),
-            heartbeat_interval=max(
-                10, min(120, int(value.get("heartbeat_interval", 30) or 30))
-            ),
+            heartbeat_interval=heartbeat_interval,
             message=self._server_message(value, "登录状态已失效，请重新登录。"),
             expires_at=self._expires_at(value.get("expires_at")),
             card_tier=self._card_tier(value.get("card_tier"), ""),
@@ -1375,12 +1379,17 @@ class ServerLicensingGateway:
         download_path = str(value.get("download_path", "")).strip()
         sha256 = str(value.get("sha256", "")).strip().lower()
         available = bool(value.get("available"))
+        cdn_download_url = str(value.get("cdn_download_url", "")).strip()
         filename = Path(str(value.get("filename", "update.exe"))).name
         build_id = str(value.get("build_id", "")).strip().lower()
         publisher_thumbprint = re.sub(
             r"\s+", "", str(value.get("publisher_thumbprint", ""))
         ).upper()
         signature_required = bool(value.get("signature_required"))
+        if available and cdn_download_url:
+            from update_cdn import valid_cdn_url
+            if not valid_cdn_url(cdn_download_url, build_id):
+                raise LicensingConnectionError("更新 CDN 地址无效，请重新检查更新")
         if available and (
             download_path != expected_download_path
             or not re.fullmatch(r"[0-9a-f]{64}", sha256)
@@ -1416,6 +1425,7 @@ class ServerLicensingGateway:
             publisher_thumbprint=publisher_thumbprint,
             signature_required=signature_required,
             rollback=rollback,
+            cdn_download_url=cdn_download_url if available else "",
         )
 
     def download_update(
@@ -1426,93 +1436,28 @@ class ServerLicensingGateway:
     ) -> Path:
         if not update.available or not update.download_path:
             raise LicensingConnectionError("没有可下载的更新")
-        destination = Path(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_suffix(destination.suffix + ".download")
-        last_error: BaseException | None = None
-        deadline = time.monotonic() + UPDATE_DOWNLOAD_TIMEOUT_SECONDS
-        for attempt in range(2):
-            digest = hashlib.sha256()
-            written = 0
-            try:
-                if progress is not None:
-                    progress(0, update.size)
-                with self._open_get(update.download_path) as response, temporary.open(
-                    "wb"
-                ) as handle:
-                    response_length = response.headers.get("Content-Length")
-                    if response_length:
-                        try:
-                            declared_length = int(response_length)
-                        except (TypeError, ValueError, OverflowError):
-                            declared_length = 0
-                        if declared_length != update.size:
-                            raise LicensingConnectionError(
-                                "更新文件大小与服务器声明不一致，请重试"
-                            )
-                    # The update metadata already gives us the exact signed/hash-
-                    # checked byte count.  Stop as soon as that many bytes arrive;
-                    # waiting for a proxy or keep-alive connection to signal EOF
-                    # can otherwise leave the UI sitting at 100% indefinitely.
-                    while written < update.size:
-                        if time.monotonic() >= deadline:
-                            raise LicensingConnectionError("更新下载超时，请重试")
-                        chunk = response.read(
-                            min(256 * 1024, update.size - written)
-                        )
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if written > 256 * 1024 * 1024:
-                            raise LicensingConnectionError("更新文件大小异常")
-                        digest.update(chunk)
-                        handle.write(chunk)
-                        if progress is not None:
-                            progress(written, update.size)
-                if written != update.size or digest.hexdigest() != update.sha256:
-                    raise LicensingConnectionError(
-                        "更新文件校验失败，请重新下载"
-                    )
-                if update.signature_required or self.require_signed_updates:
-                    expected_publishers = (
-                        self.trusted_publisher_thumbprints
-                        or (update.publisher_thumbprint,)
-                    )
-                    verification = verify_windows_publisher(
-                        temporary,
-                        expected_publishers,
-                        require_trusted_chain=True,
-                    )
-                    if not verification.verified:
-                        raise LicensingConnectionError(
-                            "更新包数字签名验证失败，已拒绝安装"
-                        )
-                os.replace(temporary, destination)
-                return destination
-            except HTTPError as exc:
-                last_error = LicensingConnectionError(
-                    f"更新下载返回 HTTP {exc.code}"
-                )
-                break
-            except LicensingConnectionError as exc:
-                last_error = exc
-            except (URLError, OSError, TimeoutError) as exc:
-                last_error = LicensingConnectionError(
-                    self._connection_error_message(exc)
-                )
-            finally:
-                if temporary.exists():
-                    try:
-                        temporary.unlink()
-                    except OSError:
-                        pass
-            if attempt == 0:
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.2)
-        if last_error is not None:
-            raise last_error
-        raise LicensingConnectionError("更新下载失败")
+        from resumable_update import UpdateDownloadError, download_partial
+        def open_response(offset):
+            if update.cdn_download_url:
+                from update_cdn import open_cdn
+                return open_cdn(update.cdn_download_url,update.build_id,offset,update.sha256.lower(),self.ssl_context,
+                                timeout=UPDATE_DOWNLOAD_READ_TIMEOUT_SECONDS)
+            headers = {}
+            if offset:
+                headers = {"Range": f"bytes={offset}-", "If-Range": '"'+update.sha256.lower()+'"'}
+            return self._open_get(update.download_path, extra_headers=headers, timeout=UPDATE_DOWNLOAD_READ_TIMEOUT_SECONDS)
+        try:
+            temporary, metadata = download_partial(update, destination, open_response, progress)
+        except UpdateDownloadError as error:
+            raise LicensingConnectionError(str(error)) from error
+        if update.signature_required or self.require_signed_updates:
+            expected_publishers = self.trusted_publisher_thumbprints or (update.publisher_thumbprint,)
+            verification = verify_windows_publisher(temporary, expected_publishers, require_trusted_chain=True)
+            if not verification.verified:
+                raise LicensingConnectionError("更新包数字签名验证失败，已拒绝安装")
+        os.replace(temporary, destination)
+        metadata.unlink(missing_ok=True)
+        return Path(destination)
 
 class LicensingService:
     def __init__(self, gateway: LicensingGateway | None = None):

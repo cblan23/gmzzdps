@@ -654,13 +654,17 @@ class NetworkPacketParser:
         self.team_group_active = False
         # Combat-statistics responses are snapshots of counters, not reliable
         # membership notifications: observed live responses temporarily omit
-        # otherwise unchanged members.  They may bootstrap a parser that was
-        # started mid-team, but once an explicit join/leave message is seen the
-        # live roster must only be changed by those membership messages.
+        # otherwise unchanged members. They may bootstrap a parser that was
+        # started mid-team. This legacy flag means a *complete* explicit roster
+        # was received; a single incremental join/leave cannot establish that.
         self.explicit_party_roster_seen = False
+        # While the complete baseline is still unknown, counter/stage snapshots
+        # may add pre-existing members but must not resurrect an explicit leave.
+        self.departed_party_tokens: set[str] = set()
         self.last_party_activity_100ns = 0
         self.self_id: int | None = None
         self.native_self_id: int | None = None
+        self.pending_self_role_switch = False
         self.self_token: str | None = None
         self.self_confirmed = False
         self.token_actors: dict[str, int] = {}
@@ -674,6 +678,7 @@ class NetworkPacketParser:
         self.live_team_property_ratings: dict[str, int] = {}
         self.pending_team_ratings: dict[str, tuple[int, int]] = {}
         self.self_profile_marker = 0
+        self.pending_self_rating: tuple[int, int] | None = None
         self.readiness_expected_members = 0
         self.readiness_tokens: set[str] = set()
         self.server_level = 0
@@ -2356,12 +2361,31 @@ class NetworkPacketParser:
             # A dedicated property update can arrive just before the roster
             # packet which proves that the token is in the current party.  It
             # is fresher than the rating embedded in that roster snapshot.
-            self.live_team_property_ratings[token] = pending[0]
+            self._remember_confirmed_self_rating(token, pending[0])
             return pending[0]
         live_rating = self.live_team_property_ratings.get(token)
         if live_rating is not None and live_rating > 0:
             return live_rating
-        return rating if rating > 0 else None
+        if rating > 0:
+            return rating
+        # Sparse roster messages do not repeat every equipment field. An
+        # exact stable token may restore its own last verified profile only;
+        # never borrow a same-name/profession teammate's rating.
+        cached = self.team_profile_cache.get(token, {})
+        try:
+            cached_rating = int(cached.get('extraordinary_rating', 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            cached_rating = 0
+        return cached_rating if cached_rating > 0 else None
+
+    def _remember_confirmed_self_rating(self, token: str, rating: int) -> None:
+        self.live_team_property_ratings[token] = rating
+        self.team_profile_markers[token] = rating
+        cached = dict(self.team_profile_cache.get(token, {}))
+        if cached.get('extraordinary_rating') != rating:
+            cached['extraordinary_rating'] = rating
+            self.team_profile_cache[token] = cached
+            self.team_profile_cache_dirty = True
 
     def _is_confirmed_non_player_actor(self, actor_id: int) -> bool:
         return bool(
@@ -2951,6 +2975,7 @@ class NetworkPacketParser:
         return updates
 
     def _reset_scene_combat_bindings(self) -> None:
+        self.pending_self_rating = None
         self.scene_retired_boss_entities.update(self.confirmed_boss_entities)
         if self.active_boss_entity_id is not None:
             self.scene_retired_boss_entities.add(self.active_boss_entity_id)
@@ -3027,9 +3052,10 @@ class NetworkPacketParser:
             ]
             if matching_casts:
                 updates.extend(self._confirm_local_actor(actor_id, record))
-                self.pending_local_casts = [
-                    item for item in self.pending_local_casts if item not in matching_casts
-                ]
+                if self.self_id == actor_id and self.self_confirmed:
+                    self.pending_local_casts = [
+                        item for item in self.pending_local_casts if item not in matching_casts
+                    ]
         if actor_id == self.self_id and self.self_confirmed:
             updates.extend(
                 self._remembered_self_identity_updates(
@@ -3495,6 +3521,15 @@ class NetworkPacketParser:
         if parsed_actor_id is None:
             return []
         actor_id = parsed_actor_id
+        if not native and (
+            self.actor_tokens.get(actor_id) in self.other_party_tokens
+            or self.entity_profiles.get(actor_id, {}).get('is_ai') is True
+        ):
+            return []
+        if (native and self.self_token and self.self_id is not None
+                and self.self_id > 0 and actor_id != self.self_id):
+            self.pending_self_role_switch = True
+            self.pending_self_rating = None
         if (
             not native
             and self.self_confirmed
@@ -3669,8 +3704,8 @@ class NetworkPacketParser:
         if len(actors) == 1:
             candidate_actor_id = next(iter(actors))
             updates.extend(self._confirm_local_actor(candidate_actor_id, record))
-            actor_id = int(self.self_id or candidate_actor_id)
-        else:
+            actor_id = int(self.self_id or 0)
+        if len(actors) != 1 or not actor_id:
             self.pending_local_casts.append((skill_id, timestamp))
             if len(self.pending_local_casts) > 64:
                 self.pending_local_casts = self.pending_local_casts[-32:]
@@ -3716,6 +3751,7 @@ class NetworkPacketParser:
             # Join-success carries the complete current member table, unlike
             # combat-statistics responses.  Replace any mid-session fallback
             # snapshot with this exact membership evidence.
+            self.departed_party_tokens.clear()
             stale_tokens = (
                 set(self.party_tokens) | set(self.authoritative_party_tokens)
             ) - seen
@@ -3888,16 +3924,17 @@ class NetworkPacketParser:
         )
 
     def _mark_explicit_party_roster(self, *tokens: str) -> None:
-        """Promote membership notifications above counter snapshots."""
+        """Record exact incremental members without claiming a full baseline."""
 
         if not self.explicit_party_roster_seen:
             if not self.authoritative_party_tokens:
                 self.authoritative_party_tokens.update(self.party_tokens)
                 if self.self_token:
                     self.authoritative_party_tokens.add(self.self_token)
-            self.explicit_party_roster_seen = True
         self.authoritative_party_tokens.update(
-            token for token in tokens if token
+            token
+            for token in tokens
+            if token and token not in self.departed_party_tokens
         )
 
     def _clear_party_roster(self) -> None:
@@ -3913,6 +3950,8 @@ class NetworkPacketParser:
         self.party_tokens.clear()
         self.authoritative_party_tokens.clear()
         self.other_party_tokens.clear()
+        self.departed_party_tokens.clear()
+        self.explicit_party_roster_seen = False
         self.token_max_hp.clear()
         if self.self_token and self.self_id is not None:
             self.token_actors[self.self_token] = self.self_id
@@ -4063,7 +4102,7 @@ class NetworkPacketParser:
     ) -> list[tuple[str, dict]]:
         # Projection tokens are never local players, even if class, rating,
         # name or HP happens to match an observation of the local entity.
-        if not token or is_ai_team_token(token):
+        if not token or is_ai_team_token(token) or (self.self_token is None and token in self.other_party_tokens):
             return []
         if self.self_id is None:
             actor_id = self.token_actors.get(token)
@@ -4130,10 +4169,17 @@ class NetworkPacketParser:
         self.token_actors[token] = self.self_id
         self.actor_tokens[self.self_id] = token
         self.self_token = token
+        self.pending_self_role_switch = False
         self.remembered_self_token = token
         self.pending_team_ratings.pop(token, None)
         if self.explicit_party_roster_seen:
             self.authoritative_party_tokens.add(token)
+        pending_rating, self.pending_self_rating = self.pending_self_rating, None
+        if pending_rating is not None:
+            rating, observed_at = pending_rating
+            timestamp = int(record.get('filetime_100ns', 0) or 0)
+            if 0 <= timestamp-observed_at <= PENDING_TEAM_RATING_TTL_100NS:
+                self._remember_confirmed_self_rating(token, rating)
         cached_profile = self.team_profile_cache.get(token, {})
         cached_update = self._profile_update(
             self.self_id,
@@ -4675,20 +4721,14 @@ class NetworkPacketParser:
         if not members:
             return []
         # Stage statistics can retain a departed member after a replacement
-        # has already joined. If the live roster is complete, use it to remove
-        # those stale rows instead of discarding the remaining exact actor/name
-        # bindings. Without a complete live roster an oversized table remains
-        # unsafe and is rejected.
+        # has already joined. Restrict bindings only after a complete roster
+        # baseline was received. Incremental events seen after a late startup
+        # do not prove that older members are absent.
         live_roster_tokens = set(self.party_tokens)
         if not self.explicit_party_roster_seen:
             live_roster_tokens.update(self.authoritative_party_tokens)
         if self.self_token:
             live_roster_tokens.add(self.self_token)
-        live_roster_complete = bool(
-            self.party_seen
-            and 0 < self.party_member_count <= MAX_PARTY_MEMBERS
-            and len(live_roster_tokens) == self.party_member_count
-        )
         binding_members = members
         if self.explicit_party_roster_seen:
             # Exact stage rows remain useful for profiles and the completed
@@ -4698,15 +4738,16 @@ class NetworkPacketParser:
             binding_members = [
                 member for member in members if member[0] in live_roster_tokens
             ]
-        elif live_roster_complete:
-            live_members = [
-                member for member in members if member[0] in live_roster_tokens
+        elif self.departed_party_tokens:
+            binding_members = [
+                member
+                for member in members
+                if member[0] not in self.departed_party_tokens
             ]
-            if len(live_members) == self.party_member_count:
-                members = live_members
-            elif len(members) > MAX_PARTY_MEMBERS:
-                return []
-        elif len(members) > MAX_PARTY_MEMBERS:
+        if (
+            not self.explicit_party_roster_seen
+            and len(binding_members) > MAX_PARTY_MEMBERS
+        ):
             return []
 
         desired = {
@@ -4744,10 +4785,7 @@ class NetworkPacketParser:
         for token, actor_id in desired.items():
             self.token_actors[token] = actor_id
             self.actor_tokens[actor_id] = token
-        if self.explicit_party_roster_seen:
-            self.stage_bound_tokens.update(desired)
-        else:
-            self.stage_bound_tokens = set(desired)
+        self.stage_bound_tokens.update(desired)
         self.scene_rebind_tokens.difference_update(desired)
 
         updates: list[tuple[str, dict]] = []
@@ -4783,12 +4821,20 @@ class NetworkPacketParser:
                         actor_merge,
                     )
                 )
+            rating = (
+                self._confirmed_team_rating(token, None, record)
+                if token in desired
+                else None
+            )
+            if rating is not None:
+                self.team_profile_markers[token] = rating
             self._profile_update(
                 actor_id,
                 record,
                 name=plausible_name(fields.get(5)),
                 profession_id=fields.get(4),
                 level=fields.get(2),
+                extraordinary_rating=rating,
                 user_token=token,
                 entity_type="Player",
             )
@@ -5429,6 +5475,8 @@ class NetworkPacketParser:
                 marker = 0
             if marker:
                 self.self_profile_marker = marker
+                if self.self_token is None:
+                    self.pending_self_rating = (marker, int(record.get('filetime_100ns', 0) or 0))
                 matches = [
                     token
                     for token, value in self.team_profile_markers.items()
@@ -5448,11 +5496,11 @@ class NetworkPacketParser:
                 ]
                 if len(matches) == 1:
                     candidate = matches[0]
-            if candidate:
+            if candidate and self.self_token is None:
                 updates.extend(self._confirm_self_token(candidate, record))
             if marker and self.self_id is not None:
                 if self.self_token:
-                    self.live_team_property_ratings[self.self_token] = marker
+                    self._remember_confirmed_self_rating(self.self_token, marker)
                 profile = self._profile_update(
                     self.self_id,
                     record,
@@ -5489,7 +5537,7 @@ class NetworkPacketParser:
                 self._remember_pending_team_rating(token, rating, record)
                 return updates
             self.pending_team_ratings.pop(token, None)
-            self.live_team_property_ratings[token] = rating
+            self._remember_confirmed_self_rating(token, rating)
             actor_id = self.token_actors.get(token)
             if actor_id is None:
                 actor_id = self._bind_team_token(token, stable_team_actor_id(token))
@@ -5507,7 +5555,11 @@ class NetworkPacketParser:
 
         if method in TEAM_OTHER_MEMBER_TOKEN_METHODS and args:
             token = self._team_token(args[0])
-            if token and token != self.self_token:
+            if (
+                token
+                and token != self.self_token
+                and token not in self.departed_party_tokens
+            ):
                 self._mark_explicit_party_roster(token)
                 actor_id = self.token_actors.get(token)
                 if actor_id is None:
@@ -5562,6 +5614,7 @@ class NetworkPacketParser:
                 token = self._team_token(fields.get(2))
                 if not token:
                     continue
+                self.departed_party_tokens.discard(token)
                 joined = True
                 self.live_team_profile_tokens.add(token)
                 actor_id = self.token_actors.get(token)
@@ -5635,6 +5688,8 @@ class NetworkPacketParser:
             )
             actor_id = self.token_actors.get(token) if token else None
             changed = False
+            if token:
+                self.departed_party_tokens.add(token)
             if token in self.party_tokens:
                 self.party_tokens.remove(token)
                 changed = True
@@ -6052,7 +6107,11 @@ class NetworkPacketParser:
             self._record_party_activity(record)
 
         updates: list[tuple[str, dict]] = []
-        entry_tokens = {token for token, _fields in parsed_entries}
+        entry_tokens = {
+            token
+            for token, _fields in parsed_entries
+            if token not in self.departed_party_tokens
+        }
         full_snapshot = method == "RetCommonCombatStatisticsByTeam"
         if full_snapshot:
             self._refresh_player_detail_common_snapshot(parsed_entries)
@@ -6064,11 +6123,19 @@ class NetworkPacketParser:
             and (full_snapshot or (not self.party_seen and len(parsed_entries) >= 1))
         )
         if authoritative:
-            self.authoritative_party_tokens = set(entry_tokens)
-            self.party_member_count = len(entry_tokens)
+            if self.party_seen:
+                self.authoritative_party_tokens.update(entry_tokens)
+            else:
+                self.authoritative_party_tokens = set(entry_tokens)
+            self.party_member_count = max(self.party_member_count, len(self.authoritative_party_tokens))
+
+        if full_snapshot and self.self_token in entry_tokens:
+            self.pending_self_role_switch = False
 
         unknown_tokens = [
-            token for token, _fields in parsed_entries if token not in self.token_actors
+            token
+            for token, _fields in parsed_entries
+            if token in entry_tokens and token not in self.token_actors
         ]
         if (
             full_snapshot
@@ -6120,6 +6187,8 @@ class NetworkPacketParser:
 
         parsed_token_set: set[str] = set()
         for token, fields in parsed_entries:
+            if token in self.departed_party_tokens:
+                continue
             if (
                 current_roster_tokens is not None
                 and token not in current_roster_tokens
@@ -6134,12 +6203,16 @@ class NetworkPacketParser:
             if actor_id is None:
                 actor_id = self._bind_team_token(token, stable_team_actor_id(token))
             parsed_token_set.add(token)
+            rating = self._confirmed_team_rating(token, None, record)
+            if rating is not None:
+                self.team_profile_markers[token] = rating
             profile = self._profile_update(
                 actor_id,
                 record,
                 name=plausible_name(fields.get(4)),
                 level=fields.get(1),
                 profession_id=fields.get(3),
+                extraordinary_rating=rating,
                 user_token=token,
                 entity_type="Player",
             )
@@ -6169,10 +6242,17 @@ class NetworkPacketParser:
                 "full_snapshot": full_snapshot,
             }
             if full_snapshot:
+                inferred_roster_tokens = (
+                    set(self.authoritative_party_tokens)
+                    | set(self.party_tokens)
+                    | entry_tokens
+                ) - self.departed_party_tokens
+                if self.self_token:
+                    inferred_roster_tokens.add(self.self_token)
                 team_stat["team_tokens"] = sorted(
                     current_roster_tokens
                     if current_roster_tokens is not None
-                    else entry_tokens
+                    else inferred_roster_tokens
                 )
             for present, key, metric, omitted, flag in (
                 (has_damage, 5, 'absolute_damage', omitted_zero, 'omitted_zero'),
@@ -6202,6 +6282,11 @@ class NetworkPacketParser:
                 if token in self.token_actors
             }
             next_party_tokens = set(parsed_token_set)
+            if self.party_seen:
+                # Full counter responses can omit a member too. Only explicit
+                # membership events remove actors; counter omissions do not.
+                next_party_ids.update(self.party_ids)
+                next_party_tokens.update(self.party_tokens)
             if self.self_id is not None:
                 next_party_ids.discard(self.self_id)
             if self.self_token:
@@ -6265,22 +6350,30 @@ class NetworkPacketParser:
         self,
         parsed_entries: list[tuple[str, dict[int, object]]],
     ) -> str:
-        """Resolve a new local character after an in-process role switch.
+        """Replace identity only after the authoritative local actor changed.
 
-        A full Common snapshot always contains the current local character. If
-        the previously confirmed token is absent, the game has replaced that
-        role without replacing the process. Keep ambiguous multiplayer cases
-        unresolved rather than assigning a teammate as the local player.
+        A missing row is not a character switch. Existing teammates are never
+        candidates, even when their name/class is the only match in a response.
         """
         if (
             not parsed_entries
             or self.self_token is None
             or self.self_token in {token for token, _fields in parsed_entries}
+            or not self.pending_self_role_switch
+            or not self.native_self_id
+            or self.native_self_id != self.self_id
         ):
             return ""
-        if len(parsed_entries) == 1:
-            return parsed_entries[0][0]
         if self.self_id is None or not self.self_confirmed:
+            return ""
+        parsed_entries = [
+            (token, fields) for token, fields in parsed_entries
+            if not is_ai_team_token(token)
+            and token not in self.party_tokens
+            and token not in self.other_party_tokens
+            and self.token_actors.get(token) in (None, self.self_id)
+        ]
+        if not parsed_entries:
             return ""
 
         actor_matches = [
@@ -6293,7 +6386,7 @@ class NetworkPacketParser:
 
         known_self_name = plausible_name(
             self.runtime_entity_names.get(self.self_id)
-        ) or plausible_name(self.entity_profiles.get(self.self_id, {}).get("name"))
+        )
         if known_self_name:
             name_matches = [
                 token
@@ -6306,7 +6399,8 @@ class NetworkPacketParser:
         profession_id = int(
             self.actor_profession_hints.get(self.self_id, 0) or 0
         )
-        if profession_id:
+        previous_profession = int(self.team_profile_cache.get(self.self_token, {}).get('profession_id', 0) or 0)
+        if profession_id and previous_profession and profession_id != previous_profession:
             profession_matches = []
             for token, fields in parsed_entries:
                 try:
@@ -6318,13 +6412,7 @@ class NetworkPacketParser:
             if len(profession_matches) == 1:
                 return profession_matches[0]
 
-        previous_teammates = set(self.party_tokens) | set(self.other_party_tokens)
-        new_tokens = [
-            token
-            for token, _fields in parsed_entries
-            if token not in previous_teammates
-        ]
-        return new_tokens[0] if len(new_tokens) == 1 else ""
+        return ""
 
     def process_native_damage(
         self, record: dict, *, include_damage: bool = True

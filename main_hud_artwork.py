@@ -530,8 +530,9 @@ class MainHudRenderer:
         boss_sources = [value for value in snapshot.get('bosses', ()) if isinstance(value, Mapping)][:2] or [snapshot]
         boss_extra = BOSS_BAR_EXTRA_HEIGHT + (len(boss_sources) - 1) * 110 if show_boss else 0
         show_time = bool(snapshot.get("show_time", True))
-        show_prediction = bool(show_boss and isinstance(prediction, Mapping) and prediction.get("message"))
-        top_removed = (0 if show_time or show_prediction else 65) + (0 if show_boss else 88)
+        connection_notice = str(snapshot.get('connection_notice', '') or '')
+        show_prediction = bool(not connection_notice and show_boss and isinstance(prediction, Mapping) and prediction.get("message"))
+        top_removed = (0 if show_time or show_prediction or connection_notice else 65) + (0 if show_boss else 88)
         footer_offset = round((10 - count) * 75.4)
         source_width = REFERENCE_WIDTH - width_removed
         source_height = 1004 - footer_offset - top_removed + boss_extra
@@ -560,6 +561,11 @@ class MainHudRenderer:
             timer_y = 129 + (88 if not show_boss else 0)
             # Only outlined text: no pill, tile or background behind the clock.
             paste_text(timer, 177, timer_y + 29)
+        if connection_notice:
+            notice_right = 1083 - width_removed
+            label(connection_notice, notice_right, 158 + (88 if not show_boss else 0), 26,
+                  anchor='right', max_width=max(120, notice_right - timer_right - 16),
+                  regular=True, color=(246, 191, 85))
 
         if show_boss:
             for boss_index, boss_snapshot in enumerate(boss_sources):
@@ -606,12 +612,18 @@ class MainHudRenderer:
                 if available and 1 <= boss_level <= 999:
                     level_tile = self._label(f'Lv.{boss_level}', 28 * font_factor,
                         regular=True, color=(200, 214, 228))
-                hp_budget = hp_right - 392
-                if level_tile is not None:
-                    hp_budget = hp_right - 267 - level_tile.width - 12
+                name_left = 281 + (level_tile.width + 10 if level_tile is not None else 0)
+                name_budget = min(210, max(0, hp_right - name_left - 260))
+                name_tile = None
+                if available and boss_name and name_budget > 0:
+                    name_tile = self._fitted_label(boss_name, name_budget, 28 * font_factor,
+                        regular=True, color=(200, 214, 228))
+                hp_budget = hp_right - name_left - (name_tile.width + 12 if name_tile is not None else 12)
                 hp_tile = self._fitted_label(hp, max(130, hp_budget), (SUMMARY_FONT_HEIGHT - 4) * font_factor, truncate=False)
                 if level_tile is not None:
                     paste_text(level_tile, 281, bar_center_y)
+                if name_tile is not None:
+                    paste_text(name_tile, name_left, bar_center_y)
                 if available:
                     hp_left, percent_left = hp_right - hp_tile.width, percent_right - percent_tile.width
                 else:
@@ -749,7 +761,11 @@ class MainHudRenderer:
                 tile = self._pin_on if bool(snapshot.get('topmost', False)) else self._pin_off
             if name == "lock" and not bool(snapshot.get("locked", False)):
                 tile = self._unlocked
-            if name == hover and name != "pvp":
+            disabled = name == 'clear' and bool(snapshot.get('clear_disabled', False))
+            if disabled:
+                tile = tile.copy()
+                tile.putalpha(tile.getchannel('A').point(lambda n: n // 3))
+            if name == hover and name != "pvp" and not disabled:
                 tile = tile.copy()
                 glow = Image.new("RGBA", tile.size, (178, 218, 255, 0))
                 glow.putalpha(tile.getchannel("A").point(lambda n: n // 12))

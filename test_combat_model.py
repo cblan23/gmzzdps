@@ -3502,7 +3502,7 @@ class CombatModelTests(unittest.TestCase):
                 "filetime_100ns": death_time,
             }
         )
-        self.assertFalse(model.combat_end_time)
+        self.assertTrue(model.combat_end_time)
         model.ingest_combat_state(
             {
                 "entity_id": SELF_ID,
@@ -3678,7 +3678,7 @@ class CombatModelTests(unittest.TestCase):
                 "filetime_100ns": death_time,
             }
         )
-        self.assertFalse(model.combat_end_time)
+        self.assertTrue(model.combat_end_time)
         for sequence, entity_id in enumerate((SELF_ID, TEAMMATE_ID), start=1):
             model.ingest_combat_state(
                 {
@@ -4190,7 +4190,7 @@ class CombatModelTests(unittest.TestCase):
                 "filetime_100ns": BASE_FILETIME + 4 * 10_000_000,
             }
         )
-        self.assertFalse(model.combat_end_time)
+        self.assertTrue(model.combat_end_time)
         self.assertTrue(model._target_hp_depleted())
         model.ingest_combat_state(
             {
@@ -5880,8 +5880,8 @@ class CombatModelTests(unittest.TestCase):
         source = Path(__file__).with_name("dps_meter.pyw").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(APP_VERSION, "0.2.3b")
-        self.assertEqual(CLIENT_BUILD, "0.2.3+20260911.5")
+        self.assertEqual(APP_VERSION, "0.2.3d")
+        self.assertEqual(CLIENT_BUILD, "0.2.3+20260912.3")
         self.assertNotIn('self.config["topmost"] = True', source)
         self.assertNotIn("toggle_boss_only", source)
         self.assertNotIn('self.footer, "只读 BOSS"', source)
@@ -11242,9 +11242,12 @@ class CombatModelTests(unittest.TestCase):
                         "actor_id": SELF_ID,
                         "name": "莫雪",
                         "profession_id": 1_200_002,
+                        "extraordinary_rating": 41_820,
                         "damage": 3_000_000,
                         "critical_rate": 0.4,
                         "deaths": 1,
+                        "revives": 1,
+                        "death_duration_seconds": 6.5,
                         "skills": [
                             {
                                 "skill_id": 86_021_070,
@@ -11295,6 +11298,27 @@ class CombatModelTests(unittest.TestCase):
             [target["name"] for target in selected["participants"][0]["targets"]],
             ["星象仪者", "星光守卫"],
         )
+        self.assertEqual(
+            selected["participants"][0]["extraordinary_rating"], 41_820
+        )
+        self.assertEqual(selected["participants"][0]["revives"], 1)
+        self.assertEqual(
+            selected["participants"][0]["death_duration_seconds"], 6.5
+        )
+
+        records[0]["boss_damage"] = {
+            "death_event_log": {
+                "version": 1,
+                "columns": ["time_ms", "actor_id", "name"],
+                "origin_started_at_epoch": 1_787_989_900,
+                "rows": [[12_345, SELF_ID, "莫雪"]],
+            }
+        }
+        selected = DpsWindow._feedback_history_summary(records[0])
+        self.assertEqual(
+            selected["death_event_log"]["rows"],
+            [[12_345, SELF_ID, "莫雪"]],
+        )
 
         complete_record = dict(records[0])
         complete_record["participants"] = [
@@ -11319,6 +11343,10 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(len(batch["participants"][0]["skills"]), 3)
         self.assertEqual(len(batch["participants"][0]["targets"]), 2)
         self.assertNotIn("capture_pipeline_at_archive", batch)
+        self.assertEqual(
+            batch["death_event_log"]["rows"],
+            [[12_345, SELF_ID, "莫雪"]],
+        )
         self.assertEqual(
             DpsWindow._normalize_feedback_record_ids(
                 ["encounter-new", "encounter-new", "", "encounter-old"]

@@ -8,6 +8,7 @@ import unittest
 
 import test_combat_model
 import test_network_state
+import test_startup_rating_sync
 
 
 def combat(name: str) -> tuple[str, str]:
@@ -16,6 +17,10 @@ def combat(name: str) -> tuple[str, str]:
 
 def network(name: str) -> tuple[str, str]:
     return "network", name
+
+
+def startup(name: str) -> tuple[str, str]:
+    return "startup", name
 
 
 OBSERVER_LEDGER = combat(
@@ -195,6 +200,11 @@ FEEDBACK_REGRESSIONS = {
         OBSERVER_LEDGER,
         FINAL_SETTLEMENT,
     ),
+    "FB8D783CC8CBE2F0EA": (
+        startup(
+            "test_feedback_fb8d_late_start_clear_keeps_all_named_rating_rows"
+        ),
+    ),
 }
 
 
@@ -203,8 +213,9 @@ class FeedbackRegressionManifestTests(unittest.TestCase):
         suites = {
             "combat": test_combat_model.CombatModelTests,
             "network": test_network_state.NetworkPacketParserTests,
+            "startup": test_startup_rating_sync.StartupRatingTests,
         }
-        self.assertEqual(len(FEEDBACK_REGRESSIONS), 42)
+        self.assertEqual(len(FEEDBACK_REGRESSIONS), 43)
         for feedback_id, regressions in FEEDBACK_REGRESSIONS.items():
             with self.subTest(feedback_id=feedback_id):
                 self.assertRegex(feedback_id, r"^FB[A-F0-9]{16}$")

@@ -368,8 +368,8 @@ class MainHudRendererTests(unittest.TestCase):
         with mock.patch.object(self.renderer, '_label', wraps=self.renderer._label) as labels:
             second = self.renderer.render(state)
         texts = [call.args[0] for call in labels.call_args_list]
-        self.assertNotIn('首领甲', texts)
-        self.assertNotIn('首领乙', texts)
+        self.assertIn('首领甲', texts)
+        self.assertIn('首领乙', texts)
         self.assertIn('1亿 / 2亿', texts)
         self.assertIn('3亿 / 4亿', texts)
         self.assertEqual(second.image.width, first.image.width)
@@ -431,7 +431,7 @@ class MainHudRendererTests(unittest.TestCase):
     def test_audience_damage_is_shown_when_existing_setting_selects_dps(self):
         from test_combat_model import DpsWindow, ActorStats, normalize_profession_display_metrics
         actor = ActorStats(actor_id=71)
-        actor.damage = 312_760
+        actor.damage = 80_000  # Below the new per-player DPS override threshold.
         window = object.__new__(DpsWindow)
         window.model = SimpleNamespace(
             current_stats=lambda: [actor], current_taken_rows=lambda: [],
@@ -445,6 +445,7 @@ class MainHudRendererTests(unittest.TestCase):
         healer = window._main_combat_display_rows()[0]
         self.assertEqual(healer['metric'], 'hps')
         self.assertIsNone(healer['stat_value'])
+        actor.damage = 312_760
         window.profession_display_metrics['1200002'] = 'dps'
         damage = window._main_combat_display_rows()[0]
         self.assertTrue(damage['is_self'])

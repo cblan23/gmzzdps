@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Select the capture implementation embedded in this application build.
 
-Source checkouts and normal releases keep using the established capture
-process.  The isolated Npcap build contains ``_capture_variant.json`` and
-loads only the passive Npcap implementation.  Keeping the selection here
+Source checkouts and normal builds use the established Hook implementation.
+The explicit Npcap variant remains available for migration development.
+Normal builds retain existing app data and identity;
+the explicit isolated variant can override those names. Keeping selection here
 prevents the Npcap executable from importing (or needing to bundle) any of the
 legacy hook capture modules.
 """
@@ -66,6 +67,8 @@ CAPTURE_VARIANT = _load_variant()
 CAPTURE_BACKEND_NAME = str(
     CAPTURE_VARIANT.get("backend", "legacy") or "legacy"
 ).strip().casefold()
+if CAPTURE_BACKEND_NAME not in {"legacy", "npcap"}:
+    raise RuntimeError(f"Unsupported capture backend: {CAPTURE_BACKEND_NAME}")
 IS_NPCAP_BACKEND = CAPTURE_BACKEND_NAME == "npcap"
 CAPTURE_DISPLAY_VERSION = str(
     CAPTURE_VARIANT.get("display_version", "") or ""

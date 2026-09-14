@@ -12,7 +12,7 @@ from combat_history import CombatHistoryStore
 
 
 class LocalIdentityRegressionTests(unittest.TestCase):
-    def test_midfight_healer_with_same_class_projection_resolves_on_first_confirmation(self):
+    def test_midfight_healer_projection_binding_requires_native_confirmation(self):
         parser = NetworkPacketParser(team_profile_cache={
             SELF_TOKEN: dict(name='本机玩家', profession_id=1200002),
             NAMED_AI_TOKEN: dict(name='队友投影', profession_id=1200002),
@@ -28,6 +28,11 @@ class LocalIdentityRegressionTests(unittest.TestCase):
         parser.actor_tokens[PLAYER_ID] = NAMED_AI_TOKEN
         parser.entity_profiles[PLAYER_ID] = dict(name='队友投影', is_ai=True)
         parser._confirm_local_actor(PLAYER_ID, packet('RetCastSkillSuccessNew', []))
+        # A same-skill timing match cannot prove that the misbound projection
+        # is the local player. The game's explicit local ID can correct it.
+        self.assertIsNone(parser.self_token)
+        self.assertIsNone(parser.self_id)
+        parser._confirm_local_actor(PLAYER_ID, packet('', []), native=True)
         self.assertEqual(parser.self_token, SELF_TOKEN)
         self.assertEqual(parser.self_id, PLAYER_ID)
         self.assertEqual(parser.entity_profiles[PLAYER_ID]['name'], '本机玩家')

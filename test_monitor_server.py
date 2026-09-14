@@ -52,6 +52,90 @@ class QuietMonitorHandler(monitor.MonitorHandler):
 
 
 class MonitorServerTests(unittest.TestCase):
+    def test_bot_card_generation_is_daily_idempotent_and_real_eight_hour_card(self):
+        from server import bot_cards
+        with monitor.write_database() as connection:
+            first=bot_cards.claim(connection,'1806525','999999','msg1',time.time(),monitor.generate_card_key,monitor.token_digest)
+        with monitor.write_database() as connection:
+            repeat=bot_cards.claim(connection,'1806525','999999','msg2',time.time(),monitor.generate_card_key,monitor.token_digest)
+        self.assertEqual(first['card'],repeat['card'])
+        self.assertTrue(repeat['already_claimed'])
+        with monitor.database() as connection:
+            row=connection.execute('SELECT * FROM cards WHERE card_key=?',(first['card'],)).fetchone()
+            self.assertEqual(row['duration_seconds'],28800)
+            self.assertEqual(row['note'],'机器人发卡专用')
+            self.assertFalse(row['activated_at'])
+        client=ServerLicensingGateway(self.base_url, 'b'*32, '0.2.3')
+        session=client.sign_in_card(first['card'])
+        self.assertTrue(session.active)
+
+    def test_bot_duration_change_preserves_existing_twelve_hour_claim(self):
+        from server import bot_cards
+        timestamp=time.time()
+        with mock.patch.object(bot_cards,'DURATION',43200):
+            with monitor.write_database() as connection:
+                first=bot_cards.claim(connection,'1806525','999999','old-claim',timestamp,monitor.generate_card_key,monitor.token_digest)
+        with monitor.write_database() as connection:
+            repeat=bot_cards.claim(connection,'1806525','999999','repeat-claim',timestamp+1,monitor.generate_card_key,monitor.token_digest)
+            new=bot_cards.claim(connection,'1806526','999999','new-claim',timestamp+1,monitor.generate_card_key,monitor.token_digest)
+        self.assertEqual(repeat['card'],first['card'])
+        self.assertTrue(repeat['already_claimed'])
+        self.assertEqual(repeat['duration_seconds'],43200)
+        self.assertEqual(new['duration_seconds'],28800)
+        with monitor.database() as connection:
+            self.assertEqual(connection.execute('SELECT duration_seconds FROM cards WHERE card_key=?',(first['card'],)).fetchone()[0],43200)
+
+    def test_admin_bot_card_type_creates_eight_hour_cards(self):
+        key=self.create_card(card_type='bot_8h')[0]
+        with monitor.database() as connection:
+            row=connection.execute('SELECT duration_seconds,note FROM cards WHERE card_key=?',(key,)).fetchone()
+        self.assertEqual(row['duration_seconds'],28800)
+        self.assertEqual(row['note'],'机器人发卡专用')
+        self.assertIn("机器人发卡专用（8小时）",monitor.ADMIN_PAGE)
+
+    def test_cards_pagination_and_search_cover_other_pages(self):
+        keys = self.create_card(count=60)
+        _, first = self.request('/api/v1/dps/admin/status?cards=visible&page=1', admin=True)
+        _, second = self.request('/api/v1/dps/admin/status?cards=visible&page=2', admin=True)
+        self.assertEqual(len(first['cards']), 50)
+        self.assertTrue(second['cards'])
+        self.assertFalse({c['card_id'] for c in first['cards']} & {c['card_id'] for c in second['cards']})
+        key = second['cards'][-1]['card_key']
+        _, found = self.request('/api/v1/dps/admin/status?cards=visible&search='+key, admin=True)
+        self.assertEqual([c['card_key'] for c in found['cards']], [key])
+        self.assertEqual(found['card_total'], 1)
+
+    def test_visible_cards_hide_expired_and_revoked_without_deleting(self):
+        keys = self.create_card(count=3)
+        with monitor.write_database() as connection:
+            connection.execute('UPDATE cards SET revoked=1 WHERE card_key=?', (keys[0],))
+            connection.execute('UPDATE cards SET activated_at=?, expires_at=? WHERE card_key=?',
+                               (time.time()-100, time.time()-1, keys[1]))
+        status, visible = self.request('/api/v1/dps/admin/status?cards=visible', admin=True)
+        self.assertEqual(status, 200)
+        shown = {row['card_key'] for row in visible['cards']}
+        self.assertNotIn(keys[0], shown)
+        self.assertNotIn(keys[1], shown)
+        self.assertIn(keys[2], shown)
+        with monitor.database() as connection:
+            for key in keys:
+                row = connection.execute('SELECT deleted_at FROM cards WHERE card_key=?', (key,)).fetchone()
+                self.assertIsNotNone(row)
+                self.assertIsNone(row['deleted_at'])
+
+    def test_light_admin_status_preserves_summary_without_card_payload(self):
+        status, full = self.request('/api/v1/dps/admin/status', admin=True)
+        self.assertEqual(status, 200)
+        status, light = self.request('/api/v1/dps/admin/status?cards=0', admin=True)
+        self.assertEqual(status, 200)
+        self.assertFalse(light['cards_included'])
+        self.assertEqual(light['cards'], [])
+        self.assertTrue(full['cards_included'])
+        for key in ('logged_in', 'using_now', 'seen_24h', 'active_cards', 'unused_cards', 'sessions'):
+            self.assertEqual(light[key], full[key], key)
+        status, _ = self.request('/api/v1/dps/admin/status?cards=0')
+        self.assertEqual(status, 401)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.original_partner_card_key = monitor.PARTNER_CARD_KEY
@@ -182,7 +266,7 @@ class MonitorServerTests(unittest.TestCase):
             self.base_url, "f" * 32, "0.1.1"
         )
         response = Response()
-        gateway._open_get = lambda _path: response
+        gateway._open_get = lambda _path, **_options: response
         update = UpdateInfo(
             available=True,
             latest_version="0.1.2",

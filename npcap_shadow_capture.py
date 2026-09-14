@@ -26,6 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
+from npcap_receiver import bind_receive_configuration
+from npcap_runtime import require_npcap_runtime
+
 
 ERRBUF_SIZE = 256
 AF_INET = 2
@@ -118,6 +121,11 @@ class MibUdpRowOwnerPid(ctypes.Structure):
     ]
 
 
+class MibUdp6RowOwnerPid(ctypes.Structure):
+    _fields_ = [("local_addr", ctypes.c_ubyte * 16), ("scope_id", ctypes.c_uint32),
+                ("local_port", ctypes.c_uint32), ("owning_pid", ctypes.c_uint32)]
+
+
 @dataclass(frozen=True)
 class Adapter:
     name: str
@@ -155,6 +163,7 @@ def _decode_native(value: Optional[bytes]) -> str:
 def load_wpcap() -> ctypes.CDLL:
     if os.name != "nt":
         raise RuntimeError("Npcap shadow capture currently supports Windows only")
+    runtime_info = require_npcap_runtime()
     npcap_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / "Npcap"
     dll_path = npcap_dir / "wpcap.dll"
     if not dll_path.is_file():
@@ -189,6 +198,8 @@ def load_wpcap() -> ctypes.CDLL:
     dll.pcap_next_ex.restype = ctypes.c_int
     dll.pcap_geterr.argtypes = [ctypes.c_void_p]
     dll.pcap_geterr.restype = ctypes.c_char_p
+    bind_receive_configuration(dll)
+    dll._npcap_runtime_info = runtime_info
     return dll
 
 
@@ -247,22 +258,29 @@ def list_udp_endpoints() -> list[UdpEndpoint]:
         ctypes.c_uint32,
     ]
     function.restype = ctypes.c_uint32
-    size = ctypes.c_uint32(0)
-    result = function(None, ctypes.byref(size), False, AF_INET, UDP_TABLE_OWNER_PID, 0)
-    if result not in (0, ERROR_INSUFFICIENT_BUFFER):
-        raise OSError(result, "GetExtendedUdpTable size query failed")
-    buffer = ctypes.create_string_buffer(size.value)
-    result = function(buffer, ctypes.byref(size), False, AF_INET, UDP_TABLE_OWNER_PID, 0)
-    if result != 0:
-        raise OSError(result, "GetExtendedUdpTable failed")
-    count = struct.unpack_from("<I", buffer.raw, 0)[0]
     endpoints: list[UdpEndpoint] = []
-    row_size = ctypes.sizeof(MibUdpRowOwnerPid)
-    for index in range(count):
-        row = MibUdpRowOwnerPid.from_buffer_copy(buffer.raw, 4 + index * row_size)
-        address = socket.inet_ntoa(struct.pack("<I", row.local_addr))
-        port = socket.ntohs(row.local_port & 0xFFFF)
-        endpoints.append(UdpEndpoint(int(row.owning_pid), address, port))
+    for family, row_type in ((socket.AF_INET, MibUdpRowOwnerPid), (socket.AF_INET6, MibUdp6RowOwnerPid)):
+        size = ctypes.c_uint32(0)
+        buffer = None
+        for _ in range(4):
+            result = function(buffer, ctypes.byref(size), False, family, UDP_TABLE_OWNER_PID, 0)
+            if result == 0 and buffer is not None:
+                break
+            if result not in (0, ERROR_INSUFFICIENT_BUFFER):
+                raise OSError(result, "GetExtendedUdpTable failed")
+            buffer = ctypes.create_string_buffer(max(4, size.value))
+        else:
+            raise RuntimeError('UDP endpoint table changed repeatedly during query')
+        raw = buffer.raw
+        count = struct.unpack_from('<I', raw)[0]
+        row_size = ctypes.sizeof(row_type)
+        if 4 + count * row_size > len(raw):
+            raise RuntimeError('Truncated UDP endpoint table')
+        for index in range(count):
+            row = row_type.from_buffer_copy(raw, 4 + index * row_size)
+            address = (socket.inet_ntoa(struct.pack('<I', row.local_addr)) if family == socket.AF_INET
+                       else socket.inet_ntop(socket.AF_INET6, bytes(row.local_addr)))
+            endpoints.append(UdpEndpoint(int(row.owning_pid), address, socket.ntohs(row.local_port & 0xffff)))
     return endpoints
 
 
@@ -296,7 +314,7 @@ def discover_game(args: argparse.Namespace) -> tuple[int, str, list[UdpEndpoint]
     if args.pid:
         selected = [row for row in endpoints if row.pid == args.pid]
         if not selected:
-            raise RuntimeError(f"PID {args.pid} owns no IPv4 UDP ports")
+            raise RuntimeError(f"PID {args.pid} owns no UDP ports")
         return args.pid, process_path(args.pid), selected
     matches: list[tuple[int, str, list[UdpEndpoint]]] = []
     for pid in {row.pid for row in endpoints}:

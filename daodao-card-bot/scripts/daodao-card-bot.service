@@ -1,0 +1,19 @@
+[Unit]
+Description=Daodao QQ card assistant (NcatBot connect only)
+After=network-online.target docker.service daodao-card-api.service
+[Service]
+User=daodao-card-bot
+WorkingDirectory=/opt/daodao-card-bot
+ExecStart=/opt/daodao-card-bot/.venv/bin/python -m app.supervisor
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/daodao-card-bot/data /opt/daodao-card-bot/logs
+MemoryMax=256M
+CPUQuota=40%
+TimeoutStopSec=20
+[Install]
+WantedBy=multi-user.target

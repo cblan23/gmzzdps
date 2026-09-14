@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Passive Npcap capture backend used by the isolated v0.2.2n build.
+"""Passive Npcap capture backend used by the main application and releases.
 
 The backend receives encrypted UDP/KCP traffic from Npcap and decodes only
 inbound server PUSH data without modifying the game's packet decoder or
@@ -17,7 +17,7 @@ import queue
 import time
 import traceback
 from collections import Counter, OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 import npcap_shadow_capture as shadow_capture
@@ -30,6 +30,9 @@ from npcap_zstd_state import (
     locate_zstd_readers,
 )
 from runtime_capability import RuntimeCapability, RuntimeCapabilityError
+from npcap_receiver import BufferedReceiver, MultiAdapterReceiver, endpoint_direction
+from passive_transport import CaptureFrame, PacketReassembler, SequenceUnwrapper
+from npcap_entity_metadata import PassiveEntityMetadataReader
 
 
 CAPTURE_RETRY_WAIT_SECONDS = 0.5
@@ -268,6 +271,7 @@ class PushSegment:
     sequence: int
     timestamp_epoch: float
     ciphertext: bytes
+    timestamp_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +281,7 @@ class DecryptedPush:
     timestamp_epoch: float
     plaintext: bytes
     after_anchor: bool
+    timestamp_ns: int | None = None
 
 
 class PassiveRc4Reassembler:
@@ -308,6 +313,7 @@ class PassiveRc4Reassembler:
         ] = OrderedDict()
         self.last_seen_monotonic: dict[tuple[int, str, int, int], float] = {}
         self.last_delivered: dict[tuple[int, str, int, int], int] = {}
+        self.serials: dict[tuple, SequenceUnwrapper] = {}
         self.anchor: Rc4Anchor | None = None
         self.active_flow: tuple[int, str, int, int] | None = None
         self.state: Rc4State | None = None
@@ -351,6 +357,7 @@ class PassiveRc4Reassembler:
             self.flows.clear()
             self.last_seen_monotonic.clear()
             self.last_delivered.clear()
+            self.serials.clear()
             self.counters["connection_history_resets"] += 1
 
     def _flow_segments(
@@ -364,6 +371,7 @@ class PassiveRc4Reassembler:
                 stale, _discarded = self.flows.popitem(last=False)
                 self.last_seen_monotonic.pop(stale, None)
                 self.last_delivered.pop(stale, None)
+                self.serials.pop(stale, None)
         else:
             self.flows.move_to_end(flow)
         return values
@@ -387,6 +395,8 @@ class PassiveRc4Reassembler:
     ) -> list[DecryptedPush]:
         monotonic_now = time.monotonic() if now is None else float(now)
         values = self._flow_segments(segment.flow)
+        serial = self.serials.setdefault(segment.flow, SequenceUnwrapper())
+        segment = replace(segment, sequence=serial.unwrap(segment.sequence))
         existing = values.get(int(segment.sequence))
         if existing is not None:
             if existing.ciphertext == segment.ciphertext:
@@ -395,6 +405,9 @@ class PassiveRc4Reassembler:
                 self.counters["kcp_sequence_conflicts"] += 1
                 if self.active_flow == segment.flow:
                     self.invalidate()
+            return []
+        if segment.sequence <= self.last_delivered.get(segment.flow, -1):
+            self.counters["kcp_old_retransmissions"] += 1
             return []
         values[int(segment.sequence)] = segment
         self.last_seen_monotonic[segment.flow] = monotonic_now
@@ -507,6 +520,7 @@ class PassiveRc4Reassembler:
                 timestamp_epoch=values[item].timestamp_epoch,
                 plaintext=decoded[item],
                 after_anchor=item > boundary,
+                timestamp_ns=values[item].timestamp_ns,
             )
             for item in sorted(decoded)
             if item > delivered
@@ -533,6 +547,7 @@ class PassiveRc4Reassembler:
                     timestamp_epoch=segment.timestamp_epoch,
                     plaintext=plaintext,
                     after_anchor=True,
+                    timestamp_ns=segment.timestamp_ns,
                 )
             )
             self.last_delivered[segment.flow] = segment.sequence
@@ -624,12 +639,6 @@ def _configure_pcap(wpcap, handle) -> None:
         ]
         wpcap.pcap_stats.restype = ctypes.c_int
     except (AttributeError, TypeError):
-        pass
-    try:
-        wpcap.pcap_setbuff.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        wpcap.pcap_setbuff.restype = ctypes.c_int
-        wpcap.pcap_setbuff(handle, PCAP_BUFFER_BYTES)
-    except (AttributeError, TypeError, OSError):
         pass
 
 
@@ -728,8 +737,10 @@ def _emit_batch(
     team_stats_mode: object,
     last_response_filetime: int,
     data_incomplete: bool,
+    metadata_records: list[dict] | None = None,
+    heartbeat: bool = False,
 ) -> bool:
-    if not records and not gaps:
+    if not records and not gaps and not metadata_records and not heartbeat:
         return False
     _put(
         output_queue,
@@ -743,6 +754,7 @@ def _emit_batch(
             "request_records": [],
             "native_records": [],
             "native_boss_records": [],
+            "entity_metadata_records": metadata_records or [],
             "native_name_records": [],
             "native_skill_name_records": [],
             "native_damage_hook_installed": False,
@@ -886,24 +898,18 @@ def _session(
             return "game_not_found"
         raise
 
-    adapter, local_ip = _select_capture_adapter(wpcap, endpoints)
     ports = sorted({int(row.local_port) for row in endpoints if row.local_port})
-    bpf = shadow_capture.make_bpf(local_ip, ports)
-    errbuf = ctypes.create_string_buffer(shadow_capture.ERRBUF_SIZE)
-    handle = wpcap.pcap_open_live(
-        adapter.name.encode(), 65535, 0, PCAP_READ_TIMEOUT_MS, errbuf
-    )
-    if not handle:
-        raise RuntimeError(
-            f"pcap_open_live failed: {shadow_capture._decode_native(errbuf.value)}"
-        )
+    receiver = BufferedReceiver(
+        MultiAdapterReceiver(wpcap, shadow_capture, _install_bpf, _configure_pcap, endpoints), _pcap_stats)
+    packets = PacketReassembler()
 
     state_readers: list[SessionStateReader] = []
+    metadata_reader = None
     state_reader_index = 0
     try:
-        _configure_pcap(wpcap, handle)
-        _install_bpf(wpcap, handle, bpf)
-        datalink = int(wpcap.pcap_datalink(handle))
+        capability = getattr(runtime_expiry, 'capability', None)
+        if capability is not None:
+            metadata_reader = PassiveEntityMetadataReader(pid, capability.profile)
         _put(
             output_queue,
             "state",
@@ -930,7 +936,7 @@ def _session(
             return "retry"
 
         reassembler = PassiveRc4Reassembler()
-        decoder = NpcapProtocolDecoder()
+        decoder = NpcapProtocolDecoder(capture_unknown=os.environ.get('GMZZ_NPCAP_CAPTURE_UNKNOWN') == '1')
         installed = False
         for state_reader_index, state_reader in enumerate(state_readers):
             try:
@@ -955,9 +961,11 @@ def _session(
         counters["server_requests_added"] = 0
         counters["stream_state_candidates"] = len(state_readers)
         pending_records: list[dict] = []
+        pending_metadata: list[dict] = []
         pending_gaps: list[dict] = []
         batch_id = 0
         next_flush = time.monotonic() + BATCH_INTERVAL_SECONDS
+        next_diagnostic_heartbeat = time.monotonic() + 1.0
         next_endpoint_refresh = time.monotonic() + ENDPOINT_REFRESH_SECONDS
         next_anchor_retry = time.monotonic() + ALIGNMENT_RETRY_SECONDS
         process_missing_since: float | None = None
@@ -968,7 +976,6 @@ def _session(
         next_pcap_stats = time.monotonic()
         last_protocol_frame = time.monotonic()
         pushes_without_protocol_frame = 0
-        scene_transition_relocate_at: float | None = None
 
         _put(
             output_queue,
@@ -988,9 +995,12 @@ def _session(
                 "damage_source": "npcap",
                 "capture_backend": "npcap",
                 "npcap_capture_active": True,
-                "npcap_adapter": adapter.description or adapter.name,
-                "npcap_local_ip": local_ip,
+                "npcap_adapters": list(receiver.handles),
+                "npcap_local_addresses": sorted(receiver.local_addresses),
                 "npcap_game_ports": ports,
+                "capture_timestamp_resolution_ns": {
+                    name: value[0].timestamp_resolution_ns for name, value in receiver.handles.items()
+                },
                 "rc4_read_mode": "query_and_read_only",
                 "zstd_read_mode": "query_and_read_only",
                 "server_requests_added": 0,
@@ -1002,22 +1012,10 @@ def _session(
             now = time.monotonic()
             protocol_state_resync = False
 
-            header_ptr = ctypes.POINTER(shadow_capture.PcapPacketHeader)()
-            data_ptr = ctypes.POINTER(ctypes.c_ubyte)()
-            status = wpcap.pcap_next_ex(
-                handle, ctypes.byref(header_ptr), ctypes.byref(data_ptr)
-            )
-            if status == -2:
-                return "capture_closed"
-            if status < 0:
-                raise RuntimeError(
-                    shadow_capture._decode_native(wpcap.pcap_geterr(handle))
-                )
-            if status > 0:
-                header = header_ptr.contents
-                raw = ctypes.string_at(data_ptr, header.caplen)
-                udp = shadow_capture.parse_udp_packet(raw, datalink)
-                if udp is None:
+            frame = receiver.next_frame()
+            if frame is not None:
+                udp = packets.feed(frame)
+                if udp is None or udp.protocol != 'udp':
                     counters["unparsed_packets"] += 1
                 else:
                     (
@@ -1026,12 +1024,9 @@ def _session(
                         remote_ip,
                         remote_port,
                         direction,
-                    ) = shadow_capture_endpoint_parts(udp, local_ip)
+                    ) = endpoint_direction(udp, receiver.endpoints, receiver.local_addresses)
                     if direction == "inbound" and local_port in ports:
-                        timestamp_epoch = (
-                            float(header.ts.tv_sec)
-                            + float(header.ts.tv_usec) / 1_000_000.0
-                        )
+                        timestamp_epoch = udp.timestamp_ns / 1_000_000_000
                         segments = shadow_capture.parse_kcp_segments(udp.payload)
                         counters["udp_packets"] += 1
                         counters["kcp_datagrams" if segments else "non_kcp_datagrams"] += 1
@@ -1047,9 +1042,11 @@ def _session(
                                     str(remote_ip),
                                     int(remote_port),
                                     int(item["conv"]),
+                                    str(_local_host),
                                 ),
                                 sequence=int(item["sequence"]),
                                 timestamp_epoch=timestamp_epoch,
+                                timestamp_ns=udp.timestamp_ns,
                                 ciphertext=bytes(
                                     udp.payload[offset : offset + length]
                                 ),
@@ -1077,6 +1074,7 @@ def _session(
                                         value.plaintext,
                                         value.sequence,
                                         value.timestamp_epoch,
+                                        timestamp_ns=value.timestamp_ns,
                                     )
                                 except (ValueError, OverflowError):
                                     counters["protocol_stream_errors"] += 1
@@ -1103,14 +1101,23 @@ def _session(
                                     protocol_state_resync = True
                                     break
                                 for record in records:
+                                    if metadata_reader is not None:
+                                        arguments = record.get('decoded_arguments', [])
+                                        if record.get('method') in {'OnMsgDamageSyncV2', 'OnMsgHealSyncV2', 'OnMsgBeatenSyncV2'} and len(arguments) > 1:
+                                            metadata_reader.request(arguments[1], record.get('filetime_100ns', 0))
+                                        if record.get('method') in {'OnMsgEndureExitHit', 'OnMsgSyncCurrentMaxHp', 'OnMsgSyncFightMode', 'OnMsgEntityDead'}:
+                                            metadata_reader.request(record.get('network_entity_id'), record.get('filetime_100ns', 0))
                                     if (
                                         record.get("method")
                                         == "OnMsgBeforeEnterNewSpace"
                                     ):
-                                        scene_transition_relocate_at = (
-                                            now
-                                            + SCENE_TRANSITION_RELOCATE_DELAY_SECONDS
-                                        )
+                                        # A map transition is still data in the
+                                        # current KCP/RC4/Zstd stream. Resetting
+                                        # it here discards the arriving roster
+                                        # and entity initialization burst.
+                                        counters['scene_transitions_preserved'] += 1
+                                        if metadata_reader is not None:
+                                            metadata_reader.reset()
                                     if record.get("method") in {
                                         "RetCommonCombatStatisticsByTeam",
                                         "OnMsgSettlementCombatStatistics",
@@ -1125,30 +1132,27 @@ def _session(
                                 break
 
             now = time.monotonic()
+            if metadata_reader is not None:
+                pending_metadata.extend(metadata_reader.poll())
             protocol_stalled = _protocol_stream_stalled(
                 aligned=reassembler.aligned,
                 pushes_without_frame=pushes_without_protocol_frame,
                 last_frame_monotonic=last_protocol_frame,
                 now=now,
             )
-            scene_relocate_due = bool(
-                scene_transition_relocate_at is not None
-                and now >= scene_transition_relocate_at
-            )
-            if scene_relocate_due or protocol_stalled:
-                if scene_relocate_due:
-                    counters["scene_transition_state_refreshes"] += 1
-                if protocol_stalled:
-                    counters["protocol_stall_state_refreshes"] += 1
-                    data_incomplete = True
+            if protocol_stalled:
+                counters["protocol_stall_state_refreshes"] += 1
+                data_incomplete = True
                 _close_state_readers(state_readers)
                 state_readers = []
                 state_reader_index = 0
-                reassembler.invalidate(clear_history=True)
+                # A scene notification is not proof of a new transport session.
+                # Keep delivered sequence history so retransmissions cannot be
+                # counted again after refreshing the read-only decoder state.
+                reassembler.invalidate()
                 decoder.reset_transport()
                 pushes_without_protocol_frame = 0
                 last_protocol_frame = now
-                scene_transition_relocate_at = None
                 next_anchor_retry = now
 
             gap = reassembler.pending_gap(now)
@@ -1233,14 +1237,10 @@ def _session(
                 )
                 if current_ports:
                     process_missing_since = None
+                    receiver.refresh(current)
                     if current_ports != ports:
                         old_ports = ports
                         ports = current_ports
-                        _install_bpf(
-                            wpcap,
-                            handle,
-                            shadow_capture.make_bpf(local_ip, ports),
-                        )
                         counters["capture_filter_updates"] += 1
                         active = reassembler.active_flow
                         if active is not None and active[0] not in ports:
@@ -1271,7 +1271,7 @@ def _session(
                 next_endpoint_refresh = now + ENDPOINT_REFRESH_SECONDS
 
             if now >= next_pcap_stats:
-                pcap_diagnostic = _pcap_stats(wpcap, handle)
+                pcap_diagnostic = receiver.statistics(_pcap_stats)
                 dropped = int(pcap_diagnostic.get("dropped", 0) or 0)
                 if dropped > last_pcap_dropped:
                     counters["pcap_dropped"] += dropped - last_pcap_dropped
@@ -1285,7 +1285,19 @@ def _session(
                 or pending_gaps
             ):
                 counters.update(reassembler.counters)
+                if decoder.unknown_records:
+                    _put(output_queue, 'protocol_unknown', list(decoder.unknown_records))
+                    decoder.unknown_records.clear()
                 reassembler.counters.clear()
+                counters.update(packets.diagnostics)
+                packets.diagnostics.clear()
+                receive_counters = receiver.take_counters()
+                counters.update(receive_counters)
+                if receive_counters.get('capture_adapter_errors', 0) or receive_counters.get('capture_queue_dropped', 0):
+                    data_incomplete = True
+                if metadata_reader is not None:
+                    counters.update(metadata_reader.counters)
+                    metadata_reader.counters.clear()
                 counters["protocol_decrypted_pushes"] = (
                     decoder.diagnostics.decrypted_pushes
                 )
@@ -1334,16 +1346,22 @@ def _session(
                     team_stats_mode=team_stats_mode,
                     last_response_filetime=last_response_filetime,
                     data_incomplete=data_incomplete,
+                    metadata_records=pending_metadata,
+                    heartbeat=now >= next_diagnostic_heartbeat,
                 ):
                     batch_id += 1
+                    next_diagnostic_heartbeat = now + 1.0
                 pending_records = []
+                pending_metadata = []
                 pending_gaps = []
                 next_flush = now + BATCH_INTERVAL_SECONDS
 
         return "stopped"
     finally:
         _close_state_readers(state_readers)
-        wpcap.pcap_close(handle)
+        if metadata_reader is not None:
+            metadata_reader.close()
+        receiver.close()
 
 
 def shadow_capture_endpoint_parts(

@@ -26,6 +26,7 @@ from npcap_protocol import (
     NpcapProtocolDecoder,
 )
 from npcap_rc4_decode import Rc4State
+from npcap_method_tables import LOCAL_ROLE_RPC_METHODS
 from npcap_zstd_state import _region_priority
 
 
@@ -248,7 +249,33 @@ class PassiveRc4ReassemblerTests(unittest.TestCase):
         )
 
 
+class KcpWrapTests(unittest.TestCase):
+    def test_sequence_wrap_and_late_retransmission(self):
+        first = 0xfffffffc
+        ciphertext, states, plaintext = encrypted_run(first, 9)
+        stream = PassiveRc4Reassembler()
+        stream.install_anchor(anchor(states[first], 10.0))
+        flow = (41000, '203.0.113.10', 51000, 88)
+        output = []
+        for sequence in range(first + 1, first + 9):
+            output.extend(stream.add(PushSegment(flow, sequence & 0xffffffff,
+                                                10.0 + (sequence-first)/100, ciphertext[sequence])))
+        self.assertEqual([item.sequence for item in output], list(range(first+1, first+9)))
+        self.assertEqual([item.plaintext for item in output], [plaintext[key] for key in range(first+1, first+9)])
+        stream.flows[flow].pop(first+1)
+        self.assertEqual(stream.add(PushSegment(flow, first+1, 11.0, ciphertext[first+1])), [])
+        self.assertEqual(stream.counters['kcp_old_retransmissions'], 1)
+
+
 class NpcapProtocolTests(unittest.TestCase):
+    def test_unverified_numeric_lifecycle_never_emits_death_or_revive(self):
+        decoder = NpcapProtocolDecoder(capture_unknown=True)
+        for method_id, arguments in ((86, [57226681286372, 3600.0]), (87, [])):
+            payload = msgpack.packb([{}, [57226681284911, method_id, arguments]], use_bin_type=True)
+            decoder._append_application(struct.pack('<IH', len(payload)+2, 22)+payload, method_id, 10.0)
+        self.assertEqual(decoder._rpc_records(), [])
+        self.assertEqual({record['method_id'] for record in decoder.unknown_records}, {86, 87})
+
     @staticmethod
     def _rpc_message(method_id: int = 90) -> bytes:
         payload = msgpack.packb([{}, [123456, method_id, []]], use_bin_type=True)
@@ -281,6 +308,30 @@ class NpcapProtocolTests(unittest.TestCase):
         self.assertEqual([record["method"] for record in records], ["OnMsgDamageSyncV2"])
         self.assertEqual(decoder.diagnostics.native_zstd_validations, 1)
         self.assertFalse(decoder.consume_state_resync_request())
+
+    def test_identical_rpc_events_are_distinct_and_keep_integer_timestamp(self):
+        rpc = self._rpc_message()
+
+        class FakeNativeDecoder:
+            def __init__(self, _snapshot):
+                pass
+
+            def decompress(self, _block):
+                return rpc + rpc
+
+            def close(self):
+                pass
+
+        timestamp_ns = 1_789_100_000_123_456_789
+        with patch('npcap_protocol.NativeZstdDecoder', FakeNativeDecoder):
+            decoder = NpcapProtocolDecoder(stream_id='replay-session')
+            decoder.install_zstd_snapshot(object())
+            records = decoder.feed_push(self._doraemon_frame(), 100, timestamp_ns/1e9,
+                                        timestamp_ns=timestamp_ns)
+        self.assertEqual(len(records), 2)
+        self.assertNotEqual(records[0]['capture_event_id'], records[1]['capture_event_id'])
+        self.assertEqual(records[0]['capture_timestamp_ns'], timestamp_ns)
+        self.assertEqual(records[0]['filetime_100ns'], 116444736000000000 + timestamp_ns//100)
 
     def test_native_snapshot_rejects_pseudo_plaintext(self):
         class FakeNativeDecoder:
@@ -374,9 +425,10 @@ class NpcapProtocolTests(unittest.TestCase):
         ])
 
     def test_verified_lifecycle_method_ids_are_available(self):
-        self.assertEqual(METHOD_ID_NAMES[86], "OnMsgEntityRelive")
-        self.assertEqual(METHOD_ID_NAMES[87], "OnMsgEntityDead")
-        self.assertEqual(METHOD_ID_NAMES[217], "OnMsgBeforeEnterNewSpace")
+        self.assertNotIn(86, METHOD_ID_NAMES)
+        self.assertNotIn(87, METHOD_ID_NAMES)
+        self.assertEqual(LOCAL_ROLE_RPC_METHODS[217], "OnMsgSyncWorldReturnInfo")
+        self.assertEqual(LOCAL_ROLE_RPC_METHODS[381], "OnMsgBeforeEnterNewSpace")
         self.assertEqual(METHOD_ID_NAMES[1067], "OnMsgAddBuffNew")
 
     def test_existing_decrypted_capture_replays(self):

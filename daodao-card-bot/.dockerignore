@@ -1,0 +1,10 @@
+.env
+.venv
+data
+logs
+backups
+__pycache__
+*.db
+*.db-*
+.git
+config.yaml

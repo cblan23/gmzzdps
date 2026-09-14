@@ -1,0 +1,14 @@
+[Unit]
+Description=Download verified NapCat image and start private QQ container
+After=docker.service network-online.target
+Requires=docker.service
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/daodao-card-bot
+ExecStart=/bin/sh scripts/bootstrap_napcat.sh
+TimeoutStartSec=0
+Restart=on-failure
+RestartSec=60
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

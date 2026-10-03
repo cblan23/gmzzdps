@@ -2778,7 +2778,7 @@ class PvpHistoryPage(PvpPage):
             for skill in opponent.get(field, []):
                 if not any(
                     int(skill.get(key, 0) or 0) > 0
-                    for key in ("damage", "hits", "casts")
+                    for key in ("damage", "hits")
                 ):
                     continue
                 skill_id = int(skill.get("skill_id") or 0)

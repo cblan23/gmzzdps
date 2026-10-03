@@ -37,12 +37,13 @@ def main() -> None:
     notes = source / f'release-notes-v{version}.txt'
     guide = source / 'docs/usage.md'
     bundle_name = f'Daodao-GMZZ-v{version}-win-x64'
+    portable_executable_name = f'叨叨诡秘助手-v{version}.exe'
     standalone_path = directory / f'{bundle_name}.exe'
     if standalone_path != executable:
         shutil.copyfile(executable, standalone_path)
     archive_path = directory / f'{bundle_name}.zip'
     files = {
-        manifest['filename']: executable,
+        portable_executable_name: executable,
         f'更新日志-v{version}.txt': notes,
         'licenses/WinDivert-LGPL-GPL.txt': source / 'third_party/windivert/LICENSE',
         'licenses/zstandard-BSD.txt': source / 'third_party_licenses/zstandard-BSD.txt',
@@ -70,7 +71,7 @@ def main() -> None:
         expected = {f'{bundle_name}/{target}' for target in files} | {f'{bundle_name}/第三方组件说明.txt', f'{bundle_name}/使用说明.md'}
         if set(archive.namelist()) != expected:
             raise ValueError('ZIP contains unexpected files')
-        embedded = hashlib.sha256(archive.read(f'{bundle_name}/{manifest["filename"]}')).hexdigest()
+        embedded = hashlib.sha256(archive.read(f'{bundle_name}/{portable_executable_name}')).hexdigest()
         if embedded != manifest['sha256']:
             raise ValueError('ZIP executable hash mismatch')
     checksums = directory / 'SHA256SUMS.txt'

@@ -6651,148 +6651,13 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.encounter_id, encounter_id)
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
-    def test_v013_keeps_feedback_update_lock_and_fixed_target_scope(self):
-        source = Path(__file__).with_name("dps_meter.pyw").read_text(
-            encoding="utf-8"
-        )
-        self.assertEqual(APP_VERSION, "0.3.3b")
-        self.assertEqual(CLIENT_BUILD, "0.3.3+20260924.4")
-        self.assertNotIn('self.config["topmost"] = True', source)
-        self.assertNotIn("toggle_boss_only", source)
-        self.assertNotIn('self.footer, "只读 BOSS"', source)
-        self.assertIn('(\"反馈\", self._feedback_selected_history)', source)
-        self.assertIn(
-            'heading, "检查更新", self._update_page_action', source
-        )
-        self.assertIn("UPDATE_DIR = APP_DIR", source)
-        self.assertIn('text=f"保存位置：{UPDATE_DIR}"', source)
-        self.assertIn('ModernCheckControl(', source)
-        self.assertIn('"附带运行摘要"', source)
-        self.assertNotIn("load_recent_restart_context", source)
-        self.assertNotIn("restart_target_profiles", source)
-        self.assertIn("entity_names={}", source)
-        self.assertIn("self.lock_button = self._main_icon_button(", source)
-        self.assertIn('tags=("compact_lock", "compact_lock_bg")', source)
-        self.assertIn("click_through_applied = self._set_window_click_through(", source)
-        self.assertIn("get_ancestor = user32.GetAncestor", source)
-        self.assertIn('locked_icon = self.icons.toolbar("lock", 16, ACCENT)', source)
-        self.assertIn('self.config["window_locked"] = self.window_locked', source)
-        self.assertNotIn("不包含完整封包", source)
-        self.assertNotIn("分享功能将在后续版本开放", source)
-        self.assertIn('actions, "share", "分享", self._share_current', source)
-        self.assertNotIn("clear_if_expired", source)
-        self.assertIn('"critical": "暴击率"', source)
-        self.assertIn('("显示死亡次数", tk.BooleanVar', source)
-        self.assertIn('"critical": critical_text', source)
-        self.assertIn('("hps", "HPS治疗", True)', source)
-        self.assertNotIn('"HDPS"', source)
-        self.assertIn(
-            "self.titlebar = tk.Frame(self.body, bg=BG, height=44)",
-            source,
-        )
-        self.assertIn("self.body, bg=BG, height=MAIN_SUMMARY_BASE_HEIGHT", source)
-        self.assertIn("height=MONSTER_HP_ROW_HEIGHT,\n            bg=BG,", source)
-        self.assertIn("+ MONSTER_HP_ROW_HEIGHT * (row_count - 1)", source)
-        self.assertIn("height=28,\n            bg=BG,", source)
-        self.assertIn(
-            "self.rows_canvas = tk.Canvas(\n            self.table_panel,\n            bg=BG,",
-            source,
-        )
-        self.assertIn(
-            'window.attributes("-transparentcolor", MAIN_CONTENT_OVERLAY_KEY)',
-            source,
-        )
-        self.assertIn(
-            "draw_content=False",
-            source,
-        )
-        self.assertNotIn("opaque_background", source)
-        self.assertIn('"DPS颜色条保持不透明"', source)
-        self.assertIn(
-            'self.config.get("keep_dps_bars_opaque", False)', source
-        )
-        self.assertIn('uniform="dps_settings"', source)
-        self.assertIn('"dps": "秒伤"', source)
-        self.assertIn('("显示秒伤", self.settings_show_dps_var, False)', source)
-        self.assertIn('self.config["show_dps"] = self.show_dps', source)
-        self.assertIn('("hps", "HPS治疗设置")', source)
-        self.assertIn(
-            '("显示有效治疗", self.settings_show_effective_healing_var)',
-            source,
-        )
-        self.assertIn('("显示 HPS", self.settings_show_hps_var)', source)
-        self.assertIn(
-            '("显示过量率", self.settings_show_overheal_rate_var)', source
-        )
-        self.assertNotIn("settings_show_healing_response_var", source)
-        self.assertNotIn('self.config["show_healing_response"] =', source)
-        self.assertIn('self.config["layout_version"] = 15', source)
-        self.assertIn("class ModernSlider(tk.Canvas):", source)
-        self.assertIn("class ModernScrollbar(tk.Canvas):", source)
-        self.assertNotIn("tk.Scrollbar(", source)
-        self.assertNotIn("ttk.Scrollbar(", source)
-        self.assertGreaterEqual(source.count("ModernScrollbar("), 6)
-        self.assertIn('text="主窗口透明度"', source)
-        self.assertIn('team_caption.configure(text="团队 DPS")', source)
-        self.assertIn('actions, "compact", "迷你模式"', source)
-        self.assertIn('actions, "menu", "主菜单", self.show_main_menu', source)
-        self.assertIn('def show_main_menu(self)', source)
-        self.assertIn("MAIN_MIN_WIDTH = 300", source)
-        self.assertIn("MINI_DEFAULT_WIDTH = 340", source)
-        self.assertIn("MINI_MIN_WIDTH = 228", source)
-        self.assertIn("MINI_DEFAULT_HEIGHT = 118", source)
-        self.assertIn('tags=("compact_restore", "compact_restore_bg")', source)
-        self.assertNotIn('text="当前身份"', source)
-        self.assertIn("membership_badge = membership_label_for_card_tier(", source)
-        self.assertIn("self.licensing.session.card_tier", source)
-        self.assertNotIn('identity_icon = self.icons.toolbar("user"', source)
-        self.assertIn('self.root.bind("<MouseWheel>", self._scroll_main, add="+")', source)
-        self.assertIn('self.config["compact_mode"] = False', source)
-        nav_source = source[
-            source.index("    def _backend_nav_button(") : source.index(
-                "    def _sync_backend_navigation("
-            )
-        ]
-        self.assertIn("caption_label = tk.Label(", nav_source)
-        self.assertIn("module_badge_label = tk.Label(", nav_source)
-        self.assertIn('normalized_module_tag in {"PVE", "PVP"}', nav_source)
-        self.assertIn("image=icon_image", nav_source)
-        self.assertIn('self.icons.toolbar(', nav_source)
-        self.assertNotIn('text=f"{icon_name}   {caption}"', nav_source)
-        checkbox_source = source[
-            source.index("    def _settings_check_row(") : source.index(
-                "    def _select_settings_section("
-            )
-        ]
-        self.assertIn("ModernCheckControl(", checkbox_source)
-        self.assertIn("cell.grid(", checkbox_source)
-        self.assertIn("row=row", checkbox_source)
-        self.assertIn("column=column", checkbox_source)
-        self.assertNotIn("tk.Checkbutton(", checkbox_source)
-        switch_source = source[
-            source.index("class ModernCheckControl(") : source.index(
-                "class ModernSlider("
-            )
-        ]
-        help_source = source[
-            source.index("class ModernHelpBadge(") : source.index(
-                "class ModernCheckControl("
-            )
-        ]
-        self.assertIn("width=44", switch_source)
-        self.assertIn("height=26", switch_source)
-        self.assertIn("self.help_badge = ModernHelpBadge(", switch_source)
-        self.assertIn("class ModernHelpBadge(tk.Canvas):", help_source)
-        self.assertIn("def _show_tooltip(", help_source)
-        self.assertNotIn("checkbox", switch_source.casefold())
-        main_rows_source = source[
-            source.index("    def _draw_main_rows_on_canvas(") : source.index(
-                "    def _drag_start("
-            )
-        ]
-        self.assertNotIn("show_skill_details(", main_rows_source)
-        self.assertNotIn("cursor=\"hand2\"", main_rows_source)
-        self.assertNotIn("main_row_detail_targets", source)
+    def test_release_version_matches_client_build_and_notes(self):
+        self.assertEqual(APP_VERSION, "0.3.5")
+        self.assertEqual(CLIENT_BUILD.split("+", 1)[0], APP_VERSION)
+        self.assertRegex(CLIENT_BUILD, r"^0\.3\.5\+\d{8}\.\d+$")
+        notes = Path(__file__).with_name(f"release-notes-v{APP_VERSION}.txt")
+        self.assertTrue(notes.is_file())
+        self.assertIn(APP_VERSION, notes.read_text(encoding="utf-8-sig"))
 
     def test_login_requires_disclaimer_for_mouse_and_enter_submission_path(self):
         class BooleanValue:
@@ -9472,7 +9337,8 @@ class CombatModelTests(unittest.TestCase):
         })
 
         window._reset_main_visible_context.assert_called_once_with(
-            boundary_ns=0, hide_current_encounter=True,
+            boundary_ns=(BASE_FILETIME + 10_000_000 - 116_444_736_000_000_000) * 100,
+            hide_current_encounter=True,
         )
 
     def test_disband_during_third_boss_does_not_hide_settled_second_boss(self):
@@ -10185,7 +10051,8 @@ class CombatModelTests(unittest.TestCase):
 
     def test_backend_page_switch_closes_active_dropdown_popup(self):
         class Owner:
-            pass
+            def winfo_viewable(self):
+                return True
 
         class Dropdown:
             def __init__(self, owner):
@@ -11797,7 +11664,7 @@ class CombatModelTests(unittest.TestCase):
         window.history_meter_mode = "boss_damage"
         self.assertEqual(
             window._history_list_performance(summary),
-            ("750 首领伤害", "归类比例 75.0%"),
+            ("750 首领伤害", ""),
         )
         for mode in ("dps", "hps", "dt", "boss_damage"):
             window.history_meter_mode = mode

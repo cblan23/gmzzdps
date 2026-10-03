@@ -7,6 +7,7 @@ from combat_history import CombatHistoryStore
 from combat_statistics import normalize_statistics
 from encounter_repository import EncounterRepository
 from encounter_tracker import EncounterTracker
+from network_state import is_ai_team_token
 from settlement_history_adapter import SettlementHistoryAdapter, encounter_history_record
 from settlement_ui_controller import SettlementUIController
 from test_encounter_settlement import (
@@ -235,7 +236,7 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
                 "iid": values[1],
                 "name": values[5],
                 "profession_id": values.get(4),
-                "is_ai": token.startswith("projection-"),
+                "is_ai": is_ai_team_token(token),
             }
             for token, values in members.items()
         ]

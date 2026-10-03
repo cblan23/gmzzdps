@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>设置 · 深色完整设计 V3</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="preview.js" defer></script>
+</head>
+<body>
+  <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+    <symbol id="icon-reset" viewBox="0 0 24 24"><path d="M4 10a8 8 0 1 1 1 7M4 4v6h6"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m8 8 8 8m0-8-8 8"/></symbol>
+    <symbol id="icon-display" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></symbol>
+    <symbol id="icon-appearance" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1-4c-1-1 0-2 1-2h2a4 4 0 0 0 4-4 9 9 0 0 0-9-8Z"/><path d="M7 10h.01M10 6h.01M16 7h.01"/></symbol>
+    <symbol id="icon-keyboard" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 16h10"/></symbol>
+  </defs></svg>
+
+  <div class="app-window">
+    <header class="window-header">
+      <div class="eyebrow"><span class="brand-mark" aria-hidden="true">叨</span>叨叨诡秘助手<span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
+      <div class="heading-row"><h1>设置</h1><span class="heading-note">调整主窗口的显示与操作</span></div>
+      <nav class="page-navigation" aria-label="设置分类">
+        <button id="tab-display" class="nav-item active" data-page="display" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#icon-display"/></svg>显示</button>
+        <button id="tab-appearance" class="nav-item" data-page="appearance"><svg class="icon" aria-hidden="true"><use href="#icon-appearance"/></svg>外观</button>
+        <button id="tab-shortcuts" class="nav-item" data-page="shortcuts"><svg class="icon" aria-hidden="true"><use href="#icon-keyboard"/></svg>快捷键</button>
+      </nav>
+    </header>
+
+    <main class="page-scroll">
+      <section class="settings-page" id="page-display" aria-labelledby="tab-display">
+        <div class="section-heading"><h2>主窗口显示</h2><span>保留你需要的信息</span></div>
+        <div class="settings-list" id="display-options"></div>
+        <details class="more-options" id="more-display">
+          <summary><span>更多显示选项</span><svg class="icon" aria-hidden="true"><use href="#icon-chevron"/></svg></summary>
+          <div class="settings-list" id="more-display-options"></div>
+          <div class="metric-row"><span>观众显示指标</span><div class="segmented" role="radiogroup" aria-label="观众显示指标"><label><input type="radio" name="audience_metric" value="HPS" data-setting="audience_metric"><span>HPS</span></label><label><input type="radio" name="audience_metric" value="DPS" data-setting="audience_metric"><span>DPS</span></label></div></div>
+          <div class="metric-row"><span>战士显示指标</span><div class="segmented" role="radiogroup" aria-label="战士显示指标"><label><input type="radio" name="warrior_metric" value="DPS" data-setting="warrior_metric"><span>DPS</span></label><label><input type="radio" name="warrior_metric" value="DT" data-setting="warrior_metric"><span>DT</span></label></div></div>
+          <p class="detail-note">其他职业显示 DPS，队伍按 DPS 排序。</p>
+        </details>
+      </section>
+
+      <section class="settings-page" id="page-appearance" aria-labelledby="tab-appearance" hidden>
+        <div class="section-heading"><h2>窗口外观</h2><span>预览随调整更新</span></div>
+        <div class="hud-preview" aria-label="主窗口示例预览">
+          <div class="preview-header"><span>团队构成</span><small>示例预览</small></div>
+          <div class="preview-player self"><span class="preview-avatar">我</span><span>当前角色 <small>空想家</small></span><strong>88,893</strong></div>
+          <div class="preview-player"><span class="preview-avatar peer">队</span><span>队伍成员 <small>太阳</small></span><strong>82,600</strong></div>
+        </div>
+        <div class="range-row"><label for="font_size"><span class="row-title">字体大小</span><span class="row-description">主窗口文字</span></label><div class="range-control"><input class="range" type="range" id="font_size" data-setting="font_size" min="12" max="18" step="1" value="14"><output for="font_size" id="value-font_size">14<span> px</span></output></div></div>
+        <div class="range-row"><label for="ui_scale"><span class="row-title">整体缩放</span><span class="row-description">主窗口大小</span></label><div class="range-control"><input class="range" type="range" id="ui_scale" data-setting="ui_scale" min="80" max="140" step="1" value="100"><output for="ui_scale" id="value-ui_scale">100<span>%</span></output></div></div>
+        <div class="range-row"><label for="row_mask_opacity"><span class="row-title">玩家行遮罩</span><span class="row-description">调高数值，加深行背景</span></label><div class="range-control"><input class="range" type="range" id="row_mask_opacity" data-setting="row_mask_opacity" min="0" max="100" step="1" value="0"><output for="row_mask_opacity" id="value-row_mask_opacity">0<span>%</span></output></div></div>
+      </section>
+
+      <section class="settings-page" id="page-shortcuts" aria-labelledby="tab-shortcuts" hidden>
+        <div class="section-heading"><h2>快捷操作</h2><span>点击按键框录入</span></div>
+        <div class="hotkey-row"><label for="visibility_enabled"><span class="row-title">显示 / 隐藏主窗口</span></label><div class="hotkey-controls"><button class="key-recorder" data-hotkey="visibility_hotkey"><span>Home</span></button><button class="clear-key" data-clear="visibility_hotkey" aria-label="清除显示或隐藏快捷键"><svg class="icon" aria-hidden="true"><use href="#icon-close"/></svg></button><span class="switch"><input type="checkbox" id="visibility_enabled" data-setting="visibility_enabled" aria-label="启用显示或隐藏快捷键"><span class="switch-track" aria-hidden="true"></span></span></div></div>
+        <div class="hotkey-row"><label for="unlock_enabled"><span class="row-title">锁定后仅快捷键解锁</span><span class="row-description">锁定时鼠标穿透</span></label><div class="hotkey-controls"><button class="key-recorder" data-hotkey="unlock_hotkey"><span>录入快捷键</span></button><button class="clear-key" data-clear="unlock_hotkey" aria-label="清除解锁快捷键"><svg class="icon" aria-hidden="true"><use href="#icon-close"/></svg></button><span class="switch"><input type="checkbox" id="unlock_enabled" data-setting="unlock_enabled" aria-label="启用仅快捷键解锁"><span class="switch-track" aria-hidden="true"></span></span></div></div>
+        <div id="lock-toggle-option"></div>
+        <p class="hotkey-feedback" id="hotkey-feedback" role="status" aria-live="polite"></p>
+        <details class="help-details"><summary>快捷键说明<svg class="icon" aria-hidden="true"><use href="#icon-chevron"/></svg></summary><p>点击按键框开始录入，按 Esc 取消。可直接使用 Home、End、Insert、Delete、PageUp、PageDown、Pause 或 F1–F12。字母和数字等按键需搭配 Ctrl 或 Alt。</p></details>
+      </section>
+    </main>
+    <div class="window-footer"><div class="save-status" role="status" aria-live="polite"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg><span id="save-status">自动保存</span></div><button id="reset-preview"><svg class="icon" aria-hidden="true"><use href="#icon-reset"/></svg>恢复预览默认值</button></div>
+  </div>
+  <footer class="prototype-caption">V3 · 完整交互设计稿 · 修改仅保存在本页</footer>
+  <noscript><p class="no-script">请启用 JavaScript 以查看交互设计。</p></noscript>
+</body>
+</html>

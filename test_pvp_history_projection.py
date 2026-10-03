@@ -818,10 +818,12 @@ class PvpHistoryProjectionTests(unittest.TestCase):
         self.assertEqual(summary["footer"], "")
 
     def test_roster_preview_occupies_existing_gap_without_growing_list_width(self):
+        window = object.__new__(DpsWindow)
+        window._ui_font = lambda _role: SimpleNamespace(measure=lambda text: len(text) * 7)
         for width in (700, 900, 1_100):
             with self.subTest(width=width):
-                columns = DpsWindow._pvp_history_list_columns(width)
-                self.assertEqual(columns["width"], width)
+                columns = window._pvp_history_list_columns(width)
+                self.assertEqual(columns["width"], max(960, width))
                 self.assertLess(columns["info_left"], columns["preview_left"])
                 self.assertLess(columns["preview_left"], columns["performance_left"])
                 self.assertLess(columns["performance_left"], columns["matchup_left"])

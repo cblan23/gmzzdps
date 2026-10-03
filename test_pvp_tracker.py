@@ -226,6 +226,25 @@ class LeagueRosterTests(unittest.TestCase):
         ))
 
 
+class PvpRosterPerformanceTests(unittest.TestCase):
+    def test_unchanged_roster_does_not_rebuild_all_players_but_name_change_does(self):
+        tracker = PvpTracker(map_scoped=True)
+        tracker._set_identity(SELF, SELF_TOKEN)
+        args = [2,
+                {0: SELF_TOKEN, 2: 1200002, 3: 70, 4: 'Self', 6: 1400039},
+                {0: ENEMY_TOKEN, 2: 1200007, 3: 70, 4: 'Enemy', 6: 1400036}]
+        tracker._replace_pvp_allies(args)
+        rebuild = Mock(wraps=tracker._rebuild_pvp_template_roster)
+        tracker._rebuild_pvp_template_roster = rebuild
+        tracker._replace_pvp_allies(deepcopy(args))
+        rebuild.assert_not_called()
+        renamed = deepcopy(args)
+        renamed[2][4] = 'Renamed'
+        tracker._replace_pvp_allies(renamed)
+        rebuild.assert_called_once()
+        self.assertEqual(tracker.pvp_enemies[ENEMY_TOKEN]['name'], 'Renamed')
+
+
 class PvpTrackerTests(unittest.TestCase):
     def test_hunter_dragon_hits_do_not_enter_player_damage(self):
         tracker = PvpTracker(map_scoped=True)
@@ -1699,7 +1718,7 @@ class PvpTrackerTests(unittest.TestCase):
         window._set_main_combat_mode('pve')
         self.assertEqual(window.pvp_tracker.snapshot(BASE_NS)['damage'], 567)
 
-    def test_pvp_hud_switch_is_rejected_outside_formal_pvp_map(self):
+    def test_pvp_hud_switch_outside_formal_map_does_not_enable_recording(self):
         from test_combat_model import DpsWindow
 
         window = object.__new__(DpsWindow)
@@ -1712,9 +1731,12 @@ class PvpTrackerTests(unittest.TestCase):
 
         window._set_main_combat_mode('pvp')
 
-        self.assertEqual(window.main_combat_mode, 'pve')
-        window._schedule_layered_main_render.assert_not_called()
+        self.assertEqual(window.main_combat_mode, 'pvp')
+        self.assertFalse(window._pvp_hud_map_active())
+        window._schedule_layered_main_render.assert_called_once_with()
 
+        window._set_main_combat_mode('pve')
+        window._schedule_layered_main_render.reset_mock()
         window.pvp_recording.map_id = 5_208_004
         window._set_main_combat_mode('pvp')
         self.assertEqual(window.main_combat_mode, 'pvp')
@@ -1744,9 +1766,12 @@ class PvpTrackerTests(unittest.TestCase):
         window._schedule_layered_main_render.assert_called_once_with(delay=0)
 
     def test_formal_capture_batch_emits_pvp_before_damage_is_lost_to_pve_gate(self):
-        from test_combat_model import HookWorker
+        from test_combat_model import HookWorker, LiveHudCombatTracker, LiveHudBossTracker
         p = Pipeline()
         worker = object.__new__(HookWorker)
+        worker.live_hud_combat_tracker = LiveHudCombatTracker()
+        worker.live_hud_boss_tracker = LiveHudBossTracker()
+        worker._sync_active_boss_cache = Mock()
         worker.emit = Mock()
         worker._add_diagnostic_counts = Mock()
         worker._update_diagnostics = Mock()

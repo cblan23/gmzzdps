@@ -61,6 +61,7 @@ PVP_CONTROL_METHODS = frozenset({
     'OnMsgSyncTeamPVPInfo', 'OnMsgTeamPVPSettlement',
     'RetGetTeamArenaBattleInfo', 'OnMsgSyncLeagueInfo',
     'OnMsgRefreshLeagueGroupInfo',
+    'RetGuildLeagueSettlementRecord',
 })
 PVP_LIFE_METHODS = frozenset({'OnMsgEntityDead', 'OnMsgEntityRelive'})
 PVP_TEAM_MEMBER_METHODS = frozenset({
@@ -221,6 +222,72 @@ def _league_group_refresh(arguments):
     if raid_id <= 0 or not isinstance(raid.get(17), dict):
         return None
     return _league_roster([{0: {raid_id: raid}}])
+
+
+def _guild_league_settlement(arguments, self_token, started_at_ns, received_at_ns):
+    """Read only this match's verified league kill/assist/death counters.
+
+    The reply also includes previous weeks. Its timestamp and stable local
+    token must both match before any row can enter the current match. Other
+    numeric fields are deliberately left undecoded until independently proven.
+    """
+    if not self_token or not started_at_ns:
+        return None
+    if not isinstance(arguments, list) or len(arguments) != 1 or not isinstance(arguments[0], list):
+        return None
+    candidates = []
+    for raw in arguments[0]:
+        entry = fields(raw)
+        end_ns = _integer(entry.get(3)) * 1_000_000_000
+        rows = entry.get(2)
+        if not started_at_ns <= end_ns <= received_at_ns or not isinstance(rows, list) or not 1 <= len(rows) <= 240:
+            continue
+        members = []
+        seen = set()
+        valid = True
+        for raw_member in rows:
+            member = fields(raw_member)
+            token = member.get(0)
+            name = member.get(2)
+            guild_id = _integer(member.get(1))
+            profession = _profession_id(member.get(3))
+            if (
+                not isinstance(token, str) or not 8 <= len(token) <= 128
+                or not token.isascii() or any(char.isspace() for char in token)
+                or token in seen or not isinstance(name, str) or not name.strip()
+                or guild_id <= 0 or profession <= 0
+            ):
+                valid = False
+                break
+            counters = {field: _optional_integer(member.get(index, 0))
+                        for field, index in (('kills', 9), ('assists', 10), ('deaths', 11))}
+            if any(value is None or value < 0 for value in counters.values()):
+                valid = False
+                break
+            seen.add(token)
+            members.append({
+                'character_id': token, 'user_token': token, 'name': name.strip(),
+                'profession_id': profession, 'guild_id': guild_id, **counters,
+                'guild_counters_authoritative': True,
+            })
+        own = next((member for member in members if member['user_token'] == self_token), None)
+        if not valid or own is None:
+            continue
+        # The team's aggregate kill count provides independent wire evidence
+        # for the screenshot-verified field 9 and prevents accepting another
+        # superficially similar history payload.
+        totals = fields(fields(entry.get(1)).get(4))
+        guilds = {member['guild_id'] for member in members}
+        if any(totals.get(guild) != sum(member['kills'] for member in members if member['guild_id'] == guild)
+               for guild in guilds):
+            continue
+        allies = [member for member in members if member['guild_id'] == own['guild_id']]
+        enemies = [member for member in members if member['guild_id'] != own['guild_id']]
+        candidates.append({
+            'allies': allies, 'enemies': enemies, 'counters_only': True,
+            'ended_at_ns': end_ns, 'finished': True,
+        })
+    return max(candidates, key=lambda value: value['ended_at_ns']) if candidates else None
 
 
 def _team_pvp_field(value, key):
@@ -913,6 +980,7 @@ class PvpTracker:
         self.healing_skills = {}
         self.dragon_targets = {}
         self.team_player_stats = {}
+        self.guild_league_self_counters = {}
         self.team_damage_contributions = {}
         # Exact team-arena events can arrive before TeamPVPInfo/settlement has
         # assigned both endpoints to a side.  Keep them separate from the
@@ -1410,6 +1478,15 @@ class PvpTracker:
         members = _team_pvp_members(arguments)
         if members is None:
             return False
+        if (
+            all(self.pvp_roster_members.get(member['user_token']) == member for member in members)
+            and (
+                not self.self_token
+                or self.pvp_self_avatar_template_id
+                == _integer(self.pvp_roster_members.get(self.self_token, {}).get('avatar_template_id'))
+            )
+        ):
+            return True
         for member in members:
             self.pvp_roster_members[member['user_token']] = dict(member)
             if member['user_token'] == self.self_token:
@@ -1619,6 +1696,7 @@ class PvpTracker:
             statistics_authoritative = bool(
                 stats.get('statistics_authoritative')
             )
+            counters_authoritative = statistics_authoritative or bool(stats.get('guild_counters_authoritative'))
             if is_self:
                 # The local exact stream is complete even when some remote
                 # actors have not yet been assigned to a side.  Do not let the
@@ -1764,17 +1842,17 @@ class PvpTracker:
                 ),
                 'kills': (
                     stats.get('kills')
-                    if statistics_authoritative
+                    if counters_authoritative
                     else local_metrics.get('kills', stats.get('kills'))
                 ),
                 'assists': (
                     stats.get('assists')
-                    if statistics_authoritative and stats.get('assists') is not None
+                    if counters_authoritative and stats.get('assists') is not None
                     else local_metrics.get('assists', stats.get('assists'))
                 ),
                 'deaths': (
                     stats.get('deaths')
-                    if statistics_authoritative
+                    if counters_authoritative
                     else local_metrics.get('deaths', stats.get('deaths'))
                 ),
                 'current_dead': (
@@ -1786,6 +1864,7 @@ class PvpTracker:
                 'metrics_scope': metrics_scope,
                 'skills_scope': skills_scope,
                 'statistics_authoritative': statistics_authoritative,
+                'guild_counters_authoritative': bool(stats.get('guild_counters_authoritative')),
             }
 
         allies = [build(token, 'ally') for token in dict.fromkeys(ally_tokens) if token]
@@ -1936,7 +2015,11 @@ class PvpTracker:
                     if field in raw and raw.get(field) is not None:
                         row[field] = max(0, _integer(raw.get(field)))
                 row['side'] = side
-                row['statistics_authoritative'] = True
+                row['statistics_authoritative'] = not bool(value.get('counters_only'))
+                if raw.get('guild_counters_authoritative') is True:
+                    row['guild_counters_authoritative'] = True
+                    if token == self.self_token:
+                        self.guild_league_self_counters = {field: row[field] for field in ('kills', 'assists', 'deaths')}
                 changed = changed or row != before
         # Method 798 contains the complete final roster.  Earlier inferred hit
         # targets and partial TeamPVPInfo rows are not extra participants; keep
@@ -1962,7 +2045,8 @@ class PvpTracker:
             self.result = result
             changed = True
         if changed:
-            self.team_settlement = self.team_battle_rows()
+            if not value.get('counters_only'):
+                self.team_settlement = self.team_battle_rows()
             self.generation += 1
         return changed
 
@@ -2899,8 +2983,9 @@ class PvpTracker:
                 'duel_active': bool(self.duel and not self.duel_finished),
                 'duel_finished': self.duel_finished,
                 'duel_outcome': self.duel_outcome,
-                'kills': sum(kills.values()) if known and self.self_token else '--', 'deaths': deaths if known else '--',
-                'assists': 0 if self.duel else sum(assists.values()) if known else '--',
+                'kills': self.guild_league_self_counters.get('kills', sum(kills.values()) if known and self.self_token else '--'),
+                'deaths': self.guild_league_self_counters.get('deaths', deaths if known else '--'),
+                'assists': self.guild_league_self_counters.get('assists', 0 if self.duel else sum(assists.values()) if known else '--'),
                 'outgoing': rows(self.outgoing, damage, kills, 'kills', assist_counts=assists),
                 # All confirmed incoming hits contribute to total_taken and
                 # skill/history aggregates; the death table is killers only.

@@ -21,7 +21,7 @@ from pvp_records import (
     TEAM_EQUIPMENT_UPLOAD_GRACE_SECONDS,
     project_duel_result_counters,
 )
-from pvp_tracker import _team_pvp_settlement
+from pvp_tracker import _team_pvp_settlement, _guild_league_settlement
 from npcap_parser_adapter import NpcapParserAdapter
 from test_pvp_tracker import TEAM_SETTLEMENT_ARGS
 
@@ -80,6 +80,80 @@ class PvpRecordingBoundaryTests(unittest.TestCase):
         self.assertTrue(self.controller.active)
         self.assertNotIn(old_token, self.controller.display_tracker.pvp_allies)
         self.assertIn(old_token, self.controller.recording["ally_tokens"])
+
+    @staticmethod
+    def guild_settlement_arguments(seconds=80):
+        return [[{
+            0: 1, 1: {4: {1400039: 29, 1400036: 12}},
+            2: [
+                {0: SELF_TOKEN, 1: 1400039, 2: 'Self', 3: 1200002, 10: 241, 6: 999999},
+                {0: 'AQAAAAllyToken12', 1: 1400039, 2: 'Ally', 3: 1200007, 9: 29, 10: 229, 11: 2},
+                {0: 'AQAAAEnemyToken', 1: 1400036, 2: 'Enemy', 3: 1200007, 9: 12, 10: 54, 11: 8},
+            ],
+            3: BASE_NS // 1_000_000_000 + seconds,
+        }]]
+
+    def guild_observation(self, arguments, seconds=82):
+        return {
+            'timestamp_ns': BASE_NS + seconds * 1_000_000_000,
+            'record': {'method': 'RetGuildLeagueSettlementRecord', 'decoded_arguments': arguments},
+            'context': {'self_id': SELF_ID, 'self_token': SELF_TOKEN},
+        }
+
+    def test_guild_league_result_updates_hud_and_history_from_same_match(self):
+        self.controller.ingest_scene(self.scene(5_200_223, 1))
+        arguments = self.guild_settlement_arguments()
+        # The server reply contains several weeks. An older record must never
+        # replace this match merely because it contains the same local role.
+        older = deepcopy(arguments[0][0])
+        older[3] -= 7 * 24 * 3600
+        older[2][0][10] = 999
+        arguments[0].insert(0, older)
+        payload = self.controller.observe(self.guild_observation(arguments))
+
+        self.assertEqual((payload['kills'], payload['assists'], payload['deaths']), (0, 241, 0))
+        self.assertEqual(payload['end_reason'], 'match_result')
+        self.assertEqual(payload['ended_at_ns'], BASE_NS + 80_000_000_000)
+        self.assertEqual(payload['damage'], 0, 'unverified league fields must not become damage')
+        self.assertEqual((len(payload['allies']), len(payload['enemies'])), (2, 1))
+        ally = next(row for row in payload['allies'] if row['character_id'] == 'AQAAAAllyToken12')
+        self.assertEqual((ally['kills'], ally['assists'], ally['deaths']), (29, 229, 2))
+        self.assertNotEqual(payload['data_scope']['team_metrics'], 'authoritative')
+        view = self.controller.snapshot(BASE_NS + 83_000_000_000)
+        self.assertEqual((view['kills'], view['assists'], view['deaths']), (0, 241, 0))
+        self.assertFalse(self.controller.active)
+        self.assertIsNone(self.controller.observe(self.guild_observation(arguments, 84)))
+        self.assertEqual(len(self.repository.list('account-a')), 1)
+
+    def test_guild_settlement_after_map_exit_uses_suspended_match(self):
+        self.controller.ingest_scene(self.scene(5_200_223, 1, instance_id='league-a'))
+        self.controller._suspend(BASE_NS + 81_000_000_000)
+        payload = self.controller.observe(self.guild_observation(self.guild_settlement_arguments()))
+        self.assertEqual(payload['assists'], 241)
+        self.assertEqual(payload['ended_at_ns'], BASE_NS + 80_000_000_000)
+        self.assertIsNone(self.controller.suspended_recording)
+
+    def test_old_or_unrelated_guild_history_does_not_finish_current_match(self):
+        self.controller.ingest_scene(self.scene(5_200_223, 1))
+        arguments = self.guild_settlement_arguments(seconds=-1)
+        self.assertIsNone(self.controller.observe(self.guild_observation(arguments)))
+        arguments = self.guild_settlement_arguments()
+        arguments[0][0][2][0][0] = 'AQAAAOtherToken12'
+        self.assertIsNone(self.controller.observe(self.guild_observation(arguments)))
+        self.assertTrue(self.controller.active)
+
+    def test_guild_history_cannot_replace_another_pvp_mode(self):
+        self.controller.ingest_scene(self.scene(5_203_003, 1))
+        self.assertIsNone(self.controller.observe(self.guild_observation(self.guild_settlement_arguments())))
+        self.assertTrue(self.controller.active)
+
+    def test_guild_result_rejects_inconsistent_totals_and_duplicate_players(self):
+        arguments = self.guild_settlement_arguments()
+        arguments[0][0][1][4][1400039] = 30
+        self.assertIsNone(_guild_league_settlement(arguments, SELF_TOKEN, BASE_NS, BASE_NS + 82_000_000_000))
+        arguments = self.guild_settlement_arguments()
+        arguments[0][0][2].append(deepcopy(arguments[0][0][2][0]))
+        self.assertIsNone(_guild_league_settlement(arguments, SELF_TOKEN, BASE_NS, BASE_NS + 82_000_000_000))
 
     def test_each_exported_formal_pvp_map_starts_automatically(self):
         self.assertEqual(len(RECORDABLE_MAPS), 19)

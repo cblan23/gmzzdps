@@ -261,7 +261,7 @@ class MainHudRendererTests(unittest.TestCase):
 
     def test_hunter_dragon_view_separates_monster_damage_from_player_damage(self):
         state = dict(
-            combat_mode="pvp", pvp_self_only=True, pvp_hud_view="dragon",
+            combat_mode="pvp", pvp_self_only=True, pvp_hud_view="live",
             pvp_in_map=True, pvp_map_name="终末猎杀",
             pvp_player_name="本人", pvp_kills=0, pvp_deaths=1,
             pvp_total_damage="1,200", pvp_total_taken="300",
@@ -273,11 +273,12 @@ class MainHudRendererTests(unittest.TestCase):
         with mock.patch.object(self.renderer, "_label", wraps=self.renderer._label) as labels:
             result = self.renderer.render(state, pixel_scale=1.0)
         captions = [str(call.args[0]) for call in labels.call_args_list]
-        self.assertIn("巨龙战果", captions)
-        self.assertIn("战争巨龙", captions)
-        self.assertIn("4500", captions)
-        self.assertNotIn("伤害占比", captions)
-        self.assertIn("action:pvp_dragon", result.hit_regions)
+        dragon_caption = next(caption for caption in captions if "战争巨龙" in caption)
+        self.assertIn("对龙伤害 4500", dragon_caption)
+        self.assertIn("承受龙伤害 200", dragon_caption)
+        self.assertIn("1,200", captions)
+        self.assertIn("300", captions)
+        self.assertIn("action:pvp_live", result.hit_regions)
 
     def test_pvp_map_header_shows_only_mode_name(self):
         state = dict(combat_mode="pvp", pvp_in_map=True,

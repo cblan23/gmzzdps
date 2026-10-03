@@ -20,7 +20,7 @@ import time
 import uuid
 
 from network_state import SCENE_TRANSITION_METHODS
-from pvp_tracker import PvpTracker, pvp_bot_evidence, skill_has_activity
+from pvp_tracker import PvpTracker, pvp_bot_evidence, skill_has_activity, _guild_league_settlement
 
 
 # Distinct template IDs are required even when two modes share 猎龙之城.
@@ -395,7 +395,7 @@ def _merge_team_settlement_rows(base_rows, verified_rows, *, source_scope=None):
                     normalized[target] = raw.get(name)
                     has_metrics = True
                     break
-        for field in ("current_dead", "skills", "equipment_snapshot"):
+        for field in ("current_dead", "skills", "equipment_snapshot", "guild_counters_authoritative"):
             if field in raw and raw.get(field) is not None:
                 normalized[field] = deepcopy(raw.get(field))
         raw_metrics_scope = str(raw.get("metrics_scope") or "").strip().casefold()
@@ -1454,6 +1454,26 @@ class PvpRecordingController:
                 and stamp < self.duel_recording['started_at_ns']):
             return None
         method = record.get("method")
+        if method == 'RetGuildLeagueSettlementRecord':
+            recording = self.recording or self.suspended_recording
+            if recording is None or recording.get('map_id') != 5_200_223:
+                return None
+            tracker = recording['tracker']
+            if context.get('self_token') and context['self_token'] != tracker.self_token:
+                return None
+            settlement = _guild_league_settlement(
+                record.get('decoded_arguments'), tracker.self_token,
+                recording['started_at_ns'], stamp,
+            )
+            if settlement is None:
+                return None
+            tracker._accept_team_settlement(settlement)
+            if self.recording is not None:
+                return self.stop(settlement['ended_at_ns'], reason='match_result')
+            # Settlement can arrive after leaving the map, within the existing
+            # suspended-match lifecycle. Preserve the official end boundary.
+            self.suspended_left_at_ns = settlement['ended_at_ns']
+            return self._finalize_suspended(settlement['ended_at_ns'], reason='match_result')
         new_token = context.get("self_token")
         new_map = context.get("map_id")
         new_instance = context.get("instance_id")
@@ -2091,7 +2111,11 @@ class PvpRecordingController:
 
         def official_or(value, field):
             if (
-                official_self.get('statistics_authoritative') is True
+                (
+                    official_self.get('statistics_authoritative') is True
+                    or (field in ('kills', 'assists', 'deaths')
+                        and official_self.get('guild_counters_authoritative') is True)
+                )
                 and official_self.get(field) is not None
             ):
                 return official_self.get(field)

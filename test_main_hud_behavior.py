@@ -752,7 +752,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             "入队申请  申请甲  非凡评分 63737",
         )
         self.assertIn(
-            "队伍超凡评分",
+            "最近战斗记录",
             [row.get("section_text") for row in rows],
         )
 
@@ -760,7 +760,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             time.monotonic() - 0.01
         )
         expired = window._settlement_main_rows()
-        self.assertEqual(expired[1]["section_text"], "队伍超凡评分")
+        self.assertEqual(expired[1]["section_text"], "最近战斗记录")
         self.assertEqual(window._team_application_section_rows(), [])
 
     def test_team_application_notices_have_no_row_limit_and_refresh_duplicate(self):
@@ -1017,9 +1017,9 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         window._schedule_layered_main_render = lambda: None
 
-        self.assertFalse(window._release_stalled_startup_gate(now=111.9))
+        self.assertFalse(window._release_stalled_startup_gate(now=101.9))
         self.assertTrue(window._startup_interaction_blocked())
-        self.assertTrue(window._release_stalled_startup_gate(now=112.0))
+        self.assertTrue(window._release_stalled_startup_gate(now=102.0))
         self.assertFalse(window._startup_interaction_blocked())
         self.assertEqual(labels, ["等待游戏数据"])
 
@@ -2005,15 +2005,15 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertFalse(rating)
         self.assertEqual(rows[0]["name"], "莫雪")
         self.assertEqual(rows[1]["row_kind"], "section")
-        self.assertEqual(rows[1]["section_text"], "队伍超凡评分")
+        self.assertEqual(rows[1]["section_text"], "最近战斗记录")
         self.assertTrue(rows[1]["expanded"])
         rating_rows = [row for row in rows[2:] if row.get("metric") == "rating"]
-        self.assertEqual([row["actor_id"] for row in rating_rows], list(range(1, 7)))
-        self.assertNotIn("message", {row.get("row_kind") for row in rows})
+        self.assertEqual(rating_rows, [])
+        self.assertEqual(rows[2]["row_kind"], "message")
         self.assertFalse(window._main_battle_signal_active())
 
         snapshot = window._layered_main_snapshot()
-        self.assertEqual(snapshot["dps_summary_caption"], "队伍超凡评分")
+        self.assertEqual(snapshot["dps_summary_caption"], "团队超凡评分")
         self.assertEqual(snapshot["team_dps"], "80,802")
 
     def test_first_boss_without_team_dps_keeps_team_rating_rows(self):
@@ -2047,11 +2047,11 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[0]["actor_id"], 1)
         self.assertEqual(rows[0]["name"], "莫雪")
         self.assertEqual(rows[1]["row_kind"], "section")
-        self.assertEqual(rows[1]["section_text"], "队伍超凡评分")
+        self.assertEqual(rows[1]["section_text"], "最近战斗记录")
         self.assertTrue(rows[1]["expanded"])
         self.assertNotIn("section_action", rows[1])
-        self.assertTrue(all(row.get("metric") == "rating" for row in rows[2:]))
-        self.assertNotIn("message", {row.get("row_kind") for row in rows})
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertFalse(any(row.get("metric") == "rating" for row in rows[2:]))
 
         window._shown_actor_name = DpsWindow._shown_actor_name.__get__(
             window, DpsWindow
@@ -2082,6 +2082,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
     def test_live_settlement_pins_self_then_shows_previous_battle(self):
         window, members = make_window()
+        window.pve_hud_view = "recent_battle"
         window.main_recent_battle_expanded = True
         members.clear()
         members.update({1, 2})
@@ -2187,8 +2188,8 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         snapshot = window._layered_main_snapshot()
         self.assertEqual(snapshot["visible_rows"], 4)
-        self.assertEqual(snapshot["dps_summary_caption"], "全队秒伤")
-        self.assertEqual(snapshot["team_dps"], "126,000")
+        self.assertEqual(snapshot["dps_summary_caption"], "团队总秒伤")
+        self.assertEqual(snapshot["team_dps"], "40,000/s")
         window.main_recent_battle_expanded = False
         still_open = window._settlement_main_rows(now=205)
         self.assertEqual(len(still_open), len(rows))
@@ -2532,8 +2533,10 @@ class MainHudBehaviorTests(unittest.TestCase):
         rows = window._settlement_main_rows()
         self.assertNotIn("recent_boss", {row.get("row_kind") for row in rows})
         lower = [row for row in rows[2:] if row.get("actor_id") is not None]
-        self.assertEqual([row["actor_id"] for row in lower], [1, 7])
-        self.assertTrue(all(row["total_value"] is None for row in lower))
+        self.assertEqual(lower, [])
+        team_rows = window._main_team_rating_section_rows()
+        self.assertEqual([row["actor_id"] for row in team_rows], [1, 7])
+        self.assertTrue(all(row["total_value"] is None for row in team_rows))
 
         new_roster = [
             {"id": "self-token", "iid": 1, "name": "Self"},
@@ -2565,7 +2568,8 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         window.model.party_active = False
         window.model.party_session_id = 0
-        self.assertEqual(len(window._settlement_main_rows()), 1)
+        self.assertEqual(len(window._settlement_main_rows()), 3)
+        self.assertEqual(window._settlement_main_rows()[2]["row_kind"], "message")
 
     def test_solo_next_pull_shows_previous_settlement(self):
         window, members = make_window()
@@ -2795,7 +2799,8 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
 
         self.assertEqual(window.main_recent_battle_scope_started_ns, 200_000_000_000)
-        self.assertEqual(len(window._settlement_main_rows()), 1)
+        self.assertEqual(len(window._settlement_main_rows()), 3)
+        self.assertEqual(window._settlement_main_rows()[2]["row_kind"], "message")
 
     def test_new_party_session_masks_previous_local_dps_until_next_encounter(self):
         window, members = make_window()
@@ -3462,10 +3467,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             session_encounter_ids=set(),
         )
 
-        rows = window._settlement_main_rows()
-        party_rows = [
-            row for row in rows[2:] if row.get("actor_id") is not None
-        ]
+        party_rows = window._main_team_rating_section_rows()
 
         self.assertEqual(
             [row["actor_id"] for row in party_rows],
@@ -3492,7 +3494,9 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
 
         rows = window._settlement_main_rows()
-        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[1]["section_text"], "最近战斗记录")
+        self.assertEqual(rows[2]["row_kind"], "message")
         self.assertEqual(rows[0]["actor_id"], window.model.self_id)
         self.assertEqual(rows[0]["inline_rating_text"], "80616")
 
@@ -4643,6 +4647,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
     def test_same_map_model_reset_retains_finished_battle_until_new_pull(self):
         window, _ = make_window()
+        window.pve_hud_view = "recent_battle"
         record = completed_record()
         original = copy.deepcopy(record)
         window._remember_main_battle_result(record)
@@ -4650,7 +4655,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertFalse(window._team_rating_preview_active())
         self.assertTrue(window._main_retained_battle_active())
         snapshot = window._layered_main_snapshot()
-        self.assertEqual(len(snapshot['rows']), 6)
+        self.assertEqual(len([row for row in snapshot['rows'] if not row.get('row_kind')]), 6)
         self.assertEqual(snapshot['boss_name'], '战斗首领')
         self.assertEqual(snapshot['boss_percent'], '0%')
         self.assertEqual(snapshot['time'], '00:30')
@@ -5075,8 +5080,9 @@ class MainHudBehaviorTests(unittest.TestCase):
         window._team_rating_preview_rows = lambda: profiles
         snapshot = window._layered_main_snapshot()
         self.assertTrue(snapshot['rating_preview'])
-        self.assertEqual(snapshot['rows'][0]['rating_text'], '123456')
-        self.assertEqual(snapshot['rows'][1]['rating_text'], '人机')
+        rows = {row['actor_id']: row for row in snapshot['rows'] if not row.get('row_kind')}
+        self.assertEqual(rows[1]['rating_text'], '123456')
+        self.assertEqual(rows[2]['rating_text'], '人机')
         self.assertEqual(profiles[1]['extraordinary_rating'], 75900)
 
     def test_team_composition_keeps_current_roster_member_without_rating_profile(self):

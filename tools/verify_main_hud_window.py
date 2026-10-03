@@ -72,6 +72,11 @@ def main():
     window.enrage_tooltip = None
     window.enrage_tooltip_canvas = None
     window.main_combat_mode = 'pve'
+    window.pve_hud_view = 'recent_battle'
+    # Exercise the flat player viewport; grouped headings are covered by the
+    # renderer regressions. The preview's PvP data represents an allowed map.
+    window.show_team_dps = False
+    window._pvp_hud_map_active = lambda: True
     window.pvp_hud_state = {
         'active': True,
         'time': '08:42',
@@ -155,7 +160,8 @@ def main():
         monster.current_hp = 711_000_000
         render()
         assert window.layered_main_last_image.tobytes() != before
-        assert window._layered_main_snapshot()['rows'][0]['stat_text'] == '2,631,751/s'
+        player = next(row for row in window._layered_main_snapshot()['rows'] if row.get('actor_id') == 1)
+        assert player['stat_text'] == '2,631,751/s'
         shot('window-live-data-white.png')
 
         def click(name):

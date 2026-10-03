@@ -50,7 +50,7 @@ class HudViewportTests(unittest.TestCase):
                 self.assertLessEqual(bounds[2], grip[0])
         state['locked'] = True
         self.assertNotIn('resize:height', self.renderer.render(state).hit_regions)
-        self.assertEqual(clamp_visible_rows(999), 12)
+        self.assertEqual(clamp_visible_rows(999), 16)
         self.assertEqual(clamp_visible_rows('invalid'), 12)
 
     def test_rating_preview_can_scroll_to_last_party_member(self):
@@ -117,14 +117,14 @@ class HudViewportTests(unittest.TestCase):
         wheel = SimpleNamespace(delta=-120, num='??', x=150, y=100)
         for _ in range(12):
             window._scroll_main(wheel)
-        self.assertEqual(window.main_scroll_offset, 5 * 24)
-        self.assertEqual(window._layered_main_snapshot()['start_index'], 5)
+        self.assertEqual(window.main_scroll_offset, 4 * 24)
+        self.assertEqual(window._layered_main_snapshot()['start_index'], 4)
         for y in (10, 285):
             window._scroll_main(SimpleNamespace(delta=120, num='??', x=150, y=y))
-        self.assertEqual(window.main_scroll_offset, 5 * 24)
+        self.assertEqual(window.main_scroll_offset, 4 * 24)
         window.window_locked = True
         window._scroll_main(SimpleNamespace(delta=120, num='??', x=150, y=100))
-        self.assertEqual(window.main_scroll_offset, 5 * 24)
+        self.assertEqual(window.main_scroll_offset, 4 * 24)
         window.window_locked = False
         for _ in range(12):
             window._scroll_main(SimpleNamespace(delta=120, num='??', x=150, y=100))

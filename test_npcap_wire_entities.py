@@ -4,6 +4,7 @@ import msgpack
 from npcap_protocol import NpcapProtocolDecoder
 from npcap_parser_adapter import NpcapParserAdapter
 from npcap_wire_entities import decode_creation
+from test_encounter_settlement import projection_token
 
 
 ENTITY = 57236882400409
@@ -53,12 +54,12 @@ class WireEntityTests(unittest.TestCase):
         self.assertIn(entity, parser.training_dummy_entities)
         self.assertEqual(parser.active_boss_entity_id, entity)
 
-    def test_new_projection_space_clears_old_players_when_leave_packet_missing(self):
+    def test_new_projection_space_clears_old_projections_when_leave_packet_missing(self):
         parser = NpcapParserAdapter()
         self_id = 57_266_949_828_970
         old_id = self_id + 1
         self_token = "AQAAAOwNKLYHAAAA"
-        old_token = "AQAAAOwNKLYHAAAB"
+        old_token = projection_token(0)
         parser.self_id = self_id
         parser.self_token = self_token
         parser.self_confirmed = True

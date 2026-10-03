@@ -27,7 +27,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from ctypes import wintypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from proc_inspect import (
@@ -2185,7 +2185,10 @@ class EquipmentProfileCoordinator:
         self.lock = threading.Lock()
         self.started = False
         self.latest_session: EquipmentQuerySession | None = None
-        self.requested_keys: dict[tuple[object, ...], float] = {}
+        # None means queued/preparing; the response timeout starts only once
+        # the game has sent the request, never while another batch is ahead.
+        self.requested_keys: dict[tuple[object, ...], float | None] = {}
+        self.priority_keys: set[tuple[object, ...]] = set()
         self.requests: dict[int, dict[str, object]] = {}
         self.pending_profiles: list[tuple[dict[str, object], EquipmentQuerySession, dict[str, object]]] = []
         self.latest_profiles: dict[
@@ -2236,16 +2239,37 @@ class EquipmentProfileCoordinator:
                 != self._query_identity(session)
             ):
                 self.latest_profiles.clear()
+                self.requested_keys.clear()
+                self.priority_keys.clear()
             self.latest_session = session
             now = time.monotonic()
             self.requested_keys = {
                 key: requested_at
                 for key, requested_at in self.requested_keys.items()
-                if now - requested_at < EQUIPMENT_QUERY_DEDUP_SECONDS
+                if requested_at is None
+                or now - requested_at < EQUIPMENT_QUERY_DEDUP_SECONDS
             }
-            if session.key in self.requested_keys:
+            self.priority_keys.intersection_update(self.requested_keys)
+            members = tuple(
+                member for member in session.members
+                if self._member_query_key(session, member) not in self.requested_keys
+                or (
+                    session.priority
+                    and self.requested_keys[self._member_query_key(session, member)] is None
+                    and self._member_query_key(session, member) not in self.priority_keys
+                )
+            )
+            if not members:
                 return False
-            self.requested_keys[session.key] = now
+            session = replace(
+                session, members=members,
+                tokens=tuple(sorted(str(member["user_token"]) for member in members)),
+            )
+            for member in members:
+                key = self._member_query_key(session, member)
+                self.requested_keys[key] = None
+                if session.priority:
+                    self.priority_keys.add(key)
         (self.priority_queries if session.priority else self.query_commands).put(session)
         return True
 
@@ -2332,6 +2356,8 @@ class EquipmentProfileCoordinator:
             self.descriptor_hint = (0, 0)
             self.local_equipment_scores.clear()
             self.latest_profiles.clear()
+            self.requested_keys.clear()
+            self.priority_keys.clear()
         self.archive.append(
             "current_context_invalidated",
             reason=str(reason or "unknown")[:96],
@@ -2341,6 +2367,10 @@ class EquipmentProfileCoordinator:
     def handle_response(self, record: object) -> None:
         if not isinstance(record, Mapping):
             return
+        # Capture/combat dispatch must not serialize or fsync equipment here.
+        self.commands.put(("response", dict(record)))
+
+    def _archive_response(self, record: Mapping[str, object]) -> None:
         # Persist the complete response before any parser or current-session
         # decision can reject it.
         self.archive.append(
@@ -2352,7 +2382,6 @@ class EquipmentProfileCoordinator:
             raw_payload_sha256=record.get("npcap_rpc_payload_sha256", ""),
             raw_payload_length=record.get("npcap_rpc_payload_length", 0),
         )
-        self.commands.put(("response", dict(record)))
 
     def _runtime_profile(self) -> Mapping[str, object]:
         value = self.runtime_profile_provider()
@@ -2635,6 +2664,9 @@ class EquipmentProfileCoordinator:
             sent = bool(count)
             if not sent:
                 raise TimeoutError("no ReqNTP edge arrived before timeout")
+            with self.lock:
+                for member in session.members:
+                    self.requested_keys[self._member_query_key(session, member)] = time.monotonic()
             self.archive.append(
                 "request_call_finished",
                 **context,
@@ -2652,7 +2684,10 @@ class EquipmentProfileCoordinator:
             )
             if not sent:
                 with self.lock:
-                    self.requested_keys.pop(session.key, None)
+                    for member in session.members:
+                        key = self._member_query_key(session, member)
+                        self.requested_keys.pop(key, None)
+                        self.priority_keys.discard(key)
                     self.requests.pop(correlation, None)
         finally:
             if request is not None:
@@ -2673,6 +2708,7 @@ class EquipmentProfileCoordinator:
                 self.request_hook_lock.release()
 
     def _process_response(self, record: Mapping[str, object]) -> None:
+        self._archive_response(record)
         try:
             parsed = parse_shape_response(record)
         except Exception as error:
@@ -2998,6 +3034,13 @@ class EquipmentProfileCoordinator:
     def _query_identity(session: EquipmentQuerySession) -> tuple[object, ...]:
         return session.game_pid, session.local_user_token, session.party_session_id
 
+    @classmethod
+    def _member_query_key(cls, session, member):
+        return (
+            *cls._query_identity(session), str(member["user_token"]),
+            _positive_int(member.get("extraordinary_rating")),
+        )
+
     def _coalesce_queries(self, session: EquipmentQuerySession) -> EquipmentQuerySession:
         # Roster rows often arrive separately while the first request is being
         # prepared. Combine only unsent newcomers in the same role/team;
@@ -3068,15 +3111,32 @@ class EquipmentProfileCoordinator:
                 return
             with self.lock:
                 latest = self.latest_session
-            if latest is None or self._query_identity(latest) != self._query_identity(session):
+                if latest is None or self._query_identity(latest) != self._query_identity(session):
+                    continue
+                # An urgent batch may have included members still present in
+                # an older normal batch. Send each queued member only once.
+                members = tuple(
+                    member for member in session.members
+                    if self._member_query_key(session, member) in self.requested_keys
+                    and self.requested_keys[self._member_query_key(session, member)] is None
+                )
+            if not members:
                 continue
+            session = replace(
+                session, members=members,
+                tokens=tuple(sorted(str(member["user_token"]) for member in members)),
+            )
             self._execute_query(session)
 
     def _run(self) -> None:
-        while not self.stop_event.is_set() and not self.closing.is_set():
+        # Drain responses queued before close's stop marker so moving archival
+        # off capture dispatch does not lose the final match's raw evidence.
+        while True:
             try:
                 kind, payload = self.commands.get(timeout=0.25)
             except queue.Empty:
+                if self.stop_event.is_set() or self.closing.is_set():
+                    return
                 continue
             if kind == "stop":
                 return

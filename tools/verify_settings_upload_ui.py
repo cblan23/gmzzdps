@@ -44,6 +44,10 @@ def main():
             window.team_rating_preview_enabled = True
             window.profession_display_metrics = app['normalize_profession_display_metrics']({})
             window.toggle_visibility_hotkey_enabled = True
+            window.toggle_visibility_hotkey = 'Home'
+            window.unlock_hotkey_enabled = False
+            window.unlock_hotkey = ''
+            window.lock_toggle_hotkey_enabled = False
             window.closing = False
             for key in ('show_deaths', 'show_main_totals', 'show_team_dps', 'highlight_self',
                         'show_combat_time', 'show_pvp_button', 'show_boss_hp_bar', 'boss_enrage_prediction_enabled'):
@@ -52,6 +56,7 @@ def main():
             window.icons = app['IconFactory'](root)
             window.icons.set_dpi(dpi)
             window._sync_toggle_hotkey_controls = lambda: None
+            window._sync_unlock_hotkey_controls = lambda: None
             window._apply_live_ui_settings = lambda *_args: None
             window._preview_font_size = lambda *_args: None
             window._preview_main_ui_scale = lambda *_args: None

@@ -675,6 +675,106 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
         self.assertTrue(coordinator.priority_queries.get_nowait().priority)
         self.assertTrue(coordinator.query_commands.get_nowait().priority is False)
 
+    def test_eighty_member_queue_does_not_retry_before_requests_are_sent(self):
+        coordinator = self.coordinator()
+        values = []
+        for start in range(2, 82, 12):
+            value = self.session_value(start)
+            value['member_count'] = 80
+            value['members'] = [
+                {'user_token': _token(1, index), 'actor_id': index, 'name': 'Player'}
+                for index in range(start, min(start + 12, 82))
+            ]
+            values.append(value)
+        with patch('equipment_profiles.time.monotonic', return_value=100):
+            for value in values:
+                self.assertTrue(coordinator.schedule(value))
+        with patch('equipment_profiles.time.monotonic', return_value=180):
+            for value in values:
+                self.assertFalse(coordinator.schedule(value))
+            overlap = dict(values[0], members=values[0]['members'][:6] + values[1]['members'][:6])
+            self.assertFalse(coordinator.schedule(overlap))
+        self.assertEqual(coordinator.query_commands.qsize(), 7)
+
+    def test_sent_request_timeout_starts_after_queue_wait_and_failed_send_can_retry(self):
+        coordinator = self.coordinator()
+        value = self.session_value(2)
+        with patch('equipment_profiles.time.monotonic', return_value=100):
+            self.assertTrue(coordinator.schedule(value))
+        session = coordinator.query_commands.get_nowait()
+        request = MagicMock()
+        request.status.return_value = (ARM_DONE, 1, 1)
+        coordinator.archive = MagicMock()
+        with patch.object(coordinator, '_begin_local_equipment_load'), patch.object(
+            coordinator, '_begin_catalog_load'
+        ), patch.object(coordinator, '_runtime_profile', return_value={}), patch(
+            'equipment_profiles.OneShotEquipmentRequest', return_value=request
+        ), patch('equipment_profiles.time.monotonic', return_value=180):
+            coordinator._execute_query(session)
+        with patch('equipment_profiles.time.monotonic', return_value=199):
+            self.assertFalse(coordinator.schedule(value))
+        with patch('equipment_profiles.time.monotonic', return_value=201):
+            self.assertTrue(coordinator.schedule(value))
+        session = coordinator.query_commands.get_nowait()
+        request.install.side_effect = RuntimeError('entry busy')
+        with patch.object(coordinator, '_begin_local_equipment_load'), patch.object(
+            coordinator, '_runtime_profile', return_value={}
+        ), patch('equipment_profiles.OneShotEquipmentRequest', return_value=request):
+            coordinator._execute_query(session)
+        self.assertTrue(coordinator.schedule(value))
+
+    def test_slow_response_archive_does_not_block_capture_dispatch(self):
+        coordinator = self.coordinator()
+        entered = threading.Event()
+        release = threading.Event()
+        dispatched = threading.Event()
+
+        def archive(_record):
+            entered.set()
+            release.wait(4)
+
+        def capture_dispatch():
+            coordinator.handle_response({'decoded_arguments': []})
+            dispatched.set()
+
+        with patch.object(coordinator, '_archive_response', side_effect=archive):
+            coordinator.start()
+            capture = threading.Thread(target=capture_dispatch)
+            try:
+                capture.start()
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(dispatched.wait(1), 'equipment fsync blocked combat dispatch')
+                self.assertFalse(release.is_set())
+            finally:
+                release.set()
+                capture.join(2)
+                coordinator.close()
+
+    def test_shutdown_drains_responses_already_queued_for_archival(self):
+        coordinator = self.coordinator()
+        entered = threading.Event()
+        release = threading.Event()
+        processed = []
+
+        def process(record):
+            entered.set()
+            release.wait(4)
+            processed.append(record['sequence'])
+
+        with patch.object(coordinator, '_process_response', side_effect=process):
+            coordinator.start()
+            try:
+                coordinator.handle_response({'sequence': 1})
+                self.assertTrue(entered.wait(2))
+                coordinator.handle_response({'sequence': 2})
+                coordinator.close(timeout=0.01)
+                release.set()
+                coordinator.thread.join(2)
+                self.assertEqual(processed, [1, 2])
+            finally:
+                release.set()
+                coordinator.close()
+
     def test_response_is_published_while_another_query_is_waiting(self):
         entered = threading.Event()
         release = threading.Event()

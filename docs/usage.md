@@ -2,7 +2,7 @@
 
 ## 启动
 
-Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0.3.5) 中的便携 ZIP。先解压，再运行 EXE；无需安装 Python 或 Npcap。程序会请求管理员权限，IPv6 或兼容回退可能加载随包提供的 WinDivert 驱动。
+Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0.3.5-r1) 中的便携 ZIP。先解压，再运行 EXE；无需安装 Python 或 Npcap。程序会请求管理员权限，IPv6 或兼容回退可能加载随包提供的 WinDivert 驱动。
 
 建议在进入副本前启动，避免漏掉本场早期身份、血量和统计数据。首次登录输入服务器签发的有效卡号；成功登录后，卡号按 Windows 当前用户加密保存，下次启动自动带出。
 

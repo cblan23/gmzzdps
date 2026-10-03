@@ -53,7 +53,8 @@
   --directory "<output-directory>" --source . --build-id "<build-id>"
 ```
 
-- Windows 便携 ZIP：EXE、使用说明、更新日志、第三方许可证。
+- Windows 单文件 EXE：`Daodao-GMZZ-v<version>-win-x64.exe`，使用英文附件名。
+- Windows 便携 ZIP：EXE、使用说明、更新日志、第三方许可证；包内保留原始中文程序名。
 - SHA-256 校验文件：包含 ZIP 与独立 EXE 的摘要。
 - 发布说明：更新内容、依赖、启动步骤和验收状态。
 

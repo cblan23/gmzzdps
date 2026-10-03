@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -36,6 +37,9 @@ def main() -> None:
     notes = source / f'release-notes-v{version}.txt'
     guide = source / 'docs/usage.md'
     bundle_name = f'Daodao-GMZZ-v{version}-win-x64'
+    standalone_path = directory / f'{bundle_name}.exe'
+    if standalone_path != executable:
+        shutil.copyfile(executable, standalone_path)
     archive_path = directory / f'{bundle_name}.zip'
     files = {
         manifest['filename']: executable,
@@ -70,8 +74,8 @@ def main() -> None:
         if embedded != manifest['sha256']:
             raise ValueError('ZIP executable hash mismatch')
     checksums = directory / 'SHA256SUMS.txt'
-    checksums.write_text(f'{sha256(executable)}  {executable.name}\n{sha256(archive_path)}  {archive_path.name}\n', encoding='utf-8')
-    print(json.dumps({'archive': str(archive_path), 'zip_size': archive_path.stat().st_size,
+    checksums.write_text(f'{sha256(standalone_path)}  {standalone_path.name}\n{sha256(archive_path)}  {archive_path.name}\n', encoding='utf-8')
+    print(json.dumps({'executable': str(standalone_path), 'archive': str(archive_path), 'zip_size': archive_path.stat().st_size,
                       'zip_sha256': sha256(archive_path), 'exe_sha256': manifest['sha256'],
                       'checksums': str(checksums), 'files': sorted(expected)}, ensure_ascii=True))
 

@@ -33,7 +33,7 @@ HUD 检查涉及 `test_main_hud`、`test_main_hud_behavior`、`test_hud_live_reg
 | 授权服务 | 新构建登记完成，原有条目保留，服务未重启，线上更新元数据未更改 |
 | Windows 签名 | EXE 未进行 Authenticode 签名，内置 WinDivert 驱动签名由构建脚本校验 |
 
-ZIP 包含 EXE、使用说明、更新日志、两份第三方许可证和组件来源说明。GitHub 附件同时提供独立 EXE 与 `SHA256SUMS.txt`。最终 ZIP 摘要以该校验文件为准。
+ZIP 包含 EXE、使用说明、更新日志、两份第三方许可证和组件来源说明。GitHub 附件同时提供 `Daodao-GMZZ-v0.3.5-win-x64.exe` 与 `SHA256SUMS.txt`，ZIP 内保留中文程序名。最终 ZIP 摘要以该校验文件为准。
 
 ## 发布范围
 

@@ -69,16 +69,16 @@ class LocalIdentityRegressionTests(unittest.TestCase):
 
 
 class BossHpRegressionTests(unittest.TestCase):
-    def test_current_hp_is_never_displayed_as_declared_maximum(self):
+    def test_observed_hp_is_display_fallback_until_declared_maximum_arrives(self):
         window = object.__new__(DpsWindow)
         window.model = SimpleNamespace()
         monster = SimpleNamespace(name='子爵夫人', current_hp=66624984,
                                   max_hp=None, observed_max_hp=66624984)
         first = window._main_boss_display_values(monster)
-        self.assertNotIn('/', first['boss_hp'])
-        self.assertTrue(first['boss_hp'])
-        self.assertEqual(first['boss_percent'], '')
-        self.assertIsNone(first['boss_ratio'])
+        self.assertIn('/', first['boss_hp'])
+        self.assertIn('6662.5', first['boss_hp'])
+        self.assertEqual(first['boss_percent'], '100%')
+        self.assertEqual(first['boss_ratio'], 1.0)
         monster.max_hp = 66735474
         exact = window._main_boss_display_values(monster)
         self.assertIn('6673.5', exact['boss_hp'])

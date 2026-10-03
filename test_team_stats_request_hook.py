@@ -177,7 +177,7 @@ class TeamStatsRequestHookTests(unittest.TestCase):
         hook.process = 99
         hook.state = 0x7FF6_0010_0000
         hook.installed = True
-        state = bytearray(0x40)
+        state = bytearray(0x50)
         struct.pack_into("<8sQQQQ", state, 0, STATE_MAGIC, 1, 123, 45, 1)
 
         with (
@@ -196,7 +196,7 @@ class TeamStatsRequestHookTests(unittest.TestCase):
             ["ReqCommonCombatStatisticsByTeam"],
         )
         self.assertEqual(status["captured_request_count"], 0)
-        read.assert_called_once_with(hook.process, hook.state, 0x40)
+        read.assert_called_once_with(hook.process, hook.state, 0x50)
 
     def test_attachment_check_reads_only_the_installed_entry_patch(self):
         hook = TeamStatsRequestHook(
@@ -261,6 +261,57 @@ class TeamStatsRequestHookTests(unittest.TestCase):
             ],
         )
         sleep.assert_called_once_with(0.35)
+
+    def test_one_shot_arms_exactly_one_overdue_primary_request(self):
+        hook = TeamStatsRequestHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            interval=300.0,
+            enabled=False,
+            stable_primary_only=True,
+            allow_existing_adoption=False,
+        )
+        hook.process = 99
+        hook.state = 0x7FF6_0010_0000
+        hook.installed = True
+
+        with (
+            patch.object(hook_module, "process_alive", return_value=True),
+            patch.object(
+                hook,
+                "status",
+                return_value={"request_count": 17},
+            ),
+            patch.object(hook_module, "write_memory") as write,
+        ):
+            baseline = hook.arm_one_shot()
+
+        self.assertEqual(baseline, 17)
+        self.assertEqual(
+            [call.args for call in write.call_args_list],
+            [
+                (hook.process, hook.state + 0x08, struct.pack("<Q", 0)),
+                (
+                    hook.process,
+                    hook.state + STATE_LAST_REQUEST_OFFSET,
+                    struct.pack("<Q", 1),
+                ),
+                (hook.process, hook.state + 0x08, struct.pack("<Q", 1)),
+            ],
+        )
+
+    def test_one_shot_rejects_the_general_round_robin_hook(self):
+        hook = TeamStatsRequestHook(
+            profile=RUNTIME_PROFILE,
+            pid=1234,
+            enabled=False,
+        )
+        hook.process = 99
+        hook.state = 0x7FF6_0010_0000
+        hook.installed = True
+        with patch.object(hook_module, "process_alive", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "primary-only"):
+                hook.arm_one_shot()
 
     def test_rearm_reenables_hook_when_clock_write_fails(self):
         hook = TeamStatsRequestHook(

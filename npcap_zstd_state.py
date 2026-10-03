@@ -561,10 +561,20 @@ class ZstdStateReader:
 
 
 def coherent_session_snapshot(rc4_reader, zstd_reader: ZstdStateReader):
-    for _attempt in range(8):
-        anchor_before = rc4_reader.snapshot()
-        snapshot = zstd_reader.snapshot(attempts=4)
-        anchor_after = rc4_reader.snapshot()
+    # The live connection can advance continuously while the user is already
+    # fighting.  A failed inner Zstd stability sample is expected in that case
+    # and must not discard the only active RC4/Zstd pair.  Keep the operation
+    # bounded, but retry the complete pair until both states describe one quiet
+    # protocol boundary.
+    last_error = None
+    for _attempt in range(32):
+        try:
+            anchor_before = rc4_reader.snapshot()
+            snapshot = zstd_reader.snapshot(attempts=4)
+            anchor_after = rc4_reader.snapshot()
+        except (OSError, ValueError, RuntimeError) as error:
+            last_error = error
+            continue
         before_decrypt = anchor_before.decrypt
         after_decrypt = anchor_after.decrypt
         if (
@@ -574,4 +584,6 @@ def coherent_session_snapshot(rc4_reader, zstd_reader: ZstdStateReader):
             and before_decrypt.s == after_decrypt.s
         ):
             return anchor_after, snapshot
-    raise RuntimeError("RC4 and Zstd state could not be sampled coherently")
+    raise RuntimeError(
+        "RC4 and Zstd state could not be sampled coherently"
+    ) from last_error

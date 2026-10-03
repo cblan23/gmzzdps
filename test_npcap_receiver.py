@@ -2,7 +2,8 @@ import unittest
 from unittest.mock import Mock
 from types import SimpleNamespace
 
-from npcap_receiver import MultiAdapterReceiver, endpoint_direction, game_udp_filter, open_receive_handle
+from npcap_receiver import MultiAdapterReceiver, endpoint_direction, game_udp_filter, game_transport_filter, open_receive_handle
+from npcap_shadow_capture import TcpEndpoint, UdpEndpoint
 from passive_transport import TransportPacket
 
 
@@ -67,6 +68,25 @@ class ReceiverTests(unittest.TestCase):
         packet = TransportPacket('2001:db8::2', '2001:db8::1', 456, 123, b'', 'udp', 0, 0)
         endpoints = [SimpleNamespace(local_address='::', local_port=123)]
         self.assertEqual(endpoint_direction(packet, endpoints, {'2001:db8::1'})[-1], 'inbound')
+
+    def test_tcp_and_udp_owned_ports_get_separate_filters(self):
+        endpoints = [UdpEndpoint(1, '0.0.0.0', 111),
+                     TcpEndpoint(1, '10.0.0.1', 222, '203.0.113.9', 30000)]
+        expression = game_transport_filter('10.0.0.1', endpoints)
+        self.assertIn('udp and (port 111)', expression)
+        self.assertIn('tcp and (port 222)', expression)
+        self.assertIn('ip[9] = 6', expression)
+        self.assertIn('ip6 protochain 6', game_transport_filter('::1', endpoints))
+
+    def test_tcp_ownership_checks_protocol_and_remote_not_just_port(self):
+        endpoint = TcpEndpoint(1, '10.0.0.1', 123, '203.0.113.9', 30000)
+        packet = TransportPacket('203.0.113.9', '10.0.0.1', 30000, 123, b'', 'tcp', 0, 0)
+        self.assertEqual(endpoint_direction(packet, [endpoint], {'10.0.0.1'})[-1], 'inbound')
+        udp = TransportPacket('203.0.113.9', '10.0.0.1', 30000, 123, b'', 'udp', 0, 0)
+        self.assertEqual(endpoint_direction(udp, [endpoint], {'10.0.0.1'})[-1], 'unrelated')
+        self.assertEqual(endpoint_direction(packet, [UdpEndpoint(1, '10.0.0.1', 123)], {'10.0.0.1'})[-1], 'unrelated')
+        wrong = TcpEndpoint(1, '10.0.0.1', 123, '203.0.113.8', 30000)
+        self.assertEqual(endpoint_direction(packet, [wrong], {'10.0.0.1'})[-1], 'unrelated')
 
     def test_adapter_refresh_closes_removed_and_updates_filter(self):
         dll = self.dll()

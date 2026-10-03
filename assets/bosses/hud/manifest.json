@@ -5,6 +5,9 @@
   "templates": {
     "7100004": "head-enemy-02.png",
     "7100008": "clown.png",
+    "7100401": "evil-water-turtle.png",
+    "7100441": "dance-king-baboon.png",
+    "7100471": "sylvia.png",
     "7100201": "anxia.png",
     "7100202": "mr-barney.png",
     "7100203": "anxia.png",
@@ -15,6 +18,8 @@
     "7100625": "war-dragon.png",
     "7100628": "war-dragon.png",
     "7100632": "training-dummy.png",
+    "7100633": "training-dummy.png",
+    "7100634": "training-dummy.png",
     "7101004": "training-dummy.png",
     "7101017": "training-dummy.png",
     "7101018": "clown.png",
@@ -63,6 +68,8 @@
     "7109005": "clown.png",
     "7109801": "mutated-hound.png",
     "7109821": "mutated-hound.png",
+    "7110200": "roselle-residual.png",
+    "7110208": "roselle-polluted.png",
     "7110581": "rock-king.png",
     "7110641": "rock-king.png",
     "7110642": "rock-king.png",
@@ -89,6 +96,36 @@
     "7265156": "dream-catcher.png"
   },
   "portraits": {
+    "roselle-residual.png": {
+      "name": "罗塞尔的残留意志",
+      "dimensions": [164, 164],
+      "sha256": "d515c971b2a96c3711424c207b7a1a9b1b630c57f75a48e1ba3401bed323c748",
+      "source": "client_boss_portrait"
+    },
+    "roselle-polluted.png": {
+      "name": "罗塞尔的污染意志",
+      "dimensions": [164, 164],
+      "sha256": "403eb97874c7814764ed163a3254e0d72636a865a4c549b89ce9e9db614bc46b",
+      "source": "client_boss_portrait"
+    },
+    "sylvia.png": {
+      "name": "西尔维娅",
+      "dimensions": [164, 164],
+      "sha256": "92f5a6d48735b293d1cf5b48af77199da8bee7bdbf5527b7def23c1ceccbf3f9",
+      "source": "client_boss_portrait"
+    },
+    "evil-water-turtle.png": {
+      "name": "厄水巨龟",
+      "dimensions": [164, 164],
+      "sha256": "05bec078f94e39b65c6dae0484c05823b97302ce9a9889318dcc1d704c1e6e36",
+      "source": "client_boss_portrait"
+    },
+    "dance-king-baboon.png": {
+      "name": "舞王狒哥",
+      "dimensions": [164, 164],
+      "sha256": "aabae1601e477d56533cb126697002de093fc44458d62bb5778cf160a186f2a9",
+      "source": "client_boss_portrait"
+    },
     "karl-edgar.png": {
       "name": "卡尔·埃德加",
       "dimensions": [
@@ -133,6 +170,15 @@
       ],
       "sha256": "687d400f7a1bb256cce112a625af907e08d7d106ec2534714af082bc5d511604",
       "source": "client_portrait_redraw"
+    },
+    "live-small-monsters-v2.png": {
+      "name": "普通小怪群像",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "sha256": "77257f96068c40b1b22c8728ef279298c2fbffe92efed8eece186fb2e37fc142",
+      "source": "imagegen_live_hud"
     },
     "clown.png": {
       "name": "小丑",
@@ -271,9 +317,9 @@
     }
   },
   "coverage": {
-    "mapped_templates": 84,
+    "mapped_templates": 91,
     "runtime_templates": 83,
-    "portraits": 20,
+    "portraits": 25,
     "missing_runtime_templates": {}
   }
 }

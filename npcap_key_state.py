@@ -32,7 +32,12 @@ MEM_PRIVATE = 0x20000
 WRITABLE_PAGE_TYPES = frozenset({0x04, 0x08, 0x40, 0x80})
 MAX_USER_ADDRESS = 0x00007FFFFFFF0000
 SCAN_CHUNK_BYTES = 8 * 1024 * 1024
-MAX_CRYPTOR_CANDIDATES = 8
+# A long-running client retains cipher objects from account switches and map
+# reconnects.  Eight slots can therefore be filled entirely by stale objects,
+# leaving the current connection outside the bounded bootstrap set.  The
+# snapshots are small and the scan already has a hard byte budget, so keep
+# enough candidates for the active-state validation step to see the live one.
+MAX_CRYPTOR_CANDIDATES = 32
 # A reconnected client can retain an old cipher in a much earlier allocator
 # band than the live one.  Continue through the normal scan budget after the
 # first hit so the caller can validate every plausible connection against

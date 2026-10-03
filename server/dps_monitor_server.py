@@ -33,6 +33,11 @@ from profile_upload import (
     ProfileUploadStore,
     initialize_profile_schema,
 )
+from pvp_backend import (
+    PvpBackendError,
+    PvpBackendStore,
+    initialize_pvp_schema,
+)
 from runtime_capability import (
     SIGNING_KEY_ID_PATTERN,
     RuntimeCapabilityError,
@@ -99,7 +104,7 @@ _COMBAT_CLOCK_CLEANUP_STATE: tuple[str, float] | None = None
 PROFILE_HMAC_KEY_PATH = os.environ.get("GMZZ_PROFILE_HMAC_KEY_PATH", "").strip()
 _PROFILE_HMAC_KEY_LOCK = threading.Lock()
 _PROFILE_HMAC_KEY_CACHE: tuple[str, bytes] | None = None
-DIAGNOSTIC_TOOL_NAME = "叨叨诡秘问题检测工具"
+DIAGNOSTIC_TOOL_NAME = "叨叨诡秘助手问题检测工具"
 UPDATE_METADATA_PATH = Path(
     os.environ.get(
         "GMZZ_MONITOR_UPDATE_METADATA",
@@ -278,6 +283,10 @@ def profile_upload_store() -> ProfileUploadStore:
         supported_boss_template_ids=supported_bosses,
         supported_game_versions=supported_game_versions,
     )
+
+
+def pvp_backend_store() -> PvpBackendStore:
+    return PvpBackendStore(profile_hmac_key())
 
 
 def clean_text(value: object, limit: int) -> str:
@@ -472,8 +481,8 @@ def update_download_fallback_filename(version: object) -> str:
     """Return an ASCII filename that still carries the current release."""
     parts = version_tuple(version)
     if not parts:
-        return "Dps-Logs-update.exe"
-    return f"Dps-Logs-v{'.'.join(str(part) for part in parts)}.exe"
+        return "DaodaoMysteryAssistant-update.exe"
+    return f"DaodaoMysteryAssistant-v{'.'.join(str(part) for part in parts)}.exe"
 
 
 def same_release_version(left: object, right: object) -> bool:
@@ -655,6 +664,8 @@ def _load_update_metadata_file(
     }
     cdn_url = str(value.get("cdn_download_url", "")).strip()
     if cdn_url:
+        # Legacy CDN object paths remain valid for clients released before
+        # the product was renamed to 叨叨诡秘助手.
         expected = f"https://downloads.daodaogame.vip/releases/{build_id}/Dps-Logs-v{display_version}.exe"
         if cdn_url == expected:
             metadata["cdn_download_url"] = cdn_url
@@ -1096,6 +1107,7 @@ def initialize_database() -> None:
             """
         )
         initialize_profile_schema(connection)
+        initialize_pvp_schema(connection)
         # Create or validate the persistent pseudonymization key before the
         # service accepts any identity or upload request.
         profile_hmac_key()
@@ -1737,6 +1749,57 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/dps/encounters/upload":
             self._upload_encounter()
             return
+        if path == "/api/v1/dps/pvp/records/upload":
+            self._pvp_upload_record()
+            return
+        if path == "/api/v1/dps/pvp/equipment/snapshots/upload":
+            self._pvp_upload_equipment_snapshot()
+            return
+        if path == "/api/v1/dps/pvp/records/list":
+            self._pvp_list_records()
+            return
+        if path == "/api/v1/dps/pvp/records/matchups":
+            self._pvp_matchups()
+            return
+        if path == "/api/v1/dps/pvp/alliance/status":
+            self._pvp_alliance_status()
+            return
+        if path == "/api/v1/dps/pvp/alliance/members/upsert":
+            self._pvp_alliance_member("upsert")
+            return
+        if path == "/api/v1/dps/pvp/alliance/members/remove":
+            self._pvp_alliance_member("remove")
+            return
+        if path == "/api/v1/dps/pvp/alliance/members/batch":
+            self._pvp_alliance_member("batch")
+            return
+        if path == "/api/v1/dps/pvp/alliance/members/records":
+            self._pvp_member_records()
+            return
+        if path == "/api/v1/dps/pvp/alliance/hunter/analysis":
+            self._pvp_hunter_analysis()
+            return
+        if path == "/api/v1/dps/pvp/alliance/hunter/record":
+            self._pvp_hunter_record()
+            return
+        if path == "/api/v1/dps/pvp/alliance/players/search":
+            self._pvp_alliance_player_search()
+            return
+        if path == "/api/v1/dps/pvp/alliance/subscriptions/status":
+            self._pvp_alliance_subscription_status()
+            return
+        if path == "/api/v1/dps/pvp/alliance/players/records":
+            self._pvp_alliance_player_records()
+            return
+        if path == "/api/v1/dps/pvp/alliance/players/record":
+            self._pvp_alliance_player_record()
+            return
+        if path == "/api/v1/dps/pvp/alliance/subscriptions/update":
+            self._pvp_alliance_subscription_update()
+            return
+        if path == "/api/v1/dps/pvp/alliance/subscriptions/report":
+            self._pvp_alliance_subscription_report()
+            return
         if path == "/api/v1/dps/diagnostic":
             self._submit_diagnostic()
             return
@@ -1765,6 +1828,10 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/dps/admin/feedback/detail":
             if self._require_admin():
                 self._admin_feedback_detail()
+            return
+        if path == "/api/v1/dps/admin/pvp/alliance/certify":
+            if self._require_admin():
+                self._pvp_certify_alliance()
             return
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
 
@@ -1809,6 +1876,401 @@ class MonitorHandler(BaseHTTPRequestHandler):
             status,
             {"ok": False, "error": error.code, "message": error.message},
         )
+
+    def _pvp_error(self, error: PvpBackendError) -> None:
+        if error.code == "PVP_ALLIANCE_FORBIDDEN":
+            status = HTTPStatus.FORBIDDEN
+        elif error.code in {
+            "PVP_MATCH_CONFLICT",
+            "PVP_EQUIPMENT_SNAPSHOT_CONFLICT",
+        }:
+            status = HTTPStatus.CONFLICT
+        else:
+            status = HTTPStatus.BAD_REQUEST
+        self._json(
+            status,
+            {"ok": False, "error": error.code, "message": error.message},
+        )
+
+    @staticmethod
+    def _pvp_session_card_hash(session: sqlite3.Row) -> str:
+        return str(session["card_hash"] or "").strip()
+
+    def _pvp_upload_record(self) -> None:
+        body = self._body(maximum_bytes=MAX_UPLOAD_BODY_BYTES)
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with write_database() as connection:
+                result = pvp_backend_store().upload(
+                    connection,
+                    card_hash,
+                    body.get("record"),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _pvp_upload_equipment_snapshot(self) -> None:
+        body = self._body(maximum_bytes=MAX_UPLOAD_BODY_BYTES)
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with write_database() as connection:
+                result = pvp_backend_store().upload_equipment_snapshot(
+                    connection,
+                    card_hash,
+                    body.get("snapshot"),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _pvp_list_records(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                records = pvp_backend_store().records(
+                    connection,
+                    card_hash,
+                    limit=body.get("limit", 200),
+                )
+        except (TypeError, ValueError, OverflowError):
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_limit"})
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "records": records})
+
+    def _pvp_matchups(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                matchups = pvp_backend_store().matchups(
+                    connection,
+                    card_hash,
+                    body.get("opponent_ids"),
+                    body.get("team_size"),
+                    exclude_match_id=body.get("exclude_match_id", ""),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "matchups": matchups})
+
+    def _pvp_alliance_status(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        with database() as connection:
+            status = pvp_backend_store().alliance(
+                connection, card_hash, include_members=not bool(body.get("compact")))
+        self._json(HTTPStatus.OK, {"ok": True, **status})
+
+    def _pvp_alliance_member(self, action: str) -> None:
+        body = self._body(maximum_bytes=MAX_UPLOAD_BODY_BYTES)
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with write_database() as connection:
+                result = pvp_backend_store().member_mutation(
+                    connection,
+                    card_hash,
+                    action,
+                    body,
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
+
+    def _pvp_member_records(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                records = pvp_backend_store().member_records(
+                    connection, card_hash, body.get("member_key"), body.get("limit", 500)
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "records": records})
+
+    def _pvp_hunter_analysis(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                analysis = pvp_backend_store().hunter_city_analysis(
+                    connection, card_hash, body.get("days", 30),
+                    body.get("member_key", ""),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **analysis})
+
+    def _pvp_hunter_record(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                record = pvp_backend_store().hunter_city_record(
+                    connection, card_hash, body.get("match_id"),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "record": record})
+
+    def _pvp_alliance_player_search(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                players = pvp_backend_store().search_alliance_players(
+                    connection, card_hash, body.get("query"),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "players": players})
+
+    def _pvp_alliance_subscription_status(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        with database() as connection:
+            subscriptions = pvp_backend_store().subscriptions(connection, card_hash)
+        self._json(HTTPStatus.OK, {"ok": True, "subscriptions": subscriptions})
+
+    def _pvp_alliance_player_records(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                page = pvp_backend_store().alliance_player_records(
+                    connection, card_hash, body.get("member_key"),
+                    body.get("days", 0), body.get("mode_name", ""),
+                    body.get("offset", 0), body.get("result", ""),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **page})
+
+    def _pvp_alliance_player_record(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                record = pvp_backend_store().alliance_player_record(
+                    connection, card_hash, body.get("member_key"),
+                    body.get("match_id"),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "record": record})
+
+    def _pvp_alliance_subscription_update(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with write_database() as connection:
+                subscriptions = pvp_backend_store().subscription_action(
+                    connection, card_hash, body.get("action"),
+                    body.get("member_key"),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "subscriptions": subscriptions})
+
+    def _pvp_alliance_subscription_report(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        session = self._active_desktop_session()
+        if session is None:
+            return
+        card_hash = self._pvp_session_card_hash(session)
+        if not card_hash:
+            self._authorization_denied("card_required")
+            return
+        try:
+            with database() as connection:
+                report = pvp_backend_store().subscribed_report(
+                    connection, card_hash, body.get("days", 30),
+                    body.get("mode_name", ""),
+                    body.get("start_date", ""), body.get("end_date", ""),
+                    body.get("member_keys"),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, "report": report})
+
+    def _pvp_certify_alliance(self) -> None:
+        body = self._body()
+        if body is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "bad_json"})
+            return
+        card_key = normalize_card_key(body.get("admin_card_key"))
+        if not card_key:
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "bad_card_key", "message": "管理员卡号无效。"},
+            )
+            return
+        card_hash = token_digest(card_key)
+        try:
+            with write_database() as connection:
+                card = connection.execute(
+                    "SELECT card_hash FROM cards WHERE card_hash=? AND deleted_at IS NULL",
+                    (card_hash,),
+                ).fetchone()
+                if card is None:
+                    raise PvpBackendError(
+                        "PVP_BAD_ALLIANCE", "管理员卡号不存在或已删除。"
+                    )
+                result = pvp_backend_store().certify(
+                    connection,
+                    body.get("club_id"),
+                    body.get("club_name"),
+                    body.get("server_name"),
+                    card_hash,
+                    body.get("admin_role", "盟主"),
+                )
+        except PvpBackendError as error:
+            self._pvp_error(error)
+            return
+        self._json(HTTPStatus.OK, {"ok": True, **result})
 
     def _resolve_upload_profile(self) -> None:
         body = self._body()
@@ -4085,7 +4547,7 @@ LEGACY_ADMIN_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>叨叨诡秘 Dps-Logs 在线监控</title>
+<title>叨叨诡秘助手在线监控</title>
 <style>
 :root{color-scheme:dark;--bg:#0b0e12;--surface:#131820;--panel:#191f28;--line:#2b3541;--text:#f3f5f7;--muted:#929eac;--green:#61d8ae;--amber:#e9b96e;--red:#e66a73}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px "Microsoft YaHei UI",system-ui,sans-serif;letter-spacing:0}
@@ -4096,7 +4558,7 @@ main{max-width:1180px;margin:0 auto;padding:22px}.metrics{display:grid;grid-temp
 </style>
 </head>
 <body>
-<header><strong>叨叨诡秘 Dps-Logs 在线监控</strong><span id="refresh">正在同步</span></header>
+<header><strong>叨叨诡秘助手在线监控</strong><span id="refresh">正在同步</span></header>
 <main>
 <section class="metrics"><div class="metric"><label>当前登录</label><b id="logged">0</b></div><div class="metric using"><label>正在使用</label><b id="using">0</b></div><div class="metric"><label>近 24 小时设备</label><b id="seen">0</b></div></section>
 <section class="table-wrap"><table><thead><tr><th>客户端</th><th>角色</th><th>版本</th><th>状态</th><th>最近心跳</th><th>IP</th><th>管理</th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty" hidden>暂无在线记录</div></section>
@@ -4116,7 +4578,7 @@ ADMIN_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>叨叨诡秘 Dps-Logs 管理后台</title>
+<title>叨叨诡秘助手管理后台</title>
 <style>
 :root{color-scheme:dark;--bg:#0b0e12;--surface:#131820;--panel:#191f28;--line:#2b3541;--text:#f3f5f7;--muted:#929eac;--green:#61d8ae;--amber:#e9b96e;--red:#e66a73;--blue:#73a7df}
 *{box-sizing:border-box;scrollbar-width:auto;scrollbar-color:#647384 #11161d}
@@ -4160,7 +4622,7 @@ textarea{width:100%;height:260px;resize:none;background:#0d1116;color:var(--text
 </style>
 </head>
 <body>
-<header><strong>叨叨诡秘 Dps-Logs 管理后台</strong><span id="refresh">正在同步</span></header>
+<header><strong>叨叨诡秘助手管理后台</strong><span id="refresh">正在同步</span></header>
 <nav><button id="onlineTab" class="active" type="button">在线用户</button><button id="cardsTab" type="button">卡号管理</button><button id="feedbackTab" type="button">反馈</button></nav>
 <main>
 <section class="metrics"><div class="metric"><label>当前登录</label><b id="logged">0</b></div><div class="metric using"><label>正在使用</label><b id="using">0</b></div><div class="metric cards"><label>有效卡号</label><b id="validCards">0</b></div><div class="metric"><label>近 24 小时设备</label><b id="seen">0</b></div></section>

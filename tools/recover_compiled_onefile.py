@@ -73,7 +73,7 @@ def main():
         raise ValueError(error)
     metadata = json.loads((dist / '_release_identity.json').read_text(encoding='utf-8'))
     payload = (directory / 'dps_meter.onefile-build' / 'blobs' / '__payload.bin').read_bytes()
-    executable = directory / f'叨叨诡秘-Dps-Logs-v{identity.version}.exe'
+    executable = directory / f'叨叨诡秘助手-v{identity.version}.exe'
     verify_payload(executable, payload)
     records = getResourcesFromDLL(str(dist / 'dps_meter.dll'), (3,14), with_data=True)
     assert sum(kind == 3 for kind, *_ in records) == 9

@@ -2,8 +2,8 @@
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1"
           xmlns:asmv3="urn:schemas-microsoft-com:asm.v3"
           manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="DaodaoDpsLogs" version="1.0.0.0" />
-  <description>叨叨诡秘 Dps-Logs</description>
+  <assemblyIdentity type="win32" name="DaodaoMysteryAssistant" version="1.0.0.0" />
+  <description>叨叨诡秘助手</description>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
       <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}" />

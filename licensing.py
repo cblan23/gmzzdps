@@ -182,6 +182,7 @@ class HeartbeatResult:
     expires_at: datetime | None = None
     card_tier: str = ""
     runtime_capability: RuntimeCapability | None = None
+    server_time: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -384,6 +385,13 @@ class LicensingGateway(Protocol):
         self, session: LicenseSession, snapshot: dict[str, object]
     ) -> CombatClockResult: ...
 
+    def pvp_request(
+        self,
+        session: LicenseSession,
+        action: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]: ...
+
     def redeem_card(self, session: LicenseSession, card_key: str) -> CardRedemption: ...
 
     def sign_out(self, session: LicenseSession) -> None: ...
@@ -532,6 +540,19 @@ class LocalLicensingGateway:
         del session, snapshot
         return CombatClockResult()
 
+    def pvp_request(
+        self,
+        session: LicenseSession,
+        action: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        del session, action, payload
+        return {
+            "ok": False,
+            "error": "offline",
+            "message": "PvP 数据服务需要连接服务器。",
+        }
+
     def redeem_card(self, session: LicenseSession, card_key: str) -> CardRedemption:
         del session, card_key
         return CardRedemption(False, "卡密服务尚未启用")
@@ -654,6 +675,7 @@ class ServerLicensingGateway:
         allow_forbidden: bool = False,
         allow_error_response: bool = False,
         request_timeout: float | None = None,
+        response_limit: int = 64 * 1024,
     ) -> dict:
         request_payload = dict(payload)
         if self.build_id:
@@ -685,7 +707,9 @@ class ServerLicensingGateway:
                 if self.ssl_context is not None:
                     open_options["context"] = self.ssl_context
                 with urlopen(request, **open_options) as response:
-                    raw = response.read(64 * 1024)
+                    raw = response.read(response_limit + 1)
+                    if len(raw) > response_limit:
+                        raise LicensingConnectionError("服务器响应超过安全大小限制")
                 break
             except HTTPError as exc:
                 if allow_error_response or (
@@ -918,6 +942,10 @@ class ServerLicensingGateway:
             heartbeat_interval = max(10, min(120, int(value.get("heartbeat_interval", 30) or 30)))
         except (TypeError, ValueError, OverflowError) as exc:
             raise LicensingConnectionError("授权服务器返回了无效的心跳间隔。") from exc
+        try:
+            server_time = max(0.0, float(value.get("server_time", 0.0) or 0.0))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise LicensingConnectionError("授权服务器返回了无效的服务器时间。") from exc
         return HeartbeatResult(
             authorized=bool(value.get("authorized")),
             heartbeat_interval=heartbeat_interval,
@@ -925,6 +953,7 @@ class ServerLicensingGateway:
             expires_at=self._expires_at(value.get("expires_at")),
             card_tier=self._card_tier(value.get("card_tier"), ""),
             runtime_capability=runtime_capability,
+            server_time=server_time,
         )
 
     def submit_feedback(
@@ -1285,6 +1314,58 @@ class ServerLicensingGateway:
             total_damage=total_damage,
         )
 
+    def pvp_request(
+        self,
+        session: LicenseSession,
+        action: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        allowed = {
+            "records/upload",
+            "records/list",
+            "records/matchups",
+            "equipment/snapshots/upload",
+            "alliance/status",
+            "alliance/members/upsert",
+            "alliance/members/remove",
+            "alliance/members/batch",
+            "alliance/members/records",
+            "alliance/hunter/analysis",
+            "alliance/hunter/record",
+            "alliance/players/search",
+            "alliance/subscriptions/status",
+            "alliance/players/records",
+            "alliance/players/record",
+            "alliance/subscriptions/update",
+            "alliance/subscriptions/report",
+        }
+        normalized = str(action or "").strip().strip("/")
+        if normalized not in allowed:
+            raise ValueError("Unsupported PVP service action")
+        if not session.access_token:
+            return {
+                "ok": False,
+                "authorized": False,
+                "error": "invalid_session",
+                "message": "登录会话无效。",
+            }
+        return self._request(
+            f"/api/v1/dps/pvp/{normalized}",
+            dict(payload) if isinstance(payload, dict) else {},
+            access_token=session.access_token,
+            allow_forbidden=True,
+            allow_error_response=True,
+            response_limit=16 * 1024 * 1024,
+            request_timeout=(
+                ENCOUNTER_UPLOAD_TIMEOUT_SECONDS
+                if normalized in {
+                    "records/upload",
+                    "equipment/snapshots/upload",
+                }
+                else None
+            ),
+        )
+
     def redeem_card(self, session: LicenseSession, card_key: str) -> CardRedemption:
         del session, card_key
         return CardRedemption(False, "卡密服务尚未启用")
@@ -1630,6 +1711,11 @@ class LicensingService:
         self, snapshot: dict[str, object]
     ) -> CombatClockResult:
         return self.gateway.sync_combat_clock(self.session, snapshot)
+
+    def pvp_request(
+        self, action: str, payload: dict[str, object]
+    ) -> dict[str, object]:
+        return self.gateway.pvp_request(self.session, action, payload)
 
     def check_update(self) -> UpdateInfo:
         return self.gateway.check_update()

@@ -53,6 +53,8 @@ CMD_RESTORE_WINDOW = 1003
 TRAY_ICON_ID = 1
 HOTKEY_ID_PRIMARY = 1
 HOTKEY_ID_SECONDARY = 2
+HOTKEY_ID_UNLOCK_PRIMARY = 5
+HOTKEY_ID_UNLOCK_SECONDARY = 6
 MOD_NOREPEAT = 0x4000
 
 
@@ -245,8 +247,8 @@ class WindowsTrayIcon:
         ] = queue.Queue()
         self._active_hotkey_id = 0
         self._hotkey: tuple[int, int] = (0, 0)
-        self._clear_hotkey = (0, 0)
-        self._clear_hotkey_id = 0
+        self._unlock_hotkey = (0, 0)
+        self._unlock_hotkey_id = 0
 
     def _emit(self, action: str) -> None:
         try:
@@ -337,13 +339,17 @@ class WindowsTrayIcon:
                 if completed.is_set():
                     continue
                 try:
-                    result.append(self._apply_clear_hotkey(modifiers, virtual_key) if action == 'clear' else self._apply_hotkey(modifiers, virtual_key))
+                    if action == 'unlock':
+                        applied = self._apply_unlock_hotkey(modifiers, virtual_key)
+                    else:
+                        applied = self._apply_hotkey(modifiers, virtual_key)
+                    result.append(applied)
                 finally:
                     completed.set()
 
     def _window_proc(self, hwnd, message, wparam, lparam):
-        if message == WM_HOTKEY and getattr(self, '_clear_hotkey_id', 0) and int(wparam) == self._clear_hotkey_id:
-            self._emit('hotkey_clear_display')
+        if message == WM_HOTKEY and getattr(self, '_unlock_hotkey_id', 0) and int(wparam) == self._unlock_hotkey_id:
+            self._emit('hotkey_unlock_window')
             return 0
         if message == self._taskbar_created:
             self._add_icon()
@@ -441,8 +447,8 @@ class WindowsTrayIcon:
             self._error = exc
             self._ready.set()
         finally:
-            if getattr(self, '_clear_hotkey_id', 0) and self.hwnd:
-                user32.UnregisterHotKey(self.hwnd, self._clear_hotkey_id)
+            if getattr(self, '_unlock_hotkey_id', 0) and self.hwnd:
+                user32.UnregisterHotKey(self.hwnd, self._unlock_hotkey_id)
             if self._active_hotkey_id and self.hwnd:
                 user32.UnregisterHotKey(self.hwnd, self._active_hotkey_id)
             self._active_hotkey_id = 0
@@ -469,31 +475,19 @@ class WindowsTrayIcon:
             raise RuntimeError(f"system tray icon initialization failed: {self._error}")
         return self
 
-    def _apply_clear_hotkey(self, modifiers: int, virtual_key: int) -> bool:
-        requested = (int(modifiers), int(virtual_key))
-        if requested == getattr(self, '_clear_hotkey', (0, 0)):
-            return True
-        old = getattr(self, '_clear_hotkey_id', 0)
-        if not virtual_key:
-            if old: user32.UnregisterHotKey(self.hwnd, old)
-            self._clear_hotkey_id, self._clear_hotkey = 0, (0, 0)
-            return True
-        candidate = 4 if old == 3 else 3
-        if not user32.RegisterHotKey(self.hwnd, candidate, modifiers | MOD_NOREPEAT, virtual_key):
-            return False
-        if old: user32.UnregisterHotKey(self.hwnd, old)
-        self._clear_hotkey_id, self._clear_hotkey = candidate, requested
-        return True
-
     def set_hotkey(self, modifiers: int, virtual_key: int, *, action='toggle') -> bool:
         """Register a replacement global hotkey without dropping a valid one."""
 
+        if action not in {'toggle', 'unlock'}:
+            return False
         if not modifiers and not virtual_key and not self.alive:
             return True
         if not self.alive:
             return False
         if threading.current_thread() is self._thread:
-            return self._apply_clear_hotkey(modifiers, virtual_key) if action == 'clear' else self._apply_hotkey(modifiers, virtual_key)
+            if action == 'unlock':
+                return self._apply_unlock_hotkey(modifiers, virtual_key)
+            return self._apply_hotkey(modifiers, virtual_key)
         completed = threading.Event()
         result: list[bool] = []
         request_lock = threading.Lock()
@@ -511,6 +505,32 @@ class WindowsTrayIcon:
                     result.append(False)
                     completed.set()
         return bool(result and result[0])
+
+    def _apply_unlock_hotkey(self, modifiers: int, virtual_key: int) -> bool:
+        """Register the lock-only unlock key without disturbing other keys."""
+
+        requested = (int(modifiers), int(virtual_key))
+        if requested == getattr(self, '_unlock_hotkey', (0, 0)):
+            return True
+        old = getattr(self, '_unlock_hotkey_id', 0)
+        if not virtual_key:
+            if old:
+                user32.UnregisterHotKey(self.hwnd, old)
+            self._unlock_hotkey_id, self._unlock_hotkey = 0, (0, 0)
+            return True
+        candidate = (
+            HOTKEY_ID_UNLOCK_SECONDARY
+            if old == HOTKEY_ID_UNLOCK_PRIMARY
+            else HOTKEY_ID_UNLOCK_PRIMARY
+        )
+        if not user32.RegisterHotKey(
+            self.hwnd, candidate, int(modifiers) | MOD_NOREPEAT, int(virtual_key)
+        ):
+            return False
+        if old:
+            user32.UnregisterHotKey(self.hwnd, old)
+        self._unlock_hotkey_id, self._unlock_hotkey = candidate, requested
+        return True
 
     def stop(self) -> None:
         hwnd = self.hwnd

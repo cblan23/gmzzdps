@@ -85,7 +85,7 @@ class BotHandler:
                     text='🎫 今日同行卡\n\n'+data['card']+'\n\n'
                     if data.get('expire_at'):text+='同行契约至：\n'+str(data['expire_at'])+'\n\n'
                     elif data.get('activation_policy')=='first_login':text+='机器人发卡专用 请注意登录时需要点击登录而不是试用\n\n'
-                    text+='今日已领取成功。\n请勿将卡号分享给其他人。\n\n叨叨诡秘 Dps-Logs'
+                    text+='今日已领取成功。\n请勿将卡号分享给其他人。\n\n叨叨诡秘助手'
                     try:
                         result=await asyncio.wait_for(self.api.send_private_msg(qq,[{'type':'text','data':{'text':text}}],group_id=group),12)
                         if not result:raise RuntimeError('send not confirmed')

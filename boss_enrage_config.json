@@ -92,6 +92,40 @@
       "display_name": "子爵夫人",
       "template_ids": [7102990, 7102991],
       "enrage_seconds": 480
+    },
+    {
+      "id": "dire_water_turtle",
+      "display_name": "厄水巨龟",
+      "template_ids": [7100401],
+      "enrage_seconds": 360
+    },
+    {
+      "id": "sylvia_normal",
+      "display_name": "西尔维娅",
+      "template_ids": [7100471],
+      "enrage_seconds": 360
+    },
+    {
+      "id": "dancing_baboon",
+      "display_name": "舞王狒哥",
+      "template_ids": [7100441],
+      "enrage_seconds": 360
+    },
+    {
+      "id": "roselle_residual",
+      "display_name": "罗塞尔的残留意志",
+      "template_ids": [7110200],
+      "enrage_seconds": 600,
+      "countdown_group": "roselle_will",
+      "countdown_phase": 1
+    },
+    {
+      "id": "roselle_polluted",
+      "display_name": "罗塞尔的污染意志",
+      "template_ids": [7110208],
+      "enrage_seconds": 600,
+      "countdown_group": "roselle_will",
+      "countdown_phase": 2
     }
   ],
   "configuration_note": "仅使用已实测确认的普通难度模板；未配置 Boss 不展示预测。预测只比较当前战斗时间与 Boss 血量进度，不读取或计算团队 DPS。"

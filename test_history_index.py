@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from combat_history import CombatHistoryStore, HISTORY_SCHEMA_VERSION
 from history_index import (
     COMPLETENESS_COMPLETE,
+    COMPLETENESS_COMPLETE_RANK,
     COMPLETENESS_PARTIAL,
     DungeonCatalog,
     HistoryIndex,
@@ -25,6 +28,38 @@ from history_index import (
 
 
 class HistoryIndexTests(unittest.TestCase):
+    def test_pending_settlement_cannot_be_marked_complete_from_local_skills(self):
+        record = self.record("pending-team-table")
+        record["settlement_status"] = "PENDING"
+
+        summary = build_history_summary(record, self.catalog)
+
+        self.assertIn("team_settlement", summary["missing_fields"])
+        self.assertEqual(summary["completeness"], "limited")
+
+    def test_boss_archive_save_does_not_wait_for_locked_derived_index(self):
+        store = CombatHistoryStore(
+            self.history,
+            catalog_path=self.catalog_path,
+            profession_path=self.profession_path,
+        )
+        store.save(self.record("first-boss"))
+        store.refresh_index()
+        connection = sqlite3.connect(store._index().path, timeout=0)
+        try:
+            connection.execute("PRAGMA locking_mode=EXCLUSIVE")
+            connection.execute("BEGIN EXCLUSIVE")
+            started = time.perf_counter()
+            path = store.save(self.record("second-boss", ended_at=200))
+            self.assertLess(time.perf_counter() - started, 0.3)
+            self.assertTrue(path.is_file())
+        finally:
+            connection.rollback()
+            connection.close()
+        store.refresh_index()
+        result = store.query_summaries()
+        self.assertEqual(result["total"], 2)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -263,6 +298,27 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertEqual(summary["stage_id"], 0)
         self.assertEqual(summary["stage_name"], "伤害木桩")
         self.assertEqual(summary["dungeon_source"], "boss_mapping_correction")
+
+    def test_completed_dummy_round_is_not_presented_as_interrupted(self):
+        record = self.record("battle-dummy-completed")
+        record["archive_reason"] = "target_reset"
+        record["duration_source"] = "game_server_dummy_clock"
+        record["monster"] = {
+            "entity_id": 99,
+            "template_id": 7_100_634,
+            "name": "伤害木桩",
+            "boss_type": 3,
+            "current_hp": 0,
+        }
+        record["targets"] = [dict(record["monster"])]
+
+        completed = build_history_summary(record, self.catalog)
+        record["monster"]["current_hp"] = 1
+        record["targets"] = [dict(record["monster"])]
+        left_early = build_history_summary(record, self.catalog)
+
+        self.assertEqual(completed["result"], RESULT_DEFEATED)
+        self.assertEqual(left_early["result"], RESULT_INTERRUPTED)
 
     def test_old_incorrect_castle_name_is_normalized_for_existing_history(self):
         record = self.record("battle-old-castle-name")
@@ -515,6 +571,33 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertEqual(overview["average_duration"], 20)
         self.assertEqual(overview["timed_count"], 25)
 
+    def test_index_can_hide_incomplete_battles(self):
+        store = CombatHistoryStore(
+            self.history,
+            catalog_path=self.catalog_path,
+            profession_path=self.profession_path,
+        )
+        store.save(self.record("complete-battle", ended_at=1000))
+        incomplete = self.record("incomplete-battle", ended_at=1001)
+        incomplete["settlement_status"] = "PENDING"
+        store.save(incomplete)
+
+        all_records = store.query_summaries(
+            {"boss_only": True}, refresh=True
+        )
+        complete_records = store.query_summaries(
+            {
+                "boss_only": True,
+                "completeness_rank": COMPLETENESS_COMPLETE_RANK,
+            }
+        )
+
+        self.assertEqual(all_records["total"], 2)
+        self.assertEqual(complete_records["total"], 1)
+        self.assertEqual(
+            complete_records["records"][0]["battle_id"], "complete-battle"
+        )
+
     def test_index_preserves_and_aggregates_boss_damage_summaries(self):
         store = CombatHistoryStore(
             self.history,
@@ -723,8 +806,9 @@ class HistoryIndexTests(unittest.TestCase):
         record["dps_duration_seconds"] = 3
         record["total_damage"] = 1200
         record["team_damage_samples"] = {
-            "version": 1,
+            "version": 2,
             "coverage": "live_team_cumulative",
+            "verified_live_final": True,
             "rows": [[0, 100], [1, 500], [2, 900], [3, 1200]],
         }
 
@@ -738,12 +822,51 @@ class HistoryIndexTests(unittest.TestCase):
         record["duration_seconds"] = 3
         record["dps_duration_seconds"] = 3
         record["team_damage_samples"] = {
-            "version": 1,
+            "version": 2,
             "coverage": "live_team_cumulative",
+            "verified_live_final": True,
             "rows": [[0, 100], [1, 500], [2, 900], [3, 1200]],
         }
 
         self.assertEqual(rebuild_team_dps_timeline(record), [])
+
+    def test_boss_hp_samples_replace_unverified_old_team_curve(self):
+        record = self.record("battle-observed-boss-hp-timeline")
+        record["duration_seconds"] = 4
+        record["dps_duration_seconds"] = 4
+        record["team_damage_samples"] = {
+            "version": 1,
+            "coverage": "live_team_cumulative",
+            "rows": [[0, 10], [1, 10], [2, 10], [3, 10], [4, 1200]],
+        }
+        record["boss_hp_damage_samples"] = {
+            "version": 1,
+            "coverage": "observed_boss_hp_loss",
+            "rows": [[1, 200], [2, 400], [3, 700], [4, 1000]],
+        }
+
+        timeline = rebuild_team_dps_timeline(record, window_seconds=2)
+
+        self.assertEqual([row["time_seconds"] for row in timeline], [2, 3, 4])
+        self.assertEqual([row["team_dps"] for row in timeline], [200, 250, 300])
+        self.assertTrue(all(row["source"] == "observed_boss_hp_loss" for row in timeline))
+
+    def test_displayed_team_dps_samples_build_live_history_curve(self):
+        record = self.record("battle-live-display-team-dps")
+        record["duration_seconds"] = 4
+        record["dps_duration_seconds"] = 4
+        record["display_team_dps_samples"] = {
+            "coverage": "live_display_team_dps",
+            "rows": [[0, 100], [1, 220], [2, 180], [4, 260]],
+        }
+
+        timeline = rebuild_team_dps_timeline(record)
+
+        self.assertEqual(
+            [(row["time_seconds"], row["team_dps"]) for row in timeline],
+            [(0, 100.0), (1, 220.0), (2, 180.0), (4, 260.0)],
+        )
+        self.assertTrue(all(row["source"] == "live_display_team_dps" for row in timeline))
 
     def test_participant_cumulative_samples_rebuild_every_player_timeline(self):
         record = self.record("battle-participant-timelines")
@@ -837,6 +960,14 @@ class HistoryIndexTests(unittest.TestCase):
 
 
 class BossAssetCatalogTests(unittest.TestCase):
+    def test_new_raid_training_dummy_has_history_portrait(self):
+        catalog = DungeonCatalog()
+
+        self.assertEqual(
+            catalog.boss_icon(7_100_634, name="伤害木桩"),
+            "training-dummy.png",
+        )
+
     def test_every_mapped_boss_icon_exists(self):
         root = Path(__file__).resolve().parent
         boss_root = root / "assets" / "bosses"

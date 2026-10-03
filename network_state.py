@@ -10,6 +10,11 @@ import re
 import time
 from collections.abc import Iterable
 
+from training_target_metadata import (
+    DAMAGE_TARGET_NAME,
+    is_validated_reserved_damage_target,
+)
+
 
 ENTITY_ID_MIN = 10_000_000_000_000
 ENTITY_ID_MAX = 999_999_999_999_999
@@ -21,6 +26,19 @@ PLAYER_SKILL_MIN = 86_000_000
 PLAYER_SKILL_MAX = 87_999_999
 MAX_COMBAT_AMOUNT = (1 << 63) - 1
 MAX_PROFILE_TEXT = 64
+ENTITY_METADATA_CACHE_LIMIT = 4096
+
+# OnMsgSyncDirtyFightAttributes is a sparse/delta map.  These four field IDs
+# were verified against the current client's MainPlayer values and are kept
+# raw here; converting them into a displayed percentage would require the
+# game's level/target formula and would turn an observation into a guess.
+FIGHT_ATTRIBUTE_FIELDS = {
+    125: "physical_critical",
+    181: "magical_critical",
+    149: "physical_penetration",
+    205: "magical_penetration",
+}
+MAX_FIGHT_ATTRIBUTE_VALUE = 1_000_000_000.0
 
 
 def parse_combat_amount(value: object) -> int | None:
@@ -63,6 +81,8 @@ HEALING_TARGET_LEVEL = 25
 DAMAGE_TARGET_TEMPLATE_IDS = frozenset(
     {
         7_100_632,
+        7_100_633,
+        7_100_634,
         7_101_004,
         7_101_017,
         7_101_025,
@@ -204,6 +224,8 @@ TEAM_STATISTICS_METHODS = {
 PLAYER_DETAIL_STATISTICS_METHOD = "RetCommonCombatStatistics"
 STAGE_COMBAT_STATISTICS_METHOD = "OnMsgUpdateStageCombatStatistics"
 SETTLEMENT_COMBAT_STATISTICS_METHOD = "OnMsgSettlementCombatStatistics"
+DUNGEON_BOT_DISPLAY_METHOD = "OnMsgDungeonBotDisplay"
+DUNGEON_BOT_DISPLAY_BATCH_GAP_100NS = 2 * 10_000_000
 REALTIME_DETAIL_STATISTICS_METHODS = frozenset(
     {
         "RetDungeonBattleStatistics",
@@ -215,17 +237,26 @@ REALTIME_DETAIL_STATISTICS_METHODS = frozenset(
     }
 )
 TEAM_JOIN_SUCCESS_METHODS = {
+    "OnCreateTeamSuccess",
     "OnJoinGroupSuccess",
     "OnCreateGroupSuccess",
 }
+TEAM_ROSTER_SYNC_METHODS = {"OnSyncTeamGroupInfo"}
 TEAM_SELF_PROPS_METHOD = "OnUpdateTeamGroupSelfProps"
 TEAM_MEMBER_JOIN_METHOD = "OnMsgOtherJoinTeamGroup"
 TEAM_MEMBERS_JOIN_METHOD = "OnMsgMembersJoinTeam"
+TEAM_GROUP_MERGE_METHODS = {
+    "OnMsgTeamJoinGroup",
+    "OnMsgMembersJoinGroup",
+}
+TEAM_GROUP_DISBANDED_METHOD = "OnMsgTeamGroupDisbanded"
 TEAM_OTHER_MEMBER_TOKEN_METHODS = {
     "OnSyncTeamGroupPropsForceRefresh",
 }
 PENDING_TEAM_RATING_TTL_100NS = 60 * 10_000_000
 MAX_PENDING_TEAM_RATINGS = MAX_PARTY_MEMBERS * 2
+LIVE_PARTY_ROSTER_REFRESH_SECONDS = 2.0
+LIVE_PARTY_ROSTER_INACTIVE_SECONDS = 45.0
 TEAM_MEMBER_LEAVE_MARKERS = (
     "otherleaveteam",
     "otherquitteam",
@@ -252,6 +283,7 @@ TEAM_HIT_SKILL_WINDOW_100NS = 10 * 10_000_000
 HP_SKILL_COLLISION_WINDOW_100NS = 3 * 10_000_000
 BOSS_HP_DROP_CONFIRM_WINDOW_100NS = 3 * 10_000_000
 BOSS_HP_DROP_CONFIRM_RATIO = 0.2
+BOSS_SUCCESS_ZERO_CONFIRM_WINDOW_100NS = 2 * 10_000_000
 BOSS_SIGNAL_BIND_WINDOW_100NS = 3 * 10_000_000
 BOSS_SIGNAL_ACTIVE_WINDOW_100NS = 10 * 10_000_000
 BOSS_POINTER_HIGH_HP_FLOOR = 1_000_000.0
@@ -296,6 +328,7 @@ NETWORK_ARGUMENT_METHODS = frozenset(
         "OnMsgSetHUDShow",
         "OnMsgReconnectOrEnter",
         "OnMsgDungeonReadinessCheck",
+        DUNGEON_BOT_DISPLAY_METHOD,
         "OnMsgDungeonStageSettlement",
         PLAYER_DETAIL_STATISTICS_METHOD,
         STAGE_COMBAT_STATISTICS_METHOD,
@@ -325,12 +358,21 @@ NETWORK_ARGUMENT_METHOD_MARKERS = (
 # These packets carry a useful boundary in the method name itself and do not
 # need their argument graph decoded.  Every other retained method either has an
 # explicit decoder above or matches one of the identity/team method markers.
-NETWORK_METHOD_ONLY_METHODS = frozenset(
+SCENE_TRANSITION_METHODS = frozenset(
     {
         "OnMsgBeforeEnterNewSpace",
+        "OnMsgLeaveQuestControl",
+        "OnMsgLeaveSpace",
+    }
+)
+
+
+NETWORK_METHOD_ONLY_METHODS = SCENE_TRANSITION_METHODS | frozenset(
+    {
         # Death handling is pointer-based. Decoding its unused argument graph
         # used to synchronously stall the game thread once per dead trash mob.
         "OnMsgEntityDead",
+        "OnMsgClearWorldReturnInfo",
     }
 )
 
@@ -424,6 +466,33 @@ BOSS_PHASE_TEMPLATE_TRANSITIONS = frozenset(
         (7_102_990, 7_102_991),  # 子爵夫人 -> 神话姿态, same encounter.
     }
 ) | LONG_GAP_BOSS_PHASE_TRANSITIONS
+
+
+def boss_template_continues_encounter(
+    previous_template_id: object, incoming_template_id: object
+) -> bool:
+    """Return whether two ordered Boss templates are one verified Encounter."""
+
+    try:
+        previous = int(previous_template_id or 0)
+        incoming = int(incoming_template_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not previous or not incoming:
+        return False
+    if previous == incoming:
+        return True
+    if (previous, incoming) in BOSS_PHASE_TEMPLATE_TRANSITIONS:
+        return True
+    for group in VERIFIED_SIMULTANEOUS_BOSS_TEMPLATE_GROUPS:
+        if previous in group and incoming in group:
+            return True
+        if (
+            previous in group
+            and incoming in VERIFIED_SIMULTANEOUS_BOSS_SUCCESSORS.get(group, ())
+        ):
+            return True
+    return False
 # These exact damage skills have only one Boss-template owner in the captured
 # client evidence. They can restore an already-running Boss identity when the
 # overlay starts mid-fight and the native template callback was missed.
@@ -645,6 +714,9 @@ class NetworkPacketParser:
         self.pointer_entities: dict[int, int] = {}
         self.pointer_state: dict[int, dict] = {}
         self.entity_profiles: dict[int, dict] = {}
+        self.entity_fight_attributes: dict[int, dict[str, float]] = {}
+        self.entity_fight_attribute_field_times: dict[int, dict[str, int]] = {}
+        self.published_fight_attribute_signatures: dict[int, tuple] = {}
         self.party_ids: set[int] = set()
         self.party_tokens: set[str] = set()
         self.authoritative_party_tokens: set[str] = set()
@@ -652,6 +724,17 @@ class NetworkPacketParser:
         self.party_member_count = 0
         self.party_seen = False
         self.team_group_active = False
+        # The lower HUD is scoped to one explicit team lifetime.  Membership
+        # snapshots and combat statistics can arrive late, so a boolean alone
+        # cannot distinguish the old team from a newly created one.
+        self.party_session_generation = 0
+        self.party_session_id = 0
+        self.party_session_started_100ns = 0
+        # A confirmed self-leave closes the roster.  Passive snapshots may
+        # still settle history, but cannot resurrect UI membership until a
+        # new create/join success packet proves another team lifetime.
+        self.party_reactivation_locked = False
+        self.party_reactivation_lock_stream_id = ""
         # Combat-statistics responses are snapshots of counters, not reliable
         # membership notifications: observed live responses temporarily omit
         # otherwise unchanged members. They may bootstrap a parser that was
@@ -676,6 +759,8 @@ class NetworkPacketParser:
         # delayed join packet carrying an older rating cannot roll a player
         # back after their score has changed.
         self.live_team_property_ratings: dict[str, int] = {}
+        self.read_only_rating_tokens: set[str] = set()
+        self.live_team_rating_observed_100ns: dict[str, int] = {}
         self.pending_team_ratings: dict[str, tuple[int, int]] = {}
         self.self_profile_marker = 0
         self.pending_self_rating: tuple[int, int] | None = None
@@ -741,12 +826,19 @@ class NetworkPacketParser:
         self.active_boss_pointer_time_100ns = 0
         self.active_boss_hp_epoch = 0
         self.active_boss_damage_epoch = 0
+        self.recent_damage_target_id: int | None = None
+        self.recent_target_damage_by_actor: dict[int, int] = {}
         self.combat_mode_pointers: set[int] = set()
+        self.active_boss_fight_exit_pointer: int | None = None
+        self.active_boss_fight_exit_time_100ns = 0
+        self.successful_stage_settlement_time_100ns = 0
+        self.pending_active_boss_zero: tuple[int, int, int] | None = None
         self.runtime_entity_names: dict[int, str] = {}
         self.allow_cached_projection_roster = bool(
             allow_cached_projection_roster
         )
         self.boss_template_catalog_enabled = boss_template_catalog is not None
+        self.damage_target_template_ids = set(DAMAGE_TARGET_TEMPLATE_IDS)
         self.boss_template_catalog: dict[str, dict] = {}
         self.target_identity_catalog: dict[str, dict] = {}
         self.known_non_boss_template_ids: set[int] = set()
@@ -802,7 +894,7 @@ class NetworkPacketParser:
                     "boss_type" in raw_metadata
                     and boss_type != HUD_BOSS_TYPE
                     and template_id not in EXPLICIT_NON_TYPE3_BOSS_TEMPLATE_IDS
-                    and template_id not in DAMAGE_TARGET_TEMPLATE_IDS
+                    and template_id not in self.damage_target_template_ids
                 ):
                     self.known_non_boss_template_ids.add(template_id)
         self.team_profile_cache: dict[str, dict] = {}
@@ -810,6 +902,35 @@ class NetworkPacketParser:
         self.live_team_profile_tokens: set[str] = set()
         self.stage_bound_tokens: set[str] = set()
         self.scene_rebind_tokens: set[str] = set()
+        # Accumulate one passive two-second MemberProps window after re-entry.
+        # It is exact only when it reaches the party size known at the scene
+        # boundary; smaller windows are incremental property updates.
+        self.live_party_roster_tokens: set[str] = set()
+        self.live_party_roster_record: dict[str, object] = {}
+        self.live_party_roster_last_monotonic = time.monotonic()
+        self.live_party_roster_activity_monotonic = time.monotonic()
+        # Once a live member heartbeat has established a roster window, an
+        # empty window is meaningful: it is the server's authoritative signal
+        # that the player has left or the team has been replaced.  Keep this
+        # separate from the token set so an idle window can clear stale UI
+        # members instead of returning early forever.
+        self.live_party_roster_window_armed = False
+        self.live_party_roster_heartbeat_seen = False
+        # A scene boundary starts one projection cleanup window. Member
+        # property packets are incremental, so quiet human teammates must
+        # remain until an explicit leave or complete roster packet removes
+        # them.
+        self.live_party_roster_replace_armed = False
+        self.live_party_roster_expected_member_count = 0
+        # DungeonBotDisplay arrives before the new scene and before the game
+        # publishes token/entity bindings for projection teammates.  Keep its
+        # exact names in temporary actor slots so the HUD can show them at
+        # once, then merge those slots when a token-bound profile arrives.
+        self.dungeon_bot_display_profiles: dict[int, dict[str, object]] = {}
+        self.dungeon_bot_display_last_100ns = 0
+        self.dungeon_bot_deferred_tokens: set[str] = set()
+        self.dungeon_bot_deferred_actor_ids: dict[str, int] = {}
+        self.dungeon_bot_roster_tokens: set[str] = set()
         if isinstance(team_profile_cache, dict):
             for raw_token, raw_profile in team_profile_cache.items():
                 token = self._team_token(raw_token)
@@ -824,6 +945,53 @@ class NetworkPacketParser:
             if remembered_token in self.team_profile_cache
             else ""
         )
+
+    def _is_damage_target_template_id(self, value: object) -> bool:
+        try:
+            return int(value or 0) in self.damage_target_template_ids
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    def _is_training_dummy_template_id(self, value: object) -> bool:
+        try:
+            template_id = int(value or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return bool(
+            template_id in self.damage_target_template_ids
+            or template_id in HEALING_TARGET_TEMPLATE_IDS
+        )
+
+    def _register_validated_damage_target(
+        self,
+        record: dict,
+        template_id: int,
+        boss_type: int,
+    ) -> None:
+        if record.get("damage_target_validated") is not True:
+            return
+        if not is_validated_reserved_damage_target(
+            template_id,
+            boss_type,
+            record.get("localization_id"),
+        ):
+            return
+        metadata: dict[str, object] = {
+            "boss_type": HUD_BOSS_TYPE,
+            "localization_id": int(record["localization_id"]),
+            "name": DAMAGE_TARGET_NAME,
+            "damage_target_validated": True,
+        }
+        try:
+            level = int(record.get("level", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            level = 0
+        if 1 <= level <= 999:
+            metadata["level"] = level
+        self.damage_target_template_ids.add(template_id)
+        self.boss_template_catalog[str(template_id)] = dict(metadata)
+        self.target_identity_catalog[str(template_id)] = dict(metadata)
+        self.known_non_boss_template_ids.discard(template_id)
 
     @staticmethod
     def _args(record: dict) -> list:
@@ -1148,6 +1316,8 @@ class NetworkPacketParser:
         self.active_boss_pointer_time_100ns = 0
         self.active_boss_hp_epoch = 0
         self.active_boss_damage_epoch = 0
+        self.recent_damage_target_id = None
+        self.recent_target_damage_by_actor.clear()
         self.pending_boss_hp_drops.pop(entity_id, None)
         self.pending_boss_hp_rises.pop(entity_id, None)
 
@@ -1246,6 +1416,15 @@ class NetworkPacketParser:
         self, entity_id: int, record: dict, **values
     ) -> tuple[str, dict] | None:
         values = self._known_non_boss_values(entity_id, values)
+        if "profession_id" in values:
+            try:
+                profession_id = int(values.get("profession_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                profession_id = 0
+            if 1_000_000 <= profession_id <= 1_999_999:
+                values["profession_id"] = profession_id
+            else:
+                values.pop("profession_id", None)
         raw_profile_name = values.get("name")
         profile_name = plausible_name(raw_profile_name)
         if (
@@ -1281,7 +1460,7 @@ class NetworkPacketParser:
         token = self._team_token(values.get("user_token"))
         if token:
             values["is_ai"] = is_ai_team_token(token)
-            cached_profile = self.team_profile_cache.get(token, {})
+            cached_profile = self._current_session_team_profile(token)
             for key in (
                 "name",
                 "profession_id",
@@ -1296,9 +1475,10 @@ class NetworkPacketParser:
                     values[key] = cached_profile[key]
             next_cached = self._clean_cached_team_profile(values)
             if next_cached:
-                merged_cached = dict(cached_profile)
+                stored_cached = self.team_profile_cache.get(token, {})
+                merged_cached = dict(stored_cached)
                 merged_cached.update(next_cached)
-                if merged_cached != cached_profile:
+                if merged_cached != stored_cached:
                     self.team_profile_cache[token] = merged_cached
                     self.team_profile_cache_dirty = True
         values = {key: value for key, value in values.items() if value not in (None, "")}
@@ -1309,6 +1489,7 @@ class NetworkPacketParser:
         if not changed:
             return None
         cached.update(changed)
+        self._prune_entity_metadata()
         update = self._base_update(record)
         update["entity_id"] = entity_id
         update.update(changed)
@@ -1325,6 +1506,8 @@ class NetworkPacketParser:
                 parsed = int(value.get(key, 0) or 0)
             except (TypeError, ValueError, OverflowError):
                 parsed = 0
+            if key == "profession_id" and not 1_000_000 <= parsed <= 1_999_999:
+                continue
             if parsed:
                 result[key] = parsed
         raw_rating = value.get("extraordinary_rating")
@@ -1336,6 +1519,24 @@ class NetworkPacketParser:
             if extraordinary_rating >= 0:
                 result["extraordinary_rating"] = extraordinary_rating
         return result
+
+    def _current_session_team_profile(self, token: str) -> dict[str, object]:
+        """Return cached identity fields plus a session-safe rating.
+
+        Names/classes help bind a stable team token after a late start.  An
+        equipment score is mutable, so a value loaded from disk is never
+        presented as current, including for the local character.  A score is
+        exposed only after a packet or read-only live snapshot has proved it
+        during this game session.
+        """
+        profile = self._clean_cached_team_profile(
+            self.team_profile_cache.get(token, {})
+        )
+        profile.pop("extraordinary_rating", None)
+        live_rating = self.live_team_property_ratings.get(token)
+        if live_rating is not None and live_rating > 0:
+            profile["extraordinary_rating"] = live_rating
+        return profile
 
     def _projection_extraordinary_rating(self, value: dict) -> int | None:
         """Return a rating only for one exact original-name/class match."""
@@ -1353,7 +1554,7 @@ class NetworkPacketParser:
             return None
 
         matches: list[int] = []
-        for source in self.team_profile_cache.values():
+        for source_token, source in self.team_profile_cache.items():
             if not isinstance(source, dict):
                 continue
             source_name = plausible_name(source.get("name"))
@@ -1365,7 +1566,7 @@ class NetworkPacketParser:
                 continue
             try:
                 source_profession = int(source.get("profession_id", 0) or 0)
-                rating = int(source["extraordinary_rating"])
+                rating = int(self.live_team_property_ratings[source_token])
             except (KeyError, TypeError, ValueError, OverflowError):
                 continue
             if source_profession == profession_id and rating >= 0:
@@ -1393,12 +1594,348 @@ class NetworkPacketParser:
         """Return only identity fields previously confirmed by network packets."""
         if not self.self_confirmed or not self.self_token:
             return None
-        profile = self._clean_cached_team_profile(
-            self.team_profile_cache.get(self.self_token, {})
-        )
+        profile = self._current_session_team_profile(self.self_token)
         if not profile.get("name"):
             return None
         return {"user_token": self.self_token, **profile}
+
+    def live_team_rating_snapshot_updates(
+        self, record: dict | None = None
+    ) -> list[tuple[str, dict]]:
+        """Re-publish the current token-bound live team ratings.
+
+        Values come from current-session property packets or the bounded
+        read-only Lua ``power`` snapshot. This periodic projection deliberately
+        does not consult a persisted teammate score: it only makes the latest
+        live value resilient to actor rebinds, scene transitions and UI timing.
+        """
+
+        source = dict(record or {})
+        source.setdefault("method", "PeriodicLiveTeamRatingSnapshot")
+        tokens = self.current_team_profile_tokens()
+        if not tokens:
+            return []
+
+        updates: list[tuple[str, dict]] = []
+        for token in sorted(tokens):
+            actor_id = self.token_actors.get(token)
+            if actor_id is None:
+                continue
+            current = self.entity_profiles.get(actor_id, {})
+            profile: dict[str, object] = {
+                "user_token": token,
+                "entity_type": "Player",
+                "is_ai": is_ai_team_token(token),
+            }
+            for key in ("name", "profession_id", "level", "role_number"):
+                value = current.get(key)
+                if value in (None, ""):
+                    value = self._current_session_team_profile(token).get(key)
+                if value not in (None, ""):
+                    profile[key] = value
+            live_rating = self.live_team_property_ratings.get(token)
+            if live_rating is not None and live_rating > 0:
+                profile["extraordinary_rating"] = live_rating
+            update = self._base_update(source)
+            update["entity_id"] = actor_id
+            update.update(profile)
+            # Publish even when the numeric value is unchanged so delayed UI
+            # consumers recover together with the current roster projection.
+            updates.append(("profile", update))
+
+        updates.append(self._party_update(source, authoritative=False))
+        return updates
+
+    def _observe_live_party_roster_token(
+        self, token: str, record: dict
+    ) -> None:
+        """Collect one token from the current passive member heartbeat."""
+
+        # A complete sweep can take several seconds. Measure the quiet period
+        # from the latest member instead of the first member in the batch.
+        self.live_party_roster_last_monotonic = time.monotonic()
+        self.live_party_roster_activity_monotonic = (
+            self.live_party_roster_last_monotonic
+        )
+        self.live_party_roster_window_armed = True
+        self.live_party_roster_heartbeat_seen = True
+        if token and token != self.self_token:
+            self.live_party_roster_tokens.add(token)
+        self.live_party_roster_record = dict(record)
+
+    def _arm_live_party_roster_rebuild(self) -> None:
+        """Start one exact roster sweep for the scene being entered."""
+
+        if self.live_party_roster_replace_armed:
+            return
+        known_other = (
+            set(self.party_tokens)
+            | set(self.other_party_tokens)
+            | set(self.authoritative_party_tokens)
+        )
+        known_other.discard(self.self_token or "")
+        self_member_count = int(bool(self.self_token or self.self_id is not None))
+        self.live_party_roster_expected_member_count = max(
+            int(self.party_member_count or 0),
+            len(known_other) + self_member_count,
+        )
+        self.live_party_roster_tokens.clear()
+        self.live_party_roster_record.clear()
+        self.live_party_roster_heartbeat_seen = False
+        self.live_party_roster_replace_armed = True
+
+    def flush_live_party_roster(
+        self, *, now: float | None = None
+    ) -> list[tuple[str, dict]]:
+        """Refresh live members without treating property deltas as a roster.
+
+        MemberProps is incremental: quiet/out-of-range players may not send a
+        packet during this window. Only a complete sweep, full roster, or leave
+        packet removes them.
+        """
+
+        current = time.monotonic() if now is None else float(now)
+        current_other = (
+            set(self.party_tokens)
+            | set(self.other_party_tokens)
+            | set(self.authoritative_party_tokens)
+        )
+        current_other.discard(self.self_token or "")
+        inactive_roster = bool(
+            current_other
+            and self.party_session_id
+            and current - self.live_party_roster_activity_monotonic
+            >= LIVE_PARTY_ROSTER_INACTIVE_SECONDS
+        )
+        if inactive_roster:
+            unix_ns = time.time_ns()
+            self.live_party_roster_tokens.clear()
+            self.live_party_roster_record = {
+                "method": "InactiveLivePartyRoster",
+                "capture_timestamp_ns": unix_ns,
+                "filetime_100ns": unix_ns // 100 + 116444736000000000,
+            }
+            self.live_party_roster_window_armed = True
+            self.live_party_roster_heartbeat_seen = True
+            self.live_party_roster_replace_armed = True
+            self.live_party_roster_last_monotonic = (
+                current - LIVE_PARTY_ROSTER_REFRESH_SECONDS
+            )
+        if (
+            not self.live_party_roster_window_armed
+            or not self.live_party_roster_heartbeat_seen
+        ):
+            return []
+        if current - self.live_party_roster_last_monotonic < LIVE_PARTY_ROSTER_REFRESH_SECONDS:
+            return []
+
+        observed = set(self.live_party_roster_tokens)
+        replace_roster = self.live_party_roster_replace_armed
+        expected_member_count = self.live_party_roster_expected_member_count
+        self.live_party_roster_tokens.clear()
+        self.live_party_roster_heartbeat_seen = False
+        self.live_party_roster_replace_armed = False
+        self.live_party_roster_expected_member_count = 0
+        self.live_party_roster_last_monotonic = current
+        source = dict(self.live_party_roster_record)
+        source.setdefault("method", "PeriodicLivePartyRoster")
+
+        desired = {
+            token for token in observed
+            if token and token != self.self_token
+            and token not in self.departed_party_tokens
+        }
+        self_member_count = int(bool(self.self_token or self.self_id is not None))
+        known_member_count = expected_member_count or max(
+            int(self.party_member_count or 0),
+            len(current_other) + self_member_count,
+        )
+        complete_rebuild = bool(
+            replace_roster
+            and len(desired) + self_member_count >= known_member_count
+        )
+        if not replace_roster:
+            desired.update(current_other - self.departed_party_tokens)
+        elif not inactive_roster and not complete_rebuild:
+            # A scene transition often publishes HP/property deltas for only a
+            # few nearby members. Until the sweep reaches the known party size,
+            # preserve confirmed humans and discard only stale projections.
+            desired.update(
+                token
+                for token in current_other - self.departed_party_tokens
+                if not is_ai_team_token(token)
+                and self.entity_profiles.get(
+                    self.token_actors.get(token), {}
+                ).get("is_ai") is not True
+            )
+
+        stale_tokens = current_other - desired
+        for stale_token in stale_tokens:
+            stale_actor = self._unbind_team_token(stale_token)
+            self._discard_dungeon_bot_display_actor(stale_token)
+            self.party_tokens.discard(stale_token)
+            self.other_party_tokens.discard(stale_token)
+            self.authoritative_party_tokens.discard(stale_token)
+            self.live_team_profile_tokens.discard(stale_token)
+            self.stage_bound_tokens.discard(stale_token)
+            self.scene_rebind_tokens.discard(stale_token)
+            self.token_max_hp.pop(stale_token, None)
+            self.team_profile_markers.pop(stale_token, None)
+            self.live_team_property_ratings.pop(stale_token, None)
+            self.read_only_rating_tokens.discard(stale_token)
+            self.pending_team_ratings.pop(stale_token, None)
+            self.dungeon_bot_deferred_tokens.discard(stale_token)
+            self.dungeon_bot_roster_tokens.discard(stale_token)
+            if stale_actor is not None:
+                self.party_ids.discard(stale_actor)
+                self.entity_profiles.pop(stale_actor, None)
+            if replace_roster and not inactive_roster:
+                self.departed_party_tokens.add(stale_token)
+
+        updates: list[tuple[str, dict]] = []
+        deferred_desired = self.dungeon_bot_deferred_tokens & desired
+        desired_actor_ids: set[int] = {
+            int(profile.get("actor_id", 0) or 0)
+            for profile in self.dungeon_bot_display_profiles.values()
+            if deferred_desired
+        }
+        desired_actor_ids.discard(0)
+        for token in sorted(desired):
+            actor_id = self.token_actors.get(token)
+            if actor_id is None and token in deferred_desired:
+                continue
+            if actor_id is None:
+                actor_id = self._bind_team_token(
+                    token, self._available_provisional_actor_id(token)
+                )
+            desired_actor_ids.add(actor_id)
+            self.departed_party_tokens.discard(token)
+            profile = self._profile_update(
+                actor_id,
+                source,
+                user_token=token,
+                entity_type="Player",
+                is_ai=is_ai_team_token(token),
+                **self._current_session_team_profile(token),
+            )
+            if profile:
+                updates.append(profile)
+
+        self.party_tokens = set(desired)
+        self.other_party_tokens = set(desired)
+        self.party_ids = desired_actor_ids
+        self.authoritative_party_tokens = set(desired)
+        if self.self_token:
+            self.authoritative_party_tokens.add(self.self_token)
+        self.explicit_party_roster_seen = True
+        self._begin_party_session(source, explicit=False)
+        self._refresh_party_member_count()
+        self._record_party_activity(source)
+        party = self._party_update(source, authoritative=True)
+        party[1]["roster_replace"] = True
+        updates.append(party)
+        return updates
+
+    def current_team_profile_tokens(self) -> set[str]:
+        """Return only tokens that still belong to the current parser roster."""
+
+        tokens = (
+            set(self.party_tokens)
+            | set(self.authoritative_party_tokens)
+            | set(self.other_party_tokens)
+        ) - set(self.departed_party_tokens)
+        if self.self_token:
+            tokens.add(self.self_token)
+        return tokens
+
+    def apply_read_only_team_profile(
+        self, record: dict
+    ) -> list[tuple[str, dict]]:
+        """Apply a current client-side rating to a proven team token.
+
+        The read-only snapshot is only a late-start supplement.  It cannot add
+        a stranger to the roster or identify the local player; a normal team,
+        readiness or property packet must already have proven the token.
+        Verified bound models may supersede an older network observation;
+        unverified supplements never override server-confirmed properties.
+        """
+
+        if not isinstance(record, dict) or str(
+            record.get("capture_source", "")
+        ).casefold() != "npcap_read_only_team_profile":
+            return []
+        token = self._team_token(record.get("user_token"))
+        if (
+            not token
+            or token in self.departed_party_tokens
+            or not self._team_token_is_live(token)
+        ):
+            return []
+        try:
+            rating = int(record.get("extraordinary_rating", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            rating = 0
+        if rating <= 0 or rating > 1_000_000:
+            return []
+        rating_key = record.get('client_rating_key')
+        bound_layout = record.get('client_rating_binding')
+        bound_rating = (rating_key, bound_layout) in {
+            ('CEScore', 'actor_CEScore'),
+            ('ceScore', 'team_member_ceScore'),
+            ('power', 'team_roster_power'),
+        }
+        local_pair_rating = (
+            (rating_key, bound_layout) == ('CEScore', 'local_actor_CEScore_pair')
+            and token == self.self_token
+        )
+        bound_rating = bound_rating or local_pair_rating
+        if rating_key not in (None, '', 'power') and not bound_rating:
+            return []
+        observed_at = int(record.get('filetime_100ns', 0) or 0)
+        previous_observation = self.live_team_rating_observed_100ns.get(token, 0)
+        fresh_bound_rating = bool(bound_rating and observed_at > previous_observation > 0
+                                  and rating != self.live_team_property_ratings.get(token))
+        if (bound_rating and previous_observation > 0 and observed_at <= previous_observation
+                and token in self.live_team_property_ratings):
+            return []
+        if token in self.live_team_property_ratings and token not in self.read_only_rating_tokens:
+            # Only a newer observation from a verified bound model may
+            # supersede server-confirmed current-session properties.
+            if not fresh_bound_rating:
+                rating = self.live_team_property_ratings[token]
+
+        actor_id = self.token_actors.get(token)
+        if token == self.self_token and self.self_id is not None:
+            actor_id = self.self_id
+            self._bind_team_token(token, actor_id)
+        elif actor_id is None:
+            actor_id = self._bind_team_token(
+                token, self._available_provisional_actor_id(token)
+            )
+            self.party_ids.add(actor_id)
+
+        values: dict[str, object] = {
+            "user_token": token,
+            "entity_type": "Player",
+            "is_ai": False,
+            "extraordinary_rating": rating,
+        }
+        name = plausible_name(record.get("name"))
+        if name:
+            values["name"] = name
+        for key in ("profession_id", "level", "role_number"):
+            try:
+                parsed = int(record.get(key, 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                parsed = 0
+            if parsed > 0:
+                values[key] = parsed
+
+        self.live_team_profile_tokens.add(token)
+        self._remember_confirmed_self_rating(token, rating, read_only=True,
+                                             record=record, verified_current=fresh_bound_rating)
+        profile = self._profile_update(actor_id, record, **values)
+        return [profile] if profile is not None else []
 
     def current_dungeon_context(self) -> dict[str, object]:
         """Return only IDs observed in explicit dungeon protocol fields.
@@ -1431,7 +1968,7 @@ class NetworkPacketParser:
         """
         dummy_entities = set(self.training_dummy_entities)
         for entity_id, template_id in self.entity_template_ids.items():
-            if is_training_dummy_template_id(template_id):
+            if self._is_training_dummy_template_id(template_id):
                 dummy_entities.add(int(entity_id))
         active_id = int(self.active_boss_entity_id or 0)
         active_template_id = int(
@@ -1449,7 +1986,7 @@ class NetworkPacketParser:
             active_id
             and (
                 active_id in dummy_entities
-                or is_training_dummy_template_id(active_template_id)
+                or self._is_training_dummy_template_id(active_template_id)
                 or (
                     isinstance(active_profile, dict)
                     and active_profile.get("healing_target") is True
@@ -1471,7 +2008,7 @@ class NetworkPacketParser:
             target_id
             and (
                 target_id in dummy_entities
-                or is_training_dummy_template_id(target_template_id)
+                or self._is_training_dummy_template_id(target_template_id)
             )
         )
         non_dummy_boss_entities = {
@@ -1492,6 +2029,19 @@ class NetworkPacketParser:
             "has_non_dummy_boss": bool(non_dummy_boss_entities),
             "party_member_count": int(self.party_member_count or 0),
             "party_seen": bool(self.party_seen),
+            # Observation-only roster evidence used to recover team mode when
+            # capture starts after the dungeon entry packets have passed.
+            "party_actor_count": len(self.party_ids),
+            "authoritative_party_token_count": len(
+                self.authoritative_party_tokens
+            ),
+            "dungeon_bot_roster_count": len(
+                self.dungeon_bot_display_profiles
+            ),
+            "team_group_active": bool(self.team_group_active),
+            "explicit_party_roster_seen": bool(
+                self.explicit_party_roster_seen
+            ),
             "dungeon_id": int(self.dungeon_id or 0),
             "dungeon_stage_id": int(self.dungeon_stage_id or 0),
         }
@@ -1739,6 +2289,16 @@ class NetworkPacketParser:
                 continue
 
             cleaned = self._clean_cached_team_profile(profile)
+            try:
+                packet_rating = int(cleaned.get("extraordinary_rating", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                packet_rating = 0
+            if (
+                packet_rating > 0
+                and token not in self.pending_team_ratings
+                and token not in self.live_team_property_ratings
+            ):
+                self._remember_confirmed_self_rating(token, packet_rating, record=record)
             cleaned = self._inherit_projection_extraordinary_rating(cleaned)
             if not cleaned:
                 continue
@@ -1778,6 +2338,52 @@ class NetworkPacketParser:
                 updates.append(update)
         return updates
 
+    def _team_application_updates(
+        self, record: dict, args: list
+    ) -> list[tuple[str, dict]]:
+        """Expose a team application without promoting it into the roster.
+
+        ``OnMsgNewTeamGroupApply`` carries a stable character token, display
+        name and the server-provided extraordinary rating.  The notification
+        is deliberately a transient UI event: it does not bind an actor,
+        mutate party membership, or manufacture a short numeric role ID that
+        is absent from the observed packet.
+        """
+
+        if str(record.get("method", "")).casefold() != "onmsgnewteamgroupapply":
+            return []
+        updates: list[tuple[str, dict]] = []
+        seen: set[str] = set()
+        for node in walk_values(args):
+            fields = direct_numeric_map(node)
+            if not fields:
+                continue
+            token = self._team_token(fields.get(2))
+            name = plausible_name(fields.get(4))
+            if not token or not name or token in seen:
+                continue
+            seen.add(token)
+            update: dict[str, object] = {
+                **self._base_update(record),
+                "user_token": token,
+                "name": name,
+            }
+            for field, key, maximum in (
+                (5, "profession_id", 10_000_000),
+                (7, "level", 10_000),
+                (8, "extraordinary_rating", 1_000_000),
+                (9, "application_time", 10**13),
+                (10, "server_id", 10_000_000),
+            ):
+                try:
+                    value = int(fields.get(field, 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    value = 0
+                if 0 < value <= maximum:
+                    update[key] = value
+            updates.append(("team_application", update))
+        return updates
+
     def _activate_boss(
         self,
         entity_id: int,
@@ -1811,10 +2417,22 @@ class NetworkPacketParser:
             incoming_template_id = int(
                 self.entity_template_ids.get(entity_id, 0) or 0
             )
+            simultaneous_peer = any(
+                current_template_id in group
+                and incoming_template_id in group
+                for group in VERIFIED_SIMULTANEOUS_BOSS_TEMPLATE_GROUPS
+            )
+            simultaneous_successor = any(
+                current_template_id in group
+                and incoming_template_id
+                in VERIFIED_SIMULTANEOUS_BOSS_SUCCESSORS.get(group, ())
+                for group in VERIFIED_SIMULTANEOUS_BOSS_TEMPLATE_GROUPS
+            )
             phase_continuation = bool(
                 boss_phase_continues(current_name, incoming_name)
                 or (current_template_id, incoming_template_id)
                 in BOSS_PHASE_TEMPLATE_TRANSITIONS
+                or simultaneous_successor
             )
             separate_encounter = (
                 current_template_id,
@@ -1826,6 +2444,16 @@ class NetworkPacketParser:
             ) in SEPARATE_BOSS_ENCOUNTER_TRANSITIONS
             incoming_is_trusted = self._name_matches_boss_allowlist(
                 incoming_name
+            )
+            incoming_catalog_confirmed = bool(
+                incoming_template_id
+                and str(incoming_template_id) in self.boss_template_catalog
+            )
+            confirmed_start_after_exit = bool(
+                corroborated_signal
+                and (incoming_is_trusted or incoming_catalog_confirmed)
+                and self.active_boss_fight_exit_time_100ns
+                and timestamp >= self.active_boss_fight_exit_time_100ns
             )
             active_activity = max(
                 int(self.active_boss_time_100ns or 0),
@@ -1841,6 +2469,15 @@ class NetworkPacketParser:
                 and timestamp - active_activity
                 >= SAME_TEMPLATE_BOSS_REPLACEMENT_STALE_100NS
             )
+            if (
+                simultaneous_peer
+                and current_is_alive
+                and not confirmed_start_after_exit
+            ):
+                # A verified dual-Boss encounter publishes both metadata and
+                # HP streams.  Keep the first live main target stable; the
+                # peer remains a confirmed Boss and still emits its own HP.
+                return False
             # Native metadata describes every spawned Boss-like unit, including
             # adds and mechanics. Metadata alone must never steal the active
             # lock. A confirmed same-template respawn may replace a stale live
@@ -1848,12 +2485,17 @@ class NetworkPacketParser:
             # damage and untrusted Boss-like units wait for the old target to die.
             if stale_predecessor and current_is_alive:
                 return False
-            if not phase_continuation and not separate_encounter and (
+            if (
+                not phase_continuation
+                and not separate_encounter
+                and not confirmed_start_after_exit
+                and (
                 (not damage_evidence and not same_template_replacement)
                 or (
                     current_is_alive
                     and not incoming_is_trusted
                     and not corroborated_signal
+                )
                 )
             ):
                 return False
@@ -1866,6 +2508,13 @@ class NetworkPacketParser:
             self.active_boss_pointer_time_100ns = 0
             self.active_boss_hp_epoch = 0
             self.active_boss_damage_epoch = 0
+            if self.recent_damage_target_id != entity_id:
+                self.recent_damage_target_id = None
+                self.recent_target_damage_by_actor.clear()
+            self.active_boss_fight_exit_pointer = None
+            self.active_boss_fight_exit_time_100ns = 0
+            self.successful_stage_settlement_time_100ns = 0
+            self.pending_active_boss_zero = None
             self.pending_target_hits.clear()
             self.pending_entity_hits.clear()
             self.pending_exact_damage.clear()
@@ -2075,6 +2724,11 @@ class NetworkPacketParser:
             self.active_boss_pointer_time_100ns = 0
             self.active_boss_hp_epoch = 0
             self.active_boss_damage_epoch = 0
+            self.recent_damage_target_id = None
+            self.recent_target_damage_by_actor.clear()
+            self.active_boss_fight_exit_pointer = None
+            self.active_boss_fight_exit_time_100ns = 0
+            self.pending_active_boss_zero = None
             return
         self.defeated_boss_entities.add(entity_id)
         for pointer, mapped_entity_id in list(self.pointer_entities.items()):
@@ -2093,6 +2747,11 @@ class NetworkPacketParser:
         self.active_boss_pointer_time_100ns = 0
         self.active_boss_hp_epoch = 0
         self.active_boss_damage_epoch = 0
+        self.recent_damage_target_id = None
+        self.recent_target_damage_by_actor.clear()
+        self.active_boss_fight_exit_pointer = None
+        self.active_boss_fight_exit_time_100ns = 0
+        self.pending_active_boss_zero = None
         self.pending_boss_hp_drops.pop(entity_id, None)
         self.pending_boss_hp_rises.pop(entity_id, None)
 
@@ -2236,6 +2895,317 @@ class NetworkPacketParser:
             return ""
         return token
 
+    def _discard_dungeon_bot_roster(self) -> bool:
+        """Remove only the temporary/projection roster owned by BotDisplay."""
+
+        changed = False
+        for profile in self.dungeon_bot_display_profiles.values():
+            actor_id = int(profile.get("actor_id", 0) or 0)
+            if actor_id in self.party_ids:
+                self.party_ids.discard(actor_id)
+                changed = True
+            self.entity_profiles.pop(actor_id, None)
+        self.dungeon_bot_display_profiles.clear()
+
+        for token in list(self.dungeon_bot_roster_tokens):
+            actor_id = self.token_actors.get(token)
+            if token in self.party_tokens or token in self.other_party_tokens:
+                changed = True
+            self.party_tokens.discard(token)
+            self.other_party_tokens.discard(token)
+            self.authoritative_party_tokens.discard(token)
+            self.live_team_profile_tokens.discard(token)
+            self.stage_bound_tokens.discard(token)
+            self.scene_rebind_tokens.discard(token)
+            self.token_max_hp.pop(token, None)
+            self.team_profile_markers.pop(token, None)
+            self.live_team_property_ratings.pop(token, None)
+            self.pending_team_ratings.pop(token, None)
+            if actor_id is not None:
+                if actor_id in self.party_ids:
+                    self.party_ids.discard(actor_id)
+                    changed = True
+                self.entity_profiles.pop(actor_id, None)
+                self._unbind_team_token(token)
+        self.dungeon_bot_deferred_tokens.clear()
+        self.dungeon_bot_deferred_actor_ids.clear()
+        self.dungeon_bot_roster_tokens.clear()
+        return changed
+
+    def _assign_dungeon_bot_display_actor(self, token: str) -> int | None:
+        """Associate an ordered scene-roster token with one temporary row."""
+
+        existing = self.dungeon_bot_deferred_actor_ids.get(token)
+        if existing is not None:
+            return existing
+        assigned = set(self.dungeon_bot_deferred_actor_ids.values())
+        for profile in self.dungeon_bot_display_profiles.values():
+            actor_id = int(profile.get("actor_id", 0) or 0)
+            if actor_id and actor_id not in assigned:
+                self.dungeon_bot_deferred_actor_ids[token] = actor_id
+                return actor_id
+        return None
+
+    def _take_dungeon_bot_display_actor(self, token: str) -> int | None:
+        """Detach and return the temporary display row owned by a token."""
+
+        actor_id = self.dungeon_bot_deferred_actor_ids.pop(token, None)
+        if actor_id is None and token in self.dungeon_bot_deferred_tokens:
+            assigned = set(self.dungeon_bot_deferred_actor_ids.values())
+            actor_id = next(
+                (
+                    int(profile.get("actor_id", 0) or 0)
+                    for profile in self.dungeon_bot_display_profiles.values()
+                    if int(profile.get("actor_id", 0) or 0) not in assigned
+                ),
+                None,
+            )
+        if actor_id is None:
+            return None
+        for template_id, profile in list(
+            self.dungeon_bot_display_profiles.items()
+        ):
+            if int(profile.get("actor_id", 0) or 0) == actor_id:
+                self.dungeon_bot_display_profiles.pop(template_id, None)
+                break
+        self.dungeon_bot_deferred_tokens.discard(token)
+        return actor_id
+
+    def _discard_dungeon_bot_display_actor(self, token: str) -> int | None:
+        """Remove the temporary display row owned by a departing token."""
+
+        actor_id = self._take_dungeon_bot_display_actor(token)
+        if actor_id is None:
+            return None
+        self.party_ids.discard(actor_id)
+        self.entity_profiles.pop(actor_id, None)
+        return actor_id
+
+    def _can_defer_dungeon_bot_token(self, token: str) -> bool:
+        if not is_ai_team_token(token) or not self.dungeon_bot_display_profiles:
+            return False
+        if token in self.dungeon_bot_deferred_tokens:
+            return True
+        return len(self.dungeon_bot_deferred_tokens) < len(
+            self.dungeon_bot_display_profiles
+        )
+
+    def _quarantine_old_party_on_projection_scene(
+        self, record: dict
+    ) -> tuple[str, dict] | None:
+        """Drop old projections while keeping confirmed human teammates."""
+
+        if not self.dungeon_bot_display_profiles:
+            return None
+        display_ids = {
+            int(profile.get("actor_id", 0) or 0)
+            for profile in self.dungeon_bot_display_profiles.values()
+        }
+        current_bot_tokens = set(self.dungeon_bot_roster_tokens)
+        current_bot_ids = {
+            self.token_actors[token]
+            for token in current_bot_tokens if token in self.token_actors
+        }
+        stale_tokens = {
+            token
+            for token in (
+                set(self.party_tokens)
+                | set(self.other_party_tokens)
+                | set(self.authoritative_party_tokens)
+            ) - current_bot_tokens - {self.self_token or ""}
+            if is_ai_team_token(token)
+            or bool(
+                self.entity_profiles.get(self.token_actors.get(token), {}).get("is_ai")
+            )
+        }
+        stale_ids = {
+            actor_id
+            for actor_id in set(self.party_ids) - display_ids - current_bot_ids
+            if self.entity_profiles.get(actor_id, {}).get("is_ai") is True
+        }
+        if not stale_tokens and not stale_ids:
+            return None
+
+        for token in stale_tokens:
+            actor_id = self._unbind_team_token(token)
+            if actor_id is not None:
+                stale_ids.add(actor_id)
+            self.party_tokens.discard(token)
+            self.other_party_tokens.discard(token)
+            self.authoritative_party_tokens.discard(token)
+            self.live_team_profile_tokens.discard(token)
+            self.stage_bound_tokens.discard(token)
+            self.scene_rebind_tokens.discard(token)
+            self.live_party_roster_tokens.discard(token)
+            self.token_max_hp.pop(token, None)
+            self.team_profile_markers.pop(token, None)
+            self.live_team_property_ratings.pop(token, None)
+            self.read_only_rating_tokens.discard(token)
+            self.pending_team_ratings.pop(token, None)
+        for actor_id in stale_ids:
+            self.party_ids.discard(actor_id)
+            self.entity_profiles.pop(actor_id, None)
+        # BotDisplay names only the synthetic members. Human teammates can
+        # stay in the same team across the scene change; their next property
+        # heartbeat may be many seconds away.
+        self._refresh_party_member_count()
+        self.party_member_count = min(
+            MAX_PARTY_MEMBERS,
+            max(self.party_member_count, len(self.party_ids) + 1),
+        )
+        party = self._party_update(record, authoritative=True)
+        party[1]["roster_replace"] = True
+        return party
+
+    def _claim_dungeon_bot_display_actor(
+        self,
+        token: str,
+        actor_id: int,
+        name: object,
+        profession_id: object,
+        record: dict,
+    ) -> dict[str, object] | None:
+        """Merge one exact BotDisplay identity into its later team token."""
+
+        resolved_name = plausible_name(name)
+        if not resolved_name or not actor_id or not is_ai_team_token(token):
+            return None
+        try:
+            resolved_profession = int(profession_id or 0)
+        except (TypeError, ValueError, OverflowError):
+            resolved_profession = 0
+        candidates: list[tuple[int, dict[str, object]]] = []
+        for template_id, profile in self.dungeon_bot_display_profiles.items():
+            if plausible_name(profile.get("name")) != resolved_name:
+                continue
+            try:
+                displayed_profession = int(profile.get("profession_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                displayed_profession = 0
+            if (
+                resolved_profession
+                and displayed_profession
+                and resolved_profession != displayed_profession
+            ):
+                continue
+            candidates.append((template_id, profile))
+        if len(candidates) != 1:
+            return None
+
+        template_id, profile = candidates[0]
+        old_actor = int(profile.get("actor_id", 0) or 0)
+        self.dungeon_bot_display_profiles.pop(template_id, None)
+        self.dungeon_bot_deferred_tokens.discard(token)
+        self.dungeon_bot_deferred_actor_ids.pop(token, None)
+        for deferred_token, deferred_actor in list(
+            self.dungeon_bot_deferred_actor_ids.items()
+        ):
+            if deferred_actor == old_actor:
+                self.dungeon_bot_deferred_actor_ids.pop(deferred_token, None)
+        self.dungeon_bot_roster_tokens.add(token)
+        self.party_ids.discard(old_actor)
+        self.entity_profiles.pop(old_actor, None)
+        if not old_actor or old_actor == actor_id:
+            return None
+        return {
+            **self._base_update(record),
+            "from_actor_id": old_actor,
+            "to_actor_id": actor_id,
+            "user_token": token,
+            "replace_profile": True,
+        }
+
+    def _dungeon_bot_display_updates(
+        self, record: dict, args: list
+    ) -> list[tuple[str, dict]]:
+        """Publish the server-provided projection names before scene entry."""
+
+        if str(record.get("method", "")) != DUNGEON_BOT_DISPLAY_METHOD or not args:
+            return []
+        if self.party_reactivation_locked and not self.party_session_id:
+            return []
+        raw_profiles = args[0] if isinstance(args[0], list) else []
+        if not raw_profiles:
+            return []
+        timestamp = int(record.get("filetime_100ns", 0) or 0)
+        fresh_batch = bool(
+            (
+                self.dungeon_bot_display_profiles
+                or self.dungeon_bot_roster_tokens
+            )
+            and timestamp > 0
+            and self.dungeon_bot_display_last_100ns > 0
+            and (
+                timestamp < self.dungeon_bot_display_last_100ns
+                or timestamp - self.dungeon_bot_display_last_100ns
+                > DUNGEON_BOT_DISPLAY_BATCH_GAP_100NS
+            )
+        )
+        changed = self._discard_dungeon_bot_roster() if fresh_batch else False
+        if timestamp > 0:
+            self.dungeon_bot_display_last_100ns = timestamp
+
+        updates: list[tuple[str, dict]] = []
+        for raw_profile in raw_profiles:
+            fields = direct_numeric_map(raw_profile)
+            try:
+                template_id = int(fields.get(0, 0) or 0)
+                profession_id = int(fields.get(4, 0) or 0)
+                level = int(fields.get(1, 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            name = plausible_name(fields.get(5))
+            if template_id <= 0 or not name:
+                continue
+            existing = self.dungeon_bot_display_profiles.get(template_id, {})
+            actor_id = int(existing.get("actor_id", 0) or 0)
+            if not actor_id:
+                if len(self.dungeon_bot_display_profiles) >= MAX_PARTY_MEMBERS - 1:
+                    continue
+                actor_id = stable_team_actor_id(
+                    f"dungeon-bot-display:{template_id}"
+                )
+                occupied = set(self.actor_tokens) | {
+                    int(value.get("actor_id", 0) or 0)
+                    for value in self.dungeon_bot_display_profiles.values()
+                }
+                while actor_id in occupied:
+                    actor_id -= 1
+            display_profile: dict[str, object] = {
+                "actor_id": actor_id,
+                "name": name,
+                "profession_id": profession_id,
+                "level": level,
+                "dungeon_bot_template_id": template_id,
+            }
+            self.dungeon_bot_display_profiles[template_id] = display_profile
+            self.party_ids.add(actor_id)
+            profile = self._profile_update(
+                actor_id,
+                record,
+                name=name,
+                profession_id=profession_id,
+                level=level,
+                is_ai=True,
+                entity_type="Player",
+                dungeon_bot_template_id=template_id,
+            )
+            if profile:
+                updates.append(profile)
+                changed = True
+
+        if not changed:
+            return updates
+        self._begin_party_session(record, explicit=False)
+        self._refresh_party_member_count()
+        self.party_member_count = min(
+            MAX_PARTY_MEMBERS,
+            max(self.party_member_count, len(self.party_ids) + 1),
+        )
+        self._record_party_activity(record)
+        updates.append(self._party_update(record, authoritative=False))
+        return updates
+
     def _bind_team_token(self, token: str, actor_id: int) -> int:
         existing = self.token_actors.get(token)
         if existing is not None:
@@ -2254,6 +3224,66 @@ class NetworkPacketParser:
                 or token in self.other_party_tokens
             )
         )
+
+    @staticmethod
+    def _clean_fight_attributes(attributes: dict) -> dict[str, float]:
+        """Return only exact, finite attributes observed in the wire map."""
+
+        cleaned: dict[str, float] = {}
+        for field_id, key in FIGHT_ATTRIBUTE_FIELDS.items():
+            try:
+                value = float(attributes[field_id])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if (
+                math.isfinite(value)
+                and 0.0 <= value <= MAX_FIGHT_ATTRIBUTE_VALUE
+            ):
+                cleaned[key] = value
+        return cleaned
+
+    def _fight_attribute_entity_is_live(self, entity_id: int) -> bool:
+        if not entity_id:
+            return False
+        if entity_id == self.self_id and self.self_confirmed:
+            return True
+        token = self.actor_tokens.get(entity_id, "")
+        return bool(token and self._team_token_is_live(token))
+
+    def _publish_current_fight_attributes(
+        self, record: dict
+    ) -> list[tuple[str, dict]]:
+        """Publish cached deltas only after an Entity is a proven teammate."""
+
+        updates: list[tuple[str, dict]] = []
+        live_entities = {
+            entity_id
+            for entity_id in self.entity_fight_attributes
+            if self._fight_attribute_entity_is_live(entity_id)
+        }
+        for stale_entity in set(self.published_fight_attribute_signatures) - live_entities:
+            self.published_fight_attribute_signatures.pop(stale_entity, None)
+        for entity_id in sorted(live_entities):
+            values = self.entity_fight_attributes.get(entity_id, {})
+            signature = tuple(
+                (key, values[key]) for key in sorted(values)
+            )
+            if not signature or (
+                self.published_fight_attribute_signatures.get(entity_id)
+                == signature
+            ):
+                continue
+            self.published_fight_attribute_signatures[entity_id] = signature
+            update: dict[str, object] = {
+                **self._base_update(record),
+                "entity_id": entity_id,
+                **values,
+            }
+            token = self.actor_tokens.get(entity_id, "")
+            if token:
+                update["user_token"] = token
+            updates.append(("fight_attributes", update))
+        return updates
 
     def _unbind_team_token(self, token: str) -> int | None:
         actor_id = self.token_actors.pop(token, None)
@@ -2314,7 +3344,7 @@ class NetworkPacketParser:
                 record,
                 user_token=existing_token,
                 entity_type="Player",
-                **self.team_profile_cache.get(existing_token, {}),
+                **self._current_session_team_profile(existing_token),
             )
             if cached_update:
                 updates.append(cached_update)
@@ -2361,24 +3391,33 @@ class NetworkPacketParser:
             # A dedicated property update can arrive just before the roster
             # packet which proves that the token is in the current party.  It
             # is fresher than the rating embedded in that roster snapshot.
-            self._remember_confirmed_self_rating(token, pending[0])
+            self._remember_confirmed_self_rating(token, pending[0], record={'filetime_100ns': pending[1]})
             return pending[0]
         live_rating = self.live_team_property_ratings.get(token)
+        if rating > 0 and token in self.read_only_rating_tokens:
+            self._remember_confirmed_self_rating(token, rating, record=record)
+            return rating
         if live_rating is not None and live_rating > 0:
             return live_rating
         if rating > 0:
+            self._remember_confirmed_self_rating(token, rating, record=record)
             return rating
-        # Sparse roster messages do not repeat every equipment field. An
-        # exact stable token may restore its own last verified profile only;
-        # never borrow a same-name/profession teammate's rating.
-        cached = self.team_profile_cache.get(token, {})
-        try:
-            cached_rating = int(cached.get('extraordinary_rating', 0) or 0)
-        except (TypeError, ValueError, OverflowError):
-            cached_rating = 0
-        return cached_rating if cached_rating > 0 else None
+        return None
 
-    def _remember_confirmed_self_rating(self, token: str, rating: int) -> None:
+    def _remember_confirmed_self_rating(self, token: str, rating: int, *, read_only: bool = False,
+                                       record: dict | None = None, verified_current: bool = False) -> None:
+        if (read_only and not verified_current and token in self.live_team_property_ratings
+                and token not in self.read_only_rating_tokens):
+            return
+        if record is not None:
+            timestamp = int(record.get('filetime_100ns', 0) or 0)
+            if timestamp > 0:
+                self.live_team_rating_observed_100ns[token] = timestamp
+        if read_only:
+            if verified_current or token not in self.live_team_property_ratings or token in self.read_only_rating_tokens:
+                self.read_only_rating_tokens.add(token)
+        else:
+            self.read_only_rating_tokens.discard(token)
         self.live_team_property_ratings[token] = rating
         self.team_profile_markers[token] = rating
         cached = dict(self.team_profile_cache.get(token, {}))
@@ -2477,15 +3516,28 @@ class NetworkPacketParser:
         *,
         allow_positive_rebind: bool = False,
     ) -> list[tuple[str, dict]]:
-        old_actor = self.token_actors.get(token)
+        bound_old_actor = self.token_actors.get(token)
+        temporary_actor = self.dungeon_bot_deferred_actor_ids.get(token)
+        old_actor = (
+            bound_old_actor
+            if bound_old_actor is not None
+            else temporary_actor
+        )
         self_token = token == self.self_token
         native_self_rebind = bool(
             allow_positive_rebind
             and self_token
             and self.native_self_id == actor_id
         )
+        authoritative_scene_rebind = bool(
+            allow_positive_rebind
+            and (
+                token in self.scene_rebind_tokens
+                or (self_token and self.native_self_id is None)
+            )
+        )
         if (
-            old_actor == actor_id
+            bound_old_actor == actor_id
             or not actor_id
             or self._is_confirmed_non_player_actor(actor_id)
             or (actor_id == self.self_id and self.self_confirmed and not self_token)
@@ -2496,6 +3548,7 @@ class NetworkPacketParser:
             and old_actor is not None
             and old_actor > 0
             and not native_self_rebind
+            and not authoritative_scene_rebind
         ):
             # Stage combat statistics provide the exact live actor ID. HP and
             # profession matching are only fallbacks before that packet arrives.
@@ -2528,6 +3581,10 @@ class NetworkPacketParser:
             )
             updates.extend(displaced)
             party_changed |= displaced_party_changed
+        if bound_old_actor is None and temporary_actor is not None:
+            self._take_dungeon_bot_display_actor(token)
+        elif temporary_actor is not None:
+            self._discard_dungeon_bot_display_actor(token)
         if old_actor is not None:
             if self.actor_tokens.get(old_actor) == token:
                 self.actor_tokens.pop(old_actor, None)
@@ -2570,7 +3627,7 @@ class NetworkPacketParser:
         self.token_actors[token] = actor_id
         self.actor_tokens[actor_id] = token
         self.scene_rebind_tokens.discard(token)
-        cached_profile = self.team_profile_cache.get(token, {})
+        cached_profile = self._current_session_team_profile(token)
         cached_update = self._profile_update(
             actor_id,
             record,
@@ -2852,7 +3909,7 @@ class NetworkPacketParser:
                         },
                     )
                 )
-            cached_profile = self.team_profile_cache.get(token, {})
+            cached_profile = self._current_session_team_profile(token)
             profile = self._profile_update(
                 actor_id,
                 record,
@@ -2974,7 +4031,48 @@ class NetworkPacketParser:
         updates.extend(self._ordered_projection_bindings(record))
         return updates
 
+    def _clear_dungeon_stage_context(self) -> None:
+        # These IDs describe the last server STAGE table, not a persistent
+        # character/team property. Carrying them across spaces rejects the
+        # next instance's delayed wipe table in the unchanged matcher.
+        self.dungeon_stage_id = 0
+        self.dungeon_stage_phase = 0
+        self.successful_stage_settlement_time_100ns = 0
+
+    def _prune_entity_metadata(self) -> None:
+        """Bound names/profiles for short-lived entities within one process."""
+
+        preserve = (
+            set(self.party_ids)
+            | set(self.token_actors.values())
+            | set(self.confirmed_boss_entities)
+            | set(self.encounter_auxiliary_entities)
+        )
+        if self.self_id is not None:
+            preserve.add(self.self_id)
+        if self.active_boss_entity_id is not None:
+            preserve.add(self.active_boss_entity_id)
+
+        for mapping in (self.runtime_entity_names, self.entity_profiles):
+            if len(mapping) <= ENTITY_METADATA_CACHE_LIMIT:
+                continue
+            for entity_id in list(mapping):
+                if len(mapping) <= ENTITY_METADATA_CACHE_LIMIT:
+                    break
+                if entity_id not in preserve:
+                    mapping.pop(entity_id, None)
+
+        if len(self.scene_retired_boss_entities) > ENTITY_METADATA_CACHE_LIMIT:
+            retained = set(self.scene_retired_boss_entities)
+            for entity_id in list(retained):
+                if len(retained) <= ENTITY_METADATA_CACHE_LIMIT:
+                    break
+                if entity_id not in preserve:
+                    retained.discard(entity_id)
+            self.scene_retired_boss_entities = retained
+
     def _reset_scene_combat_bindings(self) -> None:
+        self._clear_dungeon_stage_context()
         self.pending_self_rating = None
         self.scene_retired_boss_entities.update(self.confirmed_boss_entities)
         if self.active_boss_entity_id is not None:
@@ -2985,6 +4083,9 @@ class NetworkPacketParser:
         self.confirmed_pointer_owners.clear()
         self.pointer_state.clear()
         self.pointer_candidates.clear()
+        self.entity_fight_attributes.clear()
+        self.entity_fight_attribute_field_times.clear()
+        self.published_fight_attribute_signatures.clear()
         self.recent_target_id = None
         self.recent_target_time_100ns = 0
         self.entity_max_hp.clear()
@@ -3021,9 +4122,15 @@ class NetworkPacketParser:
         self.active_boss_pointer_time_100ns = 0
         self.active_boss_hp_epoch = 0
         self.active_boss_damage_epoch = 0
+        self.recent_damage_target_id = None
+        self.recent_target_damage_by_actor.clear()
         self.combat_mode_pointers.clear()
+        self.active_boss_fight_exit_pointer = None
+        self.active_boss_fight_exit_time_100ns = 0
+        self.pending_active_boss_zero = None
         self.stage_bound_tokens.clear()
         self._clear_player_detail_statistics(clear_roster=True)
+        self._prune_entity_metadata()
 
     def _record_combat_source(
         self,
@@ -3338,7 +4445,14 @@ class NetworkPacketParser:
                     return True
         return False
 
-    def _valid_boss_hp(self, entity_id: int, current_hp: float, timestamp: int) -> bool:
+    def _valid_boss_hp(
+        self,
+        entity_id: int,
+        current_hp: float,
+        timestamp: int,
+        *,
+        pointer: int | None = None,
+    ) -> bool:
         if not self._valid_hp_value(current_hp):
             return False
         if self._recent_skill_matches_hp(current_hp, timestamp):
@@ -3347,6 +4461,43 @@ class NetworkPacketParser:
         if max_hp > 0 and current_hp > max_hp * 1.02:
             return False
         previous_hp = self.entity_current_hp.get(entity_id)
+        pending_zero = self.pending_active_boss_zero
+        if (
+            current_hp > 0
+            and pending_zero is not None
+            and pending_zero[:2] == (entity_id, pointer)
+        ):
+            # A new positive sample proves that the earlier cleanup zero was a
+            # wipe/transition artifact rather than this Boss's death.
+            self.pending_active_boss_zero = None
+        # Space cleanup also emits CurrentHP=0 after every unit leaves fight
+        # mode. Only the explicit entity-death callback may replace a positive
+        # Boss sample with zero; it bypasses this validation below.
+        if (
+            current_hp == 0
+            and previous_hp is not None
+            and previous_hp > 0
+            and not self._successful_stage_zero_confirms_boss_death(
+                entity_id, pointer, timestamp
+            )
+        ):
+            if (
+                entity_id == self.active_boss_entity_id
+                and pointer is not None
+                and pointer == self.active_boss_pointer
+                and pointer == self.active_boss_fight_exit_pointer
+                and self.active_boss_fight_exit_time_100ns > 0
+                and timestamp >= self.active_boss_fight_exit_time_100ns
+            ):
+                # Captures show the cleanup zero can precede the successful
+                # STAGE table by tens of seconds.  Keep it as a candidate; the
+                # table, or an explicit death callback, is what confirms it.
+                self.pending_active_boss_zero = (
+                    entity_id,
+                    pointer,
+                    timestamp,
+                )
+            return False
         pending_drop = self.pending_boss_hp_drops.pop(entity_id, None)
         if pending_drop is not None:
             baseline_hp, candidate_hp, pending_time = pending_drop
@@ -3354,8 +4505,15 @@ class NetworkPacketParser:
             if (
                 0 < elapsed <= BOSS_HP_DROP_CONFIRM_WINDOW_100NS
                 and current_hp < baseline_hp * 0.5
-                and abs(current_hp - candidate_hp)
-                <= max(250_000.0, baseline_hp * 0.05, candidate_hp * 0.25)
+                and (
+                    current_hp <= candidate_hp
+                    or abs(current_hp - candidate_hp)
+                    <= max(
+                        250_000.0,
+                        baseline_hp * 0.05,
+                        candidate_hp * 0.25,
+                    )
+                )
             ):
                 return True
         pending_rise = self.pending_boss_hp_rises.pop(entity_id, None)
@@ -3406,6 +4564,62 @@ class NetworkPacketParser:
         )
         return False
 
+    def _successful_stage_zero_confirms_boss_death(
+        self, entity_id: int, pointer: int | None, timestamp: int
+    ) -> bool:
+        settlement_time = int(
+            self.successful_stage_settlement_time_100ns or 0
+        )
+        fight_exit_time = int(self.active_boss_fight_exit_time_100ns or 0)
+        return bool(
+            entity_id == self.active_boss_entity_id
+            and pointer is not None
+            and pointer == self.active_boss_pointer
+            and pointer == self.active_boss_fight_exit_pointer
+            and fight_exit_time > 0
+            and fight_exit_time <= settlement_time <= timestamp
+            and timestamp - settlement_time
+            <= BOSS_SUCCESS_ZERO_CONFIRM_WINDOW_100NS
+        )
+
+    def _consume_successful_stage_boss_zero(
+        self, record: dict
+    ) -> list[tuple[str, dict]]:
+        """Publish a pre-settlement cleanup zero after STAGE confirms success."""
+
+        pending = self.pending_active_boss_zero
+        if pending is None:
+            return []
+        entity_id, pointer, zero_time = pending
+        settlement_time = int(
+            self.successful_stage_settlement_time_100ns or 0
+        )
+        fight_exit_time = int(self.active_boss_fight_exit_time_100ns or 0)
+        if not (
+            entity_id == self.active_boss_entity_id
+            and pointer == self.active_boss_pointer
+            and pointer == self.active_boss_fight_exit_pointer
+            and fight_exit_time > 0
+            and fight_exit_time <= zero_time <= settlement_time
+        ):
+            return []
+
+        update = {
+            **self._base_update(record),
+            "entity_id": entity_id,
+            "current_hp": 0.0,
+            "death_confirmed": True,
+        }
+        combat_state = {
+            **self._base_update(record),
+            "entity_id": entity_id,
+            "in_combat": False,
+        }
+        self.entity_current_hp[entity_id] = 0.0
+        self.entity_current_hp_time[entity_id] = settlement_time
+        self._release_active_boss(entity_id)
+        return [("monster", update), ("combat_state", combat_state)]
+
     def _boss_full_hp_reset_candidate(
         self, entity_id: int, current_hp: float
     ) -> bool:
@@ -3446,6 +4660,11 @@ class NetworkPacketParser:
     def _valid_encounter_auxiliary_hp(
         self, entity_id: int, current_hp: float, timestamp: int
     ) -> bool:
+        # Encounter auxiliaries use a direct zero-HP update as their death
+        # edge. The scene-cleanup zero suppression applies only to the active
+        # Boss stream.
+        if current_hp == 0:
+            return self._valid_hp_value(current_hp)
         # Team members commonly share small max-HP values. A player HP packet
         # can briefly arrive on an auxiliary pointer while the unit respawns;
         # accepting it would turn that collision into a huge false HP drop.
@@ -3730,10 +4949,9 @@ class NetworkPacketParser:
     def _team_join_success_updates(
         self, record: dict, args: list
     ) -> list[tuple[str, dict]]:
-        if str(record.get("method", "")) not in TEAM_JOIN_SUCCESS_METHODS:
+        method = str(record.get("method", ""))
+        if method not in TEAM_JOIN_SUCCESS_METHODS | TEAM_ROSTER_SYNC_METHODS:
             return []
-        became_active = not self.team_group_active
-        self.team_group_active = True
         updates: list[tuple[str, dict]] = []
         changed = False
         seen: set[str] = set()
@@ -3742,16 +4960,52 @@ class NetworkPacketParser:
             fields = direct_numeric_map(node)
             token = self._team_token(fields.get(2))
             name = plausible_name(fields.get(5))
-            if not token or token in seen:
+            raw_name = fields.get(5)
+            numeric_identity = any(
+                isinstance(fields.get(key), (int, float))
+                and not isinstance(fields.get(key), bool)
+                and fields.get(key) > 0
+                for key in (6, 9, 27)
+            )
+            has_member_identity = bool(
+                isinstance(raw_name, str) and raw_name.strip()
+            ) or numeric_identity or bool(self._team_token(fields.get(29)))
+            if not token or token in seen or not has_member_identity:
                 continue
             seen.add(token)
             members.append((token, name, fields))
+
+        explicit_boundary = method in TEAM_JOIN_SUCCESS_METHODS
+        if not explicit_boundary and (
+            not seen
+            or (self.party_reactivation_locked and not self.party_session_id)
+        ):
+            return []
+        starting_new_session = not self.party_session_id
+        if starting_new_session and (
+            self.party_tokens
+            or self.authoritative_party_tokens
+            or self.other_party_tokens
+            or self.party_ids
+        ):
+            # These rows can only be fallbacks reconstructed from packets that
+            # arrived after the previous self-leave. A new proven team must not
+            # inherit them, even when its first roster contains only self.
+            self._clear_party_roster(lock_reactivation=False)
+        became_active = self._begin_party_session(
+            record, explicit=explicit_boundary
+        )
 
         if seen:
             # Join-success carries the complete current member table, unlike
             # combat-statistics responses.  Replace any mid-session fallback
             # snapshot with this exact membership evidence.
             self.departed_party_tokens.clear()
+            # This full table supersedes any partial scene-entry sweep.
+            self.live_party_roster_tokens.clear()
+            self.live_party_roster_heartbeat_seen = False
+            self.live_party_roster_replace_armed = False
+            self.live_party_roster_expected_member_count = 0
             stale_tokens = (
                 set(self.party_tokens) | set(self.authoritative_party_tokens)
             ) - seen
@@ -3759,6 +5013,7 @@ class NetworkPacketParser:
                 changed = True
             for stale_token in stale_tokens:
                 stale_actor = self.token_actors.get(stale_token)
+                self._discard_dungeon_bot_display_actor(stale_token)
                 self.party_tokens.discard(stale_token)
                 self.other_party_tokens.discard(stale_token)
                 self.live_team_profile_tokens.discard(stale_token)
@@ -3768,6 +5023,8 @@ class NetworkPacketParser:
                 self.team_profile_markers.pop(stale_token, None)
                 self.live_team_property_ratings.pop(stale_token, None)
                 self.pending_team_ratings.pop(stale_token, None)
+                self.dungeon_bot_deferred_tokens.discard(stale_token)
+                self.dungeon_bot_roster_tokens.discard(stale_token)
                 if stale_actor is not None:
                     self.party_ids.discard(stale_actor)
                 if stale_token != self.self_token:
@@ -3796,6 +5053,12 @@ class NetworkPacketParser:
                 actor_id = self._bind_team_token(
                     token, stable_team_actor_id(token, fields.get(6))
                 )
+            display_merge = self._claim_dungeon_bot_display_actor(
+                token, actor_id, name, fields.get(8), record
+            )
+            if display_merge is not None:
+                updates.append(("actor_merge", display_merge))
+                changed = True
             if token != self.self_token:
                 changed |= token not in self.party_tokens or actor_id not in self.party_ids
                 self.party_tokens.add(token)
@@ -3828,7 +5091,9 @@ class NetworkPacketParser:
             self._refresh_party_member_count()
             self._record_party_activity(record)
             if changed or not self.party_seen or became_active:
-                updates.append(self._party_update(record, authoritative=False))
+                party = self._party_update(record, authoritative=True)
+                party[1]["roster_replace"] = True
+                updates.append(party)
         elif became_active:
             self._refresh_party_member_count()
             self._record_party_activity(record)
@@ -3886,9 +5151,15 @@ class NetworkPacketParser:
         left_team: bool = False,
     ) -> tuple[str, dict]:
         if left_team:
-            self.team_group_active = False
-        elif self.party_member_count > 1:
+            self.party_reactivation_lock_stream_id = (
+                self._capture_stream_id(record)
+            )
+            self._end_party_session(lock_reactivation=True)
+        elif self.party_session_id:
             self.team_group_active = True
+        elif self.team_group_active or self.party_member_count > 1:
+            self._begin_party_session(record, explicit=False)
+        self.team_group_active = bool(self.party_session_id)
         self.party_seen = True
         user_tokens = set(self.party_tokens) | set(
             self.authoritative_party_tokens
@@ -3902,10 +5173,62 @@ class NetworkPacketParser:
             "member_count": min(MAX_PARTY_MEMBERS, self.party_member_count),
             "authoritative": authoritative,
             "in_team": self.team_group_active,
+            "party_session_id": int(self.party_session_id or 0),
+            "party_session_started_100ns": int(
+                self.party_session_started_100ns or 0
+            ),
         }
         if left_team:
             update["left_team"] = True
         return ("party", update)
+
+    @staticmethod
+    def _capture_stream_id(record: dict) -> str:
+        event_id = str(record.get("capture_event_id", "") or "").strip()
+        return event_id.partition(":")[0]
+
+    def _unlock_party_after_capture_stream_change(self, record: dict) -> bool:
+        """Accept current team heartbeats after a passive capture reconnect."""
+
+        if not self.party_reactivation_locked or self.party_session_id:
+            return False
+        previous = self.party_reactivation_lock_stream_id
+        current = self._capture_stream_id(record)
+        if not previous or not current or current == previous:
+            return False
+        self.party_reactivation_locked = False
+        self.party_reactivation_lock_stream_id = ""
+        return True
+
+    def _begin_party_session(self, record: dict, *, explicit: bool) -> bool:
+        """Activate one team lifetime without rotating on roster refreshes."""
+
+        if explicit:
+            self.party_reactivation_locked = False
+            self.party_reactivation_lock_stream_id = ""
+        if self.party_session_id:
+            self.team_group_active = True
+            return False
+        if self.party_reactivation_locked:
+            self.team_group_active = False
+            return False
+        self.party_session_generation += 1
+        self.party_session_id = self.party_session_generation
+        try:
+            started_at = int(record.get("filetime_100ns", 0) or 0)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            started_at = 0
+        self.party_session_started_100ns = max(0, started_at)
+        self.team_group_active = True
+        return True
+
+    def _end_party_session(self, *, lock_reactivation: bool) -> None:
+        self.party_session_id = 0
+        self.party_session_started_100ns = 0
+        self.team_group_active = False
+        self.party_reactivation_locked = bool(lock_reactivation)
+        if not lock_reactivation:
+            self.party_reactivation_lock_stream_id = ""
 
     def _refresh_party_member_count(self) -> None:
         if self.authoritative_party_tokens:
@@ -3937,7 +5260,9 @@ class NetworkPacketParser:
             if token and token not in self.departed_party_tokens
         )
 
-    def _clear_party_roster(self) -> None:
+    def _clear_party_roster(self, *, lock_reactivation: bool = True) -> None:
+        self._discard_dungeon_bot_roster()
+        self.dungeon_bot_display_last_100ns = 0
         self_max_hp = self.token_max_hp.get(self.self_token or "")
         preserved_self_token = self.self_token or ""
         for token in list(self.token_actors):
@@ -3960,12 +5285,24 @@ class NetworkPacketParser:
                 self.token_max_hp[self.self_token] = self_max_hp
         self.team_profile_markers.clear()
         self.live_team_property_ratings.clear()
+        self.read_only_rating_tokens.clear()
+        self.live_team_rating_observed_100ns.clear()
         self.pending_team_ratings.clear()
         self.live_team_profile_tokens.clear()
         self.stage_bound_tokens.clear()
         self.scene_rebind_tokens.clear()
+        self.live_party_roster_tokens.clear()
+        self.live_party_roster_record.clear()
+        self.live_party_roster_last_monotonic = time.monotonic()
+        self.live_party_roster_activity_monotonic = (
+            self.live_party_roster_last_monotonic
+        )
+        self.live_party_roster_window_armed = False
+        self.live_party_roster_heartbeat_seen = False
+        self.live_party_roster_replace_armed = False
+        self.live_party_roster_expected_member_count = 0
         self.party_member_count = 1 if self.self_id is not None else 0
-        self.team_group_active = False
+        self._end_party_session(lock_reactivation=lock_reactivation)
         self.last_party_activity_100ns = 0
         self._clear_player_detail_statistics(clear_roster=True)
 
@@ -4179,8 +5516,8 @@ class NetworkPacketParser:
             rating, observed_at = pending_rating
             timestamp = int(record.get('filetime_100ns', 0) or 0)
             if 0 <= timestamp-observed_at <= PENDING_TEAM_RATING_TTL_100NS:
-                self._remember_confirmed_self_rating(token, rating)
-        cached_profile = self.team_profile_cache.get(token, {})
+                self._remember_confirmed_self_rating(token, rating, record=record)
+        cached_profile = self._current_session_team_profile(token)
         cached_update = self._profile_update(
             self.self_id,
             record,
@@ -4380,6 +5717,7 @@ class NetworkPacketParser:
             template_id = int(record.get("template_id", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             template_id = 0
+        self._register_validated_damage_target(record, template_id, boss_type)
         was_marked_as_boss = bool(
             entity_id
             and (
@@ -4402,7 +5740,7 @@ class NetworkPacketParser:
                 template_id = int(
                     self.entity_template_ids.get(entity_id, 0) or 0
                 )
-            if is_training_dummy_template_id(template_id):
+            if self._is_training_dummy_template_id(template_id):
                 self.training_dummy_entities.add(entity_id)
                 self.last_training_dummy_entity_id = entity_id
                 self.last_training_dummy_time_100ns = max(
@@ -4614,6 +5952,9 @@ class NetworkPacketParser:
             return []
         settlement_method = method == SETTLEMENT_COMBAT_STATISTICS_METHOD
         realtime_detail_method = method in REALTIME_DETAIL_STATISTICS_METHODS
+        live_projection_blocked = bool(
+            self.party_reactivation_locked and not self.party_session_id
+        )
         if settlement_method:
             candidates = args[1:] + args[:1]
         elif realtime_detail_method:
@@ -4720,6 +6061,17 @@ class NetworkPacketParser:
             members.append((token, actor_id, fields))
         if not members:
             return []
+        if method == STAGE_COMBAT_STATISTICS_METHOD and not completion_confirmed:
+            for _token, actor_id, fields in members:
+                try:
+                    stage_damage = max(0, int(fields.get(6, 0) or 0))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if self.recent_target_damage_by_actor.get(actor_id, 0) > stage_damage:
+                    # A delayed table from the previous pull is still valid
+                    # settlement evidence, but must not repopulate the live roster.
+                    live_projection_blocked = True
+                    break
         # Stage statistics can retain a departed member after a replacement
         # has already joined. Restrict bindings only after a complete roster
         # baseline was received. Incremental events seen after a late startup
@@ -4730,7 +6082,9 @@ class NetworkPacketParser:
         if self.self_token:
             live_roster_tokens.add(self.self_token)
         binding_members = members
-        if self.explicit_party_roster_seen:
+        if live_projection_blocked:
+            binding_members = []
+        elif self.explicit_party_roster_seen:
             # Exact stage rows remain useful for profiles and the completed
             # summary, including a player who left during the pull.  Only rows
             # that are still in the explicit live roster may alter token/actor
@@ -4749,6 +6103,18 @@ class NetworkPacketParser:
             and len(binding_members) > MAX_PARTY_MEMBERS
         ):
             return []
+        if completion_confirmed:
+            # Only a structurally valid member table can confirm the cleanup
+            # zero that follows a successful single-Boss settlement.
+            self.successful_stage_settlement_time_100ns = max(
+                self.successful_stage_settlement_time_100ns,
+                int(record.get("filetime_100ns", 0) or 0),
+            )
+        confirmed_boss_zero = (
+            self._consume_successful_stage_boss_zero(record)
+            if completion_confirmed
+            else []
+        )
 
         desired = {
             token: actor_id for token, actor_id, _fields in binding_members
@@ -4788,7 +6154,7 @@ class NetworkPacketParser:
         self.stage_bound_tokens.update(desired)
         self.scene_rebind_tokens.difference_update(desired)
 
-        updates: list[tuple[str, dict]] = []
+        updates: list[tuple[str, dict]] = list(confirmed_boss_zero)
         actor_merges: list[dict[str, object]] = []
         if actor_rebindings:
             updates.append(
@@ -4803,8 +6169,21 @@ class NetworkPacketParser:
                 )
             )
         for token, actor_id, fields in members:
+            if live_projection_blocked:
+                continue
             if plausible_name(fields.get(5)):
                 self.live_team_profile_tokens.add(token)
+            if token in desired:
+                display_merge = self._claim_dungeon_bot_display_actor(
+                    token,
+                    actor_id,
+                    fields.get(5),
+                    fields.get(4),
+                    record,
+                )
+                if display_merge is not None:
+                    actor_merges.append(dict(display_merge))
+                    updates.append(("actor_merge", display_merge))
             old_actor = old_actors.get(token)
             if old_actor is not None and old_actor < 0 and old_actor != actor_id:
                 actor_merge = {
@@ -4866,10 +6245,12 @@ class NetworkPacketParser:
             for token, actor_id in desired.items()
             if self.self_id is not None and actor_id == self.self_id
         ]
-        if len(matching_self) == 1:
+        if not live_projection_blocked and len(matching_self) == 1:
             self.self_token = matching_self[0]
             self.self_confirmed = True
-        if self.explicit_party_roster_seen:
+        if live_projection_blocked:
+            pass
+        elif self.explicit_party_roster_seen:
             party_changed = False
             if self.self_token and self.self_token in self.party_tokens:
                 self.party_tokens.discard(self.self_token)
@@ -5311,6 +6692,12 @@ class NetworkPacketParser:
         if expected_token and token and token != expected_token:
             return []
         token = token or expected_token
+        if method == PLAYER_DETAIL_STATISTICS_METHOD:
+            dummy_update = self._dummy_personal_common_update(
+                record, fields, token
+            )
+            if dummy_update is not None:
+                return [("team_stat", dummy_update)]
         if not token or token not in self.player_detail_roster:
             return []
         try:
@@ -5345,6 +6732,16 @@ class NetworkPacketParser:
         actor_id = int(self.token_actors.get(token, 0) or 0)
         if actor_id <= 0:
             return updates
+
+        display_merge = self._claim_dungeon_bot_display_actor(
+            token,
+            actor_id,
+            fields.get(5),
+            fields.get(4),
+            record,
+        )
+        if display_merge is not None:
+            updates.append(("actor_merge", display_merge))
 
         profile = self._profile_update(
             actor_id,
@@ -5392,12 +6789,75 @@ class NetworkPacketParser:
         if damage_hits > 0 and 25 in fields and critical_hits <= damage_hits:
             detail["damage_hits"] = damage_hits
             detail["critical_hits"] = critical_hits
-        if damage_hits > 0 and 14 in fields and unpenetrated_hits <= damage_hits:
+        if damage_hits > 0 and unpenetrated_hits <= damage_hits:
             detail["damage_hits"] = damage_hits
             detail["penetration_hits"] = damage_hits - unpenetrated_hits
         self.player_detail_rows[token] = detail
         updates.extend(self._player_detail_summary_updates(record))
         return updates
+
+    def _dummy_personal_common_update(
+        self,
+        record: dict,
+        fields: dict[int, object],
+        token: str,
+    ) -> dict[str, object] | None:
+        """Bridge an exact local Common counter only for the active dummy.
+
+        ``RetCommonCombatStatistics`` is normally a player-detail response and
+        must never become a team counter.  The training dummy is the one narrow
+        exception observed on the wire: its official local cumulative damage
+        is field 6, field 20 identifies an in-combat epoch, and the terminal
+        row replaces field 20 with the exact whole-second duration in field 19.
+        Require current dummy context and exact local identity so an old
+        response cannot leak into a Boss or another character.
+        """
+
+        try:
+            self_id = int(self.self_id or 0)
+            response_actor_id = int(fields.get(1, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if (
+            self_id <= 0
+            or response_actor_id != self_id
+            or not self.self_token
+            or token != self.self_token
+        ):
+            return None
+
+        active_id = int(self.active_boss_entity_id or 0)
+        recent_id = int(self.recent_target_id or 0)
+        current_target_id = active_id or recent_id
+        current_template_id = int(
+            self.entity_template_ids.get(current_target_id, 0) or 0
+        )
+        if not self._is_damage_target_template_id(current_template_id):
+            return None
+
+        damage = parse_combat_amount(fields.get(6))
+        try:
+            server_time = max(0, int(fields.get(20, 0) or 0))
+            combat_seconds_total = max(0, int(fields.get(19, 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            server_time = 0
+            combat_seconds_total = 0
+        final_common = bool(combat_seconds_total > 0 and server_time <= 0)
+        if damage is None or (server_time <= 0 and not final_common):
+            return None
+        return {
+            **self._base_update(record),
+            "actor_id": self_id,
+            "user_token": token,
+            "absolute_damage": damage,
+            "server_time": server_time,
+            "combat_seconds_total": combat_seconds_total,
+            "full_snapshot": False,
+            "omitted_zero": False,
+            "dummy_personal_common": True,
+            "dummy_final_common": final_common,
+            "dummy_target_id": current_target_id,
+        }
 
     def _generic_profile_updates(
         self, record: dict, args: list
@@ -5464,9 +6924,40 @@ class NetworkPacketParser:
         method = str(record.get("method", ""))
         folded = method.casefold()
         updates: list[tuple[str, dict]] = []
+        if (
+            method in CURRENT_TEAM_ACTIVITY_METHODS
+            or method in TEAM_OTHER_MEMBER_TOKEN_METHODS
+            or method in TEAM_JOIN_SUCCESS_METHODS
+            or method in TEAM_ROSTER_SYNC_METHODS
+            or method
+            in {TEAM_MEMBER_JOIN_METHOD, TEAM_MEMBERS_JOIN_METHOD}
+            | TEAM_GROUP_MERGE_METHODS
+            or any(marker in folded for marker in TEAM_MEMBER_LEAVE_MARKERS)
+        ):
+            self.live_party_roster_activity_monotonic = time.monotonic()
+
+        if method == TEAM_GROUP_DISBANDED_METHOD:
+            try:
+                recipient = int(record.get("network_entity_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                recipient = 0
+            # This notification is also emitted for unrelated subgroups. Only
+            # the local role recipient proves that our own team was disbanded.
+            if self.self_id is None or recipient != int(self.self_id):
+                return []
+            self._clear_party_roster()
+            return [
+                self._party_update(
+                    record,
+                    authoritative=True,
+                    left_team=True,
+                )
+            ]
 
         if method == TEAM_SELF_PROPS_METHOD and args:
+            self._unlock_party_after_capture_stream_change(record)
             fields = direct_numeric_map(args[0])
+            became_active = self._begin_party_session(record, explicit=False)
             self._record_party_activity(record)
             candidate = ""
             try:
@@ -5500,7 +6991,7 @@ class NetworkPacketParser:
                 updates.extend(self._confirm_self_token(candidate, record))
             if marker and self.self_id is not None:
                 if self.self_token:
-                    self._remember_confirmed_self_rating(self.self_token, marker)
+                    self._remember_confirmed_self_rating(self.self_token, marker, record=record)
                 profile = self._profile_update(
                     self.self_id,
                     record,
@@ -5517,7 +7008,129 @@ class NetworkPacketParser:
                     max_hp = 0.0
                 if max_hp > 0:
                     self.token_max_hp[self.self_token] = max_hp
+            if became_active:
+                self._refresh_party_member_count()
+                updates.append(
+                    self._party_update(record, authoritative=False)
+                )
             return updates
+
+        if method == "OnUpdateTeamGroupDetail":
+            became_active = self._begin_party_session(record, explicit=False)
+            if became_active:
+                self._refresh_party_member_count()
+                self._record_party_activity(record)
+                updates.append(
+                    self._party_update(record, authoritative=False)
+                )
+            return updates
+
+        if (
+            self.party_reactivation_locked
+            and not self.party_session_id
+            and method == "OnUpdateTeamGroupMemberProps"
+            and len(args) >= 2
+        ):
+            token = self._team_token(args[0])
+            fields = direct_numeric_map(args[1])
+            if token and any(key in fields for key in (4, 5, 6)):
+                self._unlock_party_after_capture_stream_change(record)
+
+        if self.party_reactivation_locked and not self.party_session_id:
+            # Member/property packets can trail the self-leave edge. They must
+            # not recreate the live roster while old settlement data drains.
+            return updates
+
+        if method == "OnMsgSyncTeamGroupMemberFreqProp" and args:
+            token = self._team_token(args[0])
+            try:
+                property_id = int(args[1]) if len(args) > 1 else 0
+            except (TypeError, ValueError, OverflowError):
+                property_id = 0
+            if token and property_id == 3 and self.live_party_roster_replace_armed:
+                # On a direct dungeon-to-dungeon transition the local token is
+                # published first, while the other member sweep can arrive
+                # tens of seconds later.  The local row cannot prove that the
+                # new roster is empty, so wait for a non-local heartbeat.
+                if token == self.self_token:
+                    return updates
+                self.departed_party_tokens.discard(token)
+                self._observe_live_party_roster_token(token, record)
+                actor_id = self.token_actors.get(token)
+                deferred_bot = bool(
+                    actor_id is None
+                    and self._can_defer_dungeon_bot_token(token)
+                )
+                if deferred_bot:
+                    self.dungeon_bot_deferred_tokens.add(token)
+                    self.dungeon_bot_roster_tokens.add(token)
+                    self._assign_dungeon_bot_display_actor(token)
+                elif actor_id is None:
+                    actor_id = self._bind_team_token(
+                        token, self._available_provisional_actor_id(token)
+                    )
+                changed = (
+                    token not in self.party_tokens
+                    or token not in self.other_party_tokens
+                    or (actor_id is not None and actor_id not in self.party_ids)
+                )
+                self._mark_explicit_party_roster(token)
+                self.party_tokens.add(token)
+                self.other_party_tokens.add(token)
+                if actor_id is not None:
+                    self.party_ids.add(actor_id)
+                    profile = self._profile_update(
+                        actor_id,
+                        record,
+                        user_token=token,
+                        entity_type="Player",
+                        is_ai=is_ai_team_token(token),
+                        **self._current_session_team_profile(token),
+                    )
+                    if profile:
+                        updates.append(profile)
+                self._begin_party_session(record, explicit=False)
+                self._refresh_party_member_count()
+                if self.dungeon_bot_display_profiles:
+                    self.party_member_count = min(
+                        MAX_PARTY_MEMBERS,
+                        max(self.party_member_count, len(self.party_ids) + 1),
+                    )
+                self._record_party_activity(record)
+                if changed or not self.party_seen:
+                    updates.append(
+                        self._party_update(record, authoritative=False)
+                    )
+                updates.extend(self._infer_self_token(record))
+                return updates
+            if (
+                token
+                and token != self.self_token
+                and token not in self.departed_party_tokens
+                and token not in self.token_actors
+                and self._can_defer_dungeon_bot_token(token)
+            ):
+                changed = (
+                    token not in self.party_tokens
+                    or token not in self.other_party_tokens
+                )
+                self.dungeon_bot_deferred_tokens.add(token)
+                self.dungeon_bot_roster_tokens.add(token)
+                self._mark_explicit_party_roster(token)
+                self.party_tokens.add(token)
+                self.other_party_tokens.add(token)
+                self.team_group_active = True
+                self._refresh_party_member_count()
+                self.party_member_count = min(
+                    MAX_PARTY_MEMBERS,
+                    max(self.party_member_count, len(self.party_ids) + 1),
+                )
+                self._record_party_activity(record)
+                if changed or not self.party_seen:
+                    updates.append(
+                        self._party_update(record, authoritative=False)
+                    )
+                return updates
 
         if method == "OnUpdateTeamGroupMemberProps" and len(args) >= 2:
             token = self._team_token(args[0])
@@ -5526,7 +7139,22 @@ class NetworkPacketParser:
                 rating = int(fields.get(11, 0) or 0)
             except (TypeError, ValueError, OverflowError):
                 rating = 0
-            if not token or token == self.self_token or rating <= 0:
+            has_life_evidence = any(key in fields for key in (4, 5, 6))
+            if token and has_life_evidence:
+                # The local member heartbeat is the liveness anchor for an
+                # empty window.  Without it, a quiet capture batch is
+                # indistinguishable from a dropped packet and must not clear
+                # a still-valid teammate roster.
+                if self.live_party_roster_replace_armed:
+                    if token != self.self_token:
+                        # This is current-scene token-bound evidence.  A token
+                        # that left an older party may legitimately reappear
+                        # after entering another dungeon.
+                        self.departed_party_tokens.discard(token)
+                        self._observe_live_party_roster_token(token, record)
+                else:
+                    self._observe_live_party_roster_token(token, record)
+            if not token or token == self.self_token:
                 return updates
             current_tokens = set(self.party_tokens)
             if not self.explicit_party_roster_seen:
@@ -5534,10 +7162,62 @@ class NetworkPacketParser:
             if self.self_token:
                 current_tokens.add(self.self_token)
             if token not in current_tokens:
-                self._remember_pending_team_rating(token, rating, record)
+                if (
+                    has_life_evidence
+                    and not is_ai_team_token(token)
+                    and token not in self.departed_party_tokens
+                ):
+                    # When the meter starts after the party was formed, the
+                    # complete join table is no longer repeated.  MemberProps
+                    # HP/death heartbeats are nevertheless live, token-bound
+                    # proof that this is another current party member.  Admit
+                    # the row so its life and later statistics are not lost.
+                    self._mark_explicit_party_roster(token)
+                    actor_id = self.token_actors.get(token)
+                    if actor_id is None:
+                        actor_id = self._bind_team_token(
+                            token, stable_team_actor_id(token)
+                        )
+                    self.party_tokens.add(token)
+                    self.other_party_tokens.add(token)
+                    self.party_ids.add(actor_id)
+                    self.team_group_active = True
+                    pending_rating = self._confirmed_team_rating(
+                        token, rating if rating > 0 else None, record
+                    )
+                    profile = self._profile_update(
+                        actor_id,
+                        record,
+                        user_token=token,
+                        entity_type="Player",
+                        **self._current_session_team_profile(token),
+                    )
+                    if profile:
+                        updates.append(profile)
+                    try:
+                        max_hp = float(fields.get(6, 0) or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        max_hp = 0.0
+                    if max_hp > 0:
+                        self.token_max_hp[token] = max_hp
+                    self._refresh_party_member_count()
+                    self._record_party_activity(record)
+                    updates.append(
+                        self._party_update(record, authoritative=False)
+                    )
+                    updates.extend(self._infer_self_token(record))
+                    if pending_rating is not None:
+                        rating = pending_rating
+                    elif rating <= 0:
+                        return updates
+                else:
+                    if rating > 0:
+                        self._remember_pending_team_rating(token, rating, record)
+                    return updates
+            if rating <= 0:
                 return updates
             self.pending_team_ratings.pop(token, None)
-            self._remember_confirmed_self_rating(token, rating)
+            self._remember_confirmed_self_rating(token, rating, record=record)
             actor_id = self.token_actors.get(token)
             if actor_id is None:
                 actor_id = self._bind_team_token(token, stable_team_actor_id(token))
@@ -5562,30 +7242,44 @@ class NetworkPacketParser:
             ):
                 self._mark_explicit_party_roster(token)
                 actor_id = self.token_actors.get(token)
-                if actor_id is None:
+                deferred_bot = bool(
+                    actor_id is None
+                    and self._can_defer_dungeon_bot_token(token)
+                )
+                if deferred_bot:
+                    self.dungeon_bot_deferred_tokens.add(token)
+                    self.dungeon_bot_roster_tokens.add(token)
+                elif actor_id is None:
                     actor_id = self._bind_team_token(token, stable_team_actor_id(token))
                 changed = (
                     token not in self.other_party_tokens
                     or token not in self.party_tokens
-                    or actor_id not in self.party_ids
+                    or (actor_id is not None and actor_id not in self.party_ids)
                 )
                 self.other_party_tokens.add(token)
                 self.party_tokens.add(token)
-                self.party_ids.add(actor_id)
+                if actor_id is not None:
+                    self.party_ids.add(actor_id)
                 self.team_group_active = True
                 rating = self._confirmed_team_rating(token, None, record)
                 if rating is not None:
                     self.team_profile_markers[token] = rating
-                profile = self._profile_update(
-                    actor_id,
-                    record,
-                    extraordinary_rating=rating,
-                    user_token=token,
-                    entity_type="Player",
-                )
-                if profile:
-                    updates.append(profile)
+                if actor_id is not None:
+                    profile = self._profile_update(
+                        actor_id,
+                        record,
+                        extraordinary_rating=rating,
+                        user_token=token,
+                        entity_type="Player",
+                    )
+                    if profile:
+                        updates.append(profile)
                 self._refresh_party_member_count()
+                if self.dungeon_bot_display_profiles:
+                    self.party_member_count = min(
+                        MAX_PARTY_MEMBERS,
+                        max(self.party_member_count, len(self.party_ids) + 1),
+                    )
                 self._record_party_activity(record)
                 if changed or not self.party_seen:
                     updates.append(self._party_update(record, authoritative=False))
@@ -5600,20 +7294,33 @@ class NetworkPacketParser:
                         updates.extend(self._team_hp_bindings(record))
             return updates
 
-        if method in {TEAM_MEMBER_JOIN_METHOD, TEAM_MEMBERS_JOIN_METHOD}:
+        if method in (
+            {TEAM_MEMBER_JOIN_METHOD, TEAM_MEMBERS_JOIN_METHOD}
+            | TEAM_GROUP_MERGE_METHODS
+        ):
+            if method in TEAM_GROUP_MERGE_METHODS and not self.party_session_id:
+                # A subgroup merge only extends an existing local team. It is
+                # not a create/join boundary and cannot unlock a departed team.
+                return updates
             if method == TEAM_MEMBER_JOIN_METHOD and len(args) >= 3:
                 raw_members = [args[2]]
             elif method == TEAM_MEMBERS_JOIN_METHOD and len(args) >= 2:
                 raw_members = args[1] if isinstance(args[1], list) else []
             else:
-                raw_members = []
+                raw_members = [
+                    node
+                    for node in walk_values(args)
+                    if self._team_token(direct_numeric_map(node).get(2))
+                ]
             changed = False
             joined = False
+            joined_tokens: set[str] = set()
             for raw_member in raw_members:
                 fields = direct_numeric_map(raw_member)
                 token = self._team_token(fields.get(2))
-                if not token:
+                if not token or token in joined_tokens:
                     continue
+                joined_tokens.add(token)
                 self.departed_party_tokens.discard(token)
                 joined = True
                 self.live_team_profile_tokens.add(token)
@@ -5622,6 +7329,16 @@ class NetworkPacketParser:
                     actor_id = self._bind_team_token(
                         token, stable_team_actor_id(token, fields.get(6))
                     )
+                display_merge = self._claim_dungeon_bot_display_actor(
+                    token,
+                    actor_id,
+                    fields.get(5),
+                    fields.get(8),
+                    record,
+                )
+                if display_merge is not None:
+                    updates.append(("actor_merge", display_merge))
+                    changed = True
                 rating = self._confirmed_team_rating(
                     token, fields.get(27), record
                 )
@@ -5675,8 +7392,14 @@ class NetworkPacketParser:
 
         if any(marker in folded for marker in TEAM_MEMBER_LEAVE_MARKERS):
             self._mark_explicit_party_roster()
-            known_tokens = set(self.token_actors) | set(
-                self.pending_team_ratings
+            known_tokens = (
+                set(self.token_actors)
+                | set(self.pending_team_ratings)
+                | set(self.party_tokens)
+                | set(self.other_party_tokens)
+                | set(self.authoritative_party_tokens)
+                | set(self.live_team_profile_tokens)
+                | set(self.dungeon_bot_deferred_tokens)
             )
             token = next(
                 (
@@ -5687,9 +7410,22 @@ class NetworkPacketParser:
                 "",
             )
             actor_id = self.token_actors.get(token) if token else None
-            changed = False
+            was_dungeon_bot = token in self.dungeon_bot_roster_tokens
+            if was_dungeon_bot:
+                self._discard_dungeon_bot_display_actor(token)
+            changed = bool(
+                token
+                and (
+                    token in self.party_tokens
+                    or token in self.other_party_tokens
+                    or token in self.authoritative_party_tokens
+                    or token in self.live_team_profile_tokens
+                    or actor_id in self.party_ids
+                )
+            )
             if token:
                 self.departed_party_tokens.add(token)
+                self.live_party_roster_tokens.discard(token)
             if token in self.party_tokens:
                 self.party_tokens.remove(token)
                 changed = True
@@ -5700,16 +7436,25 @@ class NetworkPacketParser:
             self.token_max_hp.pop(token, None)
             self.team_profile_markers.pop(token, None)
             self.live_team_property_ratings.pop(token, None)
+            self.live_team_rating_observed_100ns.pop(token, None)
+            self.read_only_rating_tokens.discard(token)
+            self.live_team_profile_tokens.discard(token)
             self.pending_team_ratings.pop(token, None)
+            self.dungeon_bot_deferred_tokens.discard(token)
+            self.dungeon_bot_roster_tokens.discard(token)
             if actor_id in self.party_ids:
                 self.party_ids.remove(actor_id)
                 changed = True
             if token and token != self.self_token:
                 self._unbind_team_token(token)
+            if was_dungeon_bot and not self.dungeon_bot_roster_tokens:
+                changed |= self._discard_dungeon_bot_roster()
             if changed:
                 self._refresh_party_member_count()
                 self._record_party_activity(record)
-                updates.append(self._party_update(record, authoritative=False))
+                party = self._party_update(record, authoritative=True)
+                party[1]["roster_replace"] = True
+                updates.append(party)
             return updates
 
         if (
@@ -5897,7 +7642,7 @@ class NetworkPacketParser:
             and target_template_id not in HEALING_TARGET_TEMPLATE_IDS
             and (
                 target_id in self.training_dummy_entities
-                or target_template_id in DAMAGE_TARGET_TEMPLATE_IDS
+                or self._is_damage_target_template_id(target_template_id)
             )
         )
         if raw_damage_fallback:
@@ -6008,6 +7753,13 @@ class NetworkPacketParser:
             not confirmed_non_player
             and self._is_known_player_actor(attacker_id, timestamp)
         )
+        if emit_damage_event and known_player_attacker:
+            if self.recent_damage_target_id != target_id:
+                self.recent_damage_target_id = target_id
+                self.recent_target_damage_by_actor.clear()
+            self.recent_target_damage_by_actor[attacker_id] = (
+                self.recent_target_damage_by_actor.get(attacker_id, 0) + damage
+            )
         if known_player_attacker:
             updates.extend(
                 self._infer_active_encounter_auxiliary(target_id, record)
@@ -6088,6 +7840,11 @@ class NetworkPacketParser:
     ) -> list[tuple[str, dict]]:
         method = str(record.get("method", ""))
         if method not in TEAM_STATISTICS_METHODS:
+            return []
+        if self.party_reactivation_locked and not self.party_session_id:
+            # The raw RPC still reaches the settlement controller and may
+            # complete an older PENDING encounter. Suppress only its live
+            # roster/counter projection after a confirmed self-leave.
             return []
         if not args:
             return []
@@ -6184,6 +7941,15 @@ class NetworkPacketParser:
             current_roster_tokens = set(self.party_tokens)
             if self.self_token:
                 current_roster_tokens.add(self.self_token)
+        snapshot_tokens = {
+            token
+            for token, _fields in parsed_entries
+            if token not in self.departed_party_tokens
+            and (
+                current_roster_tokens is None
+                or token in current_roster_tokens
+            )
+        }
 
         parsed_token_set: set[str] = set()
         for token, fields in parsed_entries:
@@ -6202,6 +7968,15 @@ class NetworkPacketParser:
             actor_id = self.token_actors.get(token)
             if actor_id is None:
                 actor_id = self._bind_team_token(token, stable_team_actor_id(token))
+            display_merge = self._claim_dungeon_bot_display_actor(
+                token,
+                actor_id,
+                fields.get(4),
+                fields.get(3),
+                record,
+            )
+            if display_merge is not None:
+                updates.append(("actor_merge", display_merge))
             parsed_token_set.add(token)
             rating = self._confirmed_team_rating(token, None, record)
             if rating is not None:
@@ -6234,6 +8009,10 @@ class NetworkPacketParser:
                 server_time = max(0, int(fields.get(10, 0) or 0))
             except (TypeError, ValueError, OverflowError):
                 server_time = 0
+            try:
+                combat_seconds_total = max(0, int(fields.get(9, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                combat_seconds_total = 0
             team_stat = {
                 **self._base_update(record),
                 "actor_id": actor_id,
@@ -6254,6 +8033,9 @@ class NetworkPacketParser:
                     if current_roster_tokens is not None
                     else inferred_roster_tokens
                 )
+                team_stat["snapshot_tokens"] = sorted(snapshot_tokens)
+            if 9 in fields:
+                team_stat["combat_seconds_total"] = combat_seconds_total
             for present, key, metric, omitted, flag in (
                 (has_damage, 5, 'absolute_damage', omitted_zero, 'omitted_zero'),
                 (has_taken, 6, 'absolute_taken', taken_omitted_zero, 'taken_omitted_zero'),
@@ -6483,8 +8265,29 @@ class NetworkPacketParser:
         updates.extend(self._enrage_countdown_updates(record, args))
         self._record_dungeon_context(record, args)
 
-        if method == "OnMsgBeforeEnterNewSpace":
+        if method == "OnMsgClearWorldReturnInfo":
+            timestamp = int(record.get("filetime_100ns", 0) or 0)
+            successful_at = int(
+                self.successful_stage_settlement_time_100ns or 0
+            )
+            if (
+                successful_at
+                and 0 <= timestamp - successful_at
+                <= BOSS_SUCCESS_ZERO_CONFIRM_WINDOW_100NS
+                and self._discard_dungeon_bot_roster()
+            ):
+                self._refresh_party_member_count()
+                party = self._party_update(record, authoritative=True)
+                party[1]["roster_replace"] = True
+                updates.append(party)
+
+        if method in SCENE_TRANSITION_METHODS:
             previous_scene_id = self.scene_id
+            # The persisted projection cache is a startup fallback only. Once
+            # the game reports a real scene boundary, positional reuse can put
+            # the previous dungeon's names on a new set of projection tokens.
+            self.allow_cached_projection_roster = False
+            self._arm_live_party_roster_rebuild()
             self._reset_scene_combat_bindings()
             self.scene_id = None
             updates.append(
@@ -6500,6 +8303,9 @@ class NetworkPacketParser:
                     },
                 )
             )
+            replacement = self._quarantine_old_party_on_projection_scene(record)
+            if replacement is not None:
+                updates.append(replacement)
 
         if method == "RetCastSkillSuccessNew":
             updates.extend(self._local_cast_updates(record, args))
@@ -6515,6 +8321,8 @@ class NetworkPacketParser:
                 scene_id = 0
             if scene_id > 0:
                 previous_scene_id = self.scene_id
+                if previous_scene_id is not None and scene_id != previous_scene_id:
+                    self.allow_cached_projection_roster = False
                 visible_entity_ids: list[int] = []
                 if len(args) > 1:
                     for raw_entity_id, _descriptor in map_pairs(args[1]):
@@ -6546,11 +8354,76 @@ class NetworkPacketParser:
                 fight_mode = int(args[0])
             except (TypeError, ValueError, OverflowError):
                 fight_mode = -1
+            was_in_combat = pointer in self.combat_mode_pointers
             if fight_mode == 2:
                 self.combat_mode_pointers.add(pointer)
+                self.successful_stage_settlement_time_100ns = 0
+                if pointer == self.active_boss_fight_exit_pointer:
+                    self.active_boss_fight_exit_pointer = None
+                    self.active_boss_fight_exit_time_100ns = 0
+                    self.pending_active_boss_zero = None
             elif fight_mode >= 0:
                 self.combat_mode_pointers.discard(pointer)
+                if (
+                    fight_mode == 0
+                    and self.recent_damage_target_id
+                    in {pointer, self.pointer_entities.get(pointer)}
+                ):
+                    self.recent_damage_target_id = None
+                    self.recent_target_damage_by_actor.clear()
             entity_id = self.pointer_entities.get(pointer)
+            if (
+                fight_mode == 2
+                and entity_id
+                and entity_id != self.active_boss_entity_id
+                and self.active_boss_fight_exit_time_100ns > 0
+            ):
+                template_id = int(
+                    self.entity_template_ids.get(entity_id, 0) or 0
+                )
+                if (
+                    template_id
+                    and str(template_id) in self.boss_template_catalog
+                    and self._activate_boss(
+                        entity_id,
+                        record,
+                        corroborated_signal=True,
+                    )
+                ):
+                    self.active_boss_pointer = pointer
+                    self.active_boss_pointer_time_100ns = int(
+                        record.get("filetime_100ns", 0) or 0
+                    )
+            elif (
+                fight_mode == 2
+                and entity_id
+                and entity_id == self.active_boss_entity_id
+                and self.active_boss_pointer is None
+                and str(
+                    int(self.entity_template_ids.get(entity_id, 0) or 0)
+                )
+                in self.boss_template_catalog
+            ):
+                # The entity/pointer binding and exact catalog template are
+                # already known.  Use the formal fight-state edge immediately
+                # instead of waiting for a later hit callback to bind HP.
+                self.active_boss_pointer = pointer
+                self.active_boss_pointer_time_100ns = int(
+                    record.get("filetime_100ns", 0) or 0
+                )
+            if (
+                fight_mode == 0
+                and entity_id == self.active_boss_entity_id
+                and pointer == self.active_boss_pointer
+                and (
+                    was_in_combat
+                    or self.active_boss_damage_epoch > 0
+                )
+            ):
+                self.active_boss_fight_exit_pointer = pointer
+                self.active_boss_fight_exit_time_100ns = int(
+                    record.get("filetime_100ns", 0) or 0
+                )
             if fight_mode >= 0 and entity_id:
                 updates.append(
                     (
@@ -6890,7 +8763,10 @@ class NetworkPacketParser:
                             if self.active_boss_pointer != pointer:
                                 accept_update = False
                             elif not self._valid_boss_hp(
-                                entity_id, current_hp, timestamp
+                                entity_id,
+                                current_hp,
+                                timestamp,
+                                pointer=pointer,
                             ):
                                 accept_update = False
                                 self._discard_hit_correlations(
@@ -6936,9 +8812,14 @@ class NetworkPacketParser:
                                     )
                                 )
                         if accept_update:
+                            health_values = {"current_hp": current_hp}
+                            if self._successful_stage_zero_confirms_boss_death(
+                                entity_id, pointer, timestamp
+                            ):
+                                health_values["death_confirmed"] = True
                             updates.extend(
                                 self._pointer_update(
-                                    pointer, {"current_hp": current_hp}, record
+                                    pointer, health_values, record
                                 )
                             )
                             self.entity_current_hp[entity_id] = current_hp
@@ -7003,7 +8884,10 @@ class NetworkPacketParser:
                         accept_update
                         and "current_hp" in values
                         and not self._valid_boss_hp(
-                            entity_id, values["current_hp"], timestamp
+                            entity_id,
+                            values["current_hp"],
+                            timestamp,
+                            pointer=pointer,
                         )
                     ):
                         accept_update = False
@@ -7052,6 +8936,10 @@ class NetworkPacketParser:
                     if known_max_hp > 0 and incoming_max_hp < known_max_hp * 0.5:
                         values.pop("max_hp", None)
                 if accept_update and values:
+                    if self._successful_stage_zero_confirms_boss_death(
+                        int(entity_id or 0), pointer, timestamp
+                    ):
+                        values["death_confirmed"] = True
                     updates.extend(self._pointer_update(pointer, values, record))
                     if entity_id:
                         if "current_hp" in values:
@@ -7071,6 +8959,20 @@ class NetworkPacketParser:
         elif method == "OnMsgSyncDirtyFightAttributes" and args:
             timestamp = int(record.get("filetime_100ns", 0) or 0)
             attributes = direct_numeric_map(args[0])
+            fight_attributes = self._clean_fight_attributes(attributes)
+            entity_id = self.pointer_entities.get(pointer)
+            if entity_id and fight_attributes:
+                cached_attributes = self.entity_fight_attributes.setdefault(
+                    entity_id, {}
+                )
+                field_times = self.entity_fight_attribute_field_times.setdefault(
+                    entity_id, {}
+                )
+                for key, value in fight_attributes.items():
+                    if timestamp < field_times.get(key, 0):
+                        continue
+                    cached_attributes[key] = value
+                    field_times[key] = timestamp
             try:
                 max_hp = max(0.0, float(attributes[21]))
             except (KeyError, TypeError, ValueError, OverflowError):
@@ -7182,6 +9084,8 @@ class NetworkPacketParser:
 
         updates.extend(self._stage_combat_statistics_updates(record, args))
         updates.extend(self._player_detail_statistics_updates(record, args))
+        updates.extend(self._dungeon_bot_display_updates(record, args))
+        updates.extend(self._team_application_updates(record, args))
         updates.extend(self._cache_token_profiles(record, args))
         updates.extend(self._scene_updates(record, args))
         updates.extend(self._known_target_profile_updates(record, args))
@@ -7197,6 +9101,7 @@ class NetworkPacketParser:
                 for value in walk_values(args)
             ):
                 self._record_party_activity(record)
+        updates.extend(self._publish_current_fight_attributes(record))
         return updates
 
 

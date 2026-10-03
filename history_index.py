@@ -35,6 +35,10 @@ _COMPLETENESS_RANK = {
     COMPLETENESS_PARTIAL: 1,
     COMPLETENESS_COMPLETE: 2,
 }
+# Public threshold used by list views that need to hide records whose
+# persisted summary is only partial or limited.  Keep the ranking definition
+# in one place so callers do not duplicate the numeric value.
+COMPLETENESS_COMPLETE_RANK = _COMPLETENESS_RANK[COMPLETENESS_COMPLETE]
 FIRST_BELIEVER_TEMPLATE_GROUPS = (
     frozenset({7_100_201, 7_100_202}),
     frozenset({7_100_208, 7_100_209}),
@@ -507,6 +511,21 @@ def normalize_battle_result(record: dict) -> str:
             return RESULT_DEFEATED
 
     reason = _text(record.get("archive_reason")).casefold()
+    if reason == "target_reset":
+        monster = _dict(record.get("monster"))
+        terminal_hp = _optional_float(monster.get("current_hp"))
+        if (
+            _text(record.get("duration_source")).casefold()
+            == "game_server_dummy_clock"
+            and "木桩" in _text(monster.get("name"))
+            and terminal_hp is not None
+            and terminal_hp <= 0
+        ):
+            # A completed fixed-time dummy round ends with FightMode [0] and
+            # a small non-zero sentinel that the combat model normalizes to
+            # zero.  Keep early disengages as interrupted, but present this
+            # authoritative terminal edge as a completed history result.
+            return RESULT_DEFEATED
     if reason in {
         "target_defeated",
         "boss_defeated",
@@ -803,6 +822,9 @@ def build_history_summary(
         missing.append("self_identity")
     if my_damage is None:
         missing.append("self_damage")
+    settlement_status = _text(record.get("settlement_status")).upper()
+    if settlement_status in {"PENDING", "ABANDONED"}:
+        missing.append("team_settlement")
     capture_pipeline = _dict(record.get("capture_pipeline_at_archive"))
     team_response_health = _text(
         capture_pipeline.get("team_stats_response_health")
@@ -828,7 +850,9 @@ def build_history_summary(
         and isinstance(participant.get("skills"), list)
         and participant.get("skills")
     )
-    if not missing and has_detail:
+    if settlement_status in {"PENDING", "ABANDONED"}:
+        completeness = COMPLETENESS_LIMITED
+    elif not missing and has_detail:
         completeness = COMPLETENESS_COMPLETE
     elif len(missing) <= 2 and boss_names and duration:
         completeness = COMPLETENESS_PARTIAL
@@ -911,6 +935,16 @@ def build_history_summary(
         "timeline_available": timeline_available,
         "is_boss": _is_boss_record(record),
         "search_text": " ".join(value for value in search_values if value).casefold(),
+        "settlement_status": _text(record.get("settlement_status")).upper(),
+        "settlement_source": _text(record.get("settlement_source")),
+        "settlement_received_at": _optional_float(
+            record.get("settlement_received_at")
+        ),
+        "statistics_scope": _text(record.get("statistics_scope")).upper(),
+        "server_battle_id": _text(record.get("server_battle_id")),
+        "duration_source": _text(record.get("duration_source")),
+        "match_confidence": _text(record.get("match_confidence")),
+        "data_source": _text(record.get("data_source")),
     }
 
 
@@ -1084,7 +1118,10 @@ def _rebuild_cumulative_team_dps_timeline(
     record: dict, window_seconds: int
 ) -> list[dict]:
     sample_log = _dict(record.get("team_damage_samples"))
-    if sample_log.get("coverage") != "live_team_cumulative":
+    if (
+        sample_log.get("coverage") != "live_team_cumulative"
+        or sample_log.get("verified_live_final") is not True
+    ):
         return []
     rows = sample_log.get("rows")
     if not isinstance(rows, list) or not rows:
@@ -1155,38 +1192,123 @@ def _rebuild_cumulative_team_dps_timeline(
     return values
 
 
+def _rebuild_observed_boss_hp_dps_timeline(
+    record: dict, window_seconds: int
+) -> list[dict]:
+    sample_log = _dict(record.get("boss_hp_damage_samples"))
+    if sample_log.get("coverage") != "observed_boss_hp_loss":
+        return []
+    rows = sample_log.get("rows")
+    if not isinstance(rows, list) or len(rows) < 3:
+        return []
+    duration = max(0, int(_as_float(
+        record.get("dps_duration_seconds", record.get("duration_seconds", 0.0))
+    )))
+    samples = {
+        max(0, min(duration, _as_int(row[0]))): max(0, _as_int(row[1]))
+        for row in rows if isinstance(row, (list, tuple)) and len(row) >= 2
+    }
+    seconds = sorted(samples)
+    if len(seconds) < 3 or seconds[-1] - seconds[0] < 2:
+        return []
+    if len(seconds) / (seconds[-1] - seconds[0] + 1) < 0.65:
+        return []
+    if any(samples[current] < samples[previous]
+           for previous, current in zip(seconds, seconds[1:])):
+        return []
+
+    window = max(1, int(window_seconds))
+    first, last = seconds[0], seconds[-1]
+    previous_total = samples[first]
+    per_second: list[int] = []
+    values: list[dict] = []
+    rolling = 0
+    for second in range(first + 1, last + 1):
+        total = samples.get(second, previous_total)
+        damage = total - previous_total
+        per_second.append(damage)
+        rolling += damage
+        if len(per_second) > window:
+            rolling -= per_second[-window - 1]
+        divisor = min(window, second - first)
+        values.append({
+            "time_seconds": second,
+            "dps": rolling / divisor,
+            "team_dps": rolling / divisor,
+            "source": "observed_boss_hp_loss",
+        })
+        previous_total = total
+    return values
+
+
+def _rebuild_display_team_dps_timeline(
+    record: dict, window_seconds: int
+) -> list[dict]:
+    sample_log = _dict(record.get("display_team_dps_samples"))
+    if sample_log.get("coverage") != "live_display_team_dps":
+        return []
+    rows = sample_log.get("rows")
+    if not isinstance(rows, list) or len(rows) < 2:
+        return []
+    duration = max(0, int(_as_float(
+        record.get("dps_duration_seconds", record.get("duration_seconds", 0.0))
+    )))
+    parsed = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        second = max(0, min(duration, _as_int(row[0])))
+        value = _as_float(row[1])
+        if math.isfinite(value) and value >= 0:
+            parsed.append((second, value))
+    parsed.sort(key=lambda item: item[0])
+    compact = {second: value for second, value in parsed}
+    if len(compact) < 2:
+        return []
+    return [
+        {
+            "time_seconds": second,
+            "dps": value,
+            "team_dps": value,
+            "source": "live_display_team_dps",
+        }
+        for second, value in sorted(compact.items())
+    ]
+
+
 def rebuild_team_dps_timeline(record: dict, window_seconds: int = 10) -> list[dict]:
-    """Build team sliding DPS only from a source that covers the final total."""
+    """Build team sliding DPS from verified totals or observed Boss HP loss."""
 
     values = _rebuild_cumulative_team_dps_timeline(record, window_seconds)
     if values:
         return values
 
+    values = _rebuild_display_team_dps_timeline(record, window_seconds)
+    if values:
+        return values
+
     event_log = _dict(record.get("event_log"))
     rows = event_log.get("rows")
-    if not isinstance(rows, list) or not rows:
-        return []
-    event_total = sum(
-        max(0, _as_int(row[4]))
-        for row in rows
-        if isinstance(row, (list, tuple))
-        and len(row) >= 5
-        and _as_int(row[1]) > 0
-    )
-    expected_total = max(0, _as_int(record.get("total_damage")))
-    if expected_total <= 0:
-        return []
-    tolerance = max(1, int(expected_total * 0.005))
-    if abs(event_total - expected_total) > tolerance:
-        return []
-
-    values = _rebuild_event_dps_timeline(record, None, window_seconds)
-    scale = expected_total / event_total if event_total else 1.0
-    for value in values:
-        value["dps"] *= scale
-        value["team_dps"] = value["dps"]
-        value["source"] = "complete_damage_events"
-    return values
+    if isinstance(rows, list) and rows:
+        event_total = sum(
+            max(0, _as_int(row[4]))
+            for row in rows
+            if isinstance(row, (list, tuple))
+            and len(row) >= 5
+            and _as_int(row[1]) > 0
+        )
+        expected_total = max(0, _as_int(record.get("total_damage")))
+        tolerance = max(1, int(expected_total * 0.005))
+        if expected_total > 0 and abs(event_total - expected_total) <= tolerance:
+            values = _rebuild_event_dps_timeline(record, None, window_seconds)
+            scale = expected_total / event_total if event_total else 1.0
+            for value in values:
+                value["dps"] *= scale
+                value["team_dps"] = value["dps"]
+                value["source"] = "complete_damage_events"
+            if values:
+                return values
+    return _rebuild_observed_boss_hp_dps_timeline(record, window_seconds)
 
 
 class HistoryIndex:
@@ -1243,9 +1365,9 @@ class HistoryIndex:
         return f"{path.resolve()}|{int(stat.st_mtime_ns)}|{int(stat.st_size)}"
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, *, timeout: float = 3.0) -> Iterator[sqlite3.Connection]:
         self.directory.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(self.path), timeout=3.0)
+        connection = sqlite3.connect(str(self.path), timeout=timeout)
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA journal_mode=WAL")
@@ -1449,8 +1571,16 @@ class HistoryIndex:
             valid_record is not None and not valid_record(record)
         ):
             return None
-        with self._connect() as connection:
-            return self._upsert(connection, source, record, stat)
+        try:
+            # The JSON archive is already durable. An index lock during a
+            # Boss boundary must not stall the Tk thread; the next history
+            # refresh will rebuild this derived row from that archive.
+            with self._connect(timeout=0) as connection:
+                return self._upsert(connection, source, record, stat)
+        except sqlite3.OperationalError as error:
+            if "locked" in str(error).lower() or "busy" in str(error).lower():
+                return None
+            raise
 
     def sync(
         self, valid_record: Callable[[object], bool] | None = None

@@ -18,9 +18,10 @@ import argparse
 import ctypes
 import datetime as dt
 import json
+import math
 import struct
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from inline_capture import (
@@ -66,6 +67,8 @@ STATE_LAST_RESULT_OFFSET = 0x20
 STATE_METHOD_COUNT_OFFSET = 0x28
 STATE_NEXT_METHOD_INDEX_OFFSET = 0x30
 STATE_LAST_METHOD_INDEX_OFFSET = 0x38
+STATE_SCRIPT_ENTITY_OVERRIDE_OFFSET = 0x40
+STATE_LAST_SCRIPT_ENTITY_OFFSET = 0x48
 STATE_ARGUMENTS_OFFSET = 0x100
 STATE_ARGUMENTS_SIZE = 0x78
 STATE_VARIADIC_OFFSET = 0x180
@@ -120,7 +123,39 @@ STATE_STRING_STORAGE_OFFSET = REQUEST_RING_OFFSET + REQUEST_RING_SIZE
 STATE_STRING_STORAGE_SIZE = 0x48
 STATE_STRING_VECTOR_OFFSET = STATE_STRING_STORAGE_OFFSET + 0x50
 STATE_STRING_VECTOR_SIZE = 0x08
-STATE_SIZE = STATE_STRING_VECTOR_OFFSET + STATE_STRING_VECTOR_SIZE
+STATE_REPLAY_CONTROL_OFFSET = (STATE_STRING_VECTOR_OFFSET + 0xFF) & ~0xFF
+STATE_REPLAY_ARM_OFFSET = STATE_REPLAY_CONTROL_OFFSET
+STATE_REPLAY_REQUEST_COUNT_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x08
+STATE_REPLAY_LAST_RESULT_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x10
+STATE_REPLAY_SCRIPT_ENTITY_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x18
+STATE_REPLAY_METHOD_POINTER_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x20
+STATE_REPLAY_ARGUMENT_COUNT_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x28
+STATE_REPLAY_EXPECTED_LUA_STATE_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x30
+STATE_REPLAY_ACTIVE_LUA_STATE_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x38
+STATE_REPLAY_ORIGINAL_TOP_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x40
+STATE_REPLAY_PACKED_RANGE_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x48
+STATE_REPLAY_CELLS_OFFSET = STATE_REPLAY_CONTROL_OFFSET + 0x80
+STATE_REPLAY_MAX_ARGUMENTS = 8
+STATE_REPLAY_VARIADIC_OFFSET = STATE_REPLAY_CELLS_OFFSET + 0x40
+STATE_REPLAY_STORAGE_OFFSET = STATE_REPLAY_VARIADIC_OFFSET + 0x40
+STATE_REPLAY_DESCRIPTOR_VECTOR_OFFSET = STATE_REPLAY_STORAGE_OFFSET + 0x50
+STATE_REPLAY_REGION_END = STATE_REPLAY_DESCRIPTOR_VECTOR_OFFSET + 0x40
+STATE_SIZE = STATE_REPLAY_REGION_END
+REPLAY_DISARMED = 0
+REPLAY_ARMED = 1
+REPLAY_CLAIMED = 2
+REPLAY_COMPLETED = 3
+PRIMITIVE_REPLAY_METHOD = "ReqCastSkillNew"
+PRIMITIVE_REPLAY_SCHEMA = (
+    ("int", 1),
+    ("int", 1),
+    ("float", 2),
+    ("float", 2),
+    ("float", 2),
+    ("float", 2),
+    ("float", 2),
+    ("int", 1),
+)
 ARGUMENT_DESCRIPTOR_SNAPSHOT_SIZE = 0x80
 MAX_ARGUMENT_DESCRIPTOR_COUNT = 64
 STRING_DESCRIPTOR_SCAN_RADIUS = 0x400
@@ -432,9 +467,18 @@ def build_primary_team_request_stub(
     code += b"\xf0\x4d\x0f\xb1\x62\x10"
     skip_jumps.append(_emit_near_jump(code, b"\x0f\x85"))
 
+    # Use the locally identified Role ScriptEntity when one is available.
+    # Requests dispatched through a monster or projection entity return true
+    # locally but are silently ignored by the server. Keep the original value
+    # for diagnostics and fall back to it until identity evidence arrives.
+    code += b"\x49\x89\x4a" + bytes([STATE_LAST_SCRIPT_ENTITY_OFFSET])
+    code += b"\x48\x89\xcb"  # rbx = original ScriptEntity
+    code += b"\x49\x8b\x42" + bytes([STATE_SCRIPT_ENTITY_OVERRIDE_OFFSET])
+    code += b"\x48\x85\xc0"
+    code += b"\x48\x0f\x45\xd8"  # cmovne rbx, rax
+
     # Copy only the confirmed stable RPC context and construct the game's
     # zero-argument representation. Original RDX is at [rsp+0x40].
-    code += b"\x48\x89\xcb"  # rbx = original ScriptEntity
     code += b"\x48\x8b\x74\x24\x40"
     code += b"\x48\xbf" + struct.pack("<Q", state + STATE_ARGUMENTS_OFFSET)
     code += b"\xb9" + struct.pack("<I", STATE_ARGUMENTS_SIZE // 8)
@@ -472,6 +516,166 @@ def build_primary_team_request_stub(
     return bytes(code)
 
 
+def _emit_primitive_replay(
+    code: bytearray,
+    state: int,
+    trampoline: int,
+) -> None:
+    """Append the opt-in one-shot primitive-vector replay branch.
+
+    The branch waits for a call on the exact Lua state that supplied the
+    snapshot, appends eight freshly encoded primitive TValue cells above the
+    live stack top, invokes ``call_server`` once, and restores the old top.
+    It never accepts captured GC pointers or changes the intercepted call.
+    """
+
+    code += b"\x49\xbd" + struct.pack("<Q", state)  # r13 = state
+    code += b"\x49\x83\xbd" + struct.pack(
+        "<I", STATE_REPLAY_ARM_OFFSET
+    ) + bytes([REPLAY_ARMED])
+    not_eligible = [_emit_near_jump(code, b"\x0f\x85")]
+
+    # Only borrow a live call on the same Lua state. Its own call and stack
+    # cells remain untouched; the replay cells are rooted temporarily above
+    # lua_State.top and removed immediately after the nested call returns.
+    code += b"\x48\x8b\x44\x24" + bytes([SAVED_R9_STACK_OFFSET])
+    code += b"\x48\x85\xc0"
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x84"))
+    code += b"\x48\x8b\x08"  # rcx = lua_State
+    code += b"\x48\x85\xc9"
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x84"))
+    code += b"\x49\x3b\x8d" + struct.pack(
+        "<I", STATE_REPLAY_EXPECTED_LUA_STATE_OFFSET
+    )
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x85"))
+    code += b"\x48\x8b\x59\x20"  # rbx = lua_State.base
+    code += b"\x48\x8b\x79\x28"  # rdi = lua_State.top
+    code += b"\x48\x8b\x51\x30"  # rdx = lua_State.maxstack
+    for register_test in (b"\x48\x85\xdb", b"\x48\x85\xff", b"\x48\x85\xd2"):
+        code += register_test
+        not_eligible.append(_emit_near_jump(code, b"\x0f\x84"))
+    code += b"\x48\x39\xdf"  # cmp rdi, rbx
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x82"))
+    code += b"\x48\x8d\x47\x40"  # appended end = top + 8 TValue cells
+    code += b"\x48\x39\xd0"  # cmp appended end, maxstack
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x87"))
+    code += b"\x48\x89\xfe\x48\x29\xde"  # rsi = top - base
+    code += b"\x48\xf7\xc6\x07\x00\x00\x00"
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x85"))
+    code += b"\x48\xc1\xee\x03"
+    code += b"\x48\x81\xfe\xf8\xff\xff\x7f"
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x87"))
+    code += b"\x48\x8b\x44\x24" + bytes([SAVED_RDX_STACK_OFFSET])
+    code += b"\x48\x85\xc0"
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x84"))
+
+    # Claim the one-shot only after a fully usable live edge is present.
+    code += b"\xb8\x01\x00\x00\x00"
+    code += b"\xba\x02\x00\x00\x00"
+    code += b"\xf0\x49\x0f\xb1\x95" + struct.pack(
+        "<I", STATE_REPLAY_ARM_OFFSET
+    )
+    not_eligible.append(_emit_near_jump(code, b"\x0f\x85"))
+    code += b"\x49\xc7\x45" + bytes([STATE_ENABLED_OFFSET]) + b"\x00\x00\x00\x00"
+    code += b"\x49\x89\x8d" + struct.pack(
+        "<I", STATE_REPLAY_ACTIVE_LUA_STATE_OFFSET
+    )
+    code += b"\x49\x89\xbd" + struct.pack(
+        "<I", STATE_REPLAY_ORIGINAL_TOP_OFFSET
+    )
+
+    # RSI currently contains the zero-based stack-cell count. Convert that
+    # into the inclusive one-based [first,last] range used by VariadicArgs.
+    code += b"\xff\xc6\x89\xf0\x8d\x56\x07"
+    code += b"\x48\xc1\xe2\x20\x48\x09\xd0"
+    code += b"\x49\x89\x85" + struct.pack(
+        "<I", STATE_REPLAY_PACKED_RANGE_OFFSET
+    )
+
+    code += b"\x48\xbe" + struct.pack("<Q", state + STATE_REPLAY_CELLS_OFFSET)
+    code += b"\xb9" + struct.pack("<I", STATE_REPLAY_MAX_ARGUMENTS)
+    code += b"\xf3\x48\xa5"
+    code += b"\x49\x8b\x85" + struct.pack(
+        "<I", STATE_REPLAY_ACTIVE_LUA_STATE_OFFSET
+    )
+    code += b"\x48\x89\x78\x28"  # temporarily publish the appended top
+
+    # Clone only the current live VariadicArguments shell, then point it at a
+    # controller-built storage header and descriptor vector in hook memory.
+    code += b"\x48\x8b\x74\x24" + bytes([SAVED_R9_STACK_OFFSET])
+    code += b"\x48\xbf" + struct.pack(
+        "<Q", state + STATE_REPLAY_VARIADIC_OFFSET
+    )
+    code += b"\xb9\x08\x00\x00\x00\xf3\x48\xa5"
+    code += b"\x48\xbf" + struct.pack(
+        "<Q", state + STATE_REPLAY_VARIADIC_OFFSET
+    )
+    code += b"\x49\x8b\x85" + struct.pack(
+        "<I", STATE_REPLAY_ACTIVE_LUA_STATE_OFFSET
+    )
+    code += b"\x48\x89\x07"
+    code += b"\x48\xb8" + struct.pack(
+        "<Q", state + STATE_REPLAY_STORAGE_OFFSET
+    )
+    code += b"\x48\x89\x47\x08"
+    code += b"\x49\x8b\x85" + struct.pack(
+        "<I", STATE_REPLAY_PACKED_RANGE_OFFSET
+    )
+    code += b"\x48\x89\x47\x10"
+
+    code += b"\x48\x8b\x74\x24" + bytes([SAVED_RDX_STACK_OFFSET])
+    code += b"\x48\xbf" + struct.pack("<Q", state + STATE_ARGUMENTS_OFFSET)
+    code += b"\xb9" + struct.pack("<I", STATE_ARGUMENTS_SIZE // 8)
+    code += b"\xf3\x48\xa5"
+    code += b"\x48\x83\xec\x40"
+    for source_offset, target_offset in zip(
+        (
+            REQUEST_ENTRY_STACK_CAPTURE_OFFSET + 0x48,
+            REQUEST_ENTRY_STACK_CAPTURE_OFFSET + 0x50,
+            REQUEST_ENTRY_STACK_CAPTURE_OFFSET + 0x58,
+            REQUEST_ENTRY_STACK_CAPTURE_OFFSET + 0x60,
+        ),
+        (0x20, 0x28, 0x30, 0x38),
+    ):
+        code += b"\x48\x8b\x84\x24" + struct.pack("<I", source_offset)
+        code += b"\x48\x89\x44\x24" + bytes([target_offset])
+
+    code += b"\x49\x8b\x8d" + struct.pack(
+        "<I", STATE_REPLAY_SCRIPT_ENTITY_OFFSET
+    )
+    code += b"\x48\xba" + struct.pack("<Q", state + STATE_ARGUMENTS_OFFSET)
+    code += b"\x4d\x8b\x85" + struct.pack(
+        "<I", STATE_REPLAY_METHOD_POINTER_OFFSET
+    )
+    code += b"\x49\xb9" + struct.pack(
+        "<Q", state + STATE_REPLAY_VARIADIC_OFFSET
+    )
+    code += b"\x48\xb8" + struct.pack("<Q", trampoline)
+    code += b"\xff\xd0\x0f\xb6\xc0"
+    code += b"\x49\x89\x85" + struct.pack(
+        "<I", STATE_REPLAY_LAST_RESULT_OFFSET
+    )
+    code += b"\x49\xff\x85" + struct.pack(
+        "<I", STATE_REPLAY_REQUEST_COUNT_OFFSET
+    )
+
+    code += b"\x4d\x8b\x95" + struct.pack(
+        "<I", STATE_REPLAY_ACTIVE_LUA_STATE_OFFSET
+    )
+    code += b"\x49\x8b\x85" + struct.pack(
+        "<I", STATE_REPLAY_ORIGINAL_TOP_OFFSET
+    )
+    code += b"\x49\x89\x42\x28"
+    code += b"\x49\xc7\x85" + struct.pack(
+        "<I", STATE_REPLAY_ARM_OFFSET
+    ) + bytes([REPLAY_COMPLETED, 0, 0, 0])
+    code += b"\x48\x83\xc4\x40"
+
+    replay_done = len(code)
+    for displacement_at in not_eligible:
+        _patch_near_jump(code, displacement_at, replay_done)
+
+
 def build_request_stub(
     state: int,
     trampoline: int,
@@ -481,6 +685,7 @@ def build_request_stub(
     prologue: bytes,
     request_method_count: int = 1,
     synchronized_methods: tuple[bytes, ...] = (),
+    primitive_replay_enabled: bool = False,
 ) -> bytes:
     if not 1 <= int(request_method_count) <= MAX_REQUEST_METHODS:
         raise ValueError("request method count is unsupported")
@@ -490,6 +695,8 @@ def build_request_stub(
     code += b"\x41\x50\x41\x51\x41\x52\x41\x53\x41\x54\x41\x55"
 
     _emit_request_capture(code, state, synchronized_methods)
+    if primitive_replay_enabled:
+        _emit_primitive_replay(code, state, trampoline)
 
     code += b"\x49\xba" + struct.pack("<Q", state)
     code += b"\x49\x83\x7a\x08\x00"
@@ -526,7 +733,11 @@ def build_request_stub(
     # arbitrary request's variadic object leaks that request's argument count
     # (for example 10 for ReqCastSkillNew) and the server silently drops the
     # otherwise valid Common request. Original RDX is at [rsp+0x40].
+    code += b"\x49\x89\x4a" + bytes([STATE_LAST_SCRIPT_ENTITY_OFFSET])
     code += b"\x48\x8b\x5c\x24\x48"  # rbx = original ScriptEntity
+    code += b"\x49\x8b\x42" + bytes([STATE_SCRIPT_ENTITY_OVERRIDE_OFFSET])
+    code += b"\x48\x85\xc0"
+    code += b"\x48\x0f\x45\xd8"  # cmovne rbx, rax
     code += b"\x48\x8b\x74\x24\x40"
     code += b"\x48\xbf" + struct.pack(
         "<Q", state + STATE_ARGUMENTS_OFFSET
@@ -1191,6 +1402,8 @@ class TeamStatsRequestHook:
         synchronized_methods: tuple[str, ...] = (),
         takeover_existing: bool = False,
         stable_primary_only: bool = False,
+        allow_existing_adoption: bool = True,
+        primitive_replay_enabled: bool = False,
     ):
         self.profile = normalize_runtime_profile(profile)
         hook = runtime_profile_hook(self.profile, "team_stats")
@@ -1294,20 +1507,32 @@ class TeamStatsRequestHook:
         ):
             raise ValueError("synchronized request method is invalid")
         self.stable_primary_only = bool(stable_primary_only)
+        self.primitive_replay_enabled = bool(primitive_replay_enabled)
         if self.stable_primary_only and (
             len(self.request_methods) != 1
             or self.request_argument_kinds != (REQUEST_ARGUMENT_NONE,)
             or self.synchronized_methods
+            or self.primitive_replay_enabled
         ):
             raise ValueError(
                 "stable primary-only mode accepts exactly one zero-argument "
                 "request and no synchronized outbound methods"
             )
+        if self.primitive_replay_enabled:
+            if bool(enabled):
+                raise ValueError(
+                    "primitive replay requires the scheduled request branch disabled"
+                )
+            if PRIMITIVE_REPLAY_METHOD.encode("ascii") not in self.request_methods:
+                raise ValueError(
+                    "primitive replay requires ReqCastSkillNew in request methods"
+                )
         self.requested_pid = pid
         self.request_interval = max(0.5, float(interval))
         self.interval = max(0.25, self.request_interval / len(self.request_methods))
         self.initially_enabled = bool(enabled)
         self.takeover_existing = bool(takeover_existing)
+        self.allow_existing_adoption = bool(allow_existing_adoption)
         self.pid = 0
         self.process = 0
         self.base = 0
@@ -1321,6 +1546,7 @@ class TeamStatsRequestHook:
         self.lua_state_address = 0
         self.string_descriptor_address = 0
         self.active_lua_string_requests: dict[str, str] = {}
+        self.prepared_primitive_replay: dict[str, object] | None = None
 
     @staticmethod
     def _numeric_argument_bits(value: object) -> int:
@@ -1377,6 +1603,7 @@ class TeamStatsRequestHook:
             prologue=self.prologue,
             request_method_count=len(self.request_methods),
             synchronized_methods=self.synchronized_methods,
+            primitive_replay_enabled=self.primitive_replay_enabled,
         )
 
     def _adopt_existing_primary(self, patch: bytes) -> bool:
@@ -1460,7 +1687,7 @@ class TeamStatsRequestHook:
         return True
 
     def _adopt_existing(self, patch: bytes) -> bool:
-        """Adopt only an exact Dps-Logs team hook for this runtime profile."""
+        """Adopt only this application's exact team hook for the runtime profile."""
 
         if self.stable_primary_only:
             return self._adopt_existing_primary(patch)
@@ -1603,8 +1830,12 @@ class TeamStatsRequestHook:
         self.target = self.base + self.rva
         actual = read_region(self.process, self.target, len(self.signature))
         if actual != self.signature:
-            if actual and self._adopt_existing(
-                actual[: len(self.prologue)]
+            if (
+                self.allow_existing_adoption
+                and actual
+                and self._adopt_existing(
+                    actual[: len(self.prologue)]
+                )
             ):
                 return self
             self.close()
@@ -1736,6 +1967,462 @@ class TeamStatsRequestHook:
             self.state + STATE_ENABLED_OFFSET,
             struct.pack("<Q", int(bool(enabled))),
         )
+
+    def set_script_entity_override(self, address: object) -> int:
+        """Pin nested requests to the local Role ScriptEntity.
+
+        The pointer comes from a decoded inbound callback on the same process;
+        zero restores the legacy current-caller behavior.
+        """
+
+        try:
+            value = int(address or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("script entity override must be an address") from exc
+        if value and not 0x1_0000 <= value < 0x0000_8000_0000_0000:
+            raise ValueError("script entity override is outside user address space")
+        if not self.installed or not self.alive:
+            raise RuntimeError("team-stat request hook is not active")
+        write_memory(
+            self.process,
+            self.state + STATE_SCRIPT_ENTITY_OVERRIDE_OFFSET,
+            struct.pack("<Q", value),
+        )
+        return value
+
+    def arm_one_shot(self) -> int:
+        """Arm the stable zero-argument request for its next call-server edge.
+
+        This does not call the game's RPC function directly.  It publishes an
+        overdue timestamp while the hook is disabled, then enables the hook so
+        its existing interval gate can claim exactly one request opportunity.
+        A long interval supplied by the caller prevents a second request while
+        the one-shot driver observes and detaches the hook.
+
+        Return the request counter before arming so the caller can prove that
+        the request was actually triggered.
+        """
+
+        if not self.stable_primary_only:
+            raise RuntimeError("one-shot arming requires stable primary-only mode")
+        if not self.installed or not self.alive:
+            raise RuntimeError("team-stat request hook is not active")
+        self.set_enabled(False)
+        status = self.status()
+        baseline = int(status.get("request_count", 0) or 0)
+        write_memory(
+            self.process,
+            self.state + STATE_LAST_REQUEST_OFFSET,
+            struct.pack("<Q", 1),
+        )
+        self.set_enabled(True)
+        return baseline
+
+    @staticmethod
+    def _primitive_replay_cell(value: object, descriptor_type: str) -> int:
+        """Encode a fresh primitive TValue without retaining a Lua pointer."""
+
+        if value is None:
+            return 0xFFFF_FFFF_FFFF_FFFF
+        if descriptor_type == "int":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("int replay arguments must be integers or nil")
+            if not -(2**53) <= value <= 2**53:
+                raise ValueError("int replay argument is outside exact Lua range")
+            numeric = float(value)
+        elif descriptor_type == "float":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("float replay arguments must be numeric or nil")
+            numeric = float(value)
+            if not math.isfinite(numeric):
+                raise ValueError("float replay argument must be finite")
+        else:
+            raise ValueError(
+                f"pointer-bearing replay descriptor is forbidden: {descriptor_type!r}"
+            )
+        return struct.unpack("<Q", struct.pack("<d", numeric))[0]
+
+    def primitive_replay_status(self) -> dict[str, object]:
+        """Return the dormant/armed/completed state of the test-only branch."""
+
+        if (
+            not getattr(self, "primitive_replay_enabled", False)
+            or not self.installed
+            or not self.alive
+        ):
+            return {
+                "available": False,
+                "state": "DISABLED",
+                "request_count": 0,
+                "last_result": 0,
+                "prepared": False,
+            }
+        raw = read_region(
+            self.process,
+            self.state + STATE_REPLAY_CONTROL_OFFSET,
+            0x50,
+        )
+        if raw is None or len(raw) != 0x50:
+            raise RuntimeError("primitive replay state became unreadable")
+        (
+            arm_state,
+            request_count,
+            last_result,
+            script_entity,
+            method_pointer,
+            argument_count,
+            expected_lua_state,
+            active_lua_state,
+            original_top,
+            packed_range,
+        ) = struct.unpack("<10Q", raw)
+        state_names = {
+            REPLAY_DISARMED: "PREPARED" if self.prepared_primitive_replay else "IDLE",
+            REPLAY_ARMED: "ARMED",
+            REPLAY_CLAIMED: "CLAIMED",
+            REPLAY_COMPLETED: "COMPLETED",
+        }
+        return {
+            "available": True,
+            "state": state_names.get(arm_state, f"UNKNOWN_{arm_state}"),
+            "request_count": request_count,
+            "last_result": last_result,
+            "prepared": self.prepared_primitive_replay is not None,
+            "script_entity": script_entity,
+            "method_pointer": method_pointer,
+            "argument_count": argument_count,
+            "expected_lua_state": expected_lua_state,
+            "active_lua_state": active_lua_state,
+            "original_top": original_top,
+            "packed_range": packed_range,
+        }
+
+    def prepare_primitive_replay(
+        self,
+        record: Mapping[str, object],
+        argument_values: Sequence[object],
+    ) -> dict[str, object]:
+        """Prepare one current-session ``ReqCastSkillNew`` primitive call.
+
+        Captured TValue pointers are never accepted. Values are re-encoded
+        from Python primitives, while the current process's eight static type
+        descriptors are re-read and validated immediately before publication.
+        """
+
+        if not getattr(self, "primitive_replay_enabled", False):
+            raise RuntimeError("primitive replay was not enabled for this hook")
+        if not self.installed or not self.alive:
+            raise RuntimeError("primitive replay hook is not active")
+        if not isinstance(record, Mapping):
+            raise ValueError("replay source must be a synchronized RPC record")
+        if str(record.get("method", "")) != PRIMITIVE_REPLAY_METHOD:
+            raise ValueError("replay source is not ReqCastSkillNew")
+        if (
+            int(record.get("argument_sync_state", 0) or 0) != 1
+            or str(record.get("lua_argument_capture", ""))
+            != "hook_entry_synchronized"
+            or str(record.get("variadic_storage_capture", ""))
+            != "hook_entry_synchronized"
+        ):
+            raise ValueError("replay source was not captured at the live hook entry")
+
+        values = tuple(argument_values)
+        if len(values) != STATE_REPLAY_MAX_ARGUMENTS:
+            raise ValueError("ReqCastSkillNew replay requires exactly eight arguments")
+        if int(record.get("variadic_argument_count", 0) or 0) != len(values):
+            raise ValueError("captured ReqCastSkillNew argument count changed")
+
+        raw_cells = record.get("lua_argument_cells")
+        if not isinstance(raw_cells, list) or len(raw_cells) != len(values):
+            raise ValueError("captured TValue vector is incomplete")
+        for raw_cell in raw_cells:
+            try:
+                cell = int(raw_cell)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("captured TValue vector is invalid") from exc
+            if not 0 <= cell <= 0xFFFF_FFFF_FFFF_FFFF:
+                raise ValueError("captured TValue cell is outside uint64")
+            signed_tag = struct.unpack("<q", struct.pack("<Q", cell))[0] >> 47
+            if cell != 0xFFFF_FFFF_FFFF_FFFF and -14 <= signed_tag <= -1:
+                raise ValueError("captured GC/reference TValue cannot be replayed")
+
+        vector = record.get("argument_descriptor_vector")
+        items = vector.get("items") if isinstance(vector, Mapping) else None
+        if not isinstance(items, list) or len(items) != len(PRIMITIVE_REPLAY_SCHEMA):
+            raise ValueError("ReqCastSkillNew descriptor vector is incomplete")
+        descriptor_pointers: list[int] = []
+        descriptor_types: list[str] = []
+        for index, (item, expected) in enumerate(
+            zip(items, PRIMITIVE_REPLAY_SCHEMA, strict=True)
+        ):
+            if not isinstance(item, Mapping):
+                raise ValueError(f"argument descriptor {index + 1} is invalid")
+            expected_name, expected_lua_type = expected
+            address = int(item.get("address", 0) or 0)
+            if not _valid_user_pointer(address):
+                raise ValueError(f"argument descriptor {index + 1} is unavailable")
+            current = read_region(
+                self.process, address, ARGUMENT_DESCRIPTOR_SNAPSHOT_SIZE
+            )
+            if current is None or len(current) != ARGUMENT_DESCRIPTOR_SNAPSHOT_SIZE:
+                raise ValueError(f"argument descriptor {index + 1} is unreadable")
+            if (
+                argument_descriptor_type_name(current) != expected_name
+                or current[0x50] != expected_lua_type
+            ):
+                raise ValueError(
+                    f"argument descriptor {index + 1} changed in the current session"
+                )
+            descriptor_pointers.append(address)
+            descriptor_types.append(expected_name)
+
+        encoded_cells = tuple(
+            self._primitive_replay_cell(value, descriptor_type)
+            for value, descriptor_type in zip(
+                values, descriptor_types, strict=True
+            )
+        )
+        script_entity = int(record.get("script_entity", 0) or 0)
+        lua_state = int(record.get("lua_state_address", 0) or 0)
+        if not _valid_user_pointer(script_entity) or read_region(
+            self.process, script_entity, 8
+        ) is None:
+            raise ValueError("captured ScriptEntity is no longer valid")
+        if not _valid_user_pointer(lua_state):
+            raise ValueError("captured lua_State is no longer valid")
+        lua_state_snapshot = read_region(self.process, lua_state, 0x38)
+        if lua_state_snapshot is None or len(lua_state_snapshot) != 0x38:
+            raise ValueError("captured lua_State is no longer readable")
+        stack_base, stack_top, max_stack = struct.unpack_from(
+            "<3Q", lua_state_snapshot, LUA_STATE_STACK_BASE_OFFSET
+        )
+        if not (
+            _valid_user_pointer(stack_base)
+            and _valid_user_pointer(stack_top)
+            and _valid_user_pointer(max_stack)
+            and stack_base <= stack_top <= max_stack
+        ):
+            raise ValueError("current lua_State stack bounds are invalid")
+
+        try:
+            method_index = self.request_methods.index(
+                PRIMITIVE_REPLAY_METHOD.encode("ascii")
+            )
+        except ValueError as exc:
+            raise RuntimeError("ReqCastSkillNew method storage is unavailable") from exc
+        method_pointer = (
+            self.state + STATE_METHOD_OFFSET + method_index * STATE_METHOD_STRIDE
+        )
+
+        raw_storage = record.get("variadic_storage_snapshot")
+        if not isinstance(raw_storage, str):
+            raise ValueError("captured ReqCastSkillNew storage is unavailable")
+        try:
+            storage = bytearray.fromhex(raw_storage)
+        except ValueError as exc:
+            raise ValueError("captured ReqCastSkillNew storage is malformed") from exc
+        if len(storage) < STATE_STRING_STORAGE_SIZE:
+            raise ValueError("captured ReqCastSkillNew storage is truncated")
+        storage = storage[:STATE_STRING_STORAGE_SIZE]
+        if PRIMITIVE_REPLAY_METHOD.encode("ascii") not in storage[:0x30]:
+            raise ValueError("captured storage does not describe ReqCastSkillNew")
+        descriptor_start = self.state + STATE_REPLAY_DESCRIPTOR_VECTOR_OFFSET
+        descriptor_end = descriptor_start + len(descriptor_pointers) * 8
+        struct.pack_into(
+            "<3Q", storage, 0x30, descriptor_start, descriptor_end, descriptor_end
+        )
+
+        current_control = read_region(
+            self.process,
+            self.state + STATE_REPLAY_CONTROL_OFFSET,
+            0x50,
+        )
+        if current_control is None or len(current_control) != 0x50:
+            raise RuntimeError("primitive replay state is unavailable")
+        control = bytearray(current_control)
+        current_arm = struct.unpack_from("<Q", control, 0)[0]
+        if current_arm in {REPLAY_ARMED, REPLAY_CLAIMED}:
+            raise RuntimeError("a primitive replay is already armed")
+        struct.pack_into("<Q", control, 0x00, REPLAY_DISARMED)
+        struct.pack_into("<Q", control, 0x10, 0)
+        struct.pack_into("<Q", control, 0x18, script_entity)
+        struct.pack_into("<Q", control, 0x20, method_pointer)
+        struct.pack_into("<Q", control, 0x28, len(values))
+        struct.pack_into("<Q", control, 0x30, lua_state)
+        struct.pack_into("<3Q", control, 0x38, 0, 0, 0)
+
+        # Publish all payload material while disarmed. The armed flag is a
+        # separate final write performed only by arm_primitive_replay().
+        write_memory(
+            self.process,
+            self.state + STATE_REPLAY_CONTROL_OFFSET,
+            bytes(control),
+        )
+        write_memory(
+            self.process,
+            self.state + STATE_REPLAY_CELLS_OFFSET,
+            struct.pack("<8Q", *encoded_cells),
+        )
+        write_memory(
+            self.process,
+            self.state + STATE_REPLAY_STORAGE_OFFSET,
+            bytes(storage),
+        )
+        write_memory(
+            self.process,
+            self.state + STATE_REPLAY_DESCRIPTOR_VECTOR_OFFSET,
+            struct.pack("<8Q", *descriptor_pointers),
+        )
+        self.prepared_primitive_replay = {
+            "method": PRIMITIVE_REPLAY_METHOD,
+            "values": values,
+            "descriptor_types": tuple(descriptor_types),
+            "script_entity": script_entity,
+            "lua_state": lua_state,
+            "source_sequence": int(record.get("sequence", 0) or 0),
+            "source_filetime_100ns": int(record.get("filetime_100ns", 0) or 0),
+        }
+        return dict(self.prepared_primitive_replay)
+
+    def prepare_primitive_replay_from_registered_method(
+        self,
+        *,
+        script_entity: int,
+        lua_state: int,
+        method_storage_address: int,
+        argument_values: Sequence[object],
+    ) -> dict[str, object]:
+        """Prepare one call from a live, registered ``ReqCastSkillNew`` entry.
+
+        This is the narrow recovery path for a current process where a natural
+        synchronized cast record was not persisted.  It does not manufacture
+        a method definition: the complete method storage and its descriptor
+        vector must still be readable in the target process and must match the
+        confirmed eight-primitive schema before the normal replay preparation
+        path is entered.
+        """
+
+        if not getattr(self, "primitive_replay_enabled", False):
+            raise RuntimeError("primitive replay was not enabled for this hook")
+        if not self.installed or not self.alive:
+            raise RuntimeError("primitive replay hook is not active")
+        if not _valid_user_pointer(method_storage_address):
+            raise ValueError("registered ReqCastSkillNew storage is unavailable")
+        storage = read_region(
+            self.process,
+            int(method_storage_address),
+            REQUEST_VARIADIC_STORAGE_SNAPSHOT_SIZE,
+        )
+        if storage is None or len(storage) != REQUEST_VARIADIC_STORAGE_SNAPSHOT_SIZE:
+            raise ValueError("registered ReqCastSkillNew storage is unreadable")
+
+        method_length, method_capacity = struct.unpack_from("<2Q", storage, 0x20)
+        method_bytes = PRIMITIVE_REPLAY_METHOD.encode("ascii")
+        if (
+            method_length != len(method_bytes)
+            or method_capacity < len(method_bytes)
+            or storage[0x10 : 0x10 + len(method_bytes)] != method_bytes
+            or storage[0x10 + len(method_bytes)] != 0
+        ):
+            raise ValueError("registered method storage is not ReqCastSkillNew")
+
+        descriptor_start, descriptor_end = struct.unpack_from("<2Q", storage, 0x30)
+        descriptor_bytes = descriptor_end - descriptor_start
+        if (
+            not _valid_user_pointer(descriptor_start)
+            or descriptor_bytes != STATE_REPLAY_MAX_ARGUMENTS * 8
+        ):
+            raise ValueError("registered ReqCastSkillNew descriptor vector is invalid")
+        raw_pointers = read_region(self.process, descriptor_start, descriptor_bytes)
+        if raw_pointers is None or len(raw_pointers) != descriptor_bytes:
+            raise ValueError("registered ReqCastSkillNew descriptors are unreadable")
+
+        items: list[dict[str, object]] = []
+        for index, ((expected_name, expected_lua_type), (address,)) in enumerate(
+            zip(
+                PRIMITIVE_REPLAY_SCHEMA,
+                struct.iter_unpack("<Q", raw_pointers),
+                strict=True,
+            )
+        ):
+            snapshot = read_region(
+                self.process, address, ARGUMENT_DESCRIPTOR_SNAPSHOT_SIZE
+            )
+            if (
+                snapshot is None
+                or len(snapshot) != ARGUMENT_DESCRIPTOR_SNAPSHOT_SIZE
+                or argument_descriptor_type_name(snapshot) != expected_name
+                or snapshot[0x50] != expected_lua_type
+            ):
+                raise ValueError(
+                    f"registered ReqCastSkillNew descriptor {index + 1} changed"
+                )
+            items.append(
+                {
+                    "address": address,
+                    "type_name": expected_name,
+                    "lua_type": expected_lua_type,
+                }
+            )
+
+        values = tuple(argument_values)
+        if len(values) != STATE_REPLAY_MAX_ARGUMENTS:
+            raise ValueError("ReqCastSkillNew replay requires exactly eight arguments")
+        cells = [
+            self._primitive_replay_cell(value, descriptor_type)
+            for value, (descriptor_type, _lua_type) in zip(
+                values, PRIMITIVE_REPLAY_SCHEMA, strict=True
+            )
+        ]
+        record = {
+            "method": PRIMITIVE_REPLAY_METHOD,
+            "sequence": 0,
+            "filetime_100ns": 0,
+            "script_entity": int(script_entity),
+            "lua_state_address": int(lua_state),
+            "variadic_argument_count": STATE_REPLAY_MAX_ARGUMENTS,
+            "argument_sync_state": 1,
+            "lua_argument_capture": "hook_entry_synchronized",
+            "variadic_storage_capture": "hook_entry_synchronized",
+            "lua_argument_cells": cells,
+            "variadic_storage_snapshot": storage.hex(),
+            "argument_descriptor_vector": {"items": items},
+        }
+        prepared = self.prepare_primitive_replay(record, values)
+        prepared["registered_method_storage"] = int(method_storage_address)
+        prepared["registered_method_id"] = struct.unpack_from("<Q", storage, 0x08)[0]
+        return prepared
+
+    def arm_primitive_replay(self) -> int:
+        """Arm one prepared request and return its pre-arm send counter."""
+
+        if self.prepared_primitive_replay is None:
+            raise RuntimeError("no primitive replay has been prepared")
+        status = self.primitive_replay_status()
+        if status["state"] in {"ARMED", "CLAIMED"}:
+            raise RuntimeError("a primitive replay is already in progress")
+        baseline = int(status.get("request_count", 0) or 0)
+        write_memory(
+            self.process,
+            self.state + STATE_REPLAY_ARM_OFFSET,
+            struct.pack("<Q", REPLAY_ARMED),
+        )
+        return baseline
+
+    def cancel_primitive_replay(self) -> None:
+        """Disarm a not-yet-claimed test request."""
+
+        if not getattr(self, "primitive_replay_enabled", False):
+            return
+        if self.installed and self.alive:
+            status = self.primitive_replay_status()
+            if status["state"] == "CLAIMED":
+                raise RuntimeError("primitive replay is already executing")
+            write_memory(
+                self.process,
+                self.state + STATE_REPLAY_ARM_OFFSET,
+                struct.pack("<Q", REPLAY_DISARMED),
+            )
 
     def rearm_request_schedule(
         self,
@@ -1969,13 +2656,15 @@ class TeamStatsRequestHook:
                     method.decode("ascii") for method in self.request_methods
                 ],
                 "last_request_method": "",
+                "script_entity_override": 0,
+                "last_script_entity": 0,
                 "captured_request_count": self.request_next_sequence,
                 "dropped_request_count": self.request_dropped_count,
                 "lua_state_address": "",
                 "string_descriptor_address": "",
                 "lua_string_request_arguments": {},
             }
-        data = read_region(self.process, self.state, 0x40)
+        data = read_region(self.process, self.state, 0x50)
         if not data or data[:8] != STATE_MAGIC:
             raise RuntimeError("team-stat request state became unreadable")
         if self.stable_primary_only:
@@ -1994,6 +2683,12 @@ class TeamStatsRequestHook:
                 "string_descriptor_address": "",
                 "lua_string_request_arguments": {},
                 "last_request_method": self.request_method.decode("ascii"),
+                "script_entity_override": struct.unpack_from(
+                    "<Q", data, STATE_SCRIPT_ENTITY_OVERRIDE_OFFSET
+                )[0],
+                "last_script_entity": struct.unpack_from(
+                    "<Q", data, STATE_LAST_SCRIPT_ENTITY_OFFSET
+                )[0],
                 "captured_request_count": 0,
                 "dropped_request_count": 0,
             }
@@ -2057,6 +2752,12 @@ class TeamStatsRequestHook:
                 getattr(self, "active_lua_string_requests", {})
             ),
             "last_request_method": last_request_method,
+            "script_entity_override": struct.unpack_from(
+                "<Q", data, STATE_SCRIPT_ENTITY_OVERRIDE_OFFSET
+            )[0],
+            "last_script_entity": struct.unpack_from(
+                "<Q", data, STATE_LAST_SCRIPT_ENTITY_OFFSET
+            )[0],
             "captured_request_count": struct.unpack_from(
                 "<Q", ring_header, 0x08
             )[0],
@@ -2120,6 +2821,7 @@ class TeamStatsRequestHook:
         self.lua_state_address = 0
         self.string_descriptor_address = 0
         self.active_lua_string_requests = {}
+        self.prepared_primitive_replay = None
 
     def __enter__(self) -> "TeamStatsRequestHook":
         return self.install()

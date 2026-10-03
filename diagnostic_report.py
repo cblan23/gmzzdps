@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 from network_state import DAMAGE_TARGET_TEMPLATE_IDS, NetworkPacketParser
 
 
-TOOL_NAME = "叨叨诡秘问题检测工具"
+TOOL_NAME = "叨叨诡秘助手问题检测工具"
 TOOL_VERSION = "1.1.0+20260904.1"
 DIAGNOSTIC_SCHEMA_VERSION = 4
 MAX_REPORTED_METHODS = 80

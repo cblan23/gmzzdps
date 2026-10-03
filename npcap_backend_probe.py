@@ -18,6 +18,9 @@ from runtime_capability import create_development_capability
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seconds', type=float, default=45)
+    parser.add_argument('--source', choices=('npcap', 'windows_raw'), default='npcap')
+    parser.add_argument('--no-fallback', action='store_true',
+                        help='require the selected packet source; never load Npcap as fallback')
     parser.add_argument('--records-output', type=Path,
                         help='optional new private gameplay JSONL file; never overwritten')
     parser.add_argument('--unknown-output', type=Path, help='private diagnostic samples of unknown RPCs')
@@ -28,7 +31,9 @@ def main():
         Path(__file__).with_name('runtime-profile.dev.json'), session_id='npcap-local-probe',
         client_id='0'*32, build_id='source-development', client_build='local-validation',
         lease_seconds=args.seconds + 60)
-    client = CaptureProcessClient(runtime_capability=capability, allow_development=True)
+    client = CaptureProcessClient(runtime_capability=capability, allow_development=True,
+                                  capture_source=args.source,
+                                  allow_npcap_fallback=not args.no_fallback)
     methods, stages = Counter(), Counter()
     diagnostics = {}
     serialization_errors = 0
@@ -36,6 +41,7 @@ def main():
     unknown_output = args.unknown_output.open('x', encoding='utf-8') if args.unknown_output else None
     if unknown_output is not None:
         os.environ['GMZZ_NPCAP_CAPTURE_UNKNOWN'] = '1'
+        os.environ['GMZZ_NPCAP_CAPTURE_UNKNOWN_TIMELINE'] = '1'
     started = time.monotonic()
     try:
         client.start()
@@ -46,6 +52,8 @@ def main():
                 continue
             if kind in ('state', 'capture_error'):
                 stages[str(payload.get('stage', kind))] += 1
+                if kind == 'capture_error':
+                    print(json.dumps({'capture_error': payload}, ensure_ascii=False), flush=True)
             elif kind == 'batch':
                 for record in payload.get('entity_metadata_records', []):
                     methods['read_only_entity_metadata'] += 1
@@ -60,14 +68,18 @@ def main():
                     else:
                         if output is not None and 'chat' not in str(record.get('method', '')).casefold():
                             output.write(serialized + '\n')
+                if output is not None:
+                    output.flush()
                 diagnostics = payload.get('native_diagnostic', {}).get('counters', {})
             elif kind == 'fatal':
                 stages['fatal'] += 1
+                print(json.dumps({'fatal': payload}, ensure_ascii=False), flush=True)
                 break
             elif kind == 'protocol_unknown':
                 if unknown_output is not None:
                     for record in payload:
                         unknown_output.write(json.dumps(record, ensure_ascii=True, default=str)+'\n')
+                    unknown_output.flush()
             else:
                 stages[kind] += 1
     finally:
@@ -87,7 +99,7 @@ def main():
             output.close()
         if unknown_output is not None:
             unknown_output.close()
-    print(json.dumps({'stages': dict(stages), 'method_counts': dict(methods),
+    print(json.dumps({'source': args.source, 'stages': dict(stages), 'method_counts': dict(methods),
                       'counters': diagnostics, 'json_serialization_errors': serialization_errors,
                       'note': 'Not independent parity evidence while legacy capture is running.'}))
 

@@ -15,9 +15,15 @@ from ksbc2_skill_names import (
     LiveLocalizationScanner,
     LocalizedCandidate,
     TableRef,
+    discover_root_handle,
     normalize_localization_id,
     table_ref,
     write_json,
+)
+from training_target_metadata import (
+    DAMAGE_TARGET_NAME,
+    RESERVED_DAMAGE_TARGET_TEMPLATE_IDS,
+    is_validated_reserved_damage_target,
 )
 
 
@@ -47,7 +53,9 @@ def _fc_paths(reader: KSBC2Reader, value: object, depth: int = 0) -> list[str]:
 
 
 def extract_monster_sources(
-    reader: KSBC2Reader, root_handle: int = DEFAULT_ROOT_HANDLE
+    reader: KSBC2Reader,
+    root_handle: int = DEFAULT_ROOT_HANDLE,
+    template_ids: set[int] | frozenset[int] | None = None,
 ) -> list[MonsterSource]:
     root = reader.table_dict(root_handle)
     monster_data = reader.table_dict(table_ref(root.get("MonsterData"), "MonsterData"))
@@ -60,6 +68,8 @@ def extract_monster_sources(
             continue
         template_id = int(raw_template_id)
         if template_id <= 0:
+            continue
+        if template_ids is not None and template_id not in template_ids:
             continue
         row = reader.table_dict(raw_row.handle)
         try:
@@ -82,6 +92,59 @@ def extract_monster_sources(
             )
         )
     return sorted(sources, key=lambda item: item.template_id)
+
+
+def validated_reserved_damage_targets(
+    sources: list[MonsterSource],
+) -> dict[str, dict[str, object]]:
+    """Return only future dummy IDs verified by the current MonsterData."""
+
+    result: dict[str, dict[str, object]] = {}
+    for source in sources:
+        if not is_validated_reserved_damage_target(
+            source.template_id,
+            source.boss_type,
+            source.localization_id,
+        ):
+            continue
+        metadata: dict[str, object] = {
+            "boss_type": source.boss_type,
+            "localization_id": source.localization_id,
+            "name": DAMAGE_TARGET_NAME,
+            "damage_target_validated": True,
+        }
+        if source.level is not None:
+            metadata["level"] = source.level
+        result[str(source.template_id)] = metadata
+    return result
+
+
+def load_validated_reserved_damage_targets(
+    module_path: str | Path,
+) -> dict[str, dict[str, object]]:
+    """Validate reserved dummy IDs against the installed client's cache."""
+
+    game_root = Path(module_path).resolve().parents[2]
+    cache_dir = game_root / "Saved" / "kscache" / "14"
+    candidates = list(cache_dir.glob("4efadcdd4c7bb254c65f6f07_*"))
+    if not candidates:
+        return {}
+    source = max(
+        candidates,
+        key=lambda path: (
+            int(path.name.rpartition("_")[2])
+            if path.name.rpartition("_")[2].isdigit()
+            else -1,
+            path.stat().st_mtime_ns,
+        ),
+    )
+    reader = KSBC2Reader.from_path(source)
+    sources = extract_monster_sources(
+        reader,
+        discover_root_handle(reader),
+        RESERVED_DAMAGE_TARGET_TEMPLATE_IDS,
+    )
+    return validated_reserved_damage_targets(sources)
 
 
 def choose_localized_names(

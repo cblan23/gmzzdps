@@ -1371,7 +1371,7 @@
     }
 
     const token = ++state.renderToken;
-    document.title = "叨叨诡秘 · 战斗记录";
+    document.title = "叨叨诡秘助手 · 战斗记录";
     refreshButton.hidden = route.name === "share" || route.name === "battle";
     try {
       if (force) await loadBaseData(true);

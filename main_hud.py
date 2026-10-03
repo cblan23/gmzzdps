@@ -9,11 +9,18 @@ from PIL import Image, ImageChops
 from main_hud_artwork import (
     HUD_LOGICAL_WIDTH,
     HUD_LOGICAL_WIDTH_WITHOUT_DEATHS,
+    HUD_DEFAULT_VISIBLE_ROWS,
     HUD_MAX_VISIBLE_ROWS,
     HUD_ROW_HEIGHT,
+    PVP_TEAM_PAGE_SIZE,
+    PVP_MAX_TEAM_PAGES,
+    PVP_MAX_TEAM_MEMBERS,
+    PVP_TEAM_VISIBLE_ROWS,
     HudRenderResult,
     MainHudRenderer,
     clamp_visible_rows,
+    equipment_type_badge,
+    pvp_equipment_type_badge,
 )
 
 
@@ -107,8 +114,9 @@ class WindowsLayeredPresenter:
         self.gdi32.DeleteDC.argtypes = [wintypes.HDC]
 
     @staticmethod
-    def _root_handle(window) -> int:
-        window.update_idletasks()
+    def _root_handle(window, *, flush: bool = True) -> int:
+        if flush:
+            window.update_idletasks()
         widget = int(window.winfo_id())
         parent = int(ctypes.windll.user32.GetParent(widget) or 0)
         return parent or widget
@@ -182,7 +190,7 @@ class WindowsLayeredPresenter:
             return
         # Tk can replace the wrapper HWND when changing window styles. Keep
         # the already-allocated DIB, but reattach it to the current wrapper.
-        current_hwnd = self._root_handle(self.window)
+        current_hwnd = self._root_handle(self.window, flush=False)
         if current_hwnd != self.hwnd:
             self.hwnd = current_hwnd
             self._reset_layered_style()

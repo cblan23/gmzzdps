@@ -1,4 +1,4 @@
-"""Clear is an overlay action, and portraits never infer combat identity."""
+"""Internal clear guards and exact-template portrait regressions."""
 import unittest
 from unittest import mock
 from main_hud import MainHudRenderer
@@ -86,10 +86,31 @@ class PortraitTests(unittest.TestCase):
         for filename in set(self.renderer._boss_portrait_templates.values()):
             self.assertTrue((ROOT / 'assets/bosses/hud' / filename).is_file(), filename)
 
-    def test_clear_button_is_directly_to_the_right_of_pvp(self):
+    def test_normal_jqh_bosses_have_distinct_portraits(self):
+        expected = {
+            7100471: 'sylvia.png',
+            7100401: 'evil-water-turtle.png',
+            7100441: 'dance-king-baboon.png',
+        }
+        for template_id, filename in expected.items():
+            self.assertEqual(
+                self.renderer._boss_portrait_templates.get(str(template_id)),
+                filename,
+            )
+            self.assertTrue((ROOT / 'assets/bosses/hud' / filename).is_file())
+            self.assertIsNot(
+                self.renderer._boss_portrait(template_id), self.renderer._boss
+            )
+
+    def test_footer_omits_clear_and_keeps_remaining_actions_contiguous(self):
         regions = self.renderer.render(snapshot()).hit_regions
-        self.assertEqual(regions['action:pvp'][2], regions['action:clear'][0])
-        self.assertEqual(regions['action:clear'][2], regions['action:settings'][0])
+        self.assertNotIn('action:clear', regions)
+        actions = ('pvp', 'settings', 'lock', 'pin')
+        for left, right in zip(actions, actions[1:]):
+            self.assertEqual(
+                regions[f'action:{left}'][2],
+                regions[f'action:{right}'][0],
+            )
 
 
 if __name__ == '__main__':

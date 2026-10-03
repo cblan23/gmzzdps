@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock, patch
 from network_state import NetworkPacketParser
 from test_combat_model import CombatModel, DpsWindow
 from test_network_state import SELF_TOKEN, TEAMMATE_TOKEN, PLAYER_ID, packet
@@ -105,7 +106,7 @@ class StartupRatingTests(unittest.TestCase):
         )
         self.assertEqual(
             {row["extraordinary_rating"] for row in rows},
-            set(ratings.values()),
+            {None, ratings[late_token]},
         )
         self.assertFalse(
             any(
@@ -206,11 +207,9 @@ class StartupRatingTests(unittest.TestCase):
                     90_000,
                 )
                 for index, token in enumerate(old_tokens):
-                    self.assertEqual(
-                        parser.entity_profiles[
-                            parser.token_actors[token]
-                        ]["extraordinary_rating"],
-                        81_000 + index,
+                    self.assertNotIn(
+                        "extraordinary_rating",
+                        parser.entity_profiles[parser.token_actors[token]],
                     )
 
     def test_pending_rating_is_attached_when_snapshot_discovers_old_member(self):
@@ -444,15 +443,15 @@ class StartupRatingTests(unittest.TestCase):
         )
         self.assertEqual(parser.party_tokens, {old_token, late_token})
         self.assertEqual(parser.party_member_count, 3)
-        self.assertEqual(
-            parser.entity_profiles[PLAYER_ID + 1]["extraordinary_rating"],
-            81_000,
+        self.assertNotIn(
+            "extraordinary_rating",
+            parser.entity_profiles[PLAYER_ID + 1],
         )
 
     def test_sparse_rejoin_restores_only_exact_token_rating(self):
         parser = self.parser()
         row = packet('', [], sequence=1)
-        self.assertEqual(parser._confirmed_team_rating(TEAMMATE_TOKEN, None, row), 85558)
+        self.assertIsNone(parser._confirmed_team_rating(TEAMMATE_TOKEN, None, row))
         self.assertIsNone(parser._confirmed_team_rating('unknown-token', None, row))
         self.assertEqual(parser._confirmed_team_rating(TEAMMATE_TOKEN, 91234, row), 91234)
 
@@ -463,7 +462,379 @@ class StartupRatingTests(unittest.TestCase):
         parser.process(packet('OnUpdateTeamGroupMemberProps', [TEAMMATE_TOKEN, {11: 92345}], sequence=1))
         self.assertEqual(parser.team_profile_cache[TEAMMATE_TOKEN]['extraordinary_rating'], 92345)
         parser.live_team_property_ratings.clear()
-        self.assertEqual(parser._confirmed_team_rating(TEAMMATE_TOKEN, None, packet('', [], sequence=2)), 92345)
+        self.assertIsNone(parser._confirmed_team_rating(TEAMMATE_TOKEN, None, packet('', [], sequence=2)))
+
+    def test_disk_rating_is_hidden_until_current_session_confirms_it(self):
+        parser = NetworkPacketParser({
+            TEAMMATE_TOKEN: {
+                'name': '墨爵',
+                'profession_id': 1200002,
+                'extraordinary_rating': 83231,
+            }
+        })
+        actor_id = parser._bind_team_token(TEAMMATE_TOKEN, PLAYER_ID + 1)
+        parser.party_tokens.add(TEAMMATE_TOKEN)
+        parser.party_ids.add(actor_id)
+        initial = parser._profile_update(
+            actor_id, packet('', [], sequence=1),
+            user_token=TEAMMATE_TOKEN, entity_type='Player',
+        )
+        self.assertIsNotNone(initial)
+        self.assertNotIn('extraordinary_rating', parser.entity_profiles[actor_id])
+
+        updates = parser.process(packet(
+            'OnUpdateTeamGroupMemberProps',
+            [TEAMMATE_TOKEN, {11: 88893}], sequence=2,
+        ))
+        self.assertEqual(parser.live_team_property_ratings[TEAMMATE_TOKEN], 88893)
+        self.assertEqual(parser.entity_profiles[actor_id]['extraordinary_rating'], 88893)
+        self.assertTrue(any(
+            kind == 'profile' and value.get('extraordinary_rating') == 88893
+            for kind, value in updates
+        ))
+
+        parser.process(packet(
+            'OnUpdateTeamGroupMemberProps',
+            [TEAMMATE_TOKEN, {5: 16720, 6: 16720}], sequence=3,
+        ))
+        self.assertEqual(parser.entity_profiles[actor_id]['extraordinary_rating'], 88893)
+
+    def test_confirmed_self_does_not_show_disk_rating_until_live_refresh(self):
+        parser = NetworkPacketParser(
+            {
+                SELF_TOKEN: {
+                    'name': '莫雪',
+                    'profession_id': 1200002,
+                    'extraordinary_rating': 82929,
+                },
+                TEAMMATE_TOKEN: {
+                    'name': '墨爵',
+                    'profession_id': 1200003,
+                    'extraordinary_rating': 91444,
+                },
+            },
+            remembered_self_token=SELF_TOKEN,
+        )
+        parser.self_token = SELF_TOKEN
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+
+        self.assertNotIn('extraordinary_rating', parser._current_session_team_profile(SELF_TOKEN))
+        self.assertNotIn(
+            'extraordinary_rating',
+            parser._current_session_team_profile(TEAMMATE_TOKEN),
+        )
+
+        parser.live_team_property_ratings[SELF_TOKEN] = 83555
+        self.assertEqual(
+            parser._current_session_team_profile(SELF_TOKEN)[
+                'extraordinary_rating'
+            ],
+            83555,
+        )
+
+    def test_late_start_hp_heartbeat_bootstraps_teammate_without_stale_rating(self):
+        parser = NetworkPacketParser(
+            {
+                SELF_TOKEN: {
+                    'name': '\u672c\u673a\u73a9\u5bb6',
+                    'profession_id': 1200006,
+                    'extraordinary_rating': 82791,
+                },
+                TEAMMATE_TOKEN: {
+                    'name': '\u665a\u542f\u52a8\u961f\u53cb',
+                    'profession_id': 1200003,
+                    'extraordinary_rating': 78056,
+                },
+            },
+            remembered_self_token=SELF_TOKEN,
+        )
+        parser._confirm_local_actor(
+            PLAYER_ID, packet('', [], sequence=1), native=True
+        )
+        parser._confirm_self_token(
+            SELF_TOKEN, packet('', [], sequence=2)
+        )
+
+        updates = parser.process(
+            packet(
+                'OnUpdateTeamGroupMemberProps',
+                [TEAMMATE_TOKEN, {4: False, 5: 16583, 6: 16583}],
+                sequence=3,
+            )
+        )
+
+        actor_id = parser.token_actors[TEAMMATE_TOKEN]
+        self.assertIn(TEAMMATE_TOKEN, parser.party_tokens)
+        self.assertIn(TEAMMATE_TOKEN, parser.other_party_tokens)
+        self.assertIn(actor_id, parser.party_ids)
+        self.assertEqual(parser.party_member_count, 2)
+        self.assertEqual(
+            parser.entity_profiles[actor_id]['name'], '\u665a\u542f\u52a8\u961f\u53cb'
+        )
+        self.assertEqual(
+            parser.entity_profiles[actor_id]['profession_id'], 1200003
+        )
+        self.assertNotIn(
+            'extraordinary_rating', parser.entity_profiles[actor_id]
+        )
+        self.assertTrue(
+            any(
+                kind == 'party'
+                and TEAMMATE_TOKEN in value.get('user_tokens', [])
+                and value.get('member_count') == 2
+                for kind, value in updates
+            )
+        )
+        self.assertTrue(
+            any(
+                kind == 'life'
+                and value.get('actor_id') == actor_id
+                and value.get('current_hp') == 16583.0
+                and value.get('max_hp') == 16583.0
+                for kind, value in updates
+            )
+        )
+
+        rating_updates = parser.process(
+            packet(
+                'OnUpdateTeamGroupMemberProps',
+                [TEAMMATE_TOKEN, {11: 88893}],
+                sequence=4,
+            )
+        )
+        self.assertEqual(
+            parser.entity_profiles[actor_id]['extraordinary_rating'], 88893
+        )
+        self.assertTrue(
+            any(
+                kind == 'profile'
+                and value.get('extraordinary_rating') == 88893
+                for kind, value in rating_updates
+            )
+        )
+
+    def test_late_start_live_power_fills_heartbeat_teammate_rating(self):
+        parser = NetworkPacketParser(
+            {
+                SELF_TOKEN: {
+                    'name': '\u672c\u673a\u73a9\u5bb6',
+                    'profession_id': 1_200_002,
+                    'extraordinary_rating': 82_928,
+                },
+                TEAMMATE_TOKEN: {
+                    'name': '\u58a8\u7235',
+                    'profession_id': 1_200_003,
+                    # A persisted value must not masquerade as the current one.
+                    'extraordinary_rating': 83_428,
+                },
+            },
+            remembered_self_token=SELF_TOKEN,
+        )
+        parser._confirm_local_actor(
+            PLAYER_ID, packet('', [], sequence=1), native=True
+        )
+        parser._confirm_self_token(
+            SELF_TOKEN, packet('', [], sequence=2)
+        )
+        parser.process(
+            packet(
+                'OnUpdateTeamGroupMemberProps',
+                [TEAMMATE_TOKEN, {4: False, 5: 16_720, 6: 16_720}],
+                sequence=3,
+            )
+        )
+
+        actor_id = parser.token_actors[TEAMMATE_TOKEN]
+        self.assertNotIn(
+            'extraordinary_rating', parser.entity_profiles[actor_id]
+        )
+        updates = parser.apply_read_only_team_profile(
+            {
+                'method': 'NpcapLiveTeamProfile',
+                'capture_source': 'npcap_read_only_team_profile',
+                'profile_source': 'live_lua_power',
+                'filetime_100ns': packet('', [], sequence=4)[
+                    'filetime_100ns'
+                ],
+                'user_token': TEAMMATE_TOKEN,
+                'name': '\u58a8\u7235',
+                'profession_id': 1_200_003,
+                'level': 70,
+                'extraordinary_rating': 91_444,
+            }
+        )
+
+        self.assertEqual(
+            parser.entity_profiles[actor_id]['extraordinary_rating'], 91_444
+        )
+        self.assertEqual(
+            parser.live_team_property_ratings[TEAMMATE_TOKEN], 91_444
+        )
+        self.assertEqual(
+            parser.team_profile_cache[TEAMMATE_TOKEN][
+                'extraordinary_rating'
+            ],
+            91_444,
+        )
+        self.assertTrue(
+            any(
+                kind == 'profile'
+                and value.get('entity_id') == actor_id
+                and value.get('extraordinary_rating') == 91_444
+                for kind, value in updates
+            )
+        )
+
+    def test_live_power_rejects_unproven_and_departed_tokens(self):
+        stranger_token = 'AQAAAOwNstranger'
+        record = {
+            'method': 'NpcapLiveTeamProfile',
+            'capture_source': 'npcap_read_only_team_profile',
+            'profile_source': 'live_lua_power',
+            'filetime_100ns': packet('', [], sequence=1)[
+                'filetime_100ns'
+            ],
+            'user_token': stranger_token,
+            'name': 'not-a-member',
+            'extraordinary_rating': 99_999,
+        }
+        parser = NetworkPacketParser()
+        self.assertEqual(parser.apply_read_only_team_profile(record), [])
+        self.assertNotIn(stranger_token, parser.token_actors)
+
+        parser.process(
+            packet(
+                'OnUpdateTeamGroupMemberProps',
+                [TEAMMATE_TOKEN, {4: False, 5: 16_720, 6: 16_720}],
+                sequence=2,
+            )
+        )
+        parser.process(
+            packet(
+                'OnMsgOtherLeaveTeamGroup',
+                [TEAMMATE_TOKEN],
+                sequence=3,
+            )
+        )
+        departed_record = {
+            **record,
+            'user_token': TEAMMATE_TOKEN,
+            'name': '\u5df2\u9000\u961f\u961f\u53cb',
+        }
+        self.assertEqual(
+            parser.apply_read_only_team_profile(departed_record), []
+        )
+        self.assertNotIn(
+            TEAMMATE_TOKEN, parser.live_team_property_ratings
+        )
+
+    def test_server_self_rating_cannot_be_replaced_by_read_only_supplement(self):
+        parser = NetworkPacketParser({}, remembered_self_token=SELF_TOKEN)
+        parser.self_token, parser.self_id, parser.self_confirmed = SELF_TOKEN, PLAYER_ID, True
+        parser._remember_confirmed_self_rating(SELF_TOKEN, 88893)
+        updates = parser.apply_read_only_team_profile({
+            'method': 'NpcapLiveTeamProfile', 'capture_source': 'npcap_read_only_team_profile',
+            'user_token': SELF_TOKEN, 'name': '本人', 'extraordinary_rating': 78750,
+            'client_rating_key': 'power',
+        })
+        self.assertEqual(parser.live_team_property_ratings[SELF_TOKEN], 88893)
+        self.assertNotIn(SELF_TOKEN, parser.read_only_rating_tokens)
+        self.assertTrue(any(value.get('extraordinary_rating') == 88893 for kind, value in updates))
+
+    def test_server_packet_upgrades_read_only_rating(self):
+        parser = NetworkPacketParser({})
+        parser._remember_confirmed_self_rating(SELF_TOKEN, 78750, read_only=True)
+        self.assertEqual(parser._confirmed_team_rating(SELF_TOKEN, 88893, packet('', [], sequence=1)), 88893)
+        self.assertNotIn(SELF_TOKEN, parser.read_only_rating_tokens)
+
+    def test_legacy_alias_cannot_be_promoted_by_a_read_only_record(self):
+        parser = NetworkPacketParser({})
+        parser.self_token, parser.self_id, parser.self_confirmed = SELF_TOKEN, PLAYER_ID, True
+        self.assertEqual(parser.apply_read_only_team_profile({
+            'capture_source': 'npcap_read_only_team_profile', 'user_token': SELF_TOKEN,
+            'client_rating_key': 'ZhanLi', 'extraordinary_rating': 78750,
+        }), [])
+        self.assertNotIn(SELF_TOKEN, parser.live_team_property_ratings)
+
+    def test_token_bound_actor_and_party_scores_restore_late_start_display(self):
+        for key, binding in (('CEScore', 'actor_CEScore'), ('ceScore', 'team_member_ceScore')):
+            with self.subTest(key=key):
+                parser = NetworkPacketParser({})
+                parser.self_token, parser.self_id, parser.self_confirmed = SELF_TOKEN, PLAYER_ID, True
+                updates = parser.apply_read_only_team_profile({
+                    'capture_source': 'npcap_read_only_team_profile', 'user_token': SELF_TOKEN,
+                    'client_rating_key': key, 'client_rating_binding': binding,
+                    'extraordinary_rating': 80975, 'name': '本人',
+                })
+                self.assertEqual(parser.entity_profiles[PLAYER_ID]['extraordinary_rating'], 80975)
+                self.assertTrue(any(kind == 'profile' and value.get('extraordinary_rating') == 80975
+                                    for kind, value in updates))
+                parser.process(packet('OnUpdateTeamGroupSelfProps', [{11: 81100}], sequence=1))
+                parser.apply_read_only_team_profile({
+                    'capture_source': 'npcap_read_only_team_profile', 'user_token': SELF_TOKEN,
+                    'client_rating_key': key, 'client_rating_binding': binding,
+                    'extraordinary_rating': 80975,
+                })
+                self.assertEqual(parser.entity_profiles[PLAYER_ID]['extraordinary_rating'], 81100)
+
+    def test_unique_local_ce_score_pair_is_self_only(self):
+        parser = NetworkPacketParser({})
+        parser.self_token, parser.self_id, parser.self_confirmed = SELF_TOKEN, PLAYER_ID, True
+        record = {
+            'capture_source': 'npcap_read_only_team_profile',
+            'user_token': SELF_TOKEN,
+            'client_rating_key': 'CEScore',
+            'client_rating_binding': 'local_actor_CEScore_pair',
+            'extraordinary_rating': 81227,
+        }
+
+        updates = parser.apply_read_only_team_profile(record)
+
+        self.assertEqual(parser.entity_profiles[PLAYER_ID]['extraordinary_rating'], 81227)
+        parser.party_tokens.add(TEAMMATE_TOKEN)
+        parser._bind_team_token(TEAMMATE_TOKEN, PLAYER_ID + 1)
+        self.assertEqual(
+            parser.apply_read_only_team_profile(
+                {**record, 'user_token': TEAMMATE_TOKEN}
+            ),
+            [],
+        )
+
+    def test_fresh_exact_lua_table_updates_after_equipment_switch_without_a_repeated_rpc(self):
+        parser = NetworkPacketParser({})
+        parser.self_token, parser.self_id, parser.self_confirmed = SELF_TOKEN, PLAYER_ID, True
+        server = packet('OnUpdateTeamGroupSelfProps', [{11: 80702}], sequence=1)
+        server['filetime_100ns'] = 10000
+        parser.process(server)
+        record = {
+            'capture_source': 'npcap_read_only_team_profile', 'user_token': SELF_TOKEN,
+            'client_rating_key': 'CEScore', 'client_rating_binding': 'actor_CEScore',
+            'filetime_100ns': 11000, 'extraordinary_rating': 80975,
+        }
+        parser.apply_read_only_team_profile(record)
+        self.assertEqual(parser.entity_profiles[PLAYER_ID]['extraordinary_rating'], 80975)
+        self.assertEqual(parser.live_team_rating_observed_100ns[SELF_TOKEN], 11000)
+        self.assertEqual(parser.apply_read_only_team_profile({**record, 'filetime_100ns': 9000,
+                                                            'extraordinary_rating': 78750}), [])
+        self.assertEqual(parser.live_team_rating_observed_100ns[SELF_TOKEN], 11000)
+        self.assertEqual(parser.entity_profiles[PLAYER_ID]['extraordinary_rating'], 80975)
+        server['filetime_100ns'] = 12000
+        server['decoded_arguments'] = [{11: 81100}]
+        parser.process(server)
+        self.assertEqual(parser.entity_profiles[PLAYER_ID]['extraordinary_rating'], 81100)
+        self.assertEqual(parser.apply_read_only_team_profile(record), [])
+
+    def test_score_alias_requires_the_verified_layout_not_just_the_key(self):
+        parser = NetworkPacketParser({})
+        parser.self_token, parser.self_id, parser.self_confirmed = SELF_TOKEN, PLAYER_ID, True
+        for key, binding in (('CEScore', None), ('ceScore', None), ('ceScore', 'actor_CEScore'),
+                             ('ZhanLi', 'actor_CEScore')):
+            self.assertEqual(parser.apply_read_only_team_profile({
+                'capture_source': 'npcap_read_only_team_profile', 'user_token': SELF_TOKEN,
+                'client_rating_key': key, 'client_rating_binding': binding,
+                'extraordinary_rating': 78750,
+            }), [])
 
     def parser(self):
         return NetworkPacketParser({
@@ -491,6 +862,60 @@ class StartupRatingTests(unittest.TestCase):
         self.assertEqual(parser.self_token, SELF_TOKEN)
         self.assertEqual(parser.entity_profiles[PLAYER_ID]['extraordinary_rating'], 85558)
         self.assertEqual(parser.current_self_identity()['name'], '本人')
+
+
+class CaptureRecoveryTests(unittest.TestCase):
+    @staticmethod
+    def window():
+        window = object.__new__(DpsWindow)
+        window.closing = False
+        window.authorization_resetting = False
+        window.license_network_paused = False
+        window.capture_started = True
+        window.capture_restart_after_id = None
+        window.capture_restart_attempts = 0
+        window.connected = True
+        window.startup_capture_pending = False
+        window.startup_wait_reason = ""
+        window.startup_wait_started_at = 0.0
+        window.root = Mock()
+        window.root.after.return_value = "after#capture-restart"
+        window.dot = Mock()
+        window.status_label = Mock()
+        window._schedule_layered_main_render = Mock()
+        return window
+
+    def test_unexpected_capture_stop_schedules_bounded_restart(self):
+        window = self.window()
+        globals_dict = DpsWindow._handle_capture_worker_stopped.__globals__
+        with patch.dict(
+            globals_dict, {"write_capture_lifecycle_event": Mock()}
+        ):
+            window._handle_capture_worker_stopped(
+                {"reason": "worker_exception", "requested": False}
+            )
+
+        self.assertFalse(window.capture_started)
+        self.assertFalse(window.connected)
+        self.assertTrue(window.startup_capture_pending)
+        self.assertEqual(
+            window.capture_restart_after_id, "after#capture-restart"
+        )
+        window.root.after.assert_called_once()
+
+    def test_authorization_pause_never_restarts_capture(self):
+        window = self.window()
+        window.license_network_paused = True
+        globals_dict = DpsWindow._handle_capture_worker_stopped.__globals__
+        with patch.dict(
+            globals_dict, {"write_capture_lifecycle_event": Mock()}
+        ):
+            window._handle_capture_worker_stopped(
+                {"reason": "parent_stop_event", "requested": True}
+            )
+
+        self.assertFalse(window.capture_started)
+        window.root.after.assert_not_called()
 
 
 if __name__ == '__main__':

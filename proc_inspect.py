@@ -13,6 +13,7 @@ import ctypes
 import re
 import struct
 import sys
+import time
 from ctypes import wintypes
 
 
@@ -32,6 +33,12 @@ PAGE_GUARD = 0x100
 PAGE_NOACCESS = 0x01
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 MAX_PATH = 260
+# Windows may return ERROR_PARTIAL_COPY while a live process is loading or
+# unloading a module.  Treat that narrow race as transient; callers still get
+# the original error after a bounded retry budget.
+ERROR_PARTIAL_COPY = 299
+SNAPSHOT_RETRY_ATTEMPTS = 4
+SNAPSHOT_RETRY_DELAY_SECONDS = 0.05
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -114,10 +121,19 @@ def winerror(label: str) -> OSError:
 
 
 def snapshot(flags: int, pid: int = 0):
-    handle = kernel32.CreateToolhelp32Snapshot(flags, pid)
-    if handle == INVALID_HANDLE_VALUE:
-        raise winerror("CreateToolhelp32Snapshot")
-    return handle
+    last_error = None
+    for attempt in range(SNAPSHOT_RETRY_ATTEMPTS):
+        handle = kernel32.CreateToolhelp32Snapshot(flags, pid)
+        if handle != INVALID_HANDLE_VALUE:
+            return handle
+        error = winerror("CreateToolhelp32Snapshot")
+        last_error = error
+        if error.errno != ERROR_PARTIAL_COPY or attempt + 1 >= SNAPSHOT_RETRY_ATTEMPTS:
+            raise error
+        time.sleep(SNAPSHOT_RETRY_DELAY_SECONDS)
+    # The loop always returns or raises; retain a defensive failure for mocked
+    # Win32 APIs that do not follow the normal contract.
+    raise last_error or OSError(ERROR_PARTIAL_COPY, "CreateToolhelp32Snapshot failed")
 
 
 def find_pid(name: str) -> int:

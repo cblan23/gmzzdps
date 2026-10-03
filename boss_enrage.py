@@ -73,6 +73,8 @@ class BossEnrageRule:
     critical_margin_seconds: float = 10.0
     countdown_start_signal: str = ""
     first_sample_is_baseline: bool = False
+    countdown_group: str = ""
+    countdown_phase: int = 0
     hp_slots: tuple[BossEnrageHpSlot, ...] = ()
 
     def matches(
@@ -185,6 +187,10 @@ def _rule_from_mapping(
         ).strip(),
         first_sample_is_baseline=bool(
             value.get("first_sample_is_baseline", False)
+        ),
+        countdown_group=str(value.get("countdown_group", "") or "").strip(),
+        countdown_phase=max(
+            0, int(_finite_float(value.get("countdown_phase"), 0.0))
         ),
         hp_slots=tuple(hp_slots),
     )
@@ -306,8 +312,12 @@ class BossEnragePredictor:
         self._slot_hp: dict[str, float] = {}
         self._schedule_start_hp_ratio = 1.0
         self._schedule_baseline_ready = False
+        self._countdown_group = ""
+        self._countdown_phase = 0
+        self._countdown_elapsed = 0.0
+        self._countdown_monotonic = 0.0
 
-    def reset(self) -> None:
+    def _reset_active(self) -> None:
         self._encounter_key = ""
         self._rule_id = ""
         self._stable_state = ""
@@ -317,6 +327,13 @@ class BossEnragePredictor:
         self._slot_hp.clear()
         self._schedule_start_hp_ratio = 1.0
         self._schedule_baseline_ready = False
+
+    def reset(self) -> None:
+        self._reset_active()
+        self._countdown_group = ""
+        self._countdown_phase = 0
+        self._countdown_elapsed = 0.0
+        self._countdown_monotonic = 0.0
 
     def _aggregate_hp(
         self,
@@ -414,7 +431,7 @@ class BossEnragePredictor:
         encounter_key: str,
         rule: BossEnrageRule,
     ) -> None:
-        self.reset()
+        self._reset_active()
         self._encounter_key = encounter_key
         self._rule_id = rule.rule_id
 
@@ -480,7 +497,10 @@ class BossEnragePredictor:
         del forced_invulnerability
         boss_list = list(bosses)
         if not encounter_running or not boss_list:
-            self.reset()
+            # A sequential Boss can disappear during its scripted transition.
+            # Hide the forecast while keeping its shared countdown anchor for
+            # the configured successor phase.
+            self._reset_active()
             return None
         try:
             parsed_dungeon_id = int(dungeon_id or 0)
@@ -488,15 +508,13 @@ class BossEnragePredictor:
             parsed_dungeon_id = 0
         rule = self.catalog.match(boss_list, dungeon_id=parsed_dungeon_id)
         if rule is None:
-            self.reset()
+            self._reset_active()
             return None
         key = str(encounter_key or "").strip() or "current"
         encounter_elapsed = max(0.0, _finite_float(elapsed_seconds, 0.0))
         monotonic_now = max(
             0.0, _finite_float(monotonic_seconds, encounter_elapsed)
         )
-        if key != self._encounter_key or rule.rule_id != self._rule_id:
-            self._start_encounter(key, rule)
         try:
             explicit_countdown_elapsed = (
                 None
@@ -505,11 +523,48 @@ class BossEnragePredictor:
             )
         except (TypeError, ValueError, OverflowError):
             explicit_countdown_elapsed = None
-        elapsed = (
+        raw_elapsed = (
             explicit_countdown_elapsed
             if rule.countdown_start_signal and explicit_countdown_elapsed is not None
             else encounter_elapsed
         )
+        next_encounter = (
+            key != self._encounter_key or rule.rule_id != self._rule_id
+        )
+        countdown_group = str(rule.countdown_group or "").strip()
+        countdown_phase = max(0, int(rule.countdown_phase or 0))
+        elapsed = raw_elapsed
+        if countdown_group and countdown_phase:
+            monotonic_delta = max(
+                0.0, monotonic_now - self._countdown_monotonic
+            )
+            same_phase = bool(
+                not next_encounter
+                and countdown_group == self._countdown_group
+                and countdown_phase == self._countdown_phase
+            )
+            successor_phase = bool(
+                countdown_group == self._countdown_group
+                and countdown_phase > self._countdown_phase > 0
+                and monotonic_delta <= rule.enrage_seconds
+            )
+            if same_phase or successor_phase:
+                elapsed = max(
+                    raw_elapsed,
+                    self._countdown_elapsed + monotonic_delta,
+                )
+        if next_encounter:
+            self._start_encounter(key, rule)
+        if countdown_group and countdown_phase:
+            self._countdown_group = countdown_group
+            self._countdown_phase = countdown_phase
+            self._countdown_elapsed = elapsed
+            self._countdown_monotonic = monotonic_now
+        else:
+            self._countdown_group = ""
+            self._countdown_phase = 0
+            self._countdown_elapsed = 0.0
+            self._countdown_monotonic = 0.0
         # Follow the same resolved duration as the HUD even when a shared
         # clock correction shortens it. Keeping a stale high-water mark here
         # would make elapsed + remaining disagree with the displayed timer.
@@ -517,11 +572,11 @@ class BossEnragePredictor:
 
         aggregate = self._aggregate_hp(rule, boss_list)
         if aggregate is None:
-            self.reset()
+            self._reset_active()
             return None
         current_hp, max_hp, _composition = aggregate
         if current_hp <= 0.0:
-            self.reset()
+            self._reset_active()
             return None
         boss_percent = current_hp / max_hp * 100.0
 

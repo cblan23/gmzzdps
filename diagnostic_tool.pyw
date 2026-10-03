@@ -27,7 +27,7 @@ enable_windows_dpi_awareness()
 
 import tkinter as tk
 
-from capture_process import CaptureProcessClient, TEAM_STATS_MODE_UNKNOWN
+from capture_backend import CaptureProcessClient, TEAM_STATS_MODE_UNKNOWN
 from device_identity import resolve_client_id
 from diagnostic_report import (
     DiagnosticAnalyzer,
@@ -116,7 +116,11 @@ def running_dps_pid() -> int:
         )
         while available:
             name = str(entry.szExeFile or "").casefold()
-            if entry.th32ProcessID != current_pid and "dps-logs" in name:
+            if entry.th32ProcessID != current_pid and (
+                "dps-logs" in name
+                or "daodaomysteryassistant" in name
+                or "叨叨诡秘助手" in name
+            ):
                 return int(entry.th32ProcessID)
             available = kernel32.Process32NextW(
                 process_snapshot, ctypes.byref(entry)
@@ -392,10 +396,10 @@ class DiagnosticWindow:
             if pid:
                 self._set_step("game", f"已找到 · PID {pid}", "ok")
                 if dps_pid:
-                    self._set_step("network", f"DPS 正在运行 · PID {dps_pid}", "warn")
-                    self._set_status("请先关闭 Dps-Logs 主程序", "warn")
+                    self._set_step("network", f"助手正在运行 · PID {dps_pid}", "warn")
+                    self._set_status("请先关闭叨叨诡秘助手主程序", "warn")
                     self._set_primary(
-                        "等待关闭 Dps-Logs", self._start_detection, enabled=False
+                        "等待关闭叨叨诡秘助手", self._start_detection, enabled=False
                     )
                 else:
                     self._set_step("network", "等待", "normal")

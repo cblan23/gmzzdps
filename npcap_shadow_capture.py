@@ -34,6 +34,7 @@ ERRBUF_SIZE = 256
 AF_INET = 2
 ERROR_INSUFFICIENT_BUFFER = 122
 UDP_TABLE_OWNER_PID = 1
+TCP_TABLE_OWNER_PID_ALL = 5
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 DLT_NULL = 0
@@ -126,6 +127,21 @@ class MibUdp6RowOwnerPid(ctypes.Structure):
                 ("local_port", ctypes.c_uint32), ("owning_pid", ctypes.c_uint32)]
 
 
+class MibTcpRowOwnerPid(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in (
+        "state", "local_addr", "local_port", "remote_addr", "remote_port", "owning_pid"
+    )]
+
+
+class MibTcp6RowOwnerPid(ctypes.Structure):
+    _fields_ = [
+        ("local_addr", ctypes.c_ubyte * 16), ("local_scope", ctypes.c_uint32),
+        ("local_port", ctypes.c_uint32), ("remote_addr", ctypes.c_ubyte * 16),
+        ("remote_scope", ctypes.c_uint32), ("remote_port", ctypes.c_uint32),
+        ("state", ctypes.c_uint32), ("owning_pid", ctypes.c_uint32),
+    ]
+
+
 @dataclass(frozen=True)
 class Adapter:
     name: str
@@ -138,6 +154,24 @@ class UdpEndpoint:
     pid: int
     local_address: str
     local_port: int
+
+    @property
+    def protocol(self) -> str:
+        return "udp"
+
+
+@dataclass(frozen=True)
+class TcpEndpoint:
+    pid: int
+    local_address: str
+    local_port: int
+    remote_address: str
+    remote_port: int
+    state: int = 5
+
+    @property
+    def protocol(self) -> str:
+        return "tcp"
 
 
 @dataclass(frozen=True)
@@ -284,6 +318,51 @@ def list_udp_endpoints() -> list[UdpEndpoint]:
     return endpoints
 
 
+def list_tcp_endpoints() -> list[TcpEndpoint]:
+    """Query OS ownership only; never open/probe a game connection."""
+    function = ctypes.WinDLL("iphlpapi.dll", use_last_error=True).GetExtendedTcpTable
+    function.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
+                         ctypes.c_bool, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    function.restype = ctypes.c_uint32
+    endpoints = []
+    for family, row_type in ((socket.AF_INET, MibTcpRowOwnerPid),
+                             (socket.AF_INET6, MibTcp6RowOwnerPid)):
+        size = ctypes.c_uint32(0)
+        buffer = None
+        for _ in range(4):
+            result = function(buffer, ctypes.byref(size), False, family, TCP_TABLE_OWNER_PID_ALL, 0)
+            if result == 0 and buffer is not None:
+                break
+            if result not in (0, ERROR_INSUFFICIENT_BUFFER):
+                raise OSError(result, "GetExtendedTcpTable failed")
+            buffer = ctypes.create_string_buffer(max(4, size.value))
+        else:
+            raise RuntimeError("TCP endpoint table changed repeatedly during query")
+        raw = buffer.raw
+        count = struct.unpack_from("<I", raw)[0]
+        row_size = ctypes.sizeof(row_type)
+        if 4 + count * row_size > len(raw):
+            raise RuntimeError("Truncated TCP endpoint table")
+        for index in range(count):
+            row = row_type.from_buffer_copy(raw, 4 + index * row_size)
+            # SYN_SENT / SYN_RECEIVED / ESTABLISHED, not unrelated listeners
+            # or old TIME_WAIT sockets. State changes aren't connection IDs.
+            if int(row.state) not in (3, 4, 5):
+                continue
+            def address(value):
+                return (socket.inet_ntoa(struct.pack("<I", value)) if family == socket.AF_INET
+                        else socket.inet_ntop(socket.AF_INET6, bytes(value)))
+            endpoints.append(TcpEndpoint(
+                int(row.owning_pid), address(row.local_addr), socket.ntohs(row.local_port & 0xffff),
+                address(row.remote_addr), socket.ntohs(row.remote_port & 0xffff), int(row.state),
+            ))
+    return endpoints
+
+
+def list_game_endpoints(pid: int) -> list[UdpEndpoint | TcpEndpoint]:
+    return [row for row in list_udp_endpoints() + list_tcp_endpoints() if row.pid == int(pid)]
+
+
 def process_path(pid: int) -> str:
     kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
     kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
@@ -309,12 +388,14 @@ def process_path(pid: int) -> str:
         kernel32.CloseHandle(handle)
 
 
-def discover_game(args: argparse.Namespace) -> tuple[int, str, list[UdpEndpoint]]:
+def discover_game(args: argparse.Namespace) -> tuple[int, str, list[UdpEndpoint | TcpEndpoint]]:
     endpoints = list_udp_endpoints()
+    if getattr(args, "include_tcp", False):
+        endpoints += list_tcp_endpoints()
     if args.pid:
         selected = [row for row in endpoints if row.pid == args.pid]
         if not selected:
-            raise RuntimeError(f"PID {args.pid} owns no UDP ports")
+            raise RuntimeError(f"PID {args.pid} owns no capture endpoints")
         return args.pid, process_path(args.pid), selected
     matches: list[tuple[int, str, list[UdpEndpoint]]] = []
     for pid in {row.pid for row in endpoints}:
@@ -322,7 +403,7 @@ def discover_game(args: argparse.Namespace) -> tuple[int, str, list[UdpEndpoint]
         if Path(path).name.casefold() == args.process_name.casefold():
             matches.append((pid, path, [row for row in endpoints if row.pid == pid]))
     if not matches:
-        raise RuntimeError(f"No running {args.process_name!r} process with UDP ports was found")
+        raise RuntimeError(f"No running {args.process_name!r} process with capture endpoints was found")
     return max(matches, key=lambda item: item[0])
 
 
@@ -554,6 +635,14 @@ def capture(args: argparse.Namespace) -> int:
                 timestamp = float(header.ts.tv_sec) + float(header.ts.tv_usec) / 1_000_000
                 direction = "outbound" if udp.src_ip == local_ip else "inbound" if udp.dst_ip == local_ip else "unknown"
                 segments = parse_kcp_segments(udp.payload)
+                if args.summary_only and args.hex_prefix_bytes:
+                    for segment in segments:
+                        payload_offset = int(segment["payload_offset"])
+                        payload_length = int(segment["payload_length"])
+                        segment["payload_hex_prefix"] = udp.payload[
+                            payload_offset:payload_offset
+                            + min(payload_length, args.hex_prefix_bytes)
+                        ].hex()
                 for segment in segments:
                     segment["duplicate"] = tracker.mark(direction, segment)
                     counters[f"kcp_{segment['command'].lower()}"] += 1
@@ -562,12 +651,16 @@ def capture(args: argparse.Namespace) -> int:
                 counters[f"direction_{direction}"] += 1
                 counters["udp_payload_bytes"] += len(udp.payload)
                 counters["kcp_datagrams" if segments else "non_kcp_datagrams"] += 1
-                write_jsonl(stream, {"record_type": "udp_packet", "packet_index": packet_index,
+                record = {"record_type": "udp_packet", "packet_index": packet_index,
                     "timestamp_epoch": timestamp, "timestamp_utc": utc_iso(timestamp), "direction": direction,
                     "src_ip": udp.src_ip, "src_port": udp.src_port, "dst_ip": udp.dst_ip, "dst_port": udp.dst_port,
                     "captured_length": int(header.caplen), "wire_length": int(header.length),
                     "udp_payload_length": len(udp.payload), "udp_payload_sha256": hashlib.sha256(udp.payload).hexdigest(),
-                    "udp_payload_base64": base64.b64encode(udp.payload).decode("ascii"), "kcp_segments": segments})
+                    "udp_payload_hex_prefix": udp.payload[:args.hex_prefix_bytes].hex(),
+                    "kcp_segments": segments}
+                if not args.summary_only:
+                    record["udp_payload_base64"] = base64.b64encode(udp.payload).decode("ascii")
+                write_jsonl(stream, record)
                 if packet_index % 25 == 0:
                     stream.flush()
             finished = time.time()
@@ -590,6 +683,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-ip", default="")
     parser.add_argument("--duration", type=float, default=600.0)
     parser.add_argument("--output", default="")
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Store hashes and short hex prefixes, but not complete UDP payloads.",
+    )
+    parser.add_argument(
+        "--hex-prefix-bytes",
+        type=int,
+        default=32,
+        help="Number of UDP/KCP payload bytes retained as a hex prefix in summary mode.",
+    )
     parser.add_argument("--list", action="store_true")
     return parser
 

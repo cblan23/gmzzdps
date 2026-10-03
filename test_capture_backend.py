@@ -25,13 +25,13 @@ class CaptureBackendTests(unittest.TestCase):
             return subprocess.run([sys.executable, '-c', command, directory], cwd=ROOT,
                                   capture_output=True, text=True, timeout=30)
 
-    def test_normal_start_uses_restored_hook_backend(self):
+    def test_normal_start_is_passive_and_loads_no_hook_backend(self):
         result = self.run_backend()
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
-        self.assertEqual(data['backend'], 'legacy')
-        self.assertEqual(data['module'], 'capture_process')
-        self.assertTrue(data['legacy_loaded'])
+        self.assertEqual(data['backend'], 'windows_raw')
+        self.assertEqual(data['module'], 'windows_capture_process')
+        self.assertFalse(data['legacy_loaded'])
         self.assertEqual(data['data'], '')
         self.assertEqual(data['version'], '')
 
@@ -40,12 +40,22 @@ class CaptureBackendTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Unsupported capture backend', result.stderr)
 
-    def test_isolated_variant_is_still_explicit(self):
-        result = self.run_backend({'backend': 'npcap', 'data_directory': 'GMZZDpsMeterNpcap'})
+    def test_old_manifest_cannot_reenable_active_capture(self):
+        result = self.run_backend({'backend': 'legacy'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('requires the built-in Windows Raw Socket backend', result.stderr)
+
+    def test_windows_manifest_uses_receive_only_adapter_without_hooks(self):
+        result = self.run_backend({'backend': 'windows_raw'})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)['data'], 'GMZZDpsMeterNpcap')
-        self.assertEqual(json.loads(result.stdout)['module'], 'npcap_capture_process')
-        self.assertFalse(json.loads(result.stdout)['legacy_loaded'])
+        data = json.loads(result.stdout)
+        self.assertEqual(data['module'], 'windows_capture_process')
+        self.assertFalse(data['legacy_loaded'])
+
+    def test_old_npcap_variant_cannot_reenable_driver(self):
+        result = self.run_backend({'backend': 'npcap', 'data_directory': 'GMZZDpsMeterNpcap'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Unsupported capture backend: npcap', result.stderr)
 
 
 if __name__ == '__main__':

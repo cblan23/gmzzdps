@@ -1,0 +1,852 @@
+{
+  "schema_version": 1,
+  "metadata_cache": "4efadcdd4c7bb254c65f6f07_2153744",
+  "avatars": {
+    "4270001": {
+      "file": "avatars/4270001.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Angel.UI_F_Angel",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "72a1bfdac77bb3b8ba25173417a00f51214e1781c1fc28e2976ed59e6a3b37f8"
+    },
+    "4270002": {
+      "file": "avatars/4270002.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Kallima.UI_F_Kallima",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "3f9285d5753e663e231c3793b26a4bce7cd55802ed52a29baa48dc2f12bd0584"
+    },
+    "4270003": {
+      "file": "avatars/4270003.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Vampire.UI_F_Vampire",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "267806daaecae4207c6fd6e0a3f6a29a9c1d3f917299ca63ae4bb37cb510b573"
+    },
+    "4270004": {
+      "file": "avatars/4270004.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Audrey002.UI_F_Audrey002",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "365186bf8a6e06ee1113bf15949dd8c53796712eb6ef156d18c79c74cb8f74c3"
+    },
+    "4270005": {
+      "file": "avatars/4270005.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Benson001.UI_M_Benson001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "d2f0aa5d186604ceb03bb320785f3a1aeec37ec13893646b8830241642e070b3"
+    },
+    "4270006": {
+      "file": "avatars/4270006.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Dally001.UI_F_Dally001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "e51aedb9a72e30f965f18d45cad45e385159d31626f2fcbff7f5a0e34c1649d4"
+    },
+    "4270007": {
+      "file": "avatars/4270007.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Frank001.UI_M_Frank001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "20036d5dca3e57d4fb67600633a8938b54c2815c9381bba8c61d2b86f884eeb4"
+    },
+    "4270008": {
+      "file": "avatars/4270008.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Fors001.UI_F_Fors001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "5b1f446ac7d392e140b7af6927ee0d8e7860d98921b2fe4bbc7c1adfd2dd8e99"
+    },
+    "4270009": {
+      "file": "avatars/4270009.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Klein001.UI_M_Klein001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "cb12734fe10de0c1873022beeaa6f873ac3a8b04cbe2a3494a23f62794e9dc55"
+    },
+    "4270010": {
+      "file": "avatars/4270010.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Niel001.UI_M_Niel001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "e7c4add73d92291cee6c2cf5d6edda2c97687adf5838d0266847f84ba9e73729"
+    },
+    "4270011": {
+      "file": "avatars/4270011.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Norwaya001.UI_F_Norwaya001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "cdc1fcfd65f5a069b7e2e45c22cd3fa8f357ae840692057e8921565e04745cca"
+    },
+    "4270012": {
+      "file": "avatars/4270012.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Merrisa001.UI_F_Merrisa001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "02708da0b2589657f5ce618171d05b5431cbe97005219de3af9cce6b5b35d2d9"
+    },
+    "4270013": {
+      "file": "avatars/4270013.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_Susai.UI_Susai",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "6b2ffba0be19ce960e8a71222032241f624864bb596f5923bae1444c2cdd651d"
+    },
+    "4270014": {
+      "file": "avatars/4270014.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Leonard001.UI_M_Leonard001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "dac8000e496917e00ed66c0793c024e398f04e1472330d278e27d46b80ce3a19"
+    },
+    "4270015": {
+      "file": "avatars/4270015.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Dunn001.UI_M_Dunn001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "9af92cd5b7e0d7c204ecd1ca1ca07dc507a391edba665956c05dcc3e502708cf"
+    },
+    "4270016": {
+      "file": "avatars/4270016.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Frye001.UI_M_Frye001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "6ff3e1a64d8fa2089d682e9443070f4f5cd9b6b259b39b5ccc3bb3a3eb46b15b"
+    },
+    "4270017": {
+      "file": "avatars/4270017.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Alger001.UI_M_Alger001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "448347a9c326ab6b9087a7062dfc50d7c1aeb50e41ee74d125efc7ed8332b9bf"
+    },
+    "4270018": {
+      "file": "avatars/4270018.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Taffeta.UI_M_Taffeta",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "c4db7387f858aa54d4d58f00cc0e448a46758cde93f0c3ae38a5d5162964e607"
+    },
+    "4270019": {
+      "file": "avatars/4270019.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Taffeta.UI_F_Taffeta",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "b409d1d6342e5d3d3ae24e3b7bc943ca10fc358a295eda320da4b98eee9b57d5"
+    },
+    "4270020": {
+      "file": "avatars/4270020.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_Peom.UI_Peom",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "aca5f697a1289481f704c6120dcbdd086f33f5fa202d8cbde68de1c1e7f72e12"
+    },
+    "4270021": {
+      "file": "avatars/4270021.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_Dance.UI_Dance",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "f01fc5bb591b3454d2eb71d8e4f99d972a00eb3ba7767add3c038e4d50b4a28d"
+    },
+    "4270022": {
+      "file": "avatars/4270022.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Night.UI_M_Night",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "d6c5fb542a8b58674ca86e9d395a2a9acad5ecdf3d4f5b842bef1af188e0aad3"
+    },
+    "4270023": {
+      "file": "avatars/4270023.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Night.UI_F_Night",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "6d669cbb07ae17495d90076996776a152ac3033fc8da49c25a5dbde89285f55d"
+    },
+    "4270024": {
+      "file": "avatars/4270024.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Featherwit.UI_F_Featherwit",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "2633f2b4cd81b2c8fa159facd621e1371e414f358d57225d3c4cb0d92bacb67a"
+    },
+    "4270025": {
+      "file": "avatars/4270025.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Featherwit.UI_M_Featherwit",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "be43bbeb67af910da3ae6da62729df42a933eb357898665b5d35dbc84c9d3148"
+    },
+    "4270028": {
+      "file": "avatars/4270028.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Kallima.UI_M_Kallima",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "2f302a1fc76166a861fced50042ae485e8084bf727370752c134a9104007df2c"
+    },
+    "4270029": {
+      "file": "avatars/4270029.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_MysteryPryer.UI_M_MysteryPryer",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "764c71e1a33f88fe4ca9ee3c19294f653b8733cae4725e01f1caf4cad80e5f6e"
+    },
+    "4270030": {
+      "file": "avatars/4270030.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_MysteryPryer.UI_F_MysteryPryer",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "8aca526a47d2aa3d21c9eeff27ebfeb17c3f57082b3e57c745ac02dc7ffd1af9"
+    },
+    "4270031": {
+      "file": "avatars/4270031.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Vampire.UI_M_Vampire",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "0f35fd4c95dce0ed323fde11490f7e75002b6515d2fcb507555082fd193d76a4"
+    },
+    "4270034": {
+      "file": "avatars/4270034.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Flower.UI_M_Flower",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "091a2405976e6e988cb12f8574ab66ec30931aa453203863bafcd531dc6bc63b"
+    },
+    "4270035": {
+      "file": "avatars/4270035.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Flower.UI_F_Flower",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "559dbdfc6940f1a1e9925936e5212e626f884663c8cc2fac679197eccacf8d5d"
+    },
+    "4270036": {
+      "file": "avatars/4270036.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Alice.UI_M_Alice",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "f5249b0c6d496a2ea01a2da9a2edabc2bce156d7f08318708991cff879a7702b"
+    },
+    "4270037": {
+      "file": "avatars/4270037.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Alice.UI_F_Alice",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "7f614006ab1a53e9e476f70a1c62eedd524dd442eb7870cc909660bc29e8bf3a"
+    },
+    "4270038": {
+      "file": "avatars/4270038.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Gete.UI_M_Gete",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "065812d43cf193789f83a51add9b93097b4aaedddedad5728e949ddad4d0dd9c"
+    },
+    "4270039": {
+      "file": "avatars/4270039.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Gete.UI_F_Gete",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "db3e8dbdbf6a21c53eaf8d84078d67f2274b100964e02081d726189da3b1f64f"
+    },
+    "4270042": {
+      "file": "avatars/4270042.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Angel.UI_M_Angel",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "b98b1a2c4634c08b03cb2edba9d72c30770c0a7ffa8d2091f5cb5d3b4df939cf"
+    },
+    "4270043": {
+      "file": "avatars/4270043.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_GoldDance.UI_M_GoldDance",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "2eb48435336724456dcf52108876ef42df2b5ed5d55bdf30d3874db44301570a"
+    },
+    "4270044": {
+      "file": "avatars/4270044.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_GoldDance.UI_F_GoldDance",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "99613c42409791bef3650114ef5b8a0d2bbc0d66a3d51f08457884f534687c1e"
+    },
+    "4270045": {
+      "file": "avatars/4270045.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Ruby.UI_M_Ruby",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "fc5868aca70d12b4393f3239746c65bd1ad186bd5a08c37cd6e712b598d5c8d7"
+    },
+    "4270046": {
+      "file": "avatars/4270046.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Ballet.UI_F_Ballet",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "723f676a3c662873141bde85009ab72de125666308f21e48bdd5f25a75020c23"
+    },
+    "4270047": {
+      "file": "avatars/4270047.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Moonpage.UI_M_Moonpage",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "9646180b18c493cc57affaa6e9e22d0048016aac59dd6577132b5484d836906c"
+    },
+    "4270048": {
+      "file": "avatars/4270048.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Moonpage.UI_F_Moonpage",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "de2f17448e2e1af1493532640dd4bc449b1c2b192b75c810cf3d724200a56b27"
+    },
+    "4270055": {
+      "file": "avatars/4270055.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Apprentice.UI_M_Apprentice",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "ad177d52738f75916093b1a6ba28738e9e75063d23ecd8d584d77bc6082580f6"
+    },
+    "4270056": {
+      "file": "avatars/4270056.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Apprentice.UI_F_Apprentice",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "43d6cb869c94d325e2bcf04fea1c520267b664acddbe5980e84883a0a60ef143"
+    },
+    "4270057": {
+      "file": "avatars/4270057.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Warrior.UI_M_Warrior",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "cc14a1c3fde074861556768582188e2e5b547c098c75e0138f4b62e6654ce5bc"
+    },
+    "4270058": {
+      "file": "avatars/4270058.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Warrior.UI_F_Warrior",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "acf36e0e1130c33d3f7b9e34705bac8e8e2b6b94229bce8c1314d9e844826ba4"
+    },
+    "4270059": {
+      "file": "avatars/4270059.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Visionary.UI_F_Visionary",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "5896236355bc26d12e43a011f71acb0702ee12cbd4260a0c0392dae7e888a91b"
+    },
+    "4270060": {
+      "file": "avatars/4270060.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Sun.UI_M_Sun",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "d006a2ff764b493fbdbaf6aca7b5d6e19e53dc8043d5999d010e5e293a05a41c"
+    },
+    "4270061": {
+      "file": "avatars/4270061.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Sun.UI_F_Sun",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "86d642224d854e4d8e6b845202c6fe2a4c1534a2071e1484851570e2129b17b3"
+    },
+    "4270064": {
+      "file": "avatars/4270064.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Monet.UI_M_Monet",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "a3021f6b125f65175974f7cc634347285b7224ca311068c46134999da6879f28"
+    },
+    "4270065": {
+      "file": "avatars/4270065.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Monet.UI_F_Monet",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "ed2eda59c52a43337283267557b872f6401eb08b9fff8dd5999de700d8d241c2"
+    },
+    "4270072": {
+      "file": "avatars/4270072.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_ElvenKing.UI_M_ElvenKing",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "d34830c6d20318d3f82eda0ad5aa165e10188c468124b7c2673826be9770f727"
+    },
+    "4270073": {
+      "file": "avatars/4270073.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_ElvenKing.UI_F_ElvenKing",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "2b7c5097463fefbcaf8c97afab606a25be7b8d39c7f0775b8763f2a8577b24de"
+    },
+    "4270074": {
+      "file": "avatars/4270074.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Witch.UI_M_Witch",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "be1f067834d86ff47b291832180215c42704495e46418f2c25c3b2035ca991c9"
+    },
+    "4270075": {
+      "file": "avatars/4270075.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Witch.UI_F_Witch",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "8c3388e2e5ec6a9a33111090e0102b10125a5d77a9084362d185573b2245942e"
+    },
+    "4270076": {
+      "file": "avatars/4270076.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Naturalist.UI_M_Naturalist",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "ca199edceb64ffd2bc1a500679beadda8ff980c77e2d76613ffab4f40781062e"
+    },
+    "4270077": {
+      "file": "avatars/4270077.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Naturalist.UI_F_Naturalist",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "193c02eefa4f0cebd7cd994aec990467ebfc7f76a81b1e1421a936f52e339951"
+    },
+    "4270078": {
+      "file": "avatars/4270078.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Eclipse.UI_M_Eclipse",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "b4e110f6e15eecc16046c45481ae9e4341656a2dbb4a91626ce54a9ba8b88b20"
+    },
+    "4270079": {
+      "file": "avatars/4270079.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Eclipse.UI_F_Eclipse",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "49ccda78a04174a1117f862128176f98506696e69acebb3d71eda36ce689e459"
+    },
+    "4270080": {
+      "file": "avatars/4270080.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Healing.UI_M_Healing",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "2128f68867f0dad6e4b29ed88daca627945ac2900d04dd23fe98749b577c714f"
+    },
+    "4270081": {
+      "file": "avatars/4270081.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Healing.UI_F_Healing",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "e6ca973f1803928e471056d323c7711b2333a52ccdc0947ff9efe28dc98aea78"
+    },
+    "4270082": {
+      "file": "avatars/4270082.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Nightmare.UI_M_Nightmare",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "5b35eaa3f0644c9f9995ba71f73b44d4f716410b0e824100995cc1db6a8cefbb"
+    },
+    "4270083": {
+      "file": "avatars/4270083.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Nightmare.UI_F_Nightmare",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "b01f22fe1ab9f527f8573568074e8acf7c6fd7015289c21628917ff100def0e7"
+    },
+    "4270086": {
+      "file": "avatars/4270086.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_BlackKing.UI_M_BlackKing",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "818ae4d1d5341823bc3aaedd8c1e943b496e628aa780d885b1a797011343177a"
+    },
+    "4270087": {
+      "file": "avatars/4270087.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_BlackKing.UI_F_BlackKing",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "51aa8efc72b390ded172d124f7d552dcdb68d7f9205683f1a831e1de6047c438"
+    },
+    "4270088": {
+      "file": "avatars/4270088.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_YellowSwimWear.UI_M_YellowSwimWear",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "86cdb988704e4605e30ae4f3d0ba79769c0eca62c0cb00c49e49902f52bdb99e"
+    },
+    "4270089": {
+      "file": "avatars/4270089.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_YellowSwimWear.UI_F_YellowSwimWear",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "120f301b6eedb95e7584b0b95c2125261aa27c0de44f7e4d0882a44f4286ada7"
+    },
+    "4270090": {
+      "file": "avatars/4270090.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Echoes.UI_M_Echoes",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "0c4c1a9c0bd068b95aa5b50efe57de4f3aeb401e65c812b794b678ebc978f544"
+    },
+    "4270091": {
+      "file": "avatars/4270091.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Echoes.UI_F_Echoes",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "e0aa50b1e2e69d4a5044204d92369fcd836691b2871ad3e18816ea4c7f9dd321"
+    },
+    "4270092": {
+      "file": "avatars/4270092.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_Dragon02.UI_Dragon02",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "bbaaa42ca1a95466b34fda03be4df5adb1c643cdb756b3f956fc06258fc1250a"
+    },
+    "4270093": {
+      "file": "avatars/4270093.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_RadiantEmpyrean.UI_RadiantEmpyrean",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "2e1def7813324dd230db0cf95305f2c3617aa781aee56b7696d35b63e8e8f821"
+    },
+    "4270094": {
+      "file": "avatars/4270094.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_WarriorHigh.UI_M_WarriorHigh",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "0a3294f303c6dc37ce162e68484ad06b4ca9cc30eae1fe3fbab8926c4f909123"
+    },
+    "4270095": {
+      "file": "avatars/4270095.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_FeatherwitHigh.UI_F_FeatherwitHigh",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "0913e1b9377deab570a31e632af6a6d85fdbf43bd82e965782db7fd5cf3506ea"
+    },
+    "4270097": {
+      "file": "avatars/4270097.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Druid.UI_F_Druid",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "dc3a301c819f22e30ac20b137b9eb900c02ab738571afa25f54d1ca13d7ee0c7"
+    },
+    "4270098": {
+      "file": "avatars/4270098.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Werewolf.UI_M_Werewolf",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "f873cd458d920ee4bfe7c8ef9998c0f0bb858772da47867311875aff0e7fa7f8"
+    },
+    "4270099": {
+      "file": "avatars/4270099.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Werewolf.UI_F_Werewolf",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "e44f1ddc4142f5b39914ea0bc152a7f8a93503d90e207aeb8175abbca05cf70f"
+    },
+    "4270100": {
+      "file": "avatars/4270100.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_BloodyMary.UI_M_BloodyMary",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "7712a0f36ffb66a5ffcb2c8f97fc8a2e2ccc33b131984c04fb3f26fbb84f6f60"
+    },
+    "4270101": {
+      "file": "avatars/4270101.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_BloodyMary.UI_F_BloodyMary",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "b32572840bab7188d2a203ce6e2f6846f564990869c4c4fcbf7d5741cbb03f0a"
+    },
+    "4270102": {
+      "file": "avatars/4270102.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Eclipse001.UI_M_Eclipse001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "c05fd03d5e0d18cc786229e9f42e7119e22c8c198146baba34008c87579bfc9a"
+    },
+    "4270103": {
+      "file": "avatars/4270103.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Eclipse001.UI_F_Eclipse001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "c5e0fa3ac80884077b9262edb0b06fd3a1fa4159eed3b0ffda4d5a0424539b18"
+    },
+    "4270106": {
+      "file": "avatars/4270106.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Cicada001.UI_M_Cicada001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "a858f154ee1d4ac41ebbcd66c906ed5ed40cd8ee11168fec7310543ea1e1534d"
+    },
+    "4270107": {
+      "file": "avatars/4270107.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Druid001.UI_F_Druid001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "383ef2961843871c0ae9f0ac689662f4879586e0c950ad037696f393b8558ffe"
+    },
+    "4270108": {
+      "file": "avatars/4270108.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_M_Werewolf001.UI_M_Werewolf001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "62f76464dc5a2ffa783ffdbeef9e23c7f369be3574b8da1cb5e4a34336b86cda"
+    },
+    "4270109": {
+      "file": "avatars/4270109.png",
+      "object_path": "/Game/Arts/UI_2/Resource/Item/Middle/Appearance/Avatar/UI_F_Werewolf001.UI_F_Werewolf001",
+      "size": [
+        128,
+        128
+      ],
+      "source_sha256": "597ef63df1e389b693a5337a74da2bc4e51bf4b6fbc27a89d64b8ef8401396a9"
+    }
+  },
+  "frames": {
+    "4271000": {
+      "file": "frames/4271000.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_Default.UI_AvatarFrame_Default",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "f371697c9d029189f9c3c2e0433cc4b7cf7df226650261967f04e927224f0c73"
+    },
+    "4271002": {
+      "file": "frames/4271002.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_Thorn.UI_AvatarFrame_Thorn",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "9f38d9182f782732a3ba8969e94570c056d17ec0463b586884637c0c2ed48f07"
+    },
+    "4271004": {
+      "file": "frames/4271004.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_Susai.UI_AvatarFrame_Susai",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "7585c80c93dcab4fd28d477019f31e42aa598b24b9a1567f531b01f5f14ab7bb"
+    },
+    "4271008": {
+      "file": "frames/4271008.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_Glass.UI_AvatarFrame_Glass",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "809706484b170225a749d850a0b79ec603202fe4a36270eaa39326181574755c"
+    },
+    "4271009": {
+      "file": "frames/4271009.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_PocketWatch.UI_AvatarFrame_PocketWatch",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "8e5f7253a624055f61e290418e0cd9133bed53a848d9d0abcffb57458c65e602"
+    },
+    "4271014": {
+      "file": "frames/4271014.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_PVPS101.UI_AvatarFrame_PVPS101",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "470dbb648aaa0924608ee9d42d83a9e6e6daa0d6c11e2eec1513244fb2691cbe"
+    },
+    "4271016": {
+      "file": "frames/4271016.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_PVPS104.UI_AvatarFrame_PVPS104",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "8ea5bb504badb82da287edd65b942d5e60b5e34b4bc2f6f5caca0d4b0f978586"
+    },
+    "4271019": {
+      "file": "frames/4271019.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_PVPS106.UI_AvatarFrame_PVPS106",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "420c8a02681af8baa034998940a7cb3b24c3432a28c9831544c16b082ebfb195"
+    },
+    "4271023": {
+      "file": "frames/4271023.png",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/InterfaceAppearance/AvatarFrame/UI_AvatarFrame_Feather.UI_AvatarFrame_Feather",
+      "size": [
+        160,
+        160
+      ],
+      "source_sha256": "2b25b95ebc0753b22abaaf35eea95ee252218eada99a5cbda75ddd3db60f71ed"
+    }
+  },
+  "failures": [
+    {
+      "kind": "avatars",
+      "id": "4270096",
+      "error": "stored CRC mismatch for 0649e4e39076240700000001: a25ceca3 != 40eb715f"
+    }
+  ]
+}

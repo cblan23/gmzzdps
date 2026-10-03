@@ -11,14 +11,24 @@ class HudRenderCache:
         self.hits = 0
         self.misses = 0
 
-    def render(self, renderer, snapshot, *, pixel_scale, font_size):
+    def render(
+        self,
+        renderer,
+        snapshot,
+        *,
+        pixel_scale,
+        font_size,
+        assume_snapshot_immutable=False,
+    ):
         options = (pixel_scale, font_size)
         if (renderer is self.renderer and self.result is not None
                 and options == self.options and snapshot == self.snapshot):
             self.hits += 1
             return self.result
-        # Cache an owned copy: retained Boss/row dictionaries can mutate later.
-        owned = deepcopy(snapshot)
+        # PVP snapshots are freshly projected for each paint and are never
+        # mutated after this call. Avoid copying every roster/equipment row on
+        # each combat event; retain the defensive copy for legacy PVE callers.
+        owned = snapshot if assume_snapshot_immutable else deepcopy(snapshot)
         result = renderer.render(snapshot, pixel_scale=pixel_scale, font_size=font_size)
         self.renderer, self.snapshot, self.options, self.result = renderer, owned, options, result
         self.misses += 1

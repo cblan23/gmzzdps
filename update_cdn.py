@@ -9,6 +9,8 @@ def valid_cdn_url(url,build_id):
     except ValueError:return False
     return (parts.scheme=='https' and parts.netloc=='downloads.daodaogame.vip'
             and not parts.query and not parts.fragment
+            # The legacy object name is an update-protocol compatibility
+            # boundary, not the displayed product name.
             and bool(re.fullmatch('/releases/'+build_id+r'/Dps-Logs-v[0-9]+(?:\.[0-9]+){2,3}[a-z]?\.exe',parts.path)))
 
 def open_cdn(url,build_id,offset,digest,context,timeout=30):
@@ -17,7 +19,7 @@ def open_cdn(url,build_id,offset,digest,context,timeout=30):
         def redirect_request(self,req,fp,code,msg,headers,newurl):
             if not valid_cdn_url(newurl,build_id):raise ValueError('Untrusted CDN redirect')
             return super().redirect_request(req,fp,code,msg,headers,newurl)
-    headers={'Accept-Encoding':'identity','User-Agent':'Dps-Logs-Updater'}
+    headers={'Accept-Encoding':'identity','User-Agent':'DaodaoMysteryAssistant-Updater'}
     # OSS ETag is not SHA256. This URL is immutable and pinned to build_id;
     # final SHA256 remains authoritative. Sending SHA256 as If-Range would
     # mismatch OSS's ETag and silently restart every partial transfer.

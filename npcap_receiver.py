@@ -82,19 +82,42 @@ def game_udp_filter(local_ip, ports):
     return f'ip and host {address} and ((udp and ({port_filter})) or (ip[9] = 17 and (ip[6:2] & 0x1fff != 0)))'
 
 
+def game_transport_filter(local_ip, endpoints):
+    """Capture only owned protocol/port pairs, including IP fragments."""
+    address = ipaddress.ip_address(local_ip)
+    clauses = []
+    for protocol, number in (("udp", 17), ("tcp", 6)):
+        ports = sorted({int(row.local_port) for row in endpoints
+                        if getattr(row, "protocol", "udp") == protocol and 0 < int(row.local_port) <= 65535})
+        if not ports:
+            continue
+        port_filter = " or ".join(f"port {port}" for port in ports)
+        if address.version == 6:
+            clauses.append(f"(ip6[6] = {number} and {protocol} and ({port_filter})) "
+                           f"or (ip6[6] != {number} and ip6 protochain {number})")
+        else:
+            clauses.append(f"({protocol} and ({port_filter})) "
+                           f"or (ip[9] = {number} and (ip[6:2] & 0x1fff != 0))")
+    if not clauses:
+        raise ValueError("No game transport ports")
+    return f"{'ip6' if address.version == 6 else 'ip'} and host {address} and (" + " or ".join(f"({clause})" for clause in clauses) + ")"
+
+
 def endpoint_direction(packet, endpoints, local_addresses):
     """Match address AND owned port, including localhost and wildcard binds."""
-    def owned(address, port):
+    def owned(address, port, remote_address, remote_port):
         for endpoint in endpoints:
-            if endpoint.local_port != port:
+            if endpoint.local_port != port or getattr(endpoint, "protocol", "udp") != packet.protocol:
+                continue
+            if packet.protocol == 'tcp' and (endpoint.remote_address, endpoint.remote_port) != (remote_address, remote_port):
                 continue
             bound = ipaddress.ip_address(endpoint.local_address)
             if str(bound) == address or (bound.is_unspecified and address in local_addresses
                                         and bound.version == ipaddress.ip_address(address).version):
                 return True
         return False
-    source = owned(packet.src_ip, packet.src_port)
-    destination = owned(packet.dst_ip, packet.dst_port)
+    source = owned(packet.src_ip, packet.src_port, packet.dst_ip, packet.dst_port)
+    destination = owned(packet.dst_ip, packet.dst_port, packet.src_ip, packet.src_port)
     if destination and not source:
         return packet.dst_ip, packet.dst_port, packet.src_ip, packet.src_port, 'inbound'
     if source and not destination:
@@ -147,7 +170,7 @@ class MultiAdapterReceiver:
                 self.dll.pcap_close(self.handles.pop(name)[0].handle)
                 self.counters['capture_adapter_removals'] += 1
         for name, (adapter, addresses) in selected.items():
-            expression = ' or '.join(f'({game_udp_filter(address, ports)})' for address in sorted(addresses))
+            expression = ' or '.join(f'({game_transport_filter(address, endpoints)})' for address in sorted(addresses))
             existing = self.handles.get(name)
             opened = None
             try:
@@ -231,9 +254,11 @@ class BufferedReceiver:
     One thread exclusively owns all pcap operations. No handle is closed or
     reconfigured concurrently with pcap_next_ex. Queued frames own their bytes.
     """
-    def __init__(self, receiver, read_stats, *, max_frames=32768, max_bytes=64*1024*1024):
+    def __init__(self, receiver, read_stats, *, max_frames=32768,
+                 max_bytes=64*1024*1024, backend_name='npcap'):
         self.receiver = receiver
         self.read_stats = read_stats
+        self.backend_name = str(backend_name or 'capture')
         self.max_frames = max(1, int(max_frames))
         self.max_bytes = max(1, int(max_bytes))
         self.condition = threading.Condition()
@@ -241,6 +266,7 @@ class BufferedReceiver:
         self.byte_count = 0
         self.pending_refresh = None
         self.error = None
+        self.failure = None
         self.stopped = False
         self.done = False
         self.closed = False
@@ -249,7 +275,12 @@ class BufferedReceiver:
         self._handles = dict(receiver.handles)
         self._addresses = set(receiver.local_addresses)
         self._endpoints = list(receiver.endpoints)
-        self.thread = threading.Thread(target=self._run, name='NpcapReceive', daemon=True)
+        thread_label = ''.join(
+            character for character in self.backend_name.title() if character.isalnum()
+        ) or 'Capture'
+        self.thread = threading.Thread(
+            target=self._run, name=f'{thread_label}Receive', daemon=True
+        )
         self.thread.start()
 
     @property
@@ -293,6 +324,12 @@ class BufferedReceiver:
                     self.receiver.refresh(refresh)
                 frame = self.receiver.next_frame()
                 now = time.monotonic()
+                # A wildcard dual-stack endpoint can reveal its concrete local
+                # address only when the first packet arrives. Publish it before
+                # ownership checks consume that same frame.
+                if frame is not None:
+                    with self.condition:
+                        self._addresses = set(self.receiver.local_addresses)
                 if now >= next_stats:
                     status = self.receiver.statistics(self.read_stats)
                     with self.condition:
@@ -314,6 +351,7 @@ class BufferedReceiver:
         except Exception as exc:
             with self.condition:
                 self.error = f'{type(exc).__name__}: {exc}'
+                self.failure = exc
         finally:
             try:
                 self.receiver.close()
@@ -331,7 +369,11 @@ class BufferedReceiver:
                 self.byte_count -= len(frame.data)
                 return frame
             if self.error:
-                raise RuntimeError('Npcap receiver failed: ' + self.error)
+                if isinstance(self.failure, RuntimeError):
+                    raise self.failure
+                raise RuntimeError(
+                    f'{self.backend_name} receiver failed: ' + self.error
+                )
             return None
 
     def close(self):

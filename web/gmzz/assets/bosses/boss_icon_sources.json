@@ -419,6 +419,15 @@
       "observed_in_history": false,
       "note": "MonsterData 未配置 StageIcon；使用客户端 Interact_WoodenMan 专用交互图标。"
     },
+    "7100634": {
+      "name": "伤害木桩",
+      "icon": "training-dummy.png",
+      "confidence": "runtime_entity_and_damage_confirmed",
+      "stage_ids": [],
+      "dungeon_ids": [],
+      "observed_in_history": true,
+      "note": "2026-10-02 实测 84 级新十二人本伤害木桩。"
+    },
     "7101004": {
       "name": "伤害木桩",
       "icon": "training-dummy.png",
@@ -1722,15 +1731,23 @@
     },
     "7110200": {
       "name": "罗塞尔的残留意志",
-      "icon": "roselle-will.png",
-      "confidence": "reviewed_alias",
-      "stage_ids": []
+      "icon": "roselle-residual.png",
+      "confidence": "client_stage_icon",
+      "stage_ids": [
+        5150113,
+        5150114,
+        5150115
+      ]
     },
     "7110208": {
-      "name": "罗塞尔的残留意志",
-      "icon": "roselle-will.png",
-      "confidence": "reviewed_alias",
-      "stage_ids": []
+      "name": "罗塞尔的污染意志",
+      "icon": "roselle-polluted.png",
+      "confidence": "client_stage_icon",
+      "stage_ids": [
+        5150095,
+        5150096,
+        5150112
+      ]
     },
     "7190025": {
       "name": "绯红意志",
@@ -2168,6 +2185,26 @@
         "icon": "head-enemy-08.png",
         "stage_ids": [
           5150032
+        ]
+      }
+    ],
+    "罗塞尔的残留意志": [
+      {
+        "icon": "roselle-residual.png",
+        "stage_ids": [
+          5150113,
+          5150114,
+          5150115
+        ]
+      }
+    ],
+    "罗塞尔的污染意志": [
+      {
+        "icon": "roselle-polluted.png",
+        "stage_ids": [
+          5150095,
+          5150096,
+          5150112
         ]
       }
     ],
@@ -2882,8 +2919,8 @@
       "dungeon_names": []
     },
     "5150095": {
-      "name": "罗塞尔的意志",
-      "icon": "roselle-will.png",
+      "name": "罗塞尔的污染意志",
+      "icon": "roselle-polluted.png",
       "dungeon_ids": [
         5100064
       ],
@@ -2892,8 +2929,8 @@
       ]
     },
     "5150096": {
-      "name": "罗塞尔的意志",
-      "icon": "roselle-will.png",
+      "name": "罗塞尔的污染意志",
+      "icon": "roselle-polluted.png",
       "dungeon_ids": [
         5100065
       ],
@@ -3112,14 +3149,32 @@
       ]
     },
     "5150112": {
-      "name": "罗塞尔的意志",
-      "icon": "roselle-will.png",
+      "name": "罗塞尔的污染意志",
+      "icon": "roselle-polluted.png",
       "dungeon_ids": [
         5100075
       ],
       "dungeon_names": [
         "罗塞尔单BOSS团本-终局挑战"
       ]
+    },
+    "5150113": {
+      "name": "罗塞尔的残留意志",
+      "icon": "roselle-residual.png",
+      "dungeon_ids": [5100064],
+      "dungeon_names": ["罗塞尔单BOSS团本-普通"]
+    },
+    "5150114": {
+      "name": "罗塞尔的残留意志",
+      "icon": "roselle-residual.png",
+      "dungeon_ids": [5100065],
+      "dungeon_names": ["罗塞尔单BOSS团本-史诗"]
+    },
+    "5150115": {
+      "name": "罗塞尔的残留意志",
+      "icon": "roselle-residual.png",
+      "dungeon_ids": [5100075],
+      "dungeon_names": ["罗塞尔单BOSS团本-终局挑战"]
     }
   },
   "dungeons": {
@@ -3365,6 +3420,7 @@
         25
       ],
       "stage_ids": [
+        5150113,
         5150095
       ],
       "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RoselleReadyBg.RoselleReadyBg"
@@ -3375,6 +3431,7 @@
         25
       ],
       "stage_ids": [
+        5150114,
         5150096
       ],
       "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RoselleReadyBg.RoselleReadyBg"
@@ -3475,6 +3532,7 @@
         27
       ],
       "stage_ids": [
+        5150115,
         5150112
       ],
       "page_background": "/Game/Arts/UI_2/Resource/ConfigIcon/Dungeon/ReadyBg/RoselleReadyBg.RoselleReadyBg"
@@ -3926,6 +3984,18 @@
       "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Roselle02.Roselle02",
       "package_id": "78804a88f2ddc849",
       "source_sha256": "6bff363e9cdcf3c427540bcfbdebac9aecad1ef8b88c7aa041730337bf44e960",
+      "png_sha256": "403eb97874c7814764ed163a3254e0d72636a865a4c549b89ce9e9db614bc46b"
+    },
+    "roselle-residual.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Roselle01.Roselle01",
+      "package_id": "686e3a9ecbb2e499",
+      "png_sha256": "d515c971b2a96c3711424c207b7a1a9b1b630c57f75a48e1ba3401bed323c748"
+    },
+    "roselle-polluted.png": {
+      "dimensions": "164x164",
+      "object_path": "/Game/Arts/UI_2/Resource/ConfigIcon/Character/BossHead/Roselle02.Roselle02",
+      "package_id": "78804a88f2ddc849",
       "png_sha256": "403eb97874c7814764ed163a3254e0d72636a865a4c549b89ce9e9db614bc46b"
     },
     "sasriel.png": {

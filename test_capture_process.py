@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import capture_process as capture_module
@@ -720,7 +721,8 @@ class CaptureProcessTests(unittest.TestCase):
                     {"sequence": 200, "method": "OnMsgDestroyBulletV2"},
                     {"sequence": 201, "method": "OnMsgSyncCurrentHp"},
                     {"sequence": 202, "method": "OnMsgBeforeEnterNewSpace"},
-                    {"sequence": 203, "method": "OnUpdateTeamExample"},
+                    {"sequence": 203, "method": "OnMsgLeaveQuestControl"},
+                    {"sequence": 204, "method": "OnUpdateTeamExample"},
                 ]
             ]
         )
@@ -731,7 +733,7 @@ class CaptureProcessTests(unittest.TestCase):
         self.assertFalse(poller.is_alive())
         records = poller.drain_records()
         self.assertEqual(
-            [record["sequence"] for record in records], [201, 202, 203]
+            [record["sequence"] for record in records], [201, 202, 203, 204]
         )
         self.assertEqual(poller.drain_sequence_gaps(), [])
 
@@ -786,6 +788,9 @@ class HookWorkerBatchTests(unittest.TestCase):
         calls: list[tuple] = []
 
         class Parser:
+            def __init__(self):
+                self.network_seen = False
+
             def process_native_boss_type(self, record):
                 calls.append(("boss", record["function"]))
                 return []
@@ -800,6 +805,15 @@ class HookWorkerBatchTests(unittest.TestCase):
 
             def process(self, record, *, include_damage):
                 calls.append(("network", record["function"], include_damage))
+                self.network_seen = True
+                return []
+
+            def apply_read_only_team_profile(self, record):
+                if not self.network_seen:
+                    raise AssertionError(
+                        "live team profile ran before its roster packet"
+                    )
+                calls.append(("team_profile", record["function"]))
                 return []
 
             def current_dungeon_context(self):
@@ -844,6 +858,14 @@ class HookWorkerBatchTests(unittest.TestCase):
                 }
             ],
             "records": [{"function": "network"}],
+            "team_profile_records": [
+                {
+                    "function": "live-profile",
+                    "capture_source": "npcap_read_only_team_profile",
+                    "user_token": "AQAAAOwNuopBAAAA",
+                    "extraordinary_rating": 91_444,
+                }
+            ],
             "native_damage_hook_installed": True,
         }
         log_handle = io.StringIO()
@@ -858,12 +880,239 @@ class HookWorkerBatchTests(unittest.TestCase):
                 ("name", "name"),
                 ("damage", "damage"),
                 ("network", "network", True),
+                ("team_profile", "live-profile"),
             ],
         )
         self.assertEqual(
             [line["function"] for line in map(__import__("json").loads, log_handle.getvalue().splitlines())],
-            ["outbound", "boss", "name", "skill", "damage", "network"],
+            [
+                "outbound",
+                "boss",
+                "name",
+                "skill",
+                "damage",
+                "network",
+                "live-profile",
+            ],
         )
+
+    def test_passive_forwards_team_stat_and_final_stage_summary(self):
+        messages = self.module["queue"].Queue()
+        worker = self.module["HookWorker"](
+            messages, self.module["threading"].Event()
+        )
+
+        class Parser:
+            def process(self, _record, *, include_damage):
+                self.include_damage = include_damage
+                return [
+                    ("team_stat", {"absolute_damage": 999}),
+                    (
+                        "stage_summary",
+                        {
+                            "summary_id": "settlement|5150104|real",
+                            "authoritative": True,
+                            "completion_confirmed": True,
+                        },
+                    ),
+                ]
+
+            def take_settlement_observations(self):
+                return []
+
+            def current_dungeon_context(self):
+                return {}
+
+            def take_team_profile_cache(self):
+                return None
+
+            def current_self_identity(self):
+                return None
+
+            def current_active_boss_state(self):
+                return None
+
+            def live_team_rating_snapshot_updates(self, _record):
+                return []
+
+        parser = Parser()
+        worker._process_capture_batch(
+            parser,
+            {"records": [{"function": "network"}]},
+            io.StringIO(),
+            1234,
+        )
+
+        emitted=[]
+        while not messages.empty():
+            emitted.append(messages.get_nowait())
+        self.assertTrue(parser.include_damage)
+        self.assertEqual(
+            [kind for kind,_payload in emitted],
+            ["team_stat", "stage_summary"],
+        )
+
+    def test_active_boss_transition_precedes_same_record_hp_update(self):
+        messages = self.module["queue"].Queue()
+        worker = self.module["HookWorker"](
+            messages, self.module["threading"].Event()
+        )
+        worker.active_boss_cache = {
+            "game_pid": 1234,
+            "entity_id": 224_559_144_139_789,
+            "template_id": 7_103_402,
+        }
+        worker._set_active_boss_cache = lambda value: setattr(
+            worker, "active_boss_cache", dict(value)
+        )
+
+        class Parser:
+            state = None
+
+            def process(self, _record, *, include_damage):
+                self.include_damage = include_damage
+                self.state = {
+                    "entity_id": 224_559_144_139_845,
+                    "template_id": 7_103_401,
+                    "name": "Baldwin",
+                    "max_hp": 63_018_319,
+                    "filetime_100ns": 134_321_845_000_000_000,
+                }
+                return [
+                    (
+                        "monster",
+                        {
+                            "entity_id": self.state["entity_id"],
+                            "current_hp": 37_810_991,
+                            "max_hp": self.state["max_hp"],
+                        },
+                    )
+                ]
+
+            @staticmethod
+            def current_dungeon_context():
+                return {}
+
+            @staticmethod
+            def take_team_profile_cache():
+                return None
+
+            @staticmethod
+            def current_self_identity():
+                return None
+
+            def current_active_boss_state(self):
+                return self.state
+
+            @staticmethod
+            def live_team_rating_snapshot_updates(_record):
+                return []
+
+        parser = Parser()
+        worker._process_capture_batch(
+            parser,
+            {"records": [{"function": "new-boss-hp"}]},
+            io.StringIO(),
+            1234,
+        )
+
+        emitted = []
+        while not messages.empty():
+            emitted.append(messages.get_nowait())
+        relevant = [kind for kind, _payload in emitted if kind in {"active_boss", "monster"}]
+        self.assertTrue(parser.include_damage)
+        self.assertEqual(relevant, ["active_boss", "monster"])
+        self.assertEqual(
+            emitted[0][1]["entity_id"],
+            224_559_144_139_845,
+        )
+
+    def test_npcap_keeps_passive_dummy_personal_common_stat(self):
+        """The local dummy counter must reach the model without the team RPC hook."""
+        messages = self.module["queue"].Queue()
+        worker = self.module["HookWorker"](
+            messages, self.module["threading"].Event()
+        )
+
+        class Parser:
+            def process(self, _record, *, include_damage):
+                self.include_damage = include_damage
+                return [
+                    (
+                        "team_stat",
+                        {
+                            "actor_id": 123,
+                            "absolute_damage": 456,
+                            "dummy_personal_common": True,
+                        },
+                    )
+                ]
+
+            def take_settlement_observations(self):
+                return []
+
+            def current_dungeon_context(self):
+                return {}
+
+            def take_team_profile_cache(self):
+                return None
+
+            def current_self_identity(self):
+                return None
+
+            def current_active_boss_state(self):
+                return None
+
+            def live_team_rating_snapshot_updates(self, _record):
+                return []
+
+        parser = Parser()
+        worker._process_capture_batch(
+            parser,
+            {"records": [{"function": "dummy-common"}]},
+            io.StringIO(),
+            1234,
+        )
+
+        emitted = []
+        while not messages.empty():
+            emitted.append(messages.get_nowait())
+        self.assertEqual([kind for kind, _payload in emitted], ["team_stat"])
+        self.assertEqual(emitted[0][1]["absolute_damage"], 456)
+
+    def test_live_team_ratings_and_roster_are_republished_every_second(self):
+        messages = self.module["queue"].Queue()
+        worker = self.module["HookWorker"](
+            messages, self.module["threading"].Event()
+        )
+
+        class Parser:
+            def flush_live_party_roster(self, *, now):
+                return [("party", {
+                    "entity_ids": [123],
+                    "member_count": 2,
+                    "roster_replace": True,
+                    "flush_monotonic": now,
+                })]
+
+            def live_team_rating_snapshot_updates(self, record):
+                return [("profile", {
+                    "entity_id": 123,
+                    "extraordinary_rating": 88_893,
+                    "filetime_100ns": record["filetime_100ns"],
+                    "source_method": record["method"],
+                })]
+
+            def should_forward_damage_event(self, _payload):
+                return True
+
+        parser = Parser()
+        self.assertTrue(worker._republish_live_team_ratings(parser, now=10.0))
+        self.assertFalse(worker._republish_live_team_ratings(parser, now=10.999))
+        self.assertTrue(worker._republish_live_team_ratings(parser, now=11.0))
+        self.assertEqual(messages.qsize(), 4)
+        kinds = [messages.get_nowait()[0] for _index in range(4)]
+        self.assertEqual(kinds, ["party", "profile", "party", "profile"])
 
     def test_worker_emits_confirmed_self_character_identity_once(self):
         worker_globals = self.module["HookWorker"]._sync_parser_runtime_state.__globals__
@@ -912,6 +1161,169 @@ class HookWorkerBatchTests(unittest.TestCase):
                 self.assertTrue(messages.empty())
             finally:
                 worker_globals["SELF_IDENTITY_CACHE_PATH"] = original_path
+
+    def test_startup_log_identity_rebinds_profile_across_game_restart(self):
+        worker_globals = self.module[
+            "HookWorker"
+        ]._publish_startup_self_profile.__globals__
+        original_identity_path = worker_globals["SELF_IDENTITY_CACHE_PATH"]
+        original_profiles_path = worker_globals["TEAM_PROFILE_CACHE_PATH"]
+        token = "AQAAAOwNKLYHAAAA"
+        with tempfile.TemporaryDirectory() as directory:
+            worker_globals["SELF_IDENTITY_CACHE_PATH"] = (
+                Path(directory) / "self-identity.json"
+            )
+            worker_globals["TEAM_PROFILE_CACHE_PATH"] = (
+                Path(directory) / "team-profiles.json"
+            )
+            try:
+                messages = self.module["queue"].Queue()
+                worker = self.module["HookWorker"](
+                    messages, self.module["threading"].Event()
+                )
+                worker.team_profile_cache = {
+                    token: {
+                        "name": "莫雪",
+                        "profession_id": 1_200_002,
+                        "extraordinary_rating": 82_974,
+                    }
+                }
+                worker.self_identity_cache = {
+                    "game_pid": 111,
+                    "user_token": token,
+                    "name": "莫雪",
+                    "extraordinary_rating": 82_974,
+                }
+
+                self.assertTrue(
+                    worker._publish_startup_self_profile(
+                        {
+                            "game_pid": 222,
+                            "startup_self_token": token,
+                            "startup_self_actor_id": 57_191_790_922_782,
+                        },
+                        live=False,
+                    )
+                )
+
+                emitted = [messages.get_nowait(), messages.get_nowait()]
+                self.assertEqual(
+                    [kind for kind, _payload in emitted],
+                    ["identity", "self_character"],
+                )
+                self.assertEqual(emitted[1][1]["name"], "莫雪")
+                self.assertNotIn("extraordinary_rating", emitted[1][1])
+                self.assertEqual(worker.self_identity_cache["game_pid"], 222)
+                self.assertEqual(worker.self_identity_cache["user_token"], token)
+                self.assertNotIn(
+                    "extraordinary_rating", worker.self_identity_cache
+                )
+
+                self.assertTrue(
+                    worker._publish_startup_self_profile(
+                        {
+                            "game_pid": 222,
+                            "entity_id": 57_191_790_922_782,
+                            "user_token": token,
+                            "name": "莫雪",
+                            "profession_id": 1_200_002,
+                            "extraordinary_rating": 80_616,
+                        },
+                        live=True,
+                    )
+                )
+                live_emitted = [
+                    messages.get_nowait(), messages.get_nowait()
+                ]
+                self.assertEqual(
+                    live_emitted[1][1]["extraordinary_rating"], 80_616
+                )
+                self.assertEqual(
+                    worker.self_identity_cache["extraordinary_rating"],
+                    80_616,
+                )
+            finally:
+                worker_globals["SELF_IDENTITY_CACHE_PATH"] = original_identity_path
+                worker_globals["TEAM_PROFILE_CACHE_PATH"] = original_profiles_path
+
+    def test_unproven_identity_reset_preserves_same_role_worker_caches(self):
+        messages = self.module["queue"].Queue()
+        worker = self.module["HookWorker"](
+            messages, self.module["threading"].Event()
+        )
+        old_token = "AQAAAOwNKLYHAAAA"
+        new_token = "AQAAAOwNkGB8AAAA"
+        identity = {
+            "entity_id": 57_265_338_171_976,
+            "user_token": old_token,
+            "name": "Same role",
+        }
+        worker.last_emitted_self_identity = dict(identity)
+        worker.last_emitted_dungeon_context = {"instance_id": "same-instance"}
+        worker.team_stats_last_snapshot_total = 123_456
+        worker.self_identity_cache = {"game_pid": 222, **identity}
+        worker.active_boss_cache = {"game_pid": 222, "entity_id": 900}
+        invalidations = []
+        boss_cache_updates = []
+        writes = []
+        worker.equipment_profiles = SimpleNamespace(
+            invalidate=lambda reason: invalidations.append(reason)
+        )
+        worker._set_active_boss_cache = (
+            lambda value: boss_cache_updates.append(value)
+        )
+        update_globals = worker._emit_parser_update.__globals__
+        original_write = update_globals["write_json_object"]
+        update_globals["write_json_object"] = (
+            lambda path, value: writes.append((path, value))
+        )
+        try:
+            unproven = {
+                "capture_timestamp_ns": 1_790_646_014_998_312_600,
+                "previous_entity_id": identity["entity_id"],
+                "entity_id": identity["entity_id"],
+                "previous_user_token": old_token,
+                "user_token": "",
+                "reason": "authoritative_local_actor_changed",
+                "identity_hint_available": False,
+            }
+            worker._emit_parser_update(
+                SimpleNamespace(), "identity_session_reset", unproven
+            )
+
+            self.assertEqual(worker.last_emitted_self_identity, identity)
+            self.assertEqual(
+                worker.last_emitted_dungeon_context,
+                {"instance_id": "same-instance"},
+            )
+            self.assertEqual(worker.team_stats_last_snapshot_total, 123_456)
+            self.assertEqual(worker.self_identity_cache["user_token"], old_token)
+            self.assertEqual(worker.active_boss_cache["entity_id"], 900)
+            self.assertEqual(invalidations, [])
+            self.assertEqual(boss_cache_updates, [])
+            self.assertEqual(writes, [])
+            self.assertEqual(messages.get_nowait(), ("identity_session_reset", unproven))
+
+            proven = {
+                **unproven,
+                "user_token": new_token,
+                "reason": "wire_local_token_changed",
+                "identity_hint_available": True,
+            }
+            worker._emit_parser_update(
+                SimpleNamespace(), "identity_session_reset", proven
+            )
+
+            self.assertFalse(worker.last_emitted_self_identity)
+            self.assertFalse(worker.last_emitted_dungeon_context)
+            self.assertIsNone(worker.team_stats_last_snapshot_total)
+            self.assertFalse(worker.self_identity_cache)
+            self.assertEqual(invalidations, ["identity_session_reset"])
+            self.assertEqual(boss_cache_updates, [{}])
+            self.assertEqual(len(writes), 1)
+            self.assertEqual(messages.get_nowait(), ("identity_session_reset", proven))
+        finally:
+            update_globals["write_json_object"] = original_write
 
     def test_target_boss_lookup_config_missing_defaults_off(self):
         enabled_from_config = self.module[
@@ -980,13 +1392,19 @@ class HookWorkerBatchTests(unittest.TestCase):
 
     def test_team_stats_classifier_resets_on_scene_transition(self):
         classify = self.module["classify_team_stats_mode"]
-        mode, reason = classify(
-            object(),
-            {"records": [{"method": "OnMsgBeforeEnterNewSpace"}]},
-            "team",
-        )
-        self.assertEqual(mode, "unknown")
-        self.assertEqual(reason, "scene_transition")
+        for method in (
+            "OnMsgBeforeEnterNewSpace",
+            "OnMsgLeaveQuestControl",
+            "OnMsgLeaveSpace",
+        ):
+            with self.subTest(method=method):
+                mode, reason = classify(
+                    object(),
+                    {"records": [{"method": method}]},
+                    "team",
+                )
+                self.assertEqual(mode, "unknown")
+                self.assertEqual(reason, "scene_transition")
 
     def test_team_stats_classifier_accepts_explicit_multiplayer_party(self):
         classify = self.module["classify_team_stats_mode"]
@@ -1002,6 +1420,31 @@ class HookWorkerBatchTests(unittest.TestCase):
         mode, reason = classify(Parser(), {"records": []}, "unknown")
         self.assertEqual(mode, "team")
         self.assertEqual(reason, "multiplayer_party")
+
+    def test_team_stats_classifier_recovers_from_mid_dungeon_roster_evidence(self):
+        classify = self.module["classify_team_stats_mode"]
+
+        class Parser:
+            @staticmethod
+            def current_capture_context():
+                return {
+                    "party_member_count": 1,
+                    "party_actor_count": 12,
+                    "authoritative_party_token_count": 12,
+                    "party_seen": False,
+                }
+
+        mode, reason = classify(Parser(), {"records": []}, "unknown")
+        self.assertEqual((mode, reason), ("team", "multiplayer_party"))
+
+    def test_team_stats_classifier_accepts_team_reply_after_restart(self):
+        classify = self.module["classify_team_stats_mode"]
+        mode, reason = classify(
+            object(),
+            {"records": [{"method": "RetCommonCombatStatisticsByTeam"}]},
+            "unknown",
+        )
+        self.assertEqual((mode, reason), ("team", "dungeon_protocol"))
 
     def test_team_stats_classifier_exact_dummy_wins_over_party_roster(self):
         classify = self.module["classify_team_stats_mode"]

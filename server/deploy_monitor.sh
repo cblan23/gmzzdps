@@ -15,6 +15,7 @@ NGINX_FILE=/etc/nginx/conf.d/daodao-domain.conf
 for required in \
     dps_monitor_server.py \
     profile_upload.py \
+    pvp_backend.py \
     runtime_capability.py \
     gmzz-dps-monitor.service \
     daodao-domain.conf \
@@ -37,6 +38,8 @@ install -o root -g root -m 0644 \
     "$STAGE_DIR/dps_monitor_server.py" "$APP_DIR/dps_monitor_server.py"
 install -o root -g root -m 0644 \
     "$STAGE_DIR/profile_upload.py" "$APP_DIR/profile_upload.py"
+install -o root -g root -m 0644 \
+    "$STAGE_DIR/pvp_backend.py" "$APP_DIR/pvp_backend.py"
 install -o root -g root -m 0644 \
     "$STAGE_DIR/runtime_capability.py" "$APP_DIR/runtime_capability.py"
 install -o root -g root -m 0644 \

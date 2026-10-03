@@ -27,6 +27,10 @@ KSBC2_XOR_KEY = bytes.fromhex(
     "234bd080d18b441689538c6b98df30c3"
     "74dbf3b4541b0355320a0275b713996c"
 )
+KSBC2_XOR_TABLES = tuple(
+    bytes(value ^ key_byte for value in range(256))
+    for key_byte in KSBC2_XOR_KEY
+)
 
 DEFAULT_CACHE_DIRECTORY = Path(r"E:\GMZZLauncher\Game\C7\Saved\kscache\14")
 DEFAULT_CACHE_PREFIX = "4efadcdd4c7bb254c65f6f07_"
@@ -165,8 +169,10 @@ class KSBC2Reader:
     """Minimal reader for the table/value subset used by C7's KSBC2 data."""
 
     def __init__(self, encoded: bytes):
-        key = KSBC2_XOR_KEY
-        self.data = bytes(value ^ key[index & 63] for index, value in enumerate(encoded))
+        decoded = bytearray(len(encoded))
+        for index, translation in enumerate(KSBC2_XOR_TABLES):
+            decoded[index::64] = encoded[index::64].translate(translation)
+        self.data = bytes(decoded)
 
     @classmethod
     def from_path(cls, path: Path) -> "KSBC2Reader":
@@ -289,7 +295,9 @@ def discover_root_handle(
     }
     data_size = len(reader.data)
     start = max(0, data_size - max(64 * 1024, int(search_bytes)))
-    for handle in range(start, max(start, data_size - 3)):
+    # Generated root tables live near the cache tail. Search backwards so a
+    # current 50 MB cache does not probe almost the full four-megabyte window.
+    for handle in range(max(start, data_size - 4), start - 1, -1):
         try:
             table_header = reader.u32(handle)
             if not 0 <= table_header <= data_size - 12:

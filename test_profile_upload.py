@@ -128,6 +128,10 @@ class ProfileUploadTests(unittest.TestCase):
             "RESERVED",
         )
         self.assertEqual(
+            self.store.nickname_availability(self.connection, "叨叨诡秘助手")["status"],
+            "RESERVED",
+        )
+        self.assertEqual(
             self.store.nickname_availability(self.connection, "叨叨")["status"],
             "RESERVED",
         )

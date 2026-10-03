@@ -4,6 +4,10 @@
 
 最新调整：按用户明确要求，源码主程序和默认正式打包入口已统一切换为 Npcap，不再需要 `-PassiveCapture`。旧 `legacy` 后端配置会明确报错，不允许重新启用 Hook。已安装的旧 EXE 和线上下载包不会因源码变化自动更新，本轮尚未发布替换包。
 
+2026-09-16 修复补充：客户端 KCP 握手失败会自然回退 TCP。正式被动后端现已接入 Windows IPv4/IPv6 TCP 归属查询、双协议 BPF、TCP 序号重组和有界 RC4 字节边界验证，再沿用现有 Zstd / MessagePack 解析。没有游戏流量不再使快照超时；状态耗尽后保持接收侧观察，只在观察到新传输连接时重新初始化，不再对同一失败连接反复扫描。本机 TCP 预检已验证完整应用消息可解码；不等于全副本统计完整度验收。
+
+评分修复边界：不将 `ZhanLi / ceScore / CEScore` 裸字段当作 `power` 的同义别名。仅在完整 GC64 Lua 模型验证及 token 精确绑定后，接受活跃角色 `CEScore + eid` 或当前队伍模型 `ceScore + id`；其他候选仍只用于诊断。本人 `CEScore` 已用自然团队属性字段 11 校准。普通只读补充不能覆盖服务器值，完整模型的新实时评分可更新较旧网络值，读取开始时间用于防止旧采样回滚；磁盘旧评分不作为当前值，没有可信评分显示 `--`。此补充使用只读游戏内存，不是纯网卡来源；未增加 Hook 或主动游戏请求。
+
 改造前代码已上传 GitHub：`cblan23/gmzzdps`，提交
 `56b80ba71fec84a32ea4703965194b74b7b8ff42`，标签
 `baseline/v0.2.3b-before-npcap`。本次不发布线上更新，不改变服务器白名单。
@@ -12,8 +16,8 @@
 
 - `npcap_runtime.py`：验证 Npcap 驱动版本；不把 wpcap/libpcap 版本误当驱动版本。
 - `npcap_receiver.py`：在 activate 前配置缓冲区、立即交付和时间戳精度；非阻塞轮询多个接口；定期刷新接口和端口；接口失败可重新打开；统计驱动丢包。仅绑定接收 API。
-- `npcap_shadow_capture.py`：读取 Windows IPv4/IPv6 UDP 端口归属，处理查询期间端口表大小变化。
-- `passive_transport.py`：纯函数式收包入口，Ethernet/VLAN、IPv4/IPv6 分片、长度验证、超时、容量限制、冲突拒绝。TCP 重组覆盖乱序、重传、冲突、回绕、连接代次与缺包超时，但当前游戏接入仍仅使用已验证的 UDP/KCP。
+- `npcap_shadow_capture.py`：读取 Windows IPv4/IPv6 UDP/TCP 端点归属，处理查询期间端口表大小变化。
+- `passive_transport.py`：纯函数式收包入口，Ethernet/VLAN、IPv4/IPv6 分片、长度验证、超时、容量限制、冲突拒绝。TCP 重组覆盖乱序、重传、冲突、回绕、连接代次与缺包超时；`npcap_tcp_stream.py` 接入游戏 RC4 连续字节流，不将 TCP 分段冒充 KCP 或应用帧。
 - `npcap_capture_process.py`：接入多接口和分片重组；根据进程端口及本地地址辨别方向，包括回环；KCP 回绕处理和已交付序号去重；场景切换不会直接清空交付历史；保留既有租约鉴权。
 - `npcap_protocol.py`：原始整型纳秒时间戳传到 RPC 记录，FILETIME 使用整数换算；增加采集会话、解析代次、KCP 序号和消息偏移构成的事件标识；相同内容的不同技能消息不会按内容去重。事件标识用于采集会话内识别，不是跨客户端或跨重连的全服事件 ID。
 - `dps_meter.pyw`：唯一改动是普通被动版沿用 `GMZZDpsMeter` 数据目录。显式隔离版仍可通过构建配置使用独立目录。UI、统计模型、战斗记录格式没有改动。
@@ -38,7 +42,7 @@
 - 同场完整战斗的旧版/新版逐角色总伤、DPS、HPS、DT、技能次数、暴击、Boss 伤害和时间轴对比。
 - 旧 Hook 完全退出后的独立被动验证，覆盖胜利、失败、离开、阶段切换、重连、多网卡/VPN 实际切换。
 - 分析主动请求停止后哪些队友属性/技能汇总不再自然下发；被动收包不能创造服务器没有下发的数据。现有研究的 Boss 上下文推断不能未经验证直接复制到当前业务解析器。
-- Windows TCP 进程连接发现及实际 TCP 应用协议接入。当前 TCP 类是经测试的基础设施，不代表游戏 TCP 业务已经支持。
+- TCP 实际整场战斗、KCP→TCP 回退和 TCP 自然重连的完整统计验收。已完成真实 TCP 连接被动解码预检，仍须验证这些生命周期的统计完整度。
 - 整场缺失范围与完整性标记的业务验收、压力测试、Nuitka 候选包和最终打包检查。源码/默认正式构建的后端现已切换，但上述完整性验证仍未完成，也没有发布。
 
 游戏协议加密并有连续压缩状态。现有可运行方案需要
@@ -66,7 +70,8 @@ py -3 replay_combat_log.py .codex-tmp\passive-fight.jsonl --cold-cache --records
 候选构建入口（当前未执行构建、未发布）：
 
 ```powershell
-.\build_exe.ps1 -OutputDirectory .codex-tmp\npcap-candidate
+.\build_exe.ps1 -OutputDirectory .codex-tmp\npcap-candidate `
+  -NpcapInstaller <官方-npcap-1.89.exe>
 ```
 
 默认源码/构建已采用 Npcap；捕获失败不能静默回退到 Hook。完整性验收结果须如实记录，源码切换不代表所有业务对比已通过，也不代表已发布线上更新。

@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Select the capture implementation embedded in this application build.
+"""v0.3.0 passive capture entry. Old manifests cannot re-enable process hooks.
 
-Source checkouts and normal builds use the established Hook implementation.
-The explicit Npcap variant remains available for migration development.
-Normal builds retain existing app data and identity;
-the explicit isolated variant can override those names. Keeping selection here
-prevents the Npcap executable from importing (or needing to bundle) any of the
-legacy hook capture modules.
+The standard application retains its existing user-data directory and identity.
+Explicit isolated build metadata can still select a separate user-data directory.
 """
 
 from __future__ import annotations
@@ -65,11 +61,20 @@ def _load_variant() -> dict[str, object]:
 
 CAPTURE_VARIANT = _load_variant()
 CAPTURE_BACKEND_NAME = str(
-    CAPTURE_VARIANT.get("backend", "legacy") or "legacy"
+    CAPTURE_VARIANT.get("backend", "windows_raw") or "windows_raw"
 ).strip().casefold()
-if CAPTURE_BACKEND_NAME not in {"legacy", "npcap"}:
-    raise RuntimeError(f"Unsupported capture backend: {CAPTURE_BACKEND_NAME}")
-IS_NPCAP_BACKEND = CAPTURE_BACKEND_NAME == "npcap"
+if CAPTURE_BACKEND_NAME != "windows_raw":
+    raise RuntimeError(
+        f"Unsupported capture backend: {CAPTURE_BACKEND_NAME}; "
+        "v0.3.0 requires the built-in Windows Raw Socket backend"
+    )
+# The protocol decoder is shared with the historical receive-only parser; the
+# transport selected below is always the Windows built-in source.
+IS_PASSIVE_PROTOCOL_ADAPTER = True
+# Compatibility export for older diagnostics. It is permanently false and is
+# never consulted for source selection.
+IS_NPCAP_BACKEND = False
+IS_WINDOWS_RAW_BACKEND = True
 CAPTURE_DISPLAY_VERSION = str(
     CAPTURE_VARIANT.get("display_version", "") or ""
 ).strip()
@@ -83,6 +88,5 @@ CAPTURE_TRAY_CLASS_PREFIX = str(
     CAPTURE_VARIANT.get("tray_class_prefix", "") or ""
 ).strip()
 
-_module_name = "npcap_capture_process" if IS_NPCAP_BACKEND else "capture_process"
-_implementation = importlib.import_module(_module_name)
+_implementation = importlib.import_module("windows_capture_process")
 CaptureProcessClient = _implementation.CaptureProcessClient

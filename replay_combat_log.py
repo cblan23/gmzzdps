@@ -282,7 +282,12 @@ def main() -> int:
     identity = {} if args.cold_cache else read_object(APP["SELF_IDENTITY_CACHE_PATH"])
     team_profiles = {} if args.cold_cache else read_object(APP["TEAM_PROFILE_CACHE_PATH"])
     target_identity_catalog = APP["load_target_identity_catalog"]()
-    packet_parser = NetworkPacketParser(
+    parser_class = NetworkPacketParser
+    if APP.get("IS_PASSIVE_PROTOCOL_ADAPTER"):
+        from npcap_parser_adapter import NpcapParserAdapter
+
+        parser_class = NpcapParserAdapter
+    packet_parser = parser_class(
         team_profiles,
         APP["load_monster_catalog"](),
         target_identity_catalog=target_identity_catalog,

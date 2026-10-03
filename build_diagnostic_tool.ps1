@@ -10,7 +10,7 @@ $Python = Join-Path $ProjectDir ".venv-build310\Scripts\python.exe"
 $CapstoneDll = Join-Path $ProjectDir ".venv-build310\Lib\site-packages\capstone\lib\capstone.dll"
 $SourcePath = Join-Path $ProjectDir "diagnostic_report.py"
 $RuntimeProfilePath = Join-Path $ProjectDir "runtime-profile.dev.json"
-$ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)$([char]0x95EE)$([char]0x9898)$([char]0x68C0)$([char]0x6D4B)$([char]0x5DE5)$([char]0x5177)"
+$ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)$([char]0x52A9)$([char]0x624B)$([char]0x95EE)$([char]0x9898)$([char]0x68C0)$([char]0x6D4B)$([char]0x5DE5)$([char]0x5177)"
 $SourceText = Get-Content -LiteralPath $SourcePath -Raw -Encoding UTF8
 $VersionMatch = [regex]::Match(
     $SourceText,
@@ -65,6 +65,11 @@ try {
         --output-filename=$OutputName `
         --windows-icon-from-ico=assets/app_icon.ico `
         --include-package=capstone `
+        --include-module=windows_capture_process `
+        --include-module=windows_raw_receiver `
+        --include-module=npcap_capture_process `
+        --include-package=msgpack `
+        --include-package=zstandard `
         --include-data-files=$CapstoneDll=capstone/lib/capstone.dll `
         --include-data-files=assets/app_icon.ico=assets/app_icon.ico `
         --include-data-files=monster_metadata.json=monster_metadata.json `

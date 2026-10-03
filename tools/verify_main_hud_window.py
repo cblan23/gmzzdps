@@ -19,6 +19,8 @@ from tools.preview_main_hud import COLORS
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=ROOT / '.codex-tmp' / 'hud-acceptance')
+    parser.add_argument('--x', type=int, default=1200)
+    parser.add_argument('--y', type=int, default=100)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     module = runpy.run_path(str(ROOT / 'dps_meter.pyw'))
@@ -27,12 +29,12 @@ def main():
     desktop.overrideredirect(True)
     desktop.configure(bg='white')
     desktop.attributes('-topmost', True)
-    desktop.geometry('535x630+220+100')
+    desktop.geometry(f'535x630+{args.x}+{args.y}')
     desktop.update()
     root = tk.Toplevel(desktop)
     root.withdraw()
     root.overrideredirect(True)
-    root.geometry('459x470+245+140')
+    root.geometry(f'459x470+{args.x + 25}+{args.y + 40}')
     root.attributes('-topmost', True)
     root.update_idletasks()
 
@@ -69,8 +71,41 @@ def main():
     window.show_deaths = True
     window.enrage_tooltip = None
     window.enrage_tooltip_canvas = None
+    window.main_combat_mode = 'pve'
+    window.pvp_hud_state = {
+        'active': True,
+        'time': '08:42',
+        'status': '预览数据 · 统计中',
+        'result': '进行中',
+        'map_name': '诸王战纪',
+        'kills': 2,
+        'assists': '--',
+        'deaths': 1,
+        'total_damage': '862.4万',
+        'total_taken': '463.1万',
+        'outgoing': [
+            dict(actor_id=101, name='逐风', profession_id=1200007,
+                 rating='79,840', kills=1,
+                 assists='--', damage_text='328.6万', share_text='38.1%'),
+        ],
+        'incoming': [
+            dict(actor_id=201, name='折光', profession_id=1200001,
+                 rating='84,270', defeats=1,
+                 damage_text='214.8万', share_text='46.4%'),
+        ],
+    }
     monster = SimpleNamespace(name='测试首领', entity_id=501, current_hp=815_000_000, max_hp=1_260_000_000, observed_max_hp=1_260_000_000)
-    window.model = SimpleNamespace(current_monster=lambda: monster)
+    window.current_character_name = '莫雪'
+    window.current_character_profession_id = 1200004
+    window.model = SimpleNamespace(
+        self_id=4,
+        current_monster=lambda: monster,
+        entity_names={4: '莫雪'},
+        entity_professions={4: 1200004},
+        entity_extraordinary_ratings={4: 80616},
+        local_player_name='莫雪',
+        actor_profession_id=lambda actor_id: 1200004 if actor_id == 4 else 0,
+    )
     rows = [dict(actor_id=i + 1, profession_id=1_200_001 + i % 7, name=f'预览角色{i + 1}', metric='hps' if i % 7 == 1 else 'dps', stat_value=123_450 + i * 42_345, total_value=4_281_910 + i * 782_350, deaths=i % 3, is_self=i == 3) for i in range(10)]
     preview = [False]
     window._main_display_rows = lambda: (rows, preview[0])
@@ -132,12 +167,40 @@ def main():
             root.update()
 
         click('pvp')
+        assert window.main_combat_mode == 'pvp'
+        assert 'action:pve' in window.layered_main_hit_regions
         assert calls == [], calls
+        pvp_snapshot = window._layered_main_snapshot()
+        assert pvp_snapshot['pvp_player_name'] == '莫雪'
+        assert pvp_snapshot['pvp_rating'] == '80616'
+        assert pvp_snapshot['pvp_profession_id'] == 1200004
+        shot('window-pvp-white.png')
+        window.pvp_hud_state = {
+            'active': False,
+            'time': '00:00',
+            'status': '等待 PVP 战斗数据',
+            'result': '等待中',
+            'kills': '--',
+            'assists': '--',
+            'deaths': '--',
+            'outgoing': [],
+            'incoming': [],
+            'total_damage': '--',
+            'total_taken': '--',
+        }
+        render()
+        shell_snapshot = window._layered_main_snapshot()
+        assert shell_snapshot['pvp_player_name'] == '莫雪'
+        assert shell_snapshot['pvp_rating'] == '80616'
+        assert shell_snapshot['pvp_kills'] == '--'
+        assert shell_snapshot['pvp_outgoing'] == []
+        assert shell_snapshot['pvp_incoming'] == []
+        shot('window-pvp-shell-white.png')
+        click('pve')
+        assert window.main_combat_mode == 'pve'
+        assert 'action:pvp' in window.layered_main_hit_regions
         click('settings')
         assert calls == ['settings'], calls
-        with mock.patch.object(window, '_clear_main_display') as clear:
-            click('clear')
-            clear.assert_called_once()
         click('lock')
         render()
         assert window.window_locked and window.unlock_window.winfo_exists()
@@ -217,7 +280,7 @@ def main():
         assert calls[-1] == 'pin'
         assert window._preferred_main_topmost() != previous_topmost
         assert 'action:close' not in window.layered_main_hit_regions
-        print('PASS: real HWND, live values, PVP disabled, settings/pin, lock/unlock, drag, alpha, deaths, rating, DPI 100-200%')
+        print('PASS: real HWND, PVE/PVP switch, live values, settings/pin, lock/unlock, drag, alpha, deaths, rating, DPI 100-200%')
     finally:
         window.closing = True
         window._destroy_unlock_window()

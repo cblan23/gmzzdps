@@ -25,6 +25,90 @@ from history_index import (
 
 
 HISTORY_SCHEMA_VERSION = 1
+
+
+def recent_boss_max_hp_references(directory: str | Path) -> dict[tuple[int, int], int]:
+    """Use confirmed settled HP peaks as display references for later pulls."""
+
+    root = Path(directory)
+    try:
+        recent_cutoff = time.time() - 30 * 86400
+        paths = sorted(
+            (
+                path for path in root.glob("*.json")
+                if path.is_file() and path.stat().st_mtime >= recent_cutoff
+            ),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[:256]
+    except OSError:
+        return {}
+    observed_counts: dict[tuple[int, int], Counter[int]] = {}
+    settlement_counts: dict[tuple[int, int], Counter[int]] = {}
+    for path in paths:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            monster = record.get("monster", {})
+            if (
+                not isinstance(monster, dict)
+                or record.get("settlement_status") != "SETTLED"
+            ):
+                continue
+            template_id = int(monster.get("template_id", 0) or 0)
+            level = int(monster.get("level", 0) or 0)
+            maximum = int(float(monster.get("max_hp", 0) or 0))
+            observed = int(float(monster.get("observed_max_hp", 0) or 0))
+        except (OSError, ValueError, TypeError, OverflowError):
+            continue
+        if template_id > 0 and level > 0 and maximum > 0 and observed == maximum:
+            observed_counts.setdefault((template_id, level), Counter())[maximum] += 1
+        participants = record.get("participants")
+        try:
+            total_damage = int(float(record.get("total_damage", 0) or 0))
+            participant_damage = [
+                int(float(row["damage"]))
+                for row in participants
+                if isinstance(row, dict) and row.get("damage") is not None
+            ] if isinstance(participants, list) else []
+        except (ValueError, TypeError, OverflowError):
+            participant_damage = []
+            total_damage = 0
+        authoritative_stage_total = bool(
+            template_id > 0
+            and level > 0
+            and maximum > 0
+            and total_damage >= maximum
+            and str(record.get("result", "")).strip().lower()
+            in {"success", "victory"}
+            and str(record.get("statistics_scope", "")).strip().upper() == "STAGE"
+            and record.get("capture_complete") is True
+            and "npcap_server_statistics" in {
+                str(record.get("data_source", "")).strip(),
+                str(record.get("settlement_source", "")).strip(),
+            }
+            and isinstance(participants, list)
+            and len(participant_damage) == len(participants)
+            and participant_damage
+            and sum(participant_damage) == total_damage
+        )
+        if authoritative_stage_total:
+            settlement_counts.setdefault(
+                (template_id, level), Counter()
+            )[total_damage] += 1
+    references: dict[tuple[int, int], int] = {}
+    for identity, values in observed_counts.items():
+        ranked = values.most_common(2)
+        if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+            references[identity] = ranked[0][0]
+    for identity, values in settlement_counts.items():
+        if identity in references:
+            continue
+        ranked = values.most_common(2)
+        if ranked[0][1] >= 2 and (
+            len(ranked) == 1 or ranked[0][1] > ranked[1][1]
+        ):
+            references[identity] = ranked[0][0]
+    return references
 _SAFE_ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 _FILETIME_EPOCH_OFFSET = 116_444_736_000_000_000
 _HEALER_PROFESSION_IDS = frozenset({1_200_002})
@@ -287,36 +371,37 @@ def rebase_relative_combat_logs(
         if boss_damage_changed:
             updated["boss_damage"] = next_boss_damage
 
-    sample_log = record.get("team_damage_samples")
-    if isinstance(sample_log, dict) and isinstance(sample_log.get("rows"), list):
-        next_log = dict(sample_log)
-        try:
-            origin = float(
-                sample_log.get("origin_started_at_epoch", old_record_start)
-                or old_record_start
-            )
-        except (TypeError, ValueError, OverflowError):
-            origin = old_record_start
-        offset_seconds = int(origin - new_start)
-        maximum_second = max(0, int(new_duration))
-        samples: dict[int, int] = {}
-        for raw_row in sample_log.get("rows", []):
-            if not isinstance(raw_row, (list, tuple)) or len(raw_row) < 2:
-                continue
+    for sample_key in ("team_damage_samples", "boss_hp_damage_samples"):
+        sample_log = record.get(sample_key)
+        if isinstance(sample_log, dict) and isinstance(sample_log.get("rows"), list):
+            next_log = dict(sample_log)
             try:
-                second = min(
-                    maximum_second,
-                    max(0, int(raw_row[0]) + offset_seconds),
+                origin = float(
+                    sample_log.get("origin_started_at_epoch", old_record_start)
+                    or old_record_start
                 )
-                total = max(0, int(raw_row[1]))
             except (TypeError, ValueError, OverflowError):
-                continue
-            samples[second] = max(samples.get(second, 0), total)
-        next_log["rows"] = [
-            [second, samples[second]] for second in sorted(samples)
-        ]
-        next_log["origin_started_at_epoch"] = new_start
-        updated["team_damage_samples"] = next_log
+                origin = old_record_start
+            offset_seconds = int(origin - new_start)
+            maximum_second = max(0, int(new_duration))
+            samples: dict[int, int] = {}
+            for raw_row in sample_log.get("rows", []):
+                if not isinstance(raw_row, (list, tuple)) or len(raw_row) < 2:
+                    continue
+                try:
+                    second = min(
+                        maximum_second,
+                        max(0, int(raw_row[0]) + offset_seconds),
+                    )
+                    total = max(0, int(raw_row[1]))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                samples[second] = max(samples.get(second, 0), total)
+            next_log["rows"] = [
+                [second, samples[second]] for second in sorted(samples)
+            ]
+            next_log["origin_started_at_epoch"] = new_start
+            updated[sample_key] = next_log
 
     participant_log = record.get("participant_damage_samples")
     if isinstance(participant_log, dict) and isinstance(
@@ -484,6 +569,17 @@ class CombatHistoryStore:
             return False
         if total_damage > 0:
             return True
+        settlement_status = str(value.get("settlement_status", "")).upper()
+        if (
+            str(value.get("source", "")) == "passive_npcap_settlement"
+            and settlement_status in {"PENDING", "ABANDONED", "SETTLED"}
+            and str(value.get("local_encounter_id", "")).strip()
+            and str(value.get("target_filter", "")).casefold() == "boss"
+            and isinstance(value.get("participants_snapshot"), list)
+            and bool(value.get("participants_snapshot"))
+            and value.get("ended_at_epoch") is not None
+        ):
+            return True
         # A treatment-dummy encounter is intentionally damage-free.  Accept it
         # only when the record carries positive, explicitly attributed healing;
         # arbitrary empty records remain invalid.
@@ -579,6 +675,11 @@ class CombatHistoryStore:
 
         changed = False
         healers: list[dict] = []
+        keep_unknown_settlement_roster = bool(
+            str(record.get("source", "")) == "passive_npcap_settlement"
+            and str(record.get("settlement_status", "")).upper()
+            in {"PENDING", "ABANDONED"}
+        )
         for raw_healer in raw_healers:
             if not isinstance(raw_healer, dict):
                 changed = True
@@ -590,7 +691,11 @@ class CombatHistoryStore:
             profession_id = _parsed_profession_id(
                 raw_healer.get("profession_id", 0)
             ) or participant_professions.get(actor_id, 0)
-            if _known_non_healer(profession_id):
+            if (
+                _known_non_healer(profession_id)
+                and not keep_unknown_settlement_roster
+                and raw_healer.get("effective_healing") is not None
+            ):
                 changed = True
                 continue
             healer = dict(raw_healer)
@@ -617,14 +722,21 @@ class CombatHistoryStore:
         except (TypeError, ValueError, OverflowError):
             duration = 0.0
         divisor = float(max(1, int(duration))) if duration > 0 else 1.0
-        team_effective = 0
+        parsed_effective: list[int] = []
+        complete_effective = True
         for row in healers:
+            value = row.get("effective_healing")
+            if value is None or isinstance(value, bool):
+                complete_effective = False
+                break
             try:
-                team_effective += max(
-                    0, int(row.get("effective_healing", 0) or 0)
-                )
+                parsed_effective.append(max(0, int(value)))
             except (TypeError, ValueError, OverflowError):
-                continue
+                complete_effective = False
+                break
+        team_effective = (
+            sum(parsed_effective) if complete_effective else None
+        )
         parsed_totals: list[int] = []
         complete_totals = True
         for row in healers:
@@ -638,11 +750,19 @@ class CombatHistoryStore:
                 complete_totals = False
                 break
         team_total = sum(parsed_totals) if complete_totals else None
-        updated["team_hps"] = team_effective / divisor
+        if team_effective is None or (
+            str(updated.get("source", "")) == "passive_npcap_settlement"
+            and duration <= 0
+        ):
+            updated["team_hps"] = None
+        else:
+            updated["team_hps"] = team_effective / divisor
         updated["team_effective_healing"] = team_effective
         updated["team_total_healing"] = team_total
         updated["team_overhealing"] = (
-            team_total - team_effective if team_total is not None else None
+            team_total - team_effective
+            if team_total is not None and team_effective is not None
+            else None
         )
         return updated
 

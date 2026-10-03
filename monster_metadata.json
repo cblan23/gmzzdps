@@ -1540,6 +1540,16 @@
       "localization_id": 391426944796160,
       "name": "伤害木桩"
     },
+    "7100633": {
+      "boss_type": 3,
+      "level": 79,
+      "name": "伤害木桩"
+    },
+    "7100634": {
+      "boss_type": 3,
+      "level": 84,
+      "name": "伤害木桩"
+    },
     "7100700": {
       "boss_type": 4,
       "localization_id": 915000906483456
@@ -10268,8 +10278,8 @@
       "fc_paths": [
         "AI.RossellBossRaid.Boss_Rossell"
       ],
-      "level": 98,
-      "localization_id": 1046736948713728,
+      "level": 84,
+      "localization_id": 1108309599873792,
       "name": "罗塞尔的残留意志"
     },
     "7110201": {
@@ -10328,9 +10338,9 @@
       "fc_paths": [
         "AI.RossellBossRaid.Boss_RossellRage"
       ],
-      "level": 98,
-      "localization_id": 1046736948713728,
-      "name": "罗塞尔的残留意志"
+      "level": 84,
+      "localization_id": 1108309599869184,
+      "name": "罗塞尔的污染意志"
     },
     "7110209": {
       "boss_type": 1,
@@ -14480,6 +14490,21 @@
       ],
       "localization_id": 140807013143808,
       "name": "邦尼"
+    },
+    "7115718": {
+      "boss_type": 3,
+      "level": 83,
+      "name": "卡尔·埃德加"
+    },
+    "7115731": {
+      "boss_type": 3,
+      "level": 83,
+      "name": "\"剥面人\" 强尼"
+    },
+    "7115733": {
+      "boss_type": 3,
+      "level": 83,
+      "name": "亚巴顿"
     },
     "7190000": {
       "boss_type": 0,

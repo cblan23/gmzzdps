@@ -515,9 +515,14 @@ class BossEnrageTests(unittest.TestCase):
             7_100_210: ("first_believer", 480),
             7_102_990: ("viscountess", 480),
             7_102_991: ("viscountess", 480),
+            7_100_401: ("dire_water_turtle", 360),
+            7_100_471: ("sylvia_normal", 360),
+            7_100_441: ("dancing_baboon", 360),
+            7_110_200: ("roselle_residual", 600),
+            7_110_208: ("roselle_polluted", 600),
         }
 
-        self.assertEqual(len(catalog.rules), 12)
+        self.assertEqual(len(catalog.rules), 17)
         for template_id, (rule_id, seconds) in expected.items():
             matched = catalog.match(
                 [boss(1, 900, template_id=template_id, name="任意名称")]
@@ -539,11 +544,104 @@ class BossEnrageTests(unittest.TestCase):
         )
         self.assertEqual(len(first_believer.hp_slots), 2)
 
+    def test_roselle_phase_change_continues_the_ten_minute_forecast(self):
+        catalog = load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        )
+        forecast = BossEnragePredictor(catalog)
+
+        first_phase = forecast.update(
+            encounter_key="roselle-stage",
+            elapsed_seconds=120,
+            bosses=[
+                boss(
+                    1,
+                    800,
+                    1_000,
+                    template_id=7_110_200,
+                    name="罗塞尔的残留意志",
+                )
+            ],
+            monotonic_seconds=120,
+        )
+        second_phase = forecast.update(
+            encounter_key="roselle-stage",
+            elapsed_seconds=5,
+            bosses=[
+                boss(
+                    2,
+                    990,
+                    1_000,
+                    template_id=7_110_208,
+                    name="罗塞尔的污染意志",
+                )
+            ],
+            monotonic_seconds=125,
+        )
+
+        self.assertIsNotNone(first_phase)
+        self.assertIsNotNone(second_phase)
+        self.assertEqual(first_phase.rule_id, "roselle_residual")
+        self.assertEqual(first_phase.time_to_enrage_seconds, 480)
+        self.assertEqual(second_phase.rule_id, "roselle_polluted")
+        self.assertEqual(second_phase.time_to_enrage_seconds, 475)
+
+    def test_roselle_countdown_continues_across_the_phase_gap(self):
+        catalog = load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        )
+        forecast = BossEnragePredictor(catalog)
+
+        first_phase = forecast.update(
+            encounter_key="roselle-first",
+            elapsed_seconds=246,
+            bosses=[
+                boss(
+                    1,
+                    1,
+                    1_000,
+                    template_id=7_110_200,
+                    name="罗塞尔的残留意志",
+                )
+            ],
+            monotonic_seconds=246,
+        )
+        phase_gap = forecast.update(
+            encounter_key="roselle-first",
+            elapsed_seconds=0,
+            bosses=[],
+            encounter_running=False,
+            monotonic_seconds=260,
+        )
+        second_phase = forecast.update(
+            encounter_key="roselle-second",
+            elapsed_seconds=5,
+            bosses=[
+                boss(
+                    2,
+                    990,
+                    1_000,
+                    template_id=7_110_208,
+                    name="罗塞尔的污染意志",
+                )
+            ],
+            monotonic_seconds=298,
+        )
+
+        self.assertIsNotNone(first_phase)
+        self.assertIsNone(phase_gap)
+        self.assertIsNotNone(second_phase)
+        self.assertEqual(second_phase.elapsed_seconds, 298)
+        self.assertEqual(second_phase.time_to_enrage_seconds, 302)
+
     def test_production_catalog_does_not_match_unverified_variants_or_dummy(self):
         catalog = load_boss_enrage_catalog(
             Path(__file__).with_name("boss_enrage_config.json")
         )
         unverified_templates = (
+            7_100_301,
+            7_100_341,
+            7_100_361,
             7_100_201,
             7_100_202,
             7_100_203,
@@ -556,6 +654,8 @@ class BossEnrageTests(unittest.TestCase):
             7_110_581,
             7_110_642,
             7_114_223,
+            7_100_371,
+            7_100_472,
         )
         for template_id in unverified_templates:
             matched = catalog.match(

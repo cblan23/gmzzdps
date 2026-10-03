@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import base64
 import unittest
+from pathlib import Path
 
+from monster_metadata import load_monster_metadata
 from network_state import (
     DAMAGE_TARGET_TEMPLATE_IDS,
     HEALING_TARGET_TEMPLATE_IDS,
+    LIVE_PARTY_ROSTER_INACTIVE_SECONDS,
     NetworkPacketParser,
     TRAINING_DUMMY_TEMPLATE_IDS,
     is_training_dummy_template_id,
@@ -19,6 +22,7 @@ from network_state import (
     is_ai_team_token,
     stable_team_actor_id,
     should_decode_network_arguments,
+    should_retain_network_record,
 )
 
 
@@ -43,6 +47,139 @@ def packet(method: str, arguments: list, *, pointer: int = 1, sequence: int = 1)
 
 
 class NetworkPacketParserTests(unittest.TestCase):
+    def test_personal_common_bridges_exact_self_total_only_on_current_dummy(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+        parser.training_dummy_entities.add(MONSTER_ID)
+        parser.entity_template_ids[MONSTER_ID] = next(
+            iter(DAMAGE_TARGET_TEMPLATE_IDS)
+        )
+        parser.active_boss_entity_id = MONSTER_ID
+        parser.recent_target_id = MONSTER_ID
+
+        updates = parser.process(
+            packet(
+                "RetCommonCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, SELF_TOKEN],
+                            [1, PLAYER_ID],
+                            [6, 518_960],
+                            [20, 1_789_559_022],
+                            [34, {"$map": [[86_020_010, 518_960]]}],
+                        ]
+                    }
+                ],
+                sequence=5,
+            )
+        )
+
+        team_stat = next(value for kind, value in updates if kind == "team_stat")
+        self.assertEqual(team_stat["actor_id"], PLAYER_ID)
+        self.assertEqual(team_stat["user_token"], SELF_TOKEN)
+        self.assertEqual(team_stat["absolute_damage"], 518_960)
+        self.assertEqual(team_stat["server_time"], 1_789_559_022)
+        self.assertEqual(team_stat["dummy_target_id"], MONSTER_ID)
+        self.assertTrue(team_stat["dummy_personal_common"])
+        self.assertFalse(any(kind == "stage_summary" for kind, _ in updates))
+
+    def test_personal_common_bridges_terminal_dummy_total_and_duration(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+        parser.training_dummy_entities.add(MONSTER_ID)
+        parser.entity_template_ids[MONSTER_ID] = next(
+            iter(DAMAGE_TARGET_TEMPLATE_IDS)
+        )
+        parser.active_boss_entity_id = MONSTER_ID
+        parser.recent_target_id = MONSTER_ID
+
+        updates = parser.process(
+            packet(
+                "RetCommonCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, SELF_TOKEN],
+                            [1, PLAYER_ID],
+                            [6, 2_088_617],
+                            [19, 240],
+                        ]
+                    }
+                ],
+                sequence=6,
+            )
+        )
+
+        team_stat = next(value for kind, value in updates if kind == "team_stat")
+        self.assertEqual(team_stat["absolute_damage"], 2_088_617)
+        self.assertEqual(team_stat["server_time"], 0)
+        self.assertEqual(team_stat["combat_seconds_total"], 240)
+        self.assertTrue(team_stat["dummy_final_common"])
+
+    def test_personal_common_never_bridges_stale_dummy_or_wrong_identity(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.training_dummy_entities.add(MONSTER_ID)
+        parser.entity_template_ids[MONSTER_ID] = next(
+            iter(DAMAGE_TARGET_TEMPLATE_IDS)
+        )
+        parser.last_training_dummy_entity_id = MONSTER_ID
+
+        stale = parser.process(
+            packet(
+                "RetCommonCombatStatistics",
+                [{"$map": [[0, SELF_TOKEN], [1, PLAYER_ID], [6, 99], [20, 7]]}],
+                sequence=6,
+            )
+        )
+        self.assertFalse(any(kind == "team_stat" for kind, _ in stale))
+
+        parser.recent_target_id = MONSTER_ID
+        parser.active_boss_entity_id = MONSTER_ID + 10
+        parser.entity_template_ids[MONSTER_ID + 10] = 7_102_990
+        stale_behind_real_boss = parser.process(
+            packet(
+                "RetCommonCombatStatistics",
+                [{"$map": [[0, SELF_TOKEN], [1, PLAYER_ID], [6, 99], [20, 7]]}],
+                sequence=7,
+            )
+        )
+        self.assertFalse(
+            any(kind == "team_stat" for kind, _ in stale_behind_real_boss)
+        )
+
+        parser.active_boss_entity_id = MONSTER_ID
+        wrong_identity = parser.process(
+            packet(
+                "RetCommonCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, TEAMMATE_TOKEN],
+                            [1, PLAYER_ID + 1],
+                            [6, 100],
+                            [20, 8],
+                        ]
+                    }
+                ],
+                sequence=8,
+            )
+        )
+        self.assertFalse(
+            any(kind == "team_stat" for kind, _ in wrong_identity)
+        )
+
     def test_named_ai_token_is_exported_without_projection_suffix(self):
         self.assertTrue(is_ai_team_token(NAMED_AI_TOKEN))
         self.assertFalse(is_ai_team_token(TEAMMATE_TOKEN))
@@ -126,8 +263,636 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertTrue(
             should_decode_network_arguments("RetCommonCombatStatistics")
         )
+        self.assertTrue(
+            should_decode_network_arguments("OnMsgDungeonBotDisplay")
+        )
         self.assertFalse(should_decode_network_arguments("OnMsgStopSkill"))
         self.assertFalse(should_decode_network_arguments("OnMsgSyncFinalSpeed"))
+        self.assertFalse(
+            should_decode_network_arguments("OnMsgLeaveQuestControl")
+        )
+        self.assertTrue(
+            should_retain_network_record("OnMsgLeaveQuestControl")
+        )
+        self.assertTrue(
+            should_retain_network_record("OnMsgClearWorldReturnInfo")
+        )
+
+    def test_dungeon_bot_display_publishes_names_before_scene_entry(self):
+        parser = NetworkPacketParser()
+        updates = parser.process(
+            packet(
+                "OnMsgDungeonBotDisplay",
+                [[{0: 1_000_001, 1: 70, 4: 1_200_006, 5: "科林·投影"}]],
+                sequence=20,
+            )
+        )
+
+        profile = next(value for kind, value in updates if kind == "profile")
+        party = next(value for kind, value in updates if kind == "party")
+        actor_id = profile["entity_id"]
+        self.assertLess(actor_id, 0)
+        self.assertEqual(profile["name"], "科林·投影")
+        self.assertEqual(profile["profession_id"], 1_200_006)
+        self.assertTrue(profile["is_ai"])
+        self.assertEqual(party["entity_ids"], [actor_id])
+        self.assertEqual(party["member_count"], 2)
+        self.assertTrue(party["in_team"])
+
+        parser.process(
+            packet("OnMsgBeforeEnterNewSpace", [], sequence=21)
+        )
+        self.assertIn(actor_id, parser.party_ids)
+        self.assertEqual(parser.entity_profiles[actor_id]["name"], "科林·投影")
+
+    def test_projection_scene_keeps_human_roster_and_drops_old_projection(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+        old_actor = PLAYER_ID + 11
+        parser.token_actors[TEAMMATE_TOKEN] = old_actor
+        parser.actor_tokens[old_actor] = TEAMMATE_TOKEN
+        parser.entity_profiles[old_actor] = {
+            "name": "旧日常队友", "extraordinary_rating": 99_999,
+        }
+        parser.party_ids.add(old_actor)
+        parser.party_tokens.add(TEAMMATE_TOKEN)
+        parser.other_party_tokens.add(TEAMMATE_TOKEN)
+        parser.authoritative_party_tokens.update({SELF_TOKEN, TEAMMATE_TOKEN})
+        parser.live_team_property_ratings[TEAMMATE_TOKEN] = 99_999
+        old_ai_token = "apBrk8QJI8woZSsS"
+        old_ai_actor = PLAYER_ID + 12
+        parser.token_actors[old_ai_token] = old_ai_actor
+        parser.actor_tokens[old_ai_actor] = old_ai_token
+        parser.entity_profiles[old_ai_actor] = {
+            "name": "旧投影·投影", "is_ai": True,
+        }
+        parser.party_ids.add(old_ai_actor)
+        parser.party_tokens.add(old_ai_token)
+        parser.other_party_tokens.add(old_ai_token)
+        parser.authoritative_party_tokens.add(old_ai_token)
+        parser.party_member_count = 3
+        parser.party_session_generation = 7
+        parser.party_session_id = 7
+        parser.team_group_active = True
+
+        display = parser.process(packet(
+            "OnMsgDungeonBotDisplay",
+            [[{0: 1_000_001, 1: 70, 4: 1_200_006, 5: "科林·投影"}]],
+            sequence=20,
+        ))
+        bot_actor = next(
+            value["entity_id"] for kind, value in display if kind == "profile"
+        )
+        transition = parser.process(packet(
+            "OnMsgBeforeEnterNewSpace", [], sequence=21
+        ))
+        replacement = next(
+            value for kind, value in transition
+            if kind == "party" and value.get("roster_replace")
+        )
+
+        self.assertEqual(replacement["entity_ids"], sorted([bot_actor, old_actor]))
+        self.assertEqual(replacement["member_count"], 3)
+        self.assertEqual(
+            replacement["user_tokens"], sorted([SELF_TOKEN, TEAMMATE_TOKEN])
+        )
+        self.assertEqual(replacement["party_session_id"], 7)
+        self.assertIn(old_actor, parser.party_ids)
+        self.assertEqual(
+            parser.entity_profiles[old_actor]["name"], "旧日常队友"
+        )
+        self.assertEqual(
+            parser.live_team_property_ratings[TEAMMATE_TOKEN], 99_999
+        )
+        self.assertNotIn(old_ai_actor, parser.party_ids)
+        self.assertNotIn(old_ai_token, parser.party_tokens)
+
+        stale_counters = parser.process(packet(
+            "RetCommonCombatStatisticsByTeam",
+            [{
+                SELF_TOKEN: {"$map": [[4, "本人"], [5, 100]]},
+                TEAMMATE_TOKEN: {"$map": [[4, "旧日常队友"], [5, 900]]},
+            }],
+            sequence=22,
+        ))
+        self.assertIn(TEAMMATE_TOKEN, parser.party_tokens)
+        self.assertFalse(any(
+            kind == "team_stat" and value.get("user_token") == old_ai_token
+            for kind, value in stale_counters
+        ))
+
+        parser.process(packet(
+            "OnUpdateTeamGroupMemberProps",
+            [TEAMMATE_TOKEN, {4: 0, 5: 1000, 6: 1000, 11: 99_999}],
+            sequence=23,
+        ))
+        self.assertIn(TEAMMATE_TOKEN, parser.party_tokens)
+
+    def test_scene_boundary_disables_old_projection_name_carryover(self):
+        def scene_token(counter: int, middle: bytes, index: int) -> str:
+            raw = (
+                counter.to_bytes(4, "big")
+                + middle
+                + index.to_bytes(3, "big")
+            )
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+        old_tokens = [
+            scene_token(0x6A910210, b"old-a", index) for index in range(4)
+        ]
+        new_tokens = [
+            scene_token(0x6A910220, b"new-b", index) for index in range(4)
+        ]
+        old_names = ["旧投影甲", "旧投影乙", "旧投影丙", "旧投影丁"]
+        parser = NetworkPacketParser(
+            team_profile_cache={
+                token: {
+                    "name": name,
+                    "profession_id": 1_200_001 + index,
+                }
+                for index, (token, name) in enumerate(zip(old_tokens, old_names))
+            },
+            allow_cached_projection_roster=True,
+        )
+
+        self.assertEqual(
+            [profile["name"] for profile in parser._ordered_projection_profiles(new_tokens)],
+            old_names,
+        )
+        parser.process(packet("OnMsgBeforeEnterNewSpace", [], sequence=30))
+
+        self.assertFalse(parser.allow_cached_projection_roster)
+        self.assertEqual(parser._ordered_projection_profiles(new_tokens), [])
+
+    def test_clear_world_after_success_removes_bots_and_keeps_humans(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        real_actor = parser._bind_team_token(
+            TEAMMATE_TOKEN, stable_team_actor_id(TEAMMATE_TOKEN)
+        )
+        bots = {
+            "projection-token-1",
+            "projection-token-2",
+            "projection-token-3",
+            "projection-token-4",
+        }
+        for token in bots:
+            actor_id = parser._bind_team_token(token, stable_team_actor_id(token))
+            parser.party_ids.add(actor_id)
+            parser.entity_profiles[actor_id] = {"name": token, "is_ai": True}
+        parser.party_ids.add(real_actor)
+        parser.party_tokens = {TEAMMATE_TOKEN, *bots}
+        parser.other_party_tokens = set(parser.party_tokens)
+        parser.authoritative_party_tokens = {
+            SELF_TOKEN, TEAMMATE_TOKEN, *bots,
+        }
+        parser.dungeon_bot_roster_tokens = set(bots)
+        parser.party_member_count = 6
+        clear = packet("OnMsgClearWorldReturnInfo", [], sequence=24)
+        parser.successful_stage_settlement_time_100ns = (
+            clear["filetime_100ns"] - 10_000_000
+        )
+
+        updates = parser.process(clear)
+
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertTrue(party["roster_replace"])
+        self.assertEqual(set(party["user_tokens"]), {SELF_TOKEN, TEAMMATE_TOKEN})
+        self.assertEqual(party["member_count"], 2)
+        self.assertEqual(parser.party_tokens, {TEAMMATE_TOKEN})
+        self.assertIn(real_actor, parser.party_ids)
+        self.assertFalse(parser.dungeon_bot_roster_tokens)
+
+    def test_dungeon_bot_display_accumulates_split_packets(self):
+        parser = NetworkPacketParser()
+        batches = [
+            [{0: 1_000_001, 1: 70, 4: 1_200_006, 5: "科林·投影"}],
+            [
+                {0: 1_000_053, 1: 70, 4: 1_200_001, 5: "天上希瑞亚·投影"},
+                {0: 1_000_049, 1: 70, 4: 1_200_007, 5: "麒麟的兔子·投影"},
+            ],
+            [{0: 1_000_031, 1: 70, 4: 1_200_005, 5: "绵竹绵·投影"}],
+        ]
+        for sequence, batch in enumerate(batches, 30):
+            parser.process(
+                packet(
+                    "OnMsgDungeonBotDisplay",
+                    [batch],
+                    sequence=sequence,
+                )
+            )
+
+        self.assertEqual(len(parser.dungeon_bot_display_profiles), 4)
+        self.assertEqual(len(parser.party_ids), 4)
+        self.assertEqual(parser.party_member_count, 5)
+        self.assertEqual(
+            {
+                profile["name"]
+                for profile in parser.dungeon_bot_display_profiles.values()
+            },
+            {
+                "科林·投影",
+                "天上希瑞亚·投影",
+                "麒麟的兔子·投影",
+                "绵竹绵·投影",
+            },
+        )
+
+    def test_dungeon_bot_formal_token_replaces_temporary_row_without_ghost(self):
+        parser = NetworkPacketParser()
+        display = parser.process(
+            packet(
+                "OnMsgDungeonBotDisplay",
+                [[{0: 1_000_001, 1: 70, 4: 1_200_006, 5: "科林·投影"}]],
+                sequence=40,
+            )
+        )
+        temporary_actor = next(
+            value["entity_id"] for kind, value in display if kind == "profile"
+        )
+
+        parser.process(
+            packet(
+                "OnMsgSyncTeamGroupMemberFreqProp",
+                [NAMED_AI_TOKEN, 3, [123, {"x": 1}]],
+                sequence=41,
+            )
+        )
+        self.assertNotIn(NAMED_AI_TOKEN, parser.token_actors)
+        self.assertEqual(parser.party_ids, {temporary_actor})
+
+        updates = parser.process(
+            packet(
+                "OnMsgOtherJoinTeamGroup",
+                [
+                    0,
+                    PLAYER_ID + 50,
+                    {
+                        "$map": [
+                            [2, NAMED_AI_TOKEN],
+                            [5, "科林·投影"],
+                            [6, TEAMMATE_ROLE_NUMBER + 50],
+                            [8, 1_200_006],
+                            [9, 70],
+                        ]
+                    },
+                ],
+                sequence=42,
+            )
+        )
+
+        formal_actor = parser.token_actors[NAMED_AI_TOKEN]
+        merge = next(value for kind, value in updates if kind == "actor_merge")
+        self.assertEqual(merge["from_actor_id"], temporary_actor)
+        self.assertEqual(merge["to_actor_id"], formal_actor)
+        self.assertNotIn(temporary_actor, parser.party_ids)
+        self.assertEqual(parser.party_ids, {formal_actor})
+        self.assertFalse(parser.dungeon_bot_display_profiles)
+        self.assertEqual(parser.entity_profiles[formal_actor]["name"], "科林·投影")
+        self.assertTrue(parser.entity_profiles[formal_actor]["is_ai"])
+
+    def test_new_dungeon_bot_batch_removes_previous_roster(self):
+        parser = NetworkPacketParser()
+        first = packet(
+            "OnMsgDungeonBotDisplay",
+            [[{0: 1_000_001, 1: 70, 4: 1_200_006, 5: "科林·投影"}]],
+            sequence=50,
+        )
+        parser.process(first)
+        old_actor = next(iter(parser.party_ids))
+
+        second = packet(
+            "OnMsgDungeonBotDisplay",
+            [[{0: 1_000_054, 1: 70, 4: 1_200_002, 5: "飘飘来了·投影"}]],
+            sequence=51,
+        )
+        second["filetime_100ns"] = first["filetime_100ns"] + 3 * 10_000_000
+        updates = parser.process(second)
+
+        profile = next(value for kind, value in updates if kind == "profile")
+        self.assertEqual(profile["name"], "飘飘来了·投影")
+        self.assertNotIn(old_actor, parser.party_ids)
+        self.assertNotIn(old_actor, parser.entity_profiles)
+        self.assertEqual(len(parser.party_ids), 1)
+
+    def test_new_dungeon_bot_batch_removes_formally_bound_previous_roster(self):
+        parser = NetworkPacketParser()
+        first = packet(
+            "OnMsgDungeonBotDisplay",
+            [[{0: 1_000_001, 1: 70, 4: 1_200_006, 5: "旧投影"}]],
+            sequence=60,
+        )
+        parser.process(first)
+        parser.process(
+            packet(
+                "OnMsgSyncTeamGroupMemberFreqProp",
+                [NAMED_AI_TOKEN, 3, [123, {"x": 1}]],
+                sequence=61,
+            )
+        )
+        parser.process(
+            packet(
+                "OnMsgOtherJoinTeamGroup",
+                [
+                    0,
+                    PLAYER_ID + 60,
+                    {
+                        "$map": [
+                            [2, NAMED_AI_TOKEN],
+                            [5, "旧投影"],
+                            [6, TEAMMATE_ROLE_NUMBER + 60],
+                            [8, 1_200_006],
+                            [9, 70],
+                        ]
+                    },
+                ],
+                sequence=62,
+            )
+        )
+        old_actor = parser.token_actors[NAMED_AI_TOKEN]
+        self.assertFalse(parser.dungeon_bot_display_profiles)
+        self.assertIn(NAMED_AI_TOKEN, parser.dungeon_bot_roster_tokens)
+
+        second = packet(
+            "OnMsgDungeonBotDisplay",
+            [[{0: 1_000_054, 1: 70, 4: 1_200_002, 5: "新投影"}]],
+            sequence=63,
+        )
+        second["filetime_100ns"] = first["filetime_100ns"] + 3 * 10_000_000
+        parser.process(second)
+
+        self.assertNotIn(NAMED_AI_TOKEN, parser.party_tokens)
+        self.assertNotIn(NAMED_AI_TOKEN, parser.token_actors)
+        self.assertNotIn(old_actor, parser.party_ids)
+        self.assertNotIn(old_actor, parser.entity_profiles)
+        self.assertEqual(len(parser.party_ids), 1)
+
+    def test_scene_member_sweep_replaces_old_roster_after_quiet_period(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        parser._begin_party_session(packet("", []), explicit=True)
+
+        old_real = TEAMMATE_TOKEN
+        old_bot = NAMED_AI_TOKEN
+        for token in (old_real, old_bot):
+            actor_id = parser._bind_team_token(token, stable_team_actor_id(token))
+            parser.party_ids.add(actor_id)
+        parser.party_tokens = {old_real, old_bot}
+        parser.other_party_tokens = set(parser.party_tokens)
+        parser.authoritative_party_tokens = {SELF_TOKEN, old_real, old_bot}
+        parser.dungeon_bot_roster_tokens = {old_bot}
+        parser.dungeon_bot_display_last_100ns = packet("", [], sequence=70)[
+            "filetime_100ns"
+        ]
+
+        display = packet(
+            "OnMsgDungeonBotDisplay",
+            [[
+                {0: 1_000_101, 1: 70, 4: 1_200_001, 5: "投影甲"},
+                {0: 1_000_102, 1: 70, 4: 1_200_002, 5: "投影乙"},
+                {0: 1_000_103, 1: 70, 4: 1_200_003, 5: "投影丙"},
+                {0: 1_000_104, 1: 70, 4: 1_200_004, 5: "投影丁"},
+            ]],
+            sequence=71,
+        )
+        display["filetime_100ns"] = (
+            parser.dungeon_bot_display_last_100ns + 3 * 10_000_000
+        )
+        parser.process(display)
+        parser.process(packet("OnMsgBeforeEnterNewSpace", [], sequence=72))
+
+        new_real = "AQAAAOwN1ga-AAAA"
+        new_bots = {
+            "arnxvcPGvkVRNmCh",
+            "arnxvcPGvkVRNmER",
+            "arnxvcPGvkVRNmF9",
+            "arnxvcPGvkVRNmHp",
+        }
+        for sequence, token in enumerate([new_real, *sorted(new_bots)], 73):
+            parser.process(
+                packet(
+                    "OnMsgSyncTeamGroupMemberFreqProp",
+                    [token, 3, [123, {"x": sequence}]],
+                    sequence=sequence,
+                )
+            )
+
+        self.assertIn(old_real, parser.party_tokens)
+        self.assertEqual(
+            parser.flush_live_party_roster(
+                now=parser.live_party_roster_last_monotonic + 1.99
+            ),
+            [],
+        )
+        updates = parser.flush_live_party_roster(
+            now=parser.live_party_roster_last_monotonic + 2.0
+        )
+
+        expected = {new_real, *new_bots}
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertTrue(party["roster_replace"])
+        self.assertEqual(set(party["user_tokens"]), {SELF_TOKEN, *expected})
+        self.assertEqual(parser.party_tokens, expected)
+        self.assertEqual(parser.authoritative_party_tokens, {SELF_TOKEN, *expected})
+        self.assertEqual(parser.party_member_count, 6)
+        self.assertNotIn(old_real, parser.token_actors)
+        self.assertNotIn(old_bot, parser.token_actors)
+
+        departing_bot = sorted(new_bots)[0]
+        temporary_actor = parser.dungeon_bot_deferred_actor_ids[departing_bot]
+        leave_updates = parser.process(
+            packet(
+                "OnMsgOtherQuitTeam",
+                [0, PLAYER_ID + 100, departing_bot],
+                sequence=80,
+            )
+        )
+        leave_party = next(
+            value for kind, value in leave_updates if kind == "party"
+        )
+        self.assertEqual(leave_party["member_count"], 5)
+        self.assertNotIn(departing_bot, parser.party_tokens)
+        self.assertNotIn(temporary_actor, parser.party_ids)
+        self.assertNotIn(temporary_actor, parser.entity_profiles)
+        self.assertEqual(len(parser.party_ids), 4)
+        self.assertEqual(len(parser.dungeon_bot_display_profiles), 3)
+
+        rebound_bot = sorted(new_bots - {departing_bot})[0]
+        rebound_temporary_actor = (
+            parser.dungeon_bot_deferred_actor_ids[rebound_bot]
+        )
+        rebound_actor = PLAYER_ID + 101
+        rebound_updates = parser._rebind_team_actor(
+            rebound_bot,
+            rebound_actor,
+            packet("OnUpdateTeamGroupMemberProps", [], sequence=81),
+            allow_positive_rebind=True,
+        )
+        rebound_merge = next(
+            value for kind, value in rebound_updates if kind == "actor_merge"
+        )
+        self.assertEqual(rebound_merge["from_actor_id"], rebound_temporary_actor)
+        self.assertEqual(rebound_merge["to_actor_id"], rebound_actor)
+        self.assertNotIn(rebound_temporary_actor, parser.party_ids)
+        self.assertIn(rebound_actor, parser.party_ids)
+        self.assertEqual(len(parser.party_ids), 4)
+        self.assertEqual(len(parser.dungeon_bot_display_profiles), 2)
+
+    def test_scene_rebuild_waits_for_property_three_sweep(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        teammate_actor = parser._bind_team_token(
+            TEAMMATE_TOKEN, stable_team_actor_id(TEAMMATE_TOKEN)
+        )
+        parser.party_tokens = {TEAMMATE_TOKEN}
+        parser.other_party_tokens = {TEAMMATE_TOKEN}
+        parser.authoritative_party_tokens = {SELF_TOKEN, TEAMMATE_TOKEN}
+        parser.party_ids = {teammate_actor}
+        parser._begin_party_session(packet("", []), explicit=True)
+
+        parser.process(packet("OnMsgBeforeEnterNewSpace", [], sequence=90))
+        parser.process(
+            packet(
+                "OnMsgSyncTeamGroupMemberFreqProp",
+                [SELF_TOKEN, 3, [123, {"x": 1}]],
+                sequence=91,
+            )
+        )
+        parser.process(
+            packet(
+                "OnUpdateTeamGroupMemberProps",
+                [SELF_TOKEN, {4: False, 5: 100.0, 6: 100.0}],
+                sequence=92,
+            )
+        )
+
+        self.assertEqual(
+            parser.flush_live_party_roster(
+                now=parser.live_party_roster_last_monotonic + 10.0
+            ),
+            [],
+        )
+        self.assertEqual(parser.party_tokens, {TEAMMATE_TOKEN})
+
+    def test_direct_dungeon_transition_rebuilds_delayed_roster_and_ratings(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        retained_token = TEAMMATE_TOKEN
+        stale_token = "AQAAAOwN-old-party"
+        incoming_token = "AQAAAOwN-new-party"
+        for index, token in enumerate((retained_token, stale_token), start=1):
+            actor_id = parser._bind_team_token(
+                token, stable_team_actor_id(token)
+            )
+            parser.party_ids.add(actor_id)
+            parser.entity_profiles[actor_id] = {
+                "name": f"old-member-{index}",
+                "extraordinary_rating": 80_000 + index,
+            }
+            parser.live_team_property_ratings[token] = 80_000 + index
+        parser.party_tokens = {retained_token, stale_token}
+        parser.other_party_tokens = set(parser.party_tokens)
+        parser.authoritative_party_tokens = {
+            SELF_TOKEN,
+            retained_token,
+            stale_token,
+        }
+        parser._begin_party_session(packet("", []), explicit=True)
+
+        parser.process(packet("OnMsgBeforeEnterNewSpace", [], sequence=100))
+        parser.process(
+            packet(
+                "OnMsgSyncTeamGroupMemberFreqProp",
+                [SELF_TOKEN, 3, [123, {"x": 1}]],
+                sequence=101,
+            )
+        )
+
+        self.assertEqual(
+            parser.flush_live_party_roster(
+                now=parser.live_party_roster_last_monotonic + 30.0
+            ),
+            [],
+        )
+        self.assertEqual(
+            parser.party_tokens, {retained_token, stale_token}
+        )
+        self.assertEqual(
+            parser.live_team_property_ratings[retained_token], 80_001
+        )
+
+        parser.departed_party_tokens.add(incoming_token)
+        parser.process(
+            packet(
+                "OnUpdateTeamGroupMemberProps",
+                [
+                    retained_token,
+                    {4: False, 5: 21_000.0, 6: 21_000.0, 11: 91_001},
+                ],
+                sequence=102,
+            )
+        )
+        parser.process(
+            packet(
+                "OnUpdateTeamGroupMemberProps",
+                [
+                    incoming_token,
+                    {4: False, 5: 22_000.0, 6: 22_000.0, 11: 92_002},
+                ],
+                sequence=103,
+            )
+        )
+        updates = parser.flush_live_party_roster(
+            now=parser.live_party_roster_last_monotonic + 2.0
+        )
+
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertTrue(party["roster_replace"])
+        self.assertEqual(
+            set(party["user_tokens"]),
+            {SELF_TOKEN, retained_token, incoming_token},
+        )
+        self.assertEqual(
+            parser.party_tokens, {retained_token, incoming_token}
+        )
+        self.assertIn(stale_token, parser.departed_party_tokens)
+        self.assertNotIn(incoming_token, parser.departed_party_tokens)
+        retained_actor = parser.token_actors[retained_token]
+        incoming_actor = parser.token_actors[incoming_token]
+        self.assertEqual(
+            parser.entity_profiles[retained_actor]["extraordinary_rating"],
+            91_001,
+        )
+        self.assertEqual(
+            parser.entity_profiles[incoming_actor]["extraordinary_rating"],
+            92_002,
+        )
+
+        parser.process(
+            packet(
+                "OnMsgOtherQuitTeam",
+                [0, incoming_actor, incoming_token],
+                sequence=104,
+            )
+        )
+        self.assertNotIn(incoming_token, parser.party_tokens)
+        self.assertIn(incoming_token, parser.departed_party_tokens)
 
     def test_player_detail_query_adds_only_matching_teammate_details(self):
         teammate_id = PLAYER_ID + 10
@@ -192,6 +957,31 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(rows[teammate_id]["penetration_hits"], 8)
         self.assertNotIn("taken", rows[teammate_id])
         self.assertNotIn("effective_healing", rows[teammate_id])
+
+        without_excluded = parser.process(
+            packet(
+                "RetCommonCombatStatistics",
+                [{
+                    "$map": [
+                        [0, TEAMMATE_TOKEN],
+                        [1, teammate_id],
+                        [6, 200],
+                        [25, 4],
+                        [27, 10],
+                        [33, {"$map": [[86_021_030, 10]]}],
+                        [34, {"$map": [[86_021_030, 200]]}],
+                    ]
+                }],
+                sequence=12,
+            )
+        )
+        summary = next(
+            value for kind, value in without_excluded if kind == "stage_summary"
+        )
+        teammate = next(
+            row for row in summary["actors"] if row["actor_id"] == teammate_id
+        )
+        self.assertEqual(teammate["penetration_hits"], 10)
 
     def test_dungeon_settlement_passively_adds_its_single_teammate_detail(self):
         teammate_id = PLAYER_ID + 10
@@ -540,6 +1330,38 @@ class NetworkPacketParserTests(unittest.TestCase):
             context["dungeon_context_filetime"],
             packet("", [], sequence=3)["filetime_100ns"],
         )
+
+    def test_scene_boundaries_clear_only_the_previous_stage_context(self):
+        for method, args in (
+            ("OnMsgBeforeEnterNewSpace", []),
+            ("OnMsgLeaveSpace", []),
+            ("OnMsgLeaveQuestControl", []),
+            ("OnMsgRefreshSceneObjects", [5_200_052, {}, {}]),
+        ):
+            with self.subTest(method=method):
+                parser = NetworkPacketParser()
+                parser.dungeon_id = 5_100_052
+                parser.dungeon_stage_id = 5_150_111
+                parser.dungeon_stage_phase = 1
+                parser.process(packet(method, args))
+                self.assertEqual(parser.dungeon_stage_id, 0)
+                self.assertEqual(parser.dungeon_stage_phase, 0)
+                # Readiness/roster properties are not the stale STAGE table.
+                self.assertEqual(parser.dungeon_id, 5_100_052)
+
+    def test_fight_mode_and_partial_refresh_retain_current_stage_context(self):
+        parser = NetworkPacketParser()
+        parser.dungeon_stage_id = 5_150_073
+        parser.dungeon_stage_phase = 1
+        for method, args in (
+            ("OnMsgSyncFightMode", [0]),
+            ("OnMsgSyncFightMode", [2]),
+            ("OnMsgRefreshSceneObjects", [None, {}, {}]),
+            ("OnMsgRefreshSceneObjects", [5_200_052, 1, 2]),
+        ):
+            parser.process(packet(method, args))
+            self.assertEqual(parser.dungeon_stage_id, 5_150_073)
+            self.assertEqual(parser.dungeon_stage_phase, 1)
 
     def test_low_combat_entity_ids_are_valid_only_in_explicit_id_fields(self):
         low_boss_id = 4_530_117_319_991
@@ -2109,6 +2931,56 @@ class NetworkPacketParserTests(unittest.TestCase):
             parser._resolved_boss_name(other_id), "其他运行时首领"
         )
 
+    def test_verified_dual_boss_successor_replaces_live_partner_without_death_packet(self):
+        partner_id = MONSTER_ID + 1
+        successor_id = MONSTER_ID + 2
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7100208": {"boss_type": 3, "name": "安西娅"},
+                "7100209": {"boss_type": 3, "name": "巴尼先生"},
+                "7100210": {"boss_type": 3, "name": "安西娅"},
+            }
+        )
+        for sequence, entity_id, template_id in (
+            (1, MONSTER_ID, 7_100_208),
+            (2, partner_id, 7_100_209),
+        ):
+            parser.process_native_boss_type(
+                {
+                    "entity_id": entity_id,
+                    "template_id": template_id,
+                    "boss_type": 3,
+                    "filetime_100ns": packet("", [], sequence=sequence)[
+                        "filetime_100ns"
+                    ],
+                }
+            )
+
+        # A transport gap can hide both death packets. The exact successor
+        # template still proves that the dual-Boss opening has ended.
+        parser.active_boss_entity_id = partner_id
+        parser.entity_current_hp[partner_id] = 8_000_000.0
+        parser.active_boss_pointer = MONSTER_POINTER + 1
+        updates = parser.process_native_boss_type(
+            {
+                "entity_id": successor_id,
+                "template_id": 7_100_210,
+                "boss_type": 3,
+                "filetime_100ns": packet("", [], sequence=3)[
+                    "filetime_100ns"
+                ],
+            }
+        )
+
+        self.assertEqual(parser.active_boss_entity_id, successor_id)
+        self.assertIsNone(parser.active_boss_pointer)
+        self.assertTrue(
+            any(
+                kind == "profile" and value.get("entity_id") == successor_id
+                for kind, value in updates
+            )
+        )
+
     def test_placeholder_profile_recovers_when_template_arrives_later(self):
         parser = NetworkPacketParser(
             boss_template_catalog={
@@ -2547,6 +3419,156 @@ class NetworkPacketParserTests(unittest.TestCase):
             }
         )
         self.assertEqual(parser.active_boss_entity_id, boss_id)
+
+    def test_damage_switches_between_coexisting_current_training_dummies(self):
+        first_id = MONSTER_ID + 1_180
+        hit_id = MONSTER_ID + 1_181
+        parser = NetworkPacketParser(
+            boss_template_catalog={
+                "7100632": {"boss_type": 3, "level": 71, "name": "伤害木桩"},
+                "7100633": {"boss_type": 3, "level": 79, "name": "伤害木桩"},
+            },
+            boss_name_allowlist=("伤害木桩",),
+        )
+        for sequence, entity_id, template_id, level in (
+            (1, first_id, 7_100_632, 71),
+            (2, hit_id, 7_100_633, 79),
+        ):
+            parser.process_native_boss_type(
+                {
+                    "entity_id": entity_id,
+                    "template_id": template_id,
+                    "boss_type": 3,
+                    "level": level,
+                    "filetime_100ns": packet("", [], sequence=sequence)[
+                        "filetime_100ns"
+                    ],
+                }
+            )
+        parser.entity_current_hp[first_id] = 9_188_299_254.0
+        parser.entity_current_hp[hit_id] = 6_639_946_140.0
+        self.assertEqual(parser.active_boss_entity_id, first_id)
+
+        updates = parser.process(
+            packet(
+                "OnMsgDamageSyncV2",
+                [PLAYER_ID, hit_id, 86_010_010_000_01, 0, 1, 3_558, 0, 3_558, False],
+                sequence=3,
+            )
+        )
+
+        event = next(value for kind, value in updates if kind == "event")
+        self.assertEqual(parser.active_boss_entity_id, hit_id)
+        self.assertTrue(event["active_boss"])
+        self.assertIn(hit_id, parser.training_dummy_entities)
+
+    def test_live_level_84_damage_dummy_template_is_recognized(self):
+        template_id = 7_100_634
+        catalog = load_monster_metadata(Path(__file__).with_name("monster_metadata.json"))
+        self.assertEqual(
+            catalog[str(template_id)],
+            {"boss_type": 3, "level": 84, "name": "伤害木桩"},
+        )
+        self.assertIn(template_id, DAMAGE_TARGET_TEMPLATE_IDS)
+
+        dummy_id = 57_228_828_730_501
+        parser = NetworkPacketParser(
+            boss_template_catalog=catalog,
+            boss_name_allowlist=("伤害木桩",),
+        )
+        updates = parser.process_native_boss_type(
+            {
+                "entity_id": dummy_id,
+                "template_id": template_id,
+                "boss_type": 3,
+                "filetime_100ns": 134_353_748_206_558_294,
+            }
+        )
+
+        profile = next(value for kind, value in updates if kind == "profile")
+        self.assertEqual(profile["name"], "伤害木桩")
+        self.assertEqual(profile["level"], 84)
+        self.assertEqual(parser.active_boss_entity_id, dummy_id)
+        self.assertIn(dummy_id, parser.training_dummy_entities)
+
+    def test_reserved_damage_dummy_requires_current_client_validation(self):
+        template_id = 7_100_635
+        dummy_id = 57_228_828_730_502
+        parser = NetworkPacketParser(boss_template_catalog={})
+
+        rejected = parser.process_native_boss_type(
+            {
+                "entity_id": dummy_id,
+                "template_id": template_id,
+                "boss_type": 3,
+                "localization_id": 422_213_270_373_888,
+                "filetime_100ns": 134_353_748_206_558_294,
+            }
+        )
+        self.assertEqual(rejected, [])
+        self.assertNotIn(template_id, parser.damage_target_template_ids)
+
+        updates = parser.process_native_boss_type(
+            {
+                "entity_id": dummy_id,
+                "template_id": template_id,
+                "boss_type": 3,
+                "localization_id": 422_213_270_373_888,
+                "damage_target_validated": True,
+                "level": 90,
+                "filetime_100ns": 134_353_748_206_558_295,
+            }
+        )
+
+        profile = next(value for kind, value in updates if kind == "profile")
+        self.assertEqual(profile["name"], "伤害木桩")
+        self.assertEqual(profile["level"], 90)
+        self.assertIn(template_id, parser.damage_target_template_ids)
+        self.assertIn(dummy_id, parser.training_dummy_entities)
+
+    def test_reserved_non_dummy_template_is_never_registered(self):
+        parser = NetworkPacketParser(boss_template_catalog={})
+        for boss_type, localization_id in (
+            (1, 422_213_270_373_888),
+            (3, 422_213_270_374_144),
+        ):
+            updates = parser.process_native_boss_type(
+                {
+                    "entity_id": 57_228_828_730_503,
+                    "template_id": 7_100_638,
+                    "boss_type": boss_type,
+                    "localization_id": localization_id,
+                    "damage_target_validated": True,
+                    "filetime_100ns": 134_353_748_206_558_296,
+                }
+            )
+            self.assertEqual(updates, [])
+        self.assertNotIn(7_100_638, parser.damage_target_template_ids)
+
+    def test_leave_quest_control_is_scene_boundary_when_space_packet_is_missing(self):
+        parser = NetworkPacketParser()
+        parser.scene_id = 5_200_275
+        parser.active_boss_entity_id = MONSTER_ID
+        parser.active_boss_pointer = MONSTER_POINTER
+        parser.confirmed_boss_entities.add(MONSTER_ID)
+        parser.entity_template_ids[MONSTER_ID] = 7_102_990
+        parser.pointer_entities[MONSTER_POINTER] = MONSTER_ID
+        parser.combat_mode_pointers.add(MONSTER_POINTER)
+
+        updates = parser.process(
+            packet("OnMsgLeaveQuestControl", [], sequence=2)
+        )
+
+        scene = next(value for kind, value in updates if kind == "scene")
+        self.assertTrue(scene["transition"])
+        self.assertTrue(scene["force_reset"])
+        self.assertEqual(scene["source_method"], "OnMsgLeaveQuestControl")
+        self.assertEqual(scene["previous_scene_id"], 5_200_275)
+        self.assertEqual(scene["scene_id"], 0)
+        self.assertIsNone(parser.scene_id)
+        self.assertIsNone(parser.active_boss_entity_id)
+        self.assertFalse(parser.confirmed_boss_entities)
+        self.assertFalse(parser.combat_mode_pointers)
 
     def test_numeric_refresh_overload_does_not_clear_live_scene(self):
         parser = NetworkPacketParser()
@@ -4595,6 +5617,171 @@ class NetworkPacketParserTests(unittest.TestCase):
             any(kind == "life" for kind, _value in npc_death_with_killer_token)
         )
 
+    def test_full_roster_replaces_stale_projection_before_periodic_publish(self):
+        parser = NetworkPacketParser(
+            team_profile_cache={
+                TEAMMATE_TOKEN: {
+                    "name": "Peer",
+                    "profession_id": 1_200_003,
+                }
+            }
+        )
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+        old_bots = {
+            "aqyAVP55GzsPcwxd",
+            "aqyAVP55GzsPcwzJ",
+            "aqyAVP55GzsPcw01",
+            "aqyAVP55GzsPcw2h",
+        }
+        stale_tokens = {TEAMMATE_TOKEN, *old_bots}
+        for token in stale_tokens:
+            actor_id = parser._bind_team_token(token, stable_team_actor_id(token))
+            parser.party_ids.add(actor_id)
+        parser.party_tokens = set(stale_tokens)
+        parser.other_party_tokens = set(stale_tokens)
+        parser.authoritative_party_tokens = {SELF_TOKEN, *stale_tokens}
+        parser.explicit_party_roster_seen = True
+        parser.team_group_active = True
+        parser._begin_party_session(packet("", []), explicit=True)
+        parser._refresh_party_member_count()
+        parser.team_profile_cache["aqyAVP55GzsPcwxd"] = {"name": "cached bot"}
+
+        parser.process(packet("OnSyncTeamGroupInfo", [[
+            {"$map": [[2, SELF_TOKEN], [5, "Self"]]},
+            {"$map": [[2, TEAMMATE_TOKEN], [5, "Peer"]]},
+        ]]))
+
+        parser.process(
+            packet(
+                "OnUpdateTeamGroupMemberProps",
+                [
+                    TEAMMATE_TOKEN,
+                    {"$map": [[4, False], [5, 17_307.0], [6, 17_307.0]]},
+                ],
+                sequence=22,
+            )
+        )
+        updates = parser.flush_live_party_roster(
+            now=parser.live_party_roster_last_monotonic + 2.0
+        )
+
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertTrue(party["authoritative"])
+        self.assertTrue(party["roster_replace"])
+        self.assertEqual(set(party["user_tokens"]), {SELF_TOKEN, TEAMMATE_TOKEN})
+        self.assertEqual(parser.party_tokens, {TEAMMATE_TOKEN})
+        self.assertEqual(parser.party_member_count, 2)
+        self.assertTrue(old_bots.isdisjoint(parser.token_actors))
+        self.assertEqual(
+            parser.team_profile_cache["aqyAVP55GzsPcwxd"]["name"],
+            "cached bot",
+        )
+
+    def test_full_roster_replaces_old_bot_tokens_on_reentry(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+        parser._begin_party_session(packet("", []), explicit=True)
+        old_bots = {
+            "aqFyZFqM2Vv1Z3Uy",
+            "aqFyZFqM2Vv1Z3Uz",
+            "aqFyZFqM2Vv1Z3U0",
+            "aqFyZFqM2Vv1Z3U1",
+        }
+        for token in {TEAMMATE_TOKEN, *old_bots}:
+            actor_id = parser._bind_team_token(token, stable_team_actor_id(token))
+            parser.party_ids.add(actor_id)
+        parser.party_tokens = {TEAMMATE_TOKEN, *old_bots}
+        parser.other_party_tokens = set(parser.party_tokens)
+        parser.authoritative_party_tokens = {SELF_TOKEN, *parser.party_tokens}
+        parser.explicit_party_roster_seen = True
+        new_bots = {
+            "aqyAVP55GzsPcwxd",
+            "aqyAVP55GzsPcwzJ",
+            "aqyAVP55GzsPcw01",
+            "aqyAVP55GzsPcw2h",
+        }
+
+        parser.process(packet("OnSyncTeamGroupInfo", [[
+            {"$map": [[2, token], [5, "Current member"]]}
+            for token in [SELF_TOKEN, TEAMMATE_TOKEN, *sorted(new_bots)]
+        ]]))
+
+        for sequence, token in enumerate([TEAMMATE_TOKEN, *sorted(new_bots)], 30):
+            parser.process(
+                packet(
+                    "OnUpdateTeamGroupMemberProps",
+                    [token, {"$map": [[4, False], [5, 10.0], [6, 10.0]]}],
+                    sequence=sequence,
+                )
+            )
+        parser.flush_live_party_roster(
+            now=parser.live_party_roster_last_monotonic + 2.0
+        )
+
+        expected = {TEAMMATE_TOKEN, *new_bots}
+        self.assertEqual(parser.party_tokens, expected)
+        self.assertEqual(parser.authoritative_party_tokens, {SELF_TOKEN, *expected})
+        self.assertEqual(parser.party_member_count, 6)
+        self.assertTrue(old_bots.isdisjoint(parser.token_actors))
+
+    def test_local_life_delta_does_not_clear_quiet_teammates(self):
+        """A local HP delta is not an authoritative empty roster."""
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+        parser._begin_party_session(packet("", []), explicit=True)
+        actor_id = parser._bind_team_token(
+            TEAMMATE_TOKEN, stable_team_actor_id(TEAMMATE_TOKEN)
+        )
+        parser.party_tokens = {TEAMMATE_TOKEN}
+        parser.other_party_tokens = {TEAMMATE_TOKEN}
+        parser.authoritative_party_tokens = {SELF_TOKEN, TEAMMATE_TOKEN}
+        parser.party_ids = {actor_id}
+        parser.explicit_party_roster_seen = True
+        parser.team_group_active = True
+
+        parser.process(
+            packet(
+                "OnUpdateTeamGroupMemberProps",
+                [TEAMMATE_TOKEN, {"$map": [[4, False], [5, 1.0], [6, 1.0]]}],
+                sequence=31,
+            )
+        )
+        first = parser.flush_live_party_roster(
+            now=parser.live_party_roster_last_monotonic + 2.0
+        )
+        first_party = next(value for kind, value in first if kind == "party")
+        self.assertEqual(set(first_party["user_tokens"]), {SELF_TOKEN, TEAMMATE_TOKEN})
+
+        # Even a local HP packet cannot prove that an unchanged teammate left.
+        parser.process(
+            packet(
+                "OnUpdateTeamGroupMemberProps",
+                [SELF_TOKEN, {"$map": [[4, False], [5, 17_307.0], [6, 17_307.0]]}],
+                sequence=24,
+            )
+        )
+        second = parser.flush_live_party_roster(
+            now=parser.live_party_roster_last_monotonic + 2.0
+        )
+        second_party = next(value for kind, value in second if kind == "party")
+        self.assertTrue(second_party["roster_replace"])
+        self.assertEqual(set(second_party["user_tokens"]), {SELF_TOKEN, TEAMMATE_TOKEN})
+        self.assertEqual(parser.party_tokens, {TEAMMATE_TOKEN})
+        self.assertEqual(parser.party_ids, {actor_id})
+        self.assertIn(TEAMMATE_TOKEN, parser.token_actors)
+
     def test_reused_pid_cannot_apply_another_same_profession_player_as_self(self):
         old_token = "old-same-profession-token"
         current_token = "current-character-token"
@@ -6392,6 +7579,598 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertFalse(parser.team_group_active)
         self.assertFalse(leave_party["in_team"])
 
+    def test_join_group_ignores_outer_recruitment_description(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        recruitment = "黄铜书单六来三点八主播带队私聊发图"
+        self_profile = {
+            "$map": [
+                [2, SELF_TOKEN],
+                [5, "莫雪"],
+                [6, 33_120_849_388],
+                [8, 1_200_002],
+            ]
+        }
+        teammate_profile = {
+            "$map": [
+                [2, TEAMMATE_TOKEN],
+                [5, "队友"],
+                [6, TEAMMATE_ROLE_NUMBER],
+                [8, 1_200_003],
+            ]
+        }
+        group_details = {
+            "$map": [
+                [2, recruitment],
+                [8, SELF_TOKEN],
+                [17, [[self_profile, teammate_profile]]],
+            ]
+        }
+
+        updates = parser.process(
+            packet("OnJoinGroupSuccess", [PLAYER_ID, group_details], sequence=3)
+        )
+
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertEqual(
+            set(party["user_tokens"]), {SELF_TOKEN, TEAMMATE_TOKEN}
+        )
+        self.assertNotIn(recruitment, parser.token_actors)
+
+    def test_create_team_success_starts_one_stable_party_session(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.entity_profiles[PLAYER_ID] = {
+            "name": "莫雪",
+            "entity_type": "Player",
+        }
+        self_profile = {
+            "$map": [
+                [2, SELF_TOKEN],
+                [5, "莫雪"],
+                [6, 33_120_849_388],
+                [8, 1_200_002],
+                [27, 80_616],
+            ]
+        }
+
+        first = parser.process(
+            packet("OnCreateTeamSuccess", [[self_profile]], sequence=10)
+        )
+        first_party = next(value for kind, value in first if kind == "party")
+        first_session = first_party["party_session_id"]
+        self.assertGreater(first_session, 0)
+        self.assertTrue(first_party["in_team"])
+
+        duplicate = parser.process(
+            packet("OnCreateTeamSuccess", [[self_profile]], sequence=11)
+        )
+        self.assertFalse(any(kind == "party" for kind, _value in duplicate))
+        self.assertEqual(parser.party_session_id, first_session)
+
+    def test_live_team_self_props_recovers_single_member_team_after_late_start(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+
+        updates = parser.process(
+            packet(
+                "OnUpdateTeamGroupSelfProps",
+                [{"$map": [[11, 80_616]]}],
+                sequence=12,
+            )
+        )
+
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertTrue(party["in_team"])
+        self.assertEqual(party["member_count"], 1)
+        self.assertGreater(party["party_session_id"], 0)
+
+    def test_full_team_info_recovers_roster_without_rotating_on_repeat(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.entity_profiles[PLAYER_ID] = {
+            "name": "莫雪",
+            "entity_type": "Player",
+        }
+        profiles = [
+            {"$map": [[2, SELF_TOKEN], [5, "莫雪"], [6, 101]]},
+            {
+                "$map": [
+                    [2, TEAMMATE_TOKEN],
+                    [5, "队友"],
+                    [6, TEAMMATE_ROLE_NUMBER],
+                ]
+            },
+        ]
+
+        first = parser.process(
+            packet("OnSyncTeamGroupInfo", [profiles], sequence=13)
+        )
+        party = next(value for kind, value in first if kind == "party")
+        session_id = party["party_session_id"]
+        self.assertEqual(set(party["user_tokens"]), {SELF_TOKEN, TEAMMATE_TOKEN})
+
+        parser.process(packet("OnSyncTeamGroupInfo", [profiles], sequence=14))
+        self.assertEqual(parser.party_session_id, session_id)
+
+    def test_self_leave_locks_out_late_statistics_until_explicit_rejoin(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.entity_profiles[PLAYER_ID] = {
+            "name": "莫雪",
+            "entity_type": "Player",
+        }
+        profiles = [
+            {
+                "$map": [
+                    [2, SELF_TOKEN],
+                    [5, "莫雪"],
+                    [6, 101],
+                    [8, 1_200_002],
+                ]
+            },
+            {
+                "$map": [
+                    [2, TEAMMATE_TOKEN],
+                    [5, "队友"],
+                    [6, TEAMMATE_ROLE_NUMBER],
+                    [8, 1_200_003],
+                ]
+            },
+        ]
+        parser.process(packet("OnJoinGroupSuccess", [profiles], sequence=20))
+        old_session = parser.party_session_id
+
+        parser.process(packet("OnMsgQuitTeamGroup", [], sequence=21))
+        late = parser.process(
+            packet(
+                "RetCommonCombatStatisticsByTeam",
+                [
+                    {
+                        SELF_TOKEN: {"$map": [[4, "莫雪"], [5, 100]]},
+                        TEAMMATE_TOKEN: {"$map": [[4, "队友"], [5, 200]]},
+                    }
+                ],
+                sequence=22,
+            )
+        )
+
+        self.assertEqual(late, [])
+        self.assertFalse(parser.team_group_active)
+        self.assertEqual(parser.party_session_id, 0)
+        self.assertTrue(parser.party_reactivation_locked)
+
+        rejoined = parser.process(
+            packet("OnJoinGroupSuccess", [profiles], sequence=23)
+        )
+        new_party = next(value for kind, value in rejoined if kind == "party")
+        self.assertGreater(new_party["party_session_id"], old_session)
+        self.assertEqual(
+            set(new_party["user_tokens"]), {SELF_TOKEN, TEAMMATE_TOKEN}
+        )
+
+    def test_new_capture_stream_team_heartbeat_reactivates_after_self_leave(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        profiles = [
+            {"$map": [[2, SELF_TOKEN], [5, "本人"], [6, 101]]},
+            {
+                "$map": [
+                    [2, TEAMMATE_TOKEN],
+                    [5, "队友"],
+                    [6, TEAMMATE_ROLE_NUMBER],
+                ]
+            },
+        ]
+        joined = packet("OnJoinGroupSuccess", [profiles], sequence=30)
+        joined["capture_event_id"] = "old-stream:1:30:1"
+        parser.process(joined)
+
+        left = packet("OnMsgQuitTeamGroup", [], sequence=31)
+        left["capture_event_id"] = "old-stream:1:31:2"
+        parser.process(left)
+
+        stale = packet(
+            "OnUpdateTeamGroupMemberProps",
+            [TEAMMATE_TOKEN, {"$map": [[4, False], [5, 20_000], [6, 20_000]]}],
+            sequence=32,
+        )
+        stale["capture_event_id"] = "old-stream:1:32:3"
+        stale_updates = parser.process(stale)
+        self.assertFalse(any(kind == "party" for kind, _ in stale_updates))
+        self.assertTrue(parser.party_reactivation_locked)
+        self.assertEqual(parser.party_ids, set())
+
+        current = packet(
+            "OnUpdateTeamGroupMemberProps",
+            [TEAMMATE_TOKEN, {"$map": [[4, False], [5, 20_000], [6, 20_000]]}],
+            sequence=1,
+        )
+        current["capture_event_id"] = "new-stream:2:1:1"
+        current_updates = parser.process(current)
+
+        party = next(value for kind, value in current_updates if kind == "party")
+        self.assertFalse(parser.party_reactivation_locked)
+        self.assertGreater(parser.party_session_id, 0)
+        self.assertIn(TEAMMATE_TOKEN, party["user_tokens"])
+        self.assertEqual(party["member_count"], 2)
+
+    def test_late_stage_settlement_after_leave_only_emits_history_summary(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.self_token = SELF_TOKEN
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        teammate_id = PLAYER_ID + 99
+        profiles = [
+            {"$map": [[2, SELF_TOKEN], [5, "莫雪"], [6, 101]]},
+            {
+                "$map": [
+                    [2, TEAMMATE_TOKEN],
+                    [5, "旧队友"],
+                    [6, TEAMMATE_ROLE_NUMBER],
+                ]
+            },
+        ]
+        parser.process(packet("OnJoinGroupSuccess", [profiles], sequence=24))
+        parser.process(packet("OnMsgQuitTeamGroup", [], sequence=25))
+        stage_members = {
+            SELF_TOKEN: {
+                "$map": [
+                    [0, SELF_TOKEN],
+                    [1, PLAYER_ID],
+                    [5, "莫雪"],
+                    [6, 100_000],
+                ]
+            },
+            TEAMMATE_TOKEN: {
+                "$map": [
+                    [0, TEAMMATE_TOKEN],
+                    [1, teammate_id],
+                    [5, "旧队友"],
+                    [6, 200_000],
+                ]
+            },
+        }
+
+        updates = parser.process(
+            packet(
+                "OnMsgUpdateStageCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, 5_150_058],
+                            [1, 1],
+                            [2, "old-battle"],
+                            [5, stage_members],
+                        ]
+                    }
+                ],
+                sequence=26,
+            )
+        )
+
+        self.assertTrue(any(kind == "stage_summary" for kind, _ in updates))
+        self.assertFalse(
+            any(kind in {"party", "profile", "team_actor_rebind"} for kind, _ in updates)
+        )
+        self.assertEqual(parser.party_ids, set())
+        self.assertEqual(parser.party_tokens, set())
+        self.assertEqual(parser.party_session_id, 0)
+
+    def test_lagging_stage_table_cannot_repopulate_live_solo_roster(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.self_token = SELF_TOKEN
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        parser.active_boss_entity_id = MONSTER_ID
+        parser.confirmed_boss_entities.add(MONSTER_ID)
+
+        parser.process(
+            packet(
+                "OnMsgDamageSyncV2",
+                [
+                    PLAYER_ID,
+                    MONSTER_ID,
+                    8_602_001_006_068,
+                    2,
+                    2,
+                    2_131,
+                    0,
+                    2_131,
+                    False,
+                ],
+                sequence=26,
+            )
+        )
+        self.assertEqual(parser.recent_damage_target_id, MONSTER_ID)
+        self.assertEqual(parser.recent_target_damage_by_actor[PLAYER_ID], 2_131)
+
+        stale_members = {
+            SELF_TOKEN: {
+                "$map": [
+                    [0, SELF_TOKEN],
+                    [1, PLAYER_ID],
+                    [5, "Self"],
+                ]
+            }
+        }
+        for index in range(1, 10):
+            token = f"old-stage-token-{index}"
+            stale_members[token] = {
+                "$map": [
+                    [0, token],
+                    [1, PLAYER_ID + index],
+                    [5, f"Old member {index}"],
+                    [6, index * 10_000],
+                ]
+            }
+
+        updates = parser.process(
+            packet(
+                "OnMsgUpdateStageCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, 5_150_063],
+                            [1, 3],
+                            [2, "previous-pull"],
+                            [5, stale_members],
+                        ]
+                    }
+                ],
+                sequence=27,
+            )
+        )
+
+        summary = next(value for kind, value in updates if kind == "stage_summary")
+        self.assertEqual(summary["member_count"], 10)
+        self.assertFalse(
+            any(
+                kind in {"party", "profile", "team_actor_rebind"}
+                for kind, _value in updates
+            )
+        )
+        self.assertEqual(parser.party_tokens, set())
+        self.assertEqual(parser.party_ids, set())
+        self.assertEqual(parser.token_actors, {SELF_TOKEN: PLAYER_ID})
+
+        parser.process(
+            packet(
+                "OnMsgSyncFightMode",
+                [0],
+                pointer=MONSTER_ID,
+                sequence=28,
+            )
+        )
+        self.assertIsNone(parser.recent_damage_target_id)
+        parser.process(
+            packet(
+                "OnMsgDamageSyncV2",
+                [
+                    PLAYER_ID,
+                    MONSTER_ID,
+                    8_602_001_006_069,
+                    2,
+                    2,
+                    500,
+                    0,
+                    500,
+                    False,
+                ],
+                sequence=29,
+            )
+        )
+        current_updates = parser.process(
+            packet(
+                "OnMsgUpdateStageCombatStatistics",
+                [
+                    {
+                        "$map": [
+                            [0, 5_150_063],
+                            [1, 3],
+                            [2, "current-pull"],
+                            [
+                                5,
+                                {
+                                    SELF_TOKEN: {
+                                        "$map": [
+                                            [0, SELF_TOKEN],
+                                            [1, PLAYER_ID],
+                                            [5, "Self"],
+                                            [6, 500],
+                                        ]
+                                    }
+                                },
+                            ],
+                        ]
+                    }
+                ],
+                sequence=30,
+            )
+        )
+        self.assertTrue(any(kind == "party" for kind, _value in current_updates))
+        self.assertTrue(any(kind == "profile" for kind, _value in current_updates))
+        self.assertEqual(parser.party_tokens, set())
+
+    def test_team_group_merge_is_incremental_and_never_rotates_session(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.self_token = SELF_TOKEN
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        self_profile = {
+            "$map": [[2, SELF_TOKEN], [5, "莫雪"], [6, 101]]
+        }
+        parser.process(
+            packet("OnCreateTeamSuccess", [[self_profile]], sequence=30)
+        )
+        session_id = parser.party_session_id
+        merged_profile = {
+            "$map": [
+                [2, TEAMMATE_TOKEN],
+                [5, "合并队员"],
+                [6, TEAMMATE_ROLE_NUMBER],
+                [8, 1_200_003],
+            ]
+        }
+
+        updates = parser.process(
+            packet("OnMsgTeamJoinGroup", [[merged_profile]], sequence=31)
+        )
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertEqual(party["party_session_id"], session_id)
+        self.assertIn(TEAMMATE_TOKEN, party["user_tokens"])
+
+        inactive = NetworkPacketParser()
+        ignored = inactive.process(
+            packet("OnMsgTeamJoinGroup", [[merged_profile]], sequence=32)
+        )
+        self.assertEqual(ignored, [])
+        self.assertEqual(inactive.party_session_id, 0)
+
+    def test_only_local_team_group_disband_ends_party_session(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.process(
+            packet(
+                "OnMsgOtherJoinTeamGroup",
+                [
+                    0,
+                    57_423_175_876_976,
+                    {
+                        "$map": [
+                            [2, TEAMMATE_TOKEN],
+                            [5, "队友"],
+                            [6, TEAMMATE_ROLE_NUMBER],
+                        ]
+                    },
+                ],
+                sequence=40,
+            )
+        )
+        session_id = parser.party_session_id
+
+        unrelated = packet("OnMsgTeamGroupDisbanded", [], sequence=41)
+        unrelated["network_entity_id"] = PLAYER_ID + 1
+        self.assertEqual(parser.process(unrelated), [])
+        self.assertEqual(parser.party_session_id, session_id)
+
+        local = packet("OnMsgTeamGroupDisbanded", [], sequence=42)
+        local["network_entity_id"] = PLAYER_ID
+        updates = parser.process(local)
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertTrue(party["left_team"])
+        self.assertFalse(party["in_team"])
+        self.assertEqual(parser.party_session_id, 0)
+
+    def test_other_member_leave_removes_only_that_member(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.self_token = SELF_TOKEN
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        profiles = [
+            {"$map": [[2, SELF_TOKEN], [5, "莫雪"], [6, 101]]},
+            {
+                "$map": [
+                    [2, TEAMMATE_TOKEN],
+                    [5, "离队成员"],
+                    [6, TEAMMATE_ROLE_NUMBER],
+                ]
+            },
+        ]
+        parser.process(packet("OnJoinGroupSuccess", [profiles], sequence=43))
+        session_id = parser.party_session_id
+
+        updates = parser.process(
+            packet("OnMsgOtherQuitTeam", [TEAMMATE_TOKEN], sequence=44)
+        )
+
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertEqual(party["party_session_id"], session_id)
+        self.assertTrue(party["in_team"])
+        self.assertNotIn(TEAMMATE_TOKEN, party["user_tokens"])
+        self.assertEqual(party["user_tokens"], [SELF_TOKEN])
+
+    def test_other_member_leave_removes_unbound_authoritative_member(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.self_token = SELF_TOKEN
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        parser.party_session_generation = 1
+        parser.party_session_id = 1
+        parser.team_group_active = True
+        parser.authoritative_party_tokens = {SELF_TOKEN, TEAMMATE_TOKEN}
+        parser.other_party_tokens = {TEAMMATE_TOKEN}
+        parser.live_team_profile_tokens = {SELF_TOKEN, TEAMMATE_TOKEN}
+        parser.live_team_property_ratings[TEAMMATE_TOKEN] = 99_999
+
+        updates = parser.process(
+            packet("OnMsgOtherQuitTeam", [TEAMMATE_TOKEN], sequence=44)
+        )
+
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertTrue(party["roster_replace"])
+        self.assertEqual(party["user_tokens"], [SELF_TOKEN])
+        self.assertNotIn(TEAMMATE_TOKEN, parser.current_team_profile_tokens())
+        self.assertNotIn(TEAMMATE_TOKEN, parser.live_team_property_ratings)
+
+    def test_inactive_roster_prunes_stale_member_and_allows_live_rejoin(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.self_token = SELF_TOKEN
+        parser._bind_team_token(SELF_TOKEN, PLAYER_ID)
+        teammate_actor = stable_team_actor_id(TEAMMATE_TOKEN)
+        parser._bind_team_token(TEAMMATE_TOKEN, teammate_actor)
+        parser.party_ids.add(teammate_actor)
+        parser.party_tokens.add(TEAMMATE_TOKEN)
+        parser.other_party_tokens.add(TEAMMATE_TOKEN)
+        parser.authoritative_party_tokens.update({SELF_TOKEN, TEAMMATE_TOKEN})
+        parser.live_team_profile_tokens.update({SELF_TOKEN, TEAMMATE_TOKEN})
+        parser.party_session_generation = 1
+        parser.party_session_id = 1
+        parser.team_group_active = True
+        parser.party_member_count = 2
+        parser.live_party_roster_activity_monotonic = 100.0
+
+        self.assertEqual(
+            parser.flush_live_party_roster(
+                now=100.0 + LIVE_PARTY_ROSTER_INACTIVE_SECONDS - 0.01
+            ),
+            [],
+        )
+        updates = parser.flush_live_party_roster(
+            now=100.0 + LIVE_PARTY_ROSTER_INACTIVE_SECONDS
+        )
+
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertTrue(party["roster_replace"])
+        self.assertEqual(party["user_tokens"], [SELF_TOKEN])
+        self.assertNotIn(TEAMMATE_TOKEN, parser.departed_party_tokens)
+
+        rejoin = parser.process(
+            packet(
+                "OnUpdateTeamGroupMemberProps",
+                [TEAMMATE_TOKEN, {4: False, 5: 12_345.0, 6: 12_345.0}],
+                sequence=45,
+            )
+        )
+        rejoined_party = next(value for kind, value in rejoin if kind == "party")
+        self.assertIn(TEAMMATE_TOKEN, rejoined_party["user_tokens"])
+
     def test_rejoin_uses_known_self_name_without_duplicate_party_member(self):
         parser = NetworkPacketParser()
         parser.self_id = PLAYER_ID
@@ -7826,6 +9605,474 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(inferred, [])
         self.assertEqual(parser.entity_current_hp[boss_id], 20_868_585.0)
 
+    def test_second_fast_descending_boss_hp_sample_confirms_real_drop(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 514
+        boss_pointer = MONSTER_POINTER + 514
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+                "entity_id": boss_id,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[boss_pointer] = boss_id
+        parser.active_boss_pointer = boss_pointer
+        parser.entity_current_hp[boss_id] = 37_284_600.0
+        parser.entity_max_hp[boss_id] = 37_590_045.0
+
+        first = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [5_000_000.0],
+                pointer=boss_pointer,
+                sequence=2,
+            )
+        )
+        second = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [1_000_000.0],
+                pointer=boss_pointer,
+                sequence=3,
+            )
+        )
+
+        self.assertFalse(
+            any(
+                kind == "monster" and value.get("current_hp") == 5_000_000.0
+                for kind, value in first
+            )
+        )
+        self.assertTrue(
+            any(
+                kind == "monster" and value.get("current_hp") == 1_000_000.0
+                for kind, value in second
+            )
+        )
+        self.assertEqual(parser.entity_current_hp[boss_id], 1_000_000.0)
+
+    def test_cleanup_zero_after_boss_fight_exit_waits_for_entity_death(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 512
+        boss_pointer = MONSTER_POINTER + 512
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+                "entity_id": boss_id,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[boss_pointer] = boss_id
+        parser.active_boss_pointer = boss_pointer
+        parser.entity_current_hp[boss_id] = 115_590.0
+        parser.entity_max_hp[boss_id] = 5_474_859.0
+
+        fight_start = packet("", [], sequence=2)
+        parser.active_boss_damage_epoch = fight_start["filetime_100ns"]
+        fight_exit = packet(
+            "OnMsgSyncFightMode", [0], pointer=boss_pointer, sequence=3
+        )
+        fight_exit["filetime_100ns"] = fight_start["filetime_100ns"] + 5_000_000
+        parser.process(fight_exit)
+        zero = packet("OnMsgSyncCurrentHp", [0.0], pointer=boss_pointer, sequence=4)
+        zero["filetime_100ns"] = fight_exit["filetime_100ns"] + 690_000
+
+        updates = parser.process(zero)
+
+        self.assertFalse(
+            any(
+                kind == "monster" and value.get("current_hp") == 0.0
+                for kind, value in updates
+            )
+        )
+        self.assertEqual(parser.entity_current_hp[boss_id], 115_590.0)
+
+        death_updates = parser.process(
+            packet("OnMsgEntityDead", [], pointer=boss_pointer, sequence=5)
+        )
+        death = next(
+            value
+            for kind, value in death_updates
+            if kind == "monster" and value.get("entity_id") == boss_id
+        )
+        self.assertEqual(death["current_hp"], 0.0)
+        self.assertTrue(death["death_confirmed"])
+        self.assertEqual(parser.entity_current_hp[boss_id], 0.0)
+
+    def test_successful_stage_table_confirms_zero_after_same_boss_fight_exit(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 514
+        boss_pointer = MONSTER_POINTER + 514
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+                "entity_id": boss_id,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[boss_pointer] = boss_id
+        parser.active_boss_pointer = boss_pointer
+        parser.entity_current_hp[boss_id] = 36_132.0
+        parser.entity_max_hp[boss_id] = 7_578_453.0
+
+        fight_start = packet(
+            "OnMsgSyncFightMode", [2], pointer=boss_pointer, sequence=2
+        )
+        parser.process(fight_start)
+        fight_exit = packet(
+            "OnMsgSyncFightMode", [0], pointer=boss_pointer, sequence=3
+        )
+        fight_exit["filetime_100ns"] = fight_start["filetime_100ns"] + 5_000_000
+        parser.process(fight_exit)
+
+        member = {
+            "$map": [
+                [0, SELF_TOKEN],
+                [1, PLAYER_ID],
+                [5, "Self"],
+                [6, 7_578_453],
+            ]
+        }
+        stage = {
+            "$map": [
+                [0, 5_150_110],
+                [1, 1],
+                [2, "final-battle"],
+                [3, True],
+                [5, {SELF_TOKEN: member}],
+            ]
+        }
+        settlement = packet(
+            "OnMsgSettlementCombatStatistics",
+            [{"$map": [[0, {}]]}, stage],
+            pointer=PLAYER_ID,
+            sequence=4,
+        )
+        settlement["filetime_100ns"] = fight_exit["filetime_100ns"] + 750_000
+        parser.process(settlement)
+
+        zero = packet(
+            "OnMsgSyncCurrentHp", [0.0], pointer=boss_pointer, sequence=5
+        )
+        zero["filetime_100ns"] = settlement["filetime_100ns"] + 1_950_000
+        updates = parser.process(zero)
+
+        death = next(
+            value
+            for kind, value in updates
+            if kind == "monster" and value.get("entity_id") == boss_id
+        )
+        self.assertEqual(death["current_hp"], 0.0)
+        self.assertTrue(death["death_confirmed"])
+        self.assertEqual(parser.entity_current_hp[boss_id], 0.0)
+
+    def test_successful_stage_confirms_zero_that_arrived_before_settlement(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 516
+        boss_pointer = MONSTER_POINTER + 516
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+                "entity_id": boss_id,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[boss_pointer] = boss_id
+        parser.active_boss_pointer = boss_pointer
+        parser.entity_current_hp[boss_id] = 36_132.0
+        parser.entity_max_hp[boss_id] = 7_578_453.0
+
+        fight_start = packet("", [], sequence=2)
+        parser.active_boss_damage_epoch = fight_start["filetime_100ns"]
+        fight_exit = packet(
+            "OnMsgSyncFightMode", [0], pointer=boss_pointer, sequence=3
+        )
+        fight_exit["filetime_100ns"] = fight_start["filetime_100ns"] + 5_000_000
+        parser.process(fight_exit)
+        zero = packet(
+            "OnMsgSyncCurrentHp", [0.0], pointer=boss_pointer, sequence=4
+        )
+        zero["filetime_100ns"] = fight_exit["filetime_100ns"] + 690_000
+
+        zero_updates = parser.process(zero)
+
+        self.assertFalse(
+            any(
+                kind == "monster" and value.get("current_hp") == 0.0
+                for kind, value in zero_updates
+            )
+        )
+        self.assertEqual(
+            parser.pending_active_boss_zero,
+            (boss_id, boss_pointer, zero["filetime_100ns"]),
+        )
+
+        member = {
+            "$map": [
+                [0, SELF_TOKEN],
+                [1, PLAYER_ID],
+                [5, "Self"],
+                [6, 7_578_453],
+            ]
+        }
+        stage = {
+            "$map": [
+                [0, 5_150_110],
+                [1, 1],
+                [2, "delayed-final-battle"],
+                [3, True],
+                [5, {SELF_TOKEN: member}],
+            ]
+        }
+        settlement = packet(
+            "OnMsgSettlementCombatStatistics",
+            [{"$map": [[0, {}]]}, stage],
+            pointer=PLAYER_ID,
+            sequence=5,
+        )
+        settlement["filetime_100ns"] = zero["filetime_100ns"] + 43_000_000
+
+        updates = parser.process(settlement)
+
+        death = next(
+            value
+            for kind, value in updates
+            if kind == "monster" and value.get("entity_id") == boss_id
+        )
+        self.assertEqual(death["current_hp"], 0.0)
+        self.assertTrue(death["death_confirmed"])
+        self.assertEqual(parser.entity_current_hp[boss_id], 0.0)
+        self.assertIsNone(parser.active_boss_entity_id)
+        self.assertIsNone(parser.pending_active_boss_zero)
+
+    def test_new_pull_cancels_pre_settlement_cleanup_zero(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 517
+        boss_pointer = MONSTER_POINTER + 517
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+                "entity_id": boss_id,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[boss_pointer] = boss_id
+        parser.active_boss_pointer = boss_pointer
+        parser.entity_current_hp[boss_id] = 36_132.0
+        parser.entity_max_hp[boss_id] = 7_578_453.0
+        parser.process(
+            packet("OnMsgSyncFightMode", [2], pointer=boss_pointer, sequence=2)
+        )
+        parser.process(
+            packet("OnMsgSyncFightMode", [0], pointer=boss_pointer, sequence=3)
+        )
+        parser.process(
+            packet("OnMsgSyncCurrentHp", [0.0], pointer=boss_pointer, sequence=4)
+        )
+        self.assertIsNotNone(parser.pending_active_boss_zero)
+
+        parser.process(
+            packet("OnMsgSyncFightMode", [2], pointer=boss_pointer, sequence=5)
+        )
+
+        self.assertIsNone(parser.pending_active_boss_zero)
+        self.assertEqual(parser.entity_current_hp[boss_id], 36_132.0)
+
+    def test_catalog_fight_mode_switches_after_exit_without_dual_peer_steal(self):
+        templates = {
+            "7100215": {"boss_type": 3, "name": "First Boss"},
+            "7100208": {"boss_type": 3, "name": "Dual Boss A"},
+            "7100209": {"boss_type": 3, "name": "Dual Boss B"},
+            "7100210": {"boss_type": 3, "name": "Final Boss"},
+        }
+        parser = NetworkPacketParser(
+            boss_template_catalog=templates,
+            boss_name_allowlist=tuple(
+                profile["name"] for profile in templates.values()
+            ),
+        )
+        first_id = MONSTER_ID + 520
+        dual_a_id = MONSTER_ID + 521
+        dual_b_id = MONSTER_ID + 522
+        final_id = MONSTER_ID + 523
+        first_pointer = MONSTER_POINTER + 520
+        dual_a_pointer = MONSTER_POINTER + 521
+        dual_b_pointer = MONSTER_POINTER + 522
+        final_pointer = MONSTER_POINTER + 523
+
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+                "entity_id": first_id,
+                "template_id": 7_100_215,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[first_pointer] = first_id
+        parser.active_boss_pointer = first_pointer
+        parser.entity_current_hp[first_id] = 1_000_000.0
+        parser.process(
+            packet("OnMsgSyncFightMode", [2], pointer=first_pointer, sequence=2)
+        )
+        parser.process(
+            packet("OnMsgSyncFightMode", [0], pointer=first_pointer, sequence=3)
+        )
+
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=4)["filetime_100ns"],
+                "entity_id": dual_a_id,
+                "template_id": 7_100_208,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[dual_a_pointer] = dual_a_id
+        self.assertEqual(parser.active_boss_entity_id, first_id)
+
+        parser.process(
+            packet("OnMsgSyncFightMode", [2], pointer=dual_a_pointer, sequence=5)
+        )
+        self.assertEqual(parser.active_boss_entity_id, dual_a_id)
+        self.assertEqual(parser.active_boss_pointer, dual_a_pointer)
+        parser.entity_current_hp[dual_a_id] = 2_000_000.0
+
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=6)["filetime_100ns"],
+                "entity_id": dual_b_id,
+                "template_id": 7_100_209,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[dual_b_pointer] = dual_b_id
+        parser.process(
+            packet("OnMsgSyncFightMode", [2], pointer=dual_b_pointer, sequence=7)
+        )
+        self.assertEqual(parser.active_boss_entity_id, dual_a_id)
+
+        peer_updates = parser.process(
+            packet(
+                "OnMsgSyncCurrentHp",
+                [1_500_000.0],
+                pointer=dual_b_pointer,
+                sequence=8,
+            )
+        )
+        self.assertTrue(
+            any(
+                kind == "monster"
+                and value.get("entity_id") == dual_b_id
+                and value.get("current_hp") == 1_500_000.0
+                for kind, value in peer_updates
+            )
+        )
+
+        parser.process(
+            packet("OnMsgSyncFightMode", [0], pointer=dual_a_pointer, sequence=9)
+        )
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=10)["filetime_100ns"],
+                "entity_id": final_id,
+                "template_id": 7_100_210,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[final_pointer] = final_id
+        parser.process(
+            packet("OnMsgSyncFightMode", [2], pointer=final_pointer, sequence=11)
+        )
+        self.assertEqual(parser.active_boss_entity_id, final_id)
+        self.assertEqual(parser.active_boss_pointer, final_pointer)
+
+    def test_empty_success_table_does_not_confirm_cleanup_zero(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 515
+        boss_pointer = MONSTER_POINTER + 515
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+                "entity_id": boss_id,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[boss_pointer] = boss_id
+        parser.active_boss_pointer = boss_pointer
+        parser.entity_current_hp[boss_id] = 36_132.0
+        parser.entity_max_hp[boss_id] = 7_578_453.0
+
+        fight_start = packet(
+            "OnMsgSyncFightMode", [2], pointer=boss_pointer, sequence=2
+        )
+        parser.process(fight_start)
+        fight_exit = packet(
+            "OnMsgSyncFightMode", [0], pointer=boss_pointer, sequence=3
+        )
+        fight_exit["filetime_100ns"] = fight_start["filetime_100ns"] + 5_000_000
+        parser.process(fight_exit)
+
+        stage = {
+            "$map": [
+                [0, 5_150_110],
+                [1, 1],
+                [2, "invalid-final-battle"],
+                [3, True],
+                [5, {}],
+            ]
+        }
+        settlement = packet(
+            "OnMsgSettlementCombatStatistics",
+            [{"$map": [[0, {}]]}, stage],
+            pointer=PLAYER_ID,
+            sequence=4,
+        )
+        settlement["filetime_100ns"] = fight_exit["filetime_100ns"] + 750_000
+        self.assertEqual(parser.process(settlement), [])
+        self.assertEqual(parser.successful_stage_settlement_time_100ns, 0)
+
+        zero = packet(
+            "OnMsgSyncCurrentHp", [0.0], pointer=boss_pointer, sequence=5
+        )
+        zero["filetime_100ns"] = settlement["filetime_100ns"] + 1_950_000
+        updates = parser.process(zero)
+
+        self.assertFalse(
+            any(
+                kind == "monster" and value.get("current_hp") == 0.0
+                for kind, value in updates
+            )
+        )
+        self.assertEqual(parser.entity_current_hp[boss_id], 36_132.0)
+
+    def test_zero_hp_without_same_boss_fight_exit_keeps_drop_protection(self):
+        parser = NetworkPacketParser()
+        boss_id = MONSTER_ID + 513
+        boss_pointer = MONSTER_POINTER + 513
+        parser.process_native_boss_type(
+            {
+                "filetime_100ns": packet("", [], sequence=1)["filetime_100ns"],
+                "entity_id": boss_id,
+                "boss_type": 3,
+            }
+        )
+        parser.pointer_entities[boss_pointer] = boss_id
+        parser.active_boss_pointer = boss_pointer
+        parser.entity_current_hp[boss_id] = 20_000_000.0
+        parser.entity_max_hp[boss_id] = 20_000_000.0
+
+        updates = parser.process(
+            packet("OnMsgSyncCurrentHp", [0.0], pointer=boss_pointer, sequence=2)
+        )
+
+        self.assertFalse(
+            any(
+                kind == "monster" and value.get("current_hp") == 0.0
+                for kind, value in updates
+            )
+        )
+        self.assertEqual(parser.entity_current_hp[boss_id], 20_000_000.0)
+
     def test_malformed_hp_shape_and_transient_rise_do_not_change_boss_baseline(self):
         parser = NetworkPacketParser()
         boss_id = MONSTER_ID + 511
@@ -8766,6 +11013,56 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(cache[TEAMMATE_TOKEN]["profession_id"], 1_200_006)
         self.assertIsNone(parser.take_team_profile_cache())
 
+    def test_persisted_self_rating_is_hidden_until_live_session_evidence(self):
+        parser = NetworkPacketParser(
+            team_profile_cache={
+                SELF_TOKEN: {
+                    "name": "莫雪",
+                    "profession_id": 1_200_002,
+                    "extraordinary_rating": 80_529,
+                }
+            }
+        )
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+
+        restored = parser._current_session_team_profile(SELF_TOKEN)
+        self.assertEqual(restored["name"], "莫雪")
+        self.assertNotIn("extraordinary_rating", restored)
+
+        parser.live_team_property_ratings[SELF_TOKEN] = 80_616
+        live = parser._current_session_team_profile(SELF_TOKEN)
+        self.assertEqual(live["extraordinary_rating"], 80_616)
+
+    def test_invalid_cached_profession_cannot_override_live_profession(self):
+        parser = NetworkPacketParser(
+            team_profile_cache={
+                TEAMMATE_TOKEN: {
+                    "name": "依夫艾达香",
+                    "profession_id": 70,
+                }
+            }
+        )
+        self.assertNotIn(
+            "profession_id",
+            parser._current_session_team_profile(TEAMMATE_TOKEN),
+        )
+
+        update = parser._profile_update(
+            stable_team_actor_id(TEAMMATE_TOKEN),
+            packet("NpcapEntityCreated", [], sequence=31),
+            user_token=TEAMMATE_TOKEN,
+            name="依夫艾达香",
+            profession_id=1_200_001,
+        )
+
+        self.assertIsNotNone(update)
+        self.assertEqual(update[1]["profession_id"], 1_200_001)
+        self.assertEqual(
+            parser.team_profile_cache[TEAMMATE_TOKEN]["profession_id"],
+            1_200_001,
+        )
+
     def test_team_roster_profile_exposes_extraordinary_rating(self):
         parser = NetworkPacketParser()
         updates = parser.process(
@@ -8849,6 +11146,77 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertNotIn(unknown_token, parser.team_profile_cache)
         self.assertFalse(any(kind == "profile" for kind, _value in ignored))
 
+    def test_periodic_team_rating_snapshot_republishes_only_live_scores(self):
+        parser = NetworkPacketParser(
+            team_profile_cache={
+                SELF_TOKEN: {
+                    "name": "Self",
+                    "profession_id": 1_200_002,
+                    "extraordinary_rating": 1,
+                },
+                TEAMMATE_TOKEN: {
+                    "name": "Peer",
+                    "profession_id": 1_200_003,
+                    "extraordinary_rating": 2,
+                },
+            }
+        )
+        parser.self_token = SELF_TOKEN
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        teammate_id = stable_team_actor_id(TEAMMATE_TOKEN)
+        parser.token_actors = {
+            SELF_TOKEN: PLAYER_ID,
+            TEAMMATE_TOKEN: teammate_id,
+        }
+        parser.actor_tokens = {
+            PLAYER_ID: SELF_TOKEN,
+            teammate_id: TEAMMATE_TOKEN,
+        }
+        parser.party_tokens = {TEAMMATE_TOKEN}
+        parser.other_party_tokens = {TEAMMATE_TOKEN}
+        parser.party_ids = {teammate_id}
+        parser.party_member_count = 2
+        parser.live_team_property_ratings = {
+            SELF_TOKEN: 88_001,
+            TEAMMATE_TOKEN: 88_893,
+        }
+
+        first = parser.live_team_rating_snapshot_updates(
+            {"method": "PeriodicLiveTeamRatingSnapshot", "filetime_100ns": 123}
+        )
+        second = parser.live_team_rating_snapshot_updates(
+            {"method": "PeriodicLiveTeamRatingSnapshot", "filetime_100ns": 456}
+        )
+
+        for updates in (first, second):
+            profiles = {
+                value["user_token"]: value
+                for kind, value in updates
+                if kind == "profile"
+            }
+            self.assertEqual(profiles[SELF_TOKEN]["extraordinary_rating"], 88_001)
+            self.assertEqual(
+                profiles[TEAMMATE_TOKEN]["extraordinary_rating"], 88_893
+            )
+            self.assertEqual(
+                profiles[TEAMMATE_TOKEN]["source_method"],
+                "PeriodicLiveTeamRatingSnapshot",
+            )
+            party = next(value for kind, value in updates if kind == "party")
+            self.assertFalse(party["authoritative"])
+            self.assertEqual(set(party["user_tokens"]), {SELF_TOKEN, TEAMMATE_TOKEN})
+
+        # A persisted score is identity metadata only. Once the live property
+        # is absent it must never be projected as the current score.
+        parser.live_team_property_ratings.pop(TEAMMATE_TOKEN)
+        profiles = {
+            value["user_token"]: value
+            for kind, value in parser.live_team_rating_snapshot_updates()
+            if kind == "profile"
+        }
+        self.assertNotIn("extraordinary_rating", profiles[TEAMMATE_TOKEN])
+
     def test_live_rating_before_join_cannot_be_rolled_back_by_old_roster(self):
         parser = NetworkPacketParser()
 
@@ -8919,7 +11287,7 @@ class NetworkPacketParserTests(unittest.TestCase):
         )
         self.assertEqual(parser.live_team_property_ratings[TEAMMATE_TOKEN], 11_000)
 
-    def test_projection_inherits_rating_from_unique_original_name_and_profession(self):
+    def test_projection_does_not_inherit_stale_disk_rating(self):
         original_token = "AQAAAE2ydup2AAAA"
         projection_token = "apxSHSFboJEDJ1II"
         parser = NetworkPacketParser(
@@ -8953,9 +11321,9 @@ class NetworkPacketParserTests(unittest.TestCase):
         )
 
         actor_id = parser.token_actors[projection_token]
-        self.assertEqual(
-            parser.team_profile_cache[projection_token]["extraordinary_rating"],
-            71_304,
+        self.assertNotIn(
+            "extraordinary_rating",
+            parser.team_profile_cache[projection_token],
         )
         profile = next(
             value
@@ -8963,7 +11331,7 @@ class NetworkPacketParserTests(unittest.TestCase):
             if kind == "profile" and value.get("entity_id") == actor_id
         )
         self.assertEqual(profile["name"], "艾洛伶·投影")
-        self.assertEqual(profile["extraordinary_rating"], 71_304)
+        self.assertNotIn("extraordinary_rating", profile)
 
     def test_projection_does_not_inherit_rating_from_wrong_profession(self):
         parser = NetworkPacketParser(
@@ -9040,6 +11408,43 @@ class NetworkPacketParserTests(unittest.TestCase):
         )
         self.assertEqual(profile["extraordinary_rating"], 54_817)
 
+    def test_team_group_apply_emits_transient_application_without_joining_party(self):
+        parser = NetworkPacketParser()
+
+        updates = parser.process(
+            packet(
+                "OnMsgNewTeamGroupApply",
+                [
+                    {
+                        "$map": [
+                            [2, TEAMMATE_TOKEN],
+                            [4, "申请玩家"],
+                            [5, 1_200_003],
+                            [7, 68],
+                            [8, 63_737],
+                            [9, 1_788_856_284],
+                            [10, 1_108],
+                        ]
+                    }
+                ],
+                sequence=31,
+            )
+        )
+
+        applications = [
+            value for kind, value in updates if kind == "team_application"
+        ]
+        self.assertEqual(len(applications), 1)
+        self.assertEqual(applications[0]["user_token"], TEAMMATE_TOKEN)
+        self.assertEqual(applications[0]["name"], "申请玩家")
+        self.assertEqual(applications[0]["extraordinary_rating"], 63_737)
+        self.assertEqual(applications[0]["profession_id"], 1_200_003)
+        self.assertEqual(applications[0]["level"], 68)
+        self.assertNotIn(TEAMMATE_TOKEN, parser.party_tokens)
+        self.assertNotIn(TEAMMATE_TOKEN, parser.token_actors)
+        self.assertFalse(any(kind == "party" for kind, _value in updates))
+        self.assertFalse(any(kind == "profile" for kind, _value in updates))
+
     def test_team_invite_profile_exposes_extraordinary_rating(self):
         parser = NetworkPacketParser()
         updates = parser.process(
@@ -9082,6 +11487,93 @@ class NetworkPacketParserTests(unittest.TestCase):
         profile = next(value for kind, value in updates if kind == "profile")
         self.assertEqual(profile["entity_id"], PLAYER_ID)
         self.assertEqual(profile["extraordinary_rating"], 63_268)
+
+    def test_dirty_fight_attributes_publish_only_for_confirmed_live_player(self):
+        parser = NetworkPacketParser()
+        record = packet(
+            "OnMsgSyncDirtyFightAttributes",
+            [
+                {
+                    "$map": [
+                        [125, 569.7],
+                        [181, 570.7],
+                        [149, 1437.1],
+                        [205, 1438.1],
+                    ]
+                }
+            ],
+            pointer=PLAYER_ID,
+            sequence=40,
+        )
+        record.update(
+            capture_source="npcap",
+            network_entity_id=PLAYER_ID,
+        )
+
+        unbound = parser.process(record)
+
+        self.assertFalse(
+            any(kind == "fight_attributes" for kind, _value in unbound)
+        )
+        self.assertEqual(
+            parser.entity_fight_attributes[PLAYER_ID]["physical_critical"],
+            569.7,
+        )
+
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+        published = parser.process(packet("OnMsgChannelChat", [], sequence=41))
+
+        attributes = next(
+            value
+            for kind, value in published
+            if kind == "fight_attributes"
+        )
+        self.assertEqual(attributes["entity_id"], PLAYER_ID)
+        self.assertEqual(attributes["user_token"], SELF_TOKEN)
+        self.assertEqual(attributes["physical_critical"], 569.7)
+        self.assertEqual(attributes["magical_critical"], 570.7)
+        self.assertEqual(attributes["physical_penetration"], 1437.1)
+        self.assertEqual(attributes["magical_penetration"], 1438.1)
+
+    def test_dirty_fight_attribute_deltas_merge_and_do_not_roll_back(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_token = SELF_TOKEN
+        parser.self_confirmed = True
+        parser.token_actors[SELF_TOKEN] = PLAYER_ID
+        parser.actor_tokens[PLAYER_ID] = SELF_TOKEN
+
+        def dirty(values, sequence):
+            record = packet(
+                "OnMsgSyncDirtyFightAttributes",
+                [{"$map": values}],
+                pointer=PLAYER_ID,
+                sequence=sequence,
+            )
+            record.update(
+                capture_source="npcap",
+                network_entity_id=PLAYER_ID,
+            )
+            return record
+
+        parser.process(dirty([[125, 500.0], [149, 1400.0]], 50))
+        parser.process(dirty([[125, 600.0]], 52))
+        stale = dirty([[125, 550.0], [205, 1500.0]], 51)
+        updates = parser.process(stale)
+
+        cached = parser.entity_fight_attributes[PLAYER_ID]
+        self.assertEqual(cached["physical_critical"], 600.0)
+        self.assertEqual(cached["physical_penetration"], 1400.0)
+        self.assertEqual(cached["magical_penetration"], 1500.0)
+        published = next(
+            value for kind, value in updates if kind == "fight_attributes"
+        )
+        self.assertEqual(published["physical_critical"], 600.0)
+        self.assertEqual(published["magical_penetration"], 1500.0)
 
     def test_skill_normalization(self):
         self.assertEqual(normalize_network_skill_id(8_602_107_000_396), 86_021_070)

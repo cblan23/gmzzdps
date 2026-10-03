@@ -188,8 +188,8 @@
 | `7109501` | 米尔贡根 | [milgongen.png](milgongen.png) | `client_stage_name` |
 | `7109600` | 萨斯利尔 | [sasriel.png](sasriel.png) | `client_stage_name` |
 | `7109900` | 乌黯魔狼 | [dark-wolf.png](dark-wolf.png) | `client_stage_name` |
-| `7110200` | 罗塞尔的残留意志 | [roselle-will.png](roselle-will.png) | `reviewed_alias` |
-| `7110208` | 罗塞尔的残留意志 | [roselle-will.png](roselle-will.png) | `reviewed_alias` |
+| `7110200` | 罗塞尔的残留意志 | [roselle-residual.png](roselle-residual.png) | `client_stage_icon` |
+| `7110208` | 罗塞尔的污染意志 | [roselle-polluted.png](roselle-polluted.png) | `client_stage_icon` |
 | `7190025` | 绯红意志 | [head-enemy-08.png](head-enemy-08.png) | `client_stage_name` |
 
 ## 需要关卡上下文的同名模板

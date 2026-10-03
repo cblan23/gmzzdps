@@ -3,7 +3,6 @@ param(
     [string]$OutputFilename = "",
     [string]$BuildId = "",
     [string]$RuntimeProfileId = "",
-    [switch]$NpcapVariant,
     [switch]$PassiveCapture,
     [switch]$OfficialRelease,
     [switch]$ProtectedRelease,
@@ -15,9 +14,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-# The user restored Hook as the normal backend while the identity bug is fixed.
-# Preserve explicit passive builds without discarding the migration work.
-$UseNpcapBackend = $NpcapVariant -or $PassiveCapture
+$PacketCapture = "windows_raw"
 
 function Write-Utf8NoBom([string]$Path, [string]$Value) {
     $Encoding = New-Object System.Text.UTF8Encoding($false)
@@ -49,13 +46,54 @@ function Find-CodeSigningCertificate([string]$Thumbprint) {
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python = Join-Path $ProjectDir ".venv-build310\Scripts\python.exe"
 $CapstoneDll = Join-Path $ProjectDir ".venv-build310\Lib\site-packages\capstone\lib\capstone.dll"
-$NpcapZstdRestoreDll = Join-Path $ProjectDir "npcap_zstd_restore.dll"
+$ZstdRestoreDll = Join-Path $ProjectDir "npcap_zstd_restore.dll"
 $ZstdLicensePath = Join-Path $ProjectDir "third_party_licenses\zstandard-BSD.txt"
+$WinDivertRoot = Join-Path $ProjectDir "third_party\windivert"
+$WinDivertDll = Join-Path $WinDivertRoot "x64\WinDivert.dll"
+$WinDivertDriver = Join-Path $WinDivertRoot "x64\WinDivert64.sys"
+$WinDivertLicense = Join-Path $WinDivertRoot "LICENSE"
+$WinDivertVersionFile = Join-Path $WinDivertRoot "VERSION"
+$ExpectedWinDivertDllSha256 = "C1E060EE19444A259B2162F8AF0F3FE8C4428A1C6F694DCE20DE194AC8D7D9A2"
+$ExpectedWinDivertDriverSha256 = "8DA085332782708D8767BCACE5327A6EC7283C17CFB85E40B03CD2323A90DDC2"
 $SourcePath = Join-Path $ProjectDir "dps_meter.pyw"
 $DevelopmentRuntimeProfilePath = Join-Path $ProjectDir "runtime-profile.dev.json"
-$ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)"
-$DisplayName = "$ProductName Dps-Logs"
-$Description = "$DisplayName $([char]0x56E2)$([char]0x961F)$([char]0x4F24)$([char]0x5BB3)$([char]0x7EDF)$([char]0x8BA1)"
+if ($PacketCapture -eq "windows_raw") {
+    foreach ($RequiredWinDivertFile in @(
+        $WinDivertDll,
+        $WinDivertDriver,
+        $WinDivertLicense,
+        $WinDivertVersionFile
+    )) {
+        if (-not (Test-Path -LiteralPath $RequiredWinDivertFile -PathType Leaf)) {
+            throw "Bundled IPv6 capture resource was not found: $RequiredWinDivertFile"
+        }
+    }
+    $WinDivertVersion = (
+        Get-Content -LiteralPath $WinDivertVersionFile -Raw -Encoding ASCII
+    ).Trim()
+    if ($WinDivertVersion -ne "2.2.2") {
+        throw "Bundled WinDivert version must be exactly 2.2.2"
+    }
+    $WinDivertDllHash = (
+        Get-FileHash -LiteralPath $WinDivertDll -Algorithm SHA256
+    ).Hash.ToUpperInvariant()
+    $WinDivertDriverHash = (
+        Get-FileHash -LiteralPath $WinDivertDriver -Algorithm SHA256
+    ).Hash.ToUpperInvariant()
+    if ($WinDivertDllHash -ne $ExpectedWinDivertDllSha256) {
+        throw "Bundled WinDivert.dll hash is not the reviewed official binary"
+    }
+    if ($WinDivertDriverHash -ne $ExpectedWinDivertDriverSha256) {
+        throw "Bundled WinDivert64.sys hash is not the reviewed official binary"
+    }
+    $WinDivertDriverSignature = Get-AuthenticodeSignature -LiteralPath $WinDivertDriver
+    if ($WinDivertDriverSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+        throw "Bundled WinDivert64.sys must have a valid Authenticode signature"
+    }
+}
+$ProductName = "$([char]0x53E8)$([char]0x53E8)$([char]0x8BE1)$([char]0x79D8)$([char]0x52A9)$([char]0x624B)"
+$DisplayName = $ProductName
+$Description = "$DisplayName $([char]0x6218)$([char]0x6597)$([char]0x6570)$([char]0x636E)$([char]0x7EDF)$([char]0x8BA1)"
 $ReleaseNotesLabel = "$([char]0x66F4)$([char]0x65B0)$([char]0x65E5)$([char]0x5FD7)"
 $SourceText = Get-Content -LiteralPath $SourcePath -Raw -Encoding UTF8
 $VersionMatch = [regex]::Match(
@@ -70,18 +108,7 @@ if (-not $VersionMatch.Success -or -not $ClientBuildMatch.Success) {
     throw "APP_VERSION or CLIENT_BUILD was not found in $SourcePath"
 }
 $SourceAppVersion = $VersionMatch.Groups["version"].Value
-$AppVersion = if ($NpcapVariant) {
-    $BaseVersionMatch = [regex]::Match(
-        $SourceAppVersion,
-        '^(?<numeric>\d+(?:\.\d+){2,3})'
-    )
-    if (-not $BaseVersionMatch.Success) {
-        throw "NpcapVariant could not derive a numeric source version"
-    }
-    "$($BaseVersionMatch.Groups['numeric'].Value)n"
-} else {
-    $SourceAppVersion
-}
+$AppVersion = $SourceAppVersion
 $ClientBuild = $ClientBuildMatch.Groups["build"].Value
 $DisplayVersionMatch = [regex]::Match(
     $AppVersion,
@@ -121,10 +148,8 @@ if ($DisplayVersionSuffix) {
 $FileVersion = $FileVersionParts -join '.'
 $OutputName = if ($OutputFilename) {
     [System.IO.Path]::GetFileName($OutputFilename)
-} elseif ($NpcapVariant) {
-    "$ProductName-Dps-Logs-Npcap-v$AppVersion.exe"
 } else {
-    "$ProductName-Dps-Logs-v$AppVersion.exe"
+    "$ProductName-v$AppVersion.exe"
 }
 if (-not $OutputName.EndsWith('.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "OutputFilename must end with .exe"
@@ -218,33 +243,34 @@ New-Item -ItemType Directory -Path $TemporaryDirectory -Force | Out-Null
 $CompiledCaptureSourceNames = @(
     "dps_meter.pyw",
     "capture_backend.py",
-    "runtime_capability.py"
+    "runtime_capability.py",
+    "pvp_tracker.py",
+    "pvp_records.py",
+    "pvp_backend_ui.py"
 )
-if ($UseNpcapBackend) {
-    $CompiledCaptureSourceNames += @(
-        "npcap_capture_process.py",
-        "npcap_protocol.py",
-        "npcap_key_state.py",
-        "npcap_zstd_state.py",
-        "npcap_rc4_decode.py",
-        "npcap_shadow_capture.py",
-        "npcap_receiver.py",
-        "npcap_entity_metadata.py",
-        "npcap_parser_adapter.py",
-        "npcap_method_tables.py",
-        "npcap_runtime.py",
-        "passive_transport.py",
-        "proc_inspect.py"
-    )
-} else {
-    $CompiledCaptureSourceNames += @(
-        "capture_process.py",
-        "network_capture.py",
-        "inline_capture.py",
-        "damage_hook.py",
-        "team_stats_request_hook.py"
-    )
-}
+$CompiledCaptureSourceNames += @(
+    # The protocol decoder retains its historical module names internally;
+    # the only bundled transport is the receive-only Windows implementation.
+    "npcap_capture_process.py",
+    "npcap_protocol.py",
+    "npcap_key_state.py",
+    "npcap_zstd_state.py",
+    "npcap_rc4_decode.py",
+    "npcap_shadow_capture.py",
+    "npcap_receiver.py",
+    "windows_raw_receiver.py",
+    "windivert_receiver.py",
+    "windows_hybrid_receiver.py",
+    "windows_capture_process.py",
+    "npcap_entity_metadata.py",
+    "runtime_metadata.py",
+    "npcap_parser_adapter.py",
+    "npcap_method_tables.py",
+    "npcap_runtime.py",
+    "startup_bootstrap.py",
+    "passive_transport.py",
+    "proc_inspect.py"
+)
 $CompiledCaptureSources = $CompiledCaptureSourceNames |
     ForEach-Object { Join-Path $ProjectDir $_ }
 $ForbiddenCaptureLiterals = @(
@@ -353,6 +379,13 @@ $ResourceFiles += [pscustomobject]@{
     Source = Join-Path $AssetRoot "bosses\hud\manifest.json"
     Target = "assets/bosses/hud/manifest.json"
 }
+$PvpAppearanceManifest = Join-Path $AssetRoot "pvp\appearance_manifest.json"
+if (Test-Path -LiteralPath $PvpAppearanceManifest) {
+    $ResourceFiles += [pscustomobject]@{
+        Source = $PvpAppearanceManifest
+        Target = "assets/pvp/appearance_manifest.json"
+    }
+}
 foreach ($Name in @(
     "skill_names.json",
     "skill_metadata.json",
@@ -375,35 +408,49 @@ if (-not $ProtectedRelease) {
         Target = "runtime-profile.dev.json"
     }
 }
-$CaptureVariantPath = $null
-if ($UseNpcapBackend) {
-    $CaptureVariantPath = Join-Path $TemporaryDirectory "_capture_variant.json"
-    $CaptureVariant = [ordered]@{
-        schema_version = 1
-        backend = "npcap"
-        display_version = $AppVersion
-        data_directory = $(if ($NpcapVariant) { "GMZZDpsMeterNpcap" } else { "GMZZDpsMeter" })
-        mutex_name = $(if ($NpcapVariant) { "Local\DaodaoMysteryDpsLogsNpcap" } else { "" })
-        tray_class_prefix = $(if ($NpcapVariant) { "GMZZDpsNpcapTray_" } else { "" })
-        packet_capture = "npcap"
-        packet_transmit_functions_loaded = $false
-        server_requests_added = 0
-        game_process_access = "query_and_read_only"
-    }
-    Write-Utf8NoBom $CaptureVariantPath (
-        $CaptureVariant | ConvertTo-Json -Depth 5
-    )
+$CaptureVariantPath = Join-Path $TemporaryDirectory "_capture_variant.json"
+$CaptureVariant = [ordered]@{
+    schema_version = 1
+    backend = "windows_raw"
+    display_version = $AppVersion
+    data_directory = "GMZZDpsMeter"
+    mutex_name = ""
+    tray_class_prefix = ""
+    packet_capture = "windows_raw"
+    passive_capture = $true
+    native_ipv4_capture = "windows_raw_socket"
+    native_ipv6_capture = "windivert_sniff_receive_only"
+    packet_transmit_functions_loaded = $false
+    server_requests_added = 2
+    game_process_access = "query_read_write_bounded_rpc_hooks"
+}
+Write-Utf8NoBom $CaptureVariantPath (
+    $CaptureVariant | ConvertTo-Json -Depth 5
+)
+$ResourceFiles += [pscustomobject]@{
+    Source = $CaptureVariantPath
+    Target = "_capture_variant.json"
+}
+$ResourceFiles += [pscustomobject]@{
+    Source = $ZstdLicensePath
+    Target = "third_party_licenses/zstandard-BSD.txt"
+}
+$ResourceFiles += [pscustomobject]@{
+    Source = $ZstdRestoreDll
+    Target = "npcap_zstd_restore.dll"
+}
+if ($PacketCapture -eq "windows_raw") {
     $ResourceFiles += [pscustomobject]@{
-        Source = $CaptureVariantPath
-        Target = "_capture_variant.json"
+        Source = $WinDivertDll
+        Target = "windivert/WinDivert.dll"
     }
     $ResourceFiles += [pscustomobject]@{
-        Source = $NpcapZstdRestoreDll
-        Target = "npcap_zstd_restore.dll"
+        Source = $WinDivertDriver
+        Target = "windivert/WinDivert64.sys"
     }
     $ResourceFiles += [pscustomobject]@{
-        Source = $ZstdLicensePath
-        Target = "third_party_licenses/zstandard-BSD.txt"
+        Source = $WinDivertLicense
+        Target = "third_party_licenses/WinDivert-LGPL-GPL.txt"
     }
 }
 $ResourceFiles += [pscustomobject]@{
@@ -424,7 +471,7 @@ foreach ($Resource in $ResourceFiles) {
 $IdentityPath = Join-Path $TemporaryDirectory "_release_identity.json"
 $Identity = [ordered]@{
     schema_version = 2
-    product = "Dps-Logs"
+    product = $DisplayName
     version = $AppVersion
     client_build = $ClientBuild
     build_id = $NormalizedBuildId
@@ -472,6 +519,11 @@ try {
         "--include-package=capstone",
         "--include-module=main_hud",
         "--include-module=main_hud_artwork",
+        "--include-module=pvp_tracker",
+        "--include-module=pvp_records",
+        "--include-module=pvp_backend_ui",
+        "--include-module=equipment_profiles",
+        "--include-module=ksbc2_skill_names",
         "--include-module=profile_upload",
         "--include-module=resumable_update",
         "--include-module=update_cdn",
@@ -479,15 +531,21 @@ try {
         "--include-data-files=assets/*.png=assets/",
         "--include-data-files=assets/professions/*.png=assets/professions/",
         "--include-data-files=assets/skills/*.png=assets/skills/",
+        "--include-data-files=assets/equipment/*.png=assets/equipment/",
+        "--include-data-files=assets/equipment/manifest.json=assets/equipment/manifest.json",
         "--include-data-files=assets/bosses/*.png=assets/bosses/",
         "--include-data-files=assets/bosses/hud/*.png=assets/bosses/hud/",
         "--include-data-files=assets/bosses/hud/manifest.json=assets/bosses/hud/manifest.json",
+        "--include-data-files=assets/pvp/avatars/*.png=assets/pvp/avatars/",
+        "--include-data-files=assets/pvp/frames/*.png=assets/pvp/frames/",
+        "--include-data-files=assets/pvp/appearance_manifest.json=assets/pvp/appearance_manifest.json",
         "--include-data-files=assets/app_icon.ico=assets/app_icon.ico",
         "--include-data-files=$SanitizedIconManifestPath=assets/icon_sources.json",
         "--include-data-files=$SanitizedBossCatalogPath=assets/bosses/boss_icon_sources.json",
         "--include-data-files=skill_names.json=skill_names.json",
         "--include-data-files=skill_metadata.json=skill_metadata.json",
         "--include-data-files=monster_metadata.json=monster_metadata.json",
+        "--include-data-files=map_catalog_20260918.csv=map_catalog_20260918.csv",
         "--include-data-files=boss_enrage_config.json=boss_enrage_config.json",
         "--include-data-files=boss_allowlist.txt=boss_allowlist.txt",
         "--include-data-files=cacert.pem=cacert.pem",
@@ -499,8 +557,7 @@ try {
         "--copyright=$ProductName",
         "dps_meter.pyw"
     )
-    $BackendArguments = if ($UseNpcapBackend) {
-        @(
+    $BackendArguments = @(
             "--include-module=npcap_capture_process",
             "--include-module=npcap_protocol",
             "--include-module=npcap_key_state",
@@ -508,33 +565,48 @@ try {
             "--include-module=npcap_rc4_decode",
             "--include-module=npcap_shadow_capture",
             "--include-module=npcap_receiver",
+            "--include-module=windows_raw_receiver",
+            "--include-module=windivert_receiver",
+            "--include-module=windows_hybrid_receiver",
+            "--include-module=windows_capture_process",
+            "--include-module=npcap_bootstrap",
+            "--include-module=npcap_wire_entities",
             "--include-module=npcap_entity_metadata",
+            "--include-module=runtime_metadata",
+            "--include-module=combat_statistics",
+            "--include-module=encounter_tracker",
+            "--include-module=encounter_repository",
             "--include-module=npcap_parser_adapter",
             "--include-module=npcap_method_tables",
             "--include-module=npcap_runtime",
+            "--include-module=network_capture",
+            "--include-module=inline_capture",
+            "--include-module=team_stats_request_hook",
+            "--include-module=startup_bootstrap",
             "--include-module=passive_transport",
             "--include-package=msgpack",
             "--include-package=zstandard",
             "--nofollow-import-to=capture_process",
-            "--nofollow-import-to=damage_hook",
-            "--nofollow-import-to=network_capture",
-            "--nofollow-import-to=inline_capture",
-            "--nofollow-import-to=team_stats_request_hook"
+            "--nofollow-import-to=damage_hook"
         )
-    } else {
-        @("--include-module=capture_process")
-    }
     $NuitkaArguments = @(
         $NuitkaArguments[0..($NuitkaArguments.Count - 2)]
         $BackendArguments
         $NuitkaArguments[-1]
     )
-    if ($UseNpcapBackend) {
+    $NuitkaArguments = @(
+        $NuitkaArguments[0..($NuitkaArguments.Count - 2)]
+        "--include-data-files=$CaptureVariantPath=_capture_variant.json"
+        "--include-data-files=$ZstdRestoreDll=npcap_zstd_restore.dll"
+        "--include-data-files=$ZstdLicensePath=third_party_licenses/zstandard-BSD.txt"
+        $NuitkaArguments[-1]
+    )
+    if ($PacketCapture -eq "windows_raw") {
         $NuitkaArguments = @(
             $NuitkaArguments[0..($NuitkaArguments.Count - 2)]
-            "--include-data-files=$CaptureVariantPath=_capture_variant.json"
-            "--include-data-files=$NpcapZstdRestoreDll=npcap_zstd_restore.dll"
-            "--include-data-files=$ZstdLicensePath=third_party_licenses/zstandard-BSD.txt"
+            "--include-data-files=$WinDivertDll=windivert/WinDivert.dll"
+            "--include-data-files=$WinDivertDriver=windivert/WinDivert64.sys"
+            "--include-data-files=$WinDivertLicense=third_party_licenses/WinDivert-LGPL-GPL.txt"
             $NuitkaArguments[-1]
         )
     }
@@ -560,22 +632,16 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Nuitka build failed with exit code $LASTEXITCODE"
     }
-    if ($UseNpcapBackend) {
-        $NuitkaReportText = Get-Content -LiteralPath (
-            Join-Path $TemporaryDirectory "nuitka-report.xml"
-        ) -Raw -Encoding UTF8
-        $ForbiddenNpcapModules = @(
-            "capture_process",
-            "damage_hook",
-            "network_capture",
-            "inline_capture",
-            "team_stats_request_hook"
-        )
-        foreach ($ModuleName in $ForbiddenNpcapModules) {
-            $ModulePattern = '<module\s+name="' + [regex]::Escape($ModuleName) + '"'
-            if ($NuitkaReportText -match $ModulePattern) {
-                throw "Npcap build unexpectedly contains hook module: $ModuleName"
-            }
+    $NuitkaReportText = Get-Content -LiteralPath (
+        Join-Path $TemporaryDirectory "nuitka-report.xml"
+    ) -Raw -Encoding UTF8
+    foreach ($ModuleName in @(
+        "capture_process",
+        "damage_hook"
+    )) {
+        $ModulePattern = '<module\s+name="' + [regex]::Escape($ModuleName) + '"'
+        if ($NuitkaReportText -match $ModulePattern) {
+            throw "Release unexpectedly contains unused legacy hook module: $ModuleName"
         }
     }
 
@@ -628,14 +694,18 @@ try {
     $ReleaseManifestPath = Join-Path $OutputDirectoryPath "release-manifest-$NormalizedBuildId.json"
     $ReleaseManifest = [ordered]@{
         schema_version = 1
-        product = "Dps-Logs"
+        product = $DisplayName
         version = $AppVersion
         client_build = $ClientBuild
         build_id = $NormalizedBuildId
         runtime_profile_id = $RuntimeProfileId
         official = [bool]$OfficialRelease
         protected = [bool]$ProtectedRelease
-        capture_backend = $(if ($UseNpcapBackend) { "npcap" } else { "legacy" })
+        capture_backend = "windows_raw"
+        passive_capture = $true
+        requires_npcap = $false
+        native_ipv4_capture = "windows_raw_socket"
+        native_ipv6_capture = "windivert_sniff_receive_only"
         capability_signing_key_id = $CapabilitySigningKeyId
         capability_public_keys = $CapabilityPublicKeys
         filename = $OutputName

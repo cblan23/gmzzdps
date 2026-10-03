@@ -25,7 +25,9 @@ CHARACTER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16}$")
 APP_VERSION_PATTERN = re.compile(r"^\d+(?:\.\d+){2,3}(?:[A-Za-z0-9.+_-]*)$")
 LINK_CODE_PATTERN = re.compile(r"^[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){2}$")
 LINK_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-DEFAULT_RESERVED_NICKNAMES = frozenset({"Dps-Logs", "官方", "叨叨"})
+DEFAULT_RESERVED_NICKNAMES = frozenset(
+    {"叨叨诡秘助手", "Dps-Logs", "官方", "叨叨"}
+)
 TRAINING_DUMMY_TEMPLATE_IDS = frozenset(
     {
         7_100_632,

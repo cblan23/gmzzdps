@@ -3,9 +3,11 @@ dps_config.json
 network_self_identity.json
 team_profiles.json
 monster_name_cache.json
+equipment_item_names.json
 device_id
 logs/
 combat_history/
+equipment_queries/
 *.log
 *.pcap
 *.db
@@ -30,6 +32,7 @@ replay_*.json
 research-v0.0.15/joker-protocol-evidence.json
 更新日志-v*.txt
 /叨叨诡秘-全员战报-*.png
+/叨叨诡秘助手-全员战报-*.png
 
 # Local development and Codex work products
 /.codex-reference/
@@ -55,7 +58,12 @@ __pycache__/
 *.xml
 
 # Large reverse-engineering workspaces are not application source
-tools/
+tools/*
+!tools/extract_map_catalog.py
+!tools/preview_official_settlement_history.py
+!tools/preview_pvp_backend.py
+!tools/preview_pvp_hud.py
+!tools/replay_pvp_capture.py
 video-guide/
 
 # Local editor and operating-system files

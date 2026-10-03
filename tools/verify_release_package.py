@@ -17,9 +17,9 @@ def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('--directory', type=Path, required=True)
     cli.add_argument('--source', type=Path, required=True)
-    cli.add_argument('--version', default='0.2.3')
+    cli.add_argument('--version', default='0.3.1')
     cli.add_argument('--build-id', required=True)
-    cli.add_argument('--backend', choices=('npcap', 'legacy'), default='npcap')
+    cli.add_argument('--backend', choices=('windows_raw', 'npcap', 'legacy'), default='windows_raw')
     args = cli.parse_args()
     directory = args.directory.resolve()
     manifest = read_json(directory / f'release-manifest-{args.build_id}.json')
@@ -51,6 +51,17 @@ def main():
     if args.backend == 'npcap':
         assert '_capture_variant.json' in resources
         assert resources['npcap_zstd_restore.dll'] == hashlib.sha256((args.source / 'npcap_zstd_restore.dll').read_bytes()).hexdigest()
+    if args.backend == 'windows_raw':
+        assert manifest.get('requires_npcap') is False
+        assert '_capture_variant.json' in resources
+        expected = {
+            'windivert/WinDivert.dll': args.source / 'third_party/windivert/x64/WinDivert.dll',
+            'windivert/WinDivert64.sys': args.source / 'third_party/windivert/x64/WinDivert64.sys',
+            'third_party_licenses/WinDivert-LGPL-GPL.txt': args.source / 'third_party/windivert/LICENSE',
+        }
+        for target, source in expected.items():
+            assert resources[target] == hashlib.sha256(source.read_bytes()).hexdigest()
+        assert not any(name.startswith('_npcap/') for name in resources)
     notes = (args.source / f'release-notes-v{args.version}.txt').read_text(encoding='utf-8-sig').strip()
     assert notes == update['notes']
     assert notes == (directory / f'更新日志-v{args.version}.txt').read_text(encoding='utf-8-sig').strip()

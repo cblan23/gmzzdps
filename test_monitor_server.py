@@ -415,6 +415,218 @@ class MonitorServerTests(unittest.TestCase):
         self.assertTrue(value["authorized"])
         return value
 
+    def test_pvp_private_api_upload_list_alliance_and_idempotency(self):
+        card_key = self.create_card()[0]
+        gateway = ServerLicensingGateway(
+            self.base_url,
+            "9" * 32,
+            "0.3.2b",
+        )
+        service = LicensingService(gateway)
+        session = service.sign_in_card(card_key)
+        self.assertTrue(session.active)
+
+        start_ns = 1_789_700_000_000_000_000
+        character_id = profile_character_token(9_001)
+        record = {
+            "schema_version": 1,
+            "match_id": "pvp_" + "a" * 32,
+            "map_id": 5_200_223,
+            "mode_id": 5_500_009,
+            "mode_name": "四方联赛",
+            "map_name": "四方联赛",
+            "instance_id": "http-pvp-instance",
+            "started_at_ns": start_ns,
+            "ended_at_ns": start_ns + 30_000_000_000,
+            "started_at": "2026-09-18T12:00:00+00:00",
+            "ended_at": "2026-09-18T12:00:30+00:00",
+            "duration_seconds": 30,
+            "result": "未知",
+            "end_reason": "left_map",
+            "player": {
+                "character_id": character_id,
+                "name": "接口角色",
+                "profession_id": 1_200_001,
+                "extraordinary_rating": 88_893,
+                "equipment_snapshot": None,
+            },
+            "kills": 1,
+            "assists": None,
+            "deaths": 1,
+            "damage": 123_456,
+            "taken": None,
+            "capture_complete": True,
+            "assist_source_available": False,
+            "incoming_source_available": False,
+            "opponents": [],
+        }
+        first = service.pvp_request("records/upload", {"record": record})
+        repeat = service.pvp_request("records/upload", {"record": record})
+        self.assertTrue(first["ok"])
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(repeat["duplicate"])
+        equipment = {
+            "schema_version": 1,
+            "snapshot_id": "pvp_eq_" + "b" * 32,
+            "owner_character_id": character_id,
+            "target_character_id": profile_character_token(9_002),
+            "target_name": "对手",
+            "profession_id": 1_200_003,
+            "extraordinary_rating": 90_001,
+            "captured_at_ns": start_ns,
+            "captured_at": "2026-09-18T12:00:00+00:00",
+            "source": "RetOtherRoleShapeData",
+            "equipment_snapshot": {
+                "captured_at_ns": start_ns,
+                "captured_at": "2026-09-18T12:00:00+00:00",
+                "extraordinary_rating": 90_001,
+                "equipment_score": None,
+                "equipment": [],
+                "source": "RetOtherRoleShapeData",
+                "partial": False,
+            },
+        }
+        equipment_first = service.pvp_request(
+            "equipment/snapshots/upload", {"snapshot": equipment}
+        )
+        equipment_repeat = service.pvp_request(
+            "equipment/snapshots/upload", {"snapshot": equipment}
+        )
+        self.assertTrue(equipment_first["ok"])
+        self.assertFalse(equipment_first["duplicate"])
+        self.assertTrue(equipment_repeat["duplicate"])
+        listed = service.pvp_request("records/list", {"limit": 20})
+        self.assertEqual([row["match_id"] for row in listed["records"]], [record["match_id"]])
+        matchups = service.pvp_request(
+            "records/matchups",
+            {
+                "opponent_ids": [],
+                "team_size": 3,
+                "exclude_match_id": record["match_id"],
+            },
+        )
+        self.assertTrue(matchups["ok"])
+        self.assertEqual(matchups["matchups"], {})
+        self.assertFalse(service.pvp_request("alliance/status", {})["authorized"])
+        self.assertFalse(service.pvp_request("alliance/hunter/analysis", {"days": 30})["ok"])
+        self.assertTrue(service.pvp_request(
+            "alliance/players/search", {"query": "接口角色"})["ok"])
+        self.assertEqual(service.pvp_request(
+            "alliance/subscriptions/status", {})["subscriptions"], [])
+
+        status, certified = self.request(
+            "/api/v1/dps/admin/pvp/alliance/certify",
+            method="POST",
+            admin=True,
+            body={
+                "club_id": "club_http_001",
+                "club_name": "星空远征团",
+                "server_name": "测试服",
+                "admin_card_key": card_key,
+            },
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertTrue(certified["ok"])
+        added = service.pvp_request(
+            "alliance/members/upsert",
+            {
+                "character_id": character_id,
+                "character_name": "接口角色",
+                "profession_id": 1_200_001,
+                "club_role": "核心成员",
+            },
+        )
+        self.assertTrue(added["ok"])
+        alliance = service.pvp_request("alliance/status", {})
+        self.assertTrue(alliance["authorized"])
+        self.assertEqual(alliance["members"][0]["matches"], 1)
+        self.assertEqual(alliance["members"][0]["kills"], 1)
+        member_key = alliance["members"][0]["member_key"]
+        member_history = service.pvp_request("alliance/members/records", {"member_key": member_key})
+        self.assertTrue(member_history["ok"])
+        self.assertEqual([row["match_id"] for row in member_history["records"]], [record["match_id"]])
+        foreign_member = service.pvp_request("alliance/members/records", {"member_key": "f" * 64})
+        self.assertFalse(foreign_member["ok"])
+        hunter = dict(record)
+        hunter.update(match_id="pvp_" + "c" * 32, map_id=5200167,
+                      mode_id=5500012, mode_name="终末猎杀", map_name="猎龙之城")
+        self.assertTrue(service.pvp_request("records/upload", {"record": hunter})["ok"])
+        analysis = service.pvp_request("alliance/hunter/analysis", {"days": 30})
+        self.assertTrue(analysis["ok"])
+        self.assertEqual(analysis["summary"]["matches"], 1)
+        self.assertEqual(analysis["records"][0]["match_id"], hunter["match_id"])
+        self.assertNotIn("opponents", analysis["records"][0])
+        detail = service.pvp_request("alliance/hunter/record", {"match_id": hunter["match_id"]})
+        self.assertTrue(detail["ok"])
+        self.assertEqual(detail["record"]["match_id"], hunter["match_id"])
+        self.assertFalse(service.pvp_request(
+            "alliance/hunter/analysis", {"days": 30, "member_key": "f" * 64}
+        )["ok"])
+        self.assertFalse(service.pvp_request(
+            "alliance/hunter/record", {"match_id": record["match_id"]}
+        )["ok"])
+        outsider = dict(record)
+        outsider.update(match_id="pvp_" + "d" * 32, map_id=5200229,
+                        mode_id=5500014, mode_name="战略服俱乐部宣战",
+                        map_name="征服宣令",
+                        player={**record["player"],
+                                "character_id": profile_character_token(9_003),
+                                "name": "外部角色"})
+        self.assertTrue(service.pvp_request("records/upload", {"record": outsider})["ok"])
+        found = service.pvp_request("alliance/players/search", {"query": "外部角色"})
+        self.assertEqual(len(found["players"]), 1)
+        outsider_key = found["players"][0]["member_key"]
+        subscribed = service.pvp_request("alliance/subscriptions/update", {
+            "action": "subscribe", "member_key": outsider_key,
+        })
+        self.assertEqual(subscribed["subscriptions"][0]["new_matches"], 0)
+        newer = dict(outsider, match_id="pvp_" + "e" * 32)
+        self.assertTrue(service.pvp_request("records/upload", {"record": newer})["ok"])
+        status = service.pvp_request("alliance/status", {})
+        self.assertEqual(status["subscriptions"][0]["new_matches"], 1)
+        compact = service.pvp_request("alliance/status", {"compact": True})
+        self.assertNotIn("members", compact)
+        self.assertEqual(compact["subscriptions"][0]["new_matches"], 1)
+        records = service.pvp_request("alliance/players/records", {
+            "member_key": outsider_key, "days": 30,
+            "mode_name": "战略服俱乐部宣战", "result": "未知", "offset": 0,
+        })
+        self.assertEqual(records["total"], 2)
+        self.assertEqual(len(records["records"]), 2)
+        self.assertTrue(service.pvp_request("alliance/players/record", {
+            "member_key": outsider_key, "match_id": outsider["match_id"],
+        })["ok"])
+        self.assertFalse(service.pvp_request("alliance/players/record", {
+            "member_key": outsider_key, "match_id": record["match_id"],
+        })["ok"])
+        report = service.pvp_request("alliance/subscriptions/report", {
+            "days": 30,
+            "member_keys": [outsider_key],
+        })
+        self.assertEqual(report["report"]["summary"]["matches"], 0)
+        self.assertEqual(report["report"]["battle_name"], "猎龙之城")
+        self.assertEqual(report["report"]["selected_member_keys"], [outsider_key])
+        self.assertFalse(service.pvp_request("alliance/subscriptions/report", {
+            "days": 30, "member_keys": ["f" * 64],
+        })["ok"])
+        dated = service.pvp_request("alliance/subscriptions/report", {
+            "days": 0,
+            "start_date": "2026-09-18", "end_date": "2026-09-18",
+        })
+        self.assertTrue(dated["ok"])
+        self.assertEqual(dated["report"]["summary"]["matches"], 0)
+        self.assertEqual(sum(row["matches"] for row in dated["report"]["trend"]), 0)
+        self.assertEqual(len(dated["report"]["trend"]), 12)
+        self.assertFalse(service.pvp_request("alliance/subscriptions/report", {
+            "days": 0, "start_date": "2026-09-19", "end_date": "2026-09-18",
+        })["ok"])
+        self.assertEqual(service.pvp_request("alliance/subscriptions/update", {
+            "action": "seen", "member_key": outsider_key,
+        })["subscriptions"][0]["new_matches"], 0)
+        self.assertEqual(service.pvp_request("alliance/subscriptions/update", {
+            "action": "unsubscribe", "member_key": outsider_key,
+        })["subscriptions"], [])
+
     @staticmethod
     def profile_encounter_payload(first: str, second: str, uploader: str) -> dict:
         return {
@@ -1015,7 +1227,7 @@ class MonitorServerTests(unittest.TestCase):
         ) as response:
             self.assertEqual(response.status, 200)
             self.assertIn(
-                'filename="Dps-Logs-v0.0.4.exe"',
+                'filename="DaodaoMysteryAssistant-v0.0.4.exe"',
                 response.headers.get("Content-Disposition", ""),
             )
             self.assertEqual(response.read(), update_bytes)

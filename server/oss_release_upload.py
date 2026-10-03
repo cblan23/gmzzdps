@@ -6,6 +6,7 @@ import os
 import sys
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 BUCKET='daodao-dps-updates'
 REGION='cn-hangzhou'
@@ -53,10 +54,17 @@ def main():
         build=metadata['build_id'];version=metadata['display_version']
         assert len(build)==32 and all(c in '0123456789abcdef' for c in build)
         assert all(c in '0123456789.abcd' for c in version)
+        # Keep the immutable legacy object key so already published clients
+        # can validate and follow the same CDN update URL after the rename.
         key=f'releases/{build}/Dps-Logs-v{version}.exe'
         if not bucket.object_exists(key):
+            branded_name=f'叨叨诡秘助手-v{version}.exe'
+            content_disposition=(
+                f'attachment; filename="DaodaoMysteryAssistant-v{version}.exe"; '
+                f"filename*=UTF-8''{quote(branded_name, safe='')}"
+            )
             bucket.put_object_from_file(key,str(file),headers={'Content-Type':'application/octet-stream','Cache-Control':'public,max-age=31536000,immutable',
-                'Content-Disposition':f'attachment; filename="Dps-Logs-v{version}.exe"','x-oss-forbid-overwrite':'true','x-oss-meta-sha256':digest})
+                'Content-Disposition':content_disposition,'x-oss-forbid-overwrite':'true','x-oss-meta-sha256':digest})
     verify(bucket,key,digest,size)
     print(json.dumps({'uploaded_and_verified':True,'bucket':BUCKET,'key':key,'size':size,'sha256':digest,'cdn_url':'https://downloads.daodaogame.vip/'+key,'permissions':'ECS role; bucket ACL unchanged'}))
 

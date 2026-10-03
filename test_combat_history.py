@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from combat_history import (
     CombatHistoryStore,
     HISTORY_SCHEMA_VERSION,
+    recent_boss_max_hp_references,
     rebase_relative_combat_logs,
 )
 
@@ -32,6 +35,81 @@ class CombatHistoryStoreTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_repeated_settled_hp_peak_becomes_boss_display_reference(self):
+        for index, observed in enumerate((36_519_704, 36_519_704, 35_971_650)):
+            value = {
+                "settlement_status": "SETTLED",
+                "monster": {
+                    "template_id": 7_100_471,
+                    "level": 74,
+                    "max_hp": observed,
+                    "observed_max_hp": observed,
+                },
+            }
+            (self.directory / f"{index}.json").write_text(
+                json.dumps(value), encoding="utf-8"
+            )
+
+        references = recent_boss_max_hp_references(self.directory)
+
+        self.assertEqual(references[(7_100_471, 74)], 36_519_704)
+        self.assertNotIn((7_100_471, 72), references)
+
+    def test_single_confirmed_full_hp_peak_survives_a_ten_day_gap(self):
+        value = {
+            "settlement_status": "SETTLED",
+            "monster": {
+                "template_id": 7_115_080,
+                "level": 63,
+                "max_hp": 7_578_453,
+                "observed_max_hp": 7_578_453,
+            },
+        }
+        path = self.directory / "confirmed-full-hp.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        old = time.time() - 10 * 86400
+        os.utime(path, (old, old))
+
+        references = recent_boss_max_hp_references(self.directory)
+
+        self.assertEqual(references[(7_115_080, 63)], 7_578_453)
+
+    def test_repeated_authoritative_stage_total_recovers_partial_max_hp(self):
+        for index, maximum in enumerate((6_988_788, 7_474_081)):
+            value = {
+                "source": "passive_npcap_settlement",
+                "data_source": "npcap_server_statistics",
+                "settlement_source": "npcap_server_statistics",
+                "settlement_status": "SETTLED",
+                "statistics_scope": "STAGE",
+                "capture_complete": True,
+                "result": "success",
+                "total_damage": 7_578_453,
+                "participants": [
+                    {"damage": 2_500_000},
+                    {"damage": 5_078_453},
+                ],
+                "monster": {
+                    "template_id": 7_115_080,
+                    "level": 63,
+                    "max_hp": maximum,
+                },
+            }
+            (self.directory / f"stage-{index}.json").write_text(
+                json.dumps(value), encoding="utf-8"
+            )
+        all_scope = dict(value)
+        all_scope["statistics_scope"] = "ALL"
+        all_scope["total_damage"] = 99_999_999
+        all_scope["participants"] = [{"damage": 99_999_999}]
+        (self.directory / "all-scope.json").write_text(
+            json.dumps(all_scope), encoding="utf-8"
+        )
+
+        references = recent_boss_max_hp_references(self.directory)
+
+        self.assertEqual(references[(7_115_080, 63)], 7_578_453)
 
     def test_rebase_moves_boss_hits_and_death_nodes_to_the_shared_clock(self):
         source = {
@@ -253,6 +331,74 @@ class CombatHistoryStoreTests(unittest.TestCase):
         self.assertEqual(normalized["team_effective_healing"], 800)
         self.assertEqual(normalized["team_total_healing"], 1_000)
         self.assertEqual(normalized["team_hps"], 80.0)
+
+    def test_healing_display_keeps_pending_nulls_unknown(self):
+        source = record("pending-healing-display")
+        source["source"] = "passive_npcap_settlement"
+        source["settlement_status"] = "PENDING"
+        source["duration_seconds"] = None
+        source["participants"] = [
+            {"actor_id": 11, "profession_id": 1_200_002},
+            {"actor_id": 22, "profession_id": 1_200_003},
+        ]
+        source["healers"] = [
+            {
+                "actor_id": 11,
+                "profession_id": 1_200_002,
+                "effective_healing": None,
+                "total_healing": None,
+                "response": {"average_ms": 600},
+            },
+            {
+                "actor_id": 22,
+                "profession_id": 1_200_003,
+                "effective_healing": None,
+                "total_healing": None,
+            },
+        ]
+        source["team_effective_healing"] = None
+
+        normalized = self.store.normalize_healing_for_display(source)
+
+        self.assertEqual(
+            [row["actor_id"] for row in normalized["healers"]], [11, 22]
+        )
+        self.assertIsNone(normalized["team_effective_healing"])
+        self.assertIsNone(normalized["team_hps"])
+        self.assertIsNone(normalized["team_total_healing"])
+
+    def test_healing_display_does_not_complete_partial_settlement(self):
+        source = record("partial-healing-display")
+        source["source"] = "passive_npcap_settlement"
+        source["settlement_status"] = "SETTLED"
+        source["duration_seconds"] = 10.0
+        source["participants"] = [
+            {"actor_id": 11, "profession_id": 1_200_002},
+            {"actor_id": 22, "profession_id": 1_200_003},
+        ]
+        source["healers"] = [
+            {
+                "actor_id": 11,
+                "profession_id": 1_200_002,
+                "effective_healing": 800,
+                "total_healing": None,
+                "response": {"average_ms": 600},
+            },
+            {
+                "actor_id": 22,
+                "profession_id": 1_200_003,
+                "effective_healing": None,
+                "total_healing": None,
+            },
+        ]
+
+        normalized = self.store.normalize_healing_for_display(source)
+
+        self.assertEqual(
+            [row["actor_id"] for row in normalized["healers"]], [11, 22]
+        )
+        self.assertIsNone(normalized["team_effective_healing"])
+        self.assertIsNone(normalized["team_hps"])
 
     def test_late_completion_attaches_validation_without_rewriting_damage(self):
         finished = record("late-table", 1_788_058_851.0124204)

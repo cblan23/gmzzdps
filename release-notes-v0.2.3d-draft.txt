@@ -1,3 +1,0 @@
-此草稿已由 release-notes-v0.2.3d.txt 取代，最终日志以该文件和客户端内置日志为准。
-Npcap 调查报告：docs/npcap-team-data-report-20260912.md。
-子爵夫人白魂/黑夜机制误计死亡仍未确认修复，见 docs/pending-white-soul-deaths.md。

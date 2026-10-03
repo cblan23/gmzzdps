@@ -14,6 +14,8 @@ equipment_queries/
 *.db-*
 *.sqlite
 *.sqlite3
+*.sqlite3-*
+*.sqlite-*
 .env
 .env.*
 !.env.example
@@ -39,6 +41,13 @@ research-v0.0.15/joker-protocol-evidence.json
 /.codex-tmp/
 /.codex-*/
 /.codex-*
+/.tmp-*
+/preview-*/
+/dual-game-tool-*/
+/fulltest-*.txt
+/test-run-*.txt
+/main_hud_behavior-current.txt
+/v034e-r6-*.txt
 /combat_upload_state.json
 /available-cards-*.txt
 /runtime-profile.dev.json
@@ -64,6 +73,8 @@ tools/*
 !tools/preview_pvp_backend.py
 !tools/preview_pvp_hud.py
 !tools/replay_pvp_capture.py
+!tools/verify_release_package.py
+!tools/package_portable_release.py
 video-guide/
 
 # Local editor and operating-system files

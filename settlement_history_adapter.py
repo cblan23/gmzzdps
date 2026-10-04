@@ -221,7 +221,7 @@ def _server_healing_skills(member: dict, total: int | None) -> list[dict]:
     return rows
 
 
-def _base_self_rows(base: dict) -> dict[int, dict]:
+def _base_participant_rows(base: dict) -> dict[int, dict]:
     rows = base.get("participants") if isinstance(base, dict) else None
     if not isinstance(rows, list):
         return {}
@@ -229,7 +229,6 @@ def _base_self_rows(base: dict) -> dict[int, dict]:
         _actor_id(row.get("actor_id")): deepcopy(row)
         for row in rows
         if isinstance(row, dict)
-        and row.get("is_self") is True
         and _actor_id(row.get("actor_id"))
     }
 
@@ -257,7 +256,7 @@ def encounter_history_record(
         # An old explicit binding can point at another Boss's local archive.
         # Do not inherit its entity, HP, targets, or local player damage.
         base = {}
-    existing_self = _base_self_rows(base)
+    existing_participants = _base_participant_rows(base)
     existing_equipment = {}
     for collection_name in ("participants", "healers", "damage_taken"):
         collection = base.get(collection_name)
@@ -302,7 +301,7 @@ def encounter_history_record(
         values = members.get(token, {})
         actor = _actor_id(identity.get("iid") or values.get("iid"))
         is_self = token == encounter.self_token
-        local = existing_self.get(actor, {}) if is_self else {}
+        local = existing_participants.get(actor, {})
         if token not in visible_tokens:
             continue
         damage = _optional_nonnegative(values.get("damage")) if settled else None
@@ -361,6 +360,17 @@ def encounter_history_record(
             excluded = _optional_nonnegative(values.get("penetration_excluded_count"))
             if hits is not None and excluded is None:
                 excluded = 0
+            local_damage = _optional_nonnegative(local.get("damage"))
+            local_targets = local.get("targets")
+            exact_local_targets = (
+                local_damage == damage
+                and isinstance(local_targets, list)
+                and sum(
+                    _optional_nonnegative(target.get("damage")) or 0
+                    for target in local_targets
+                    if isinstance(target, dict)
+                ) == damage
+            )
             row.update(
                 {
                     "damage_hits": hits,
@@ -380,7 +390,9 @@ def encounter_history_record(
                     "skill_detail_status": "server_settlement",
                     "skill_source": "server_stage_statistics",
                     "skills": _server_damage_skills(values, damage),
-                    "targets": [],
+                    "targets": (
+                        deepcopy(local_targets) if exact_local_targets else []
+                    ),
                     "local_detail_available": bool(
                         local
                         and _optional_nonnegative(local.get("damage")) == damage
@@ -548,6 +560,7 @@ def encounter_history_record(
             "statistics_scope": "STAGE",
             "stage_id": encounter.stage_id,
             "dungeon_id": encounter.dungeon_id,
+            "map_id": encounter.map_id,
             "dungeon_stage_id": encounter.stage_id,
             "dungeon_stage_phase": encounter.stage_index,
             "boss_token": encounter.boss_token,

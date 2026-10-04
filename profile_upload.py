@@ -20,6 +20,12 @@ from typing import Callable, Iterable, Mapping
 NICKNAME_MIN_LENGTH = 2
 NICKNAME_MAX_LENGTH = 12
 MAX_ENCOUNTER_PARTICIPANTS = 24
+MAX_UPLOAD_TARGETS = 64
+MAX_UPLOAD_SKILL_TIMELINE_EVENTS = 100_000
+MAX_UPLOAD_OPENING_EVENTS = 512
+MAX_UPLOAD_BOSS_EVENTS = 50_000
+MAX_UPLOAD_BOSS_HP_SAMPLES = 8_000
+OPENING_SEQUENCE_MAX_MS = 30_000
 LINK_CODE_TTL_SECONDS = 10 * 60
 NICKNAME_RESERVATION_SECONDS = 30 * 24 * 60 * 60
 CHARACTER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16}$")
@@ -52,6 +58,29 @@ TRAINING_DUMMY_TEMPLATE_IDS = frozenset(
 UPLOAD_VICTORY_ARCHIVE_REASONS = frozenset(
     {"target_defeated", "boss_defeated", "stage_completed", "completed"}
 )
+
+MAP_DIFFICULTIES = {
+    5_200_079: "hard",
+    5_200_102: "hard",
+    5_200_138: "normal",
+    5_200_139: "hard",
+    5_200_142: "normal",
+    5_200_143: "normal",
+    5_200_224: "normal",
+    5_200_225: "epic",
+    5_200_226: "final_challenge",
+}
+DUNGEON_DIFFICULTIES = {
+    5_100_045: "hard",
+    5_100_047: "hard",
+    5_100_052: "normal",
+    5_100_053: "hard",
+    5_100_054: "normal",
+    5_100_055: "normal",
+    5_100_064: "normal",
+    5_100_065: "epic",
+    5_100_075: "final_challenge",
+}
 
 PUBLIC_PERFORMANCE_BOSSES: dict[str, dict[str, object]] = {
     "drill": {
@@ -525,8 +554,59 @@ def _as_float(
     return min(maximum, max(minimum, parsed))
 
 
+def _encounter_difficulty(record: Mapping[str, object]) -> tuple[str, str]:
+    explicit = _safe_text(record.get("difficulty"), 32).casefold()
+    if explicit:
+        return {
+            "普通": "normal",
+            "困难": "hard",
+            "史诗": "epic",
+            "英雄": "heroic",
+            "神话": "mythic",
+            "终局挑战": "final_challenge",
+        }.get(explicit, explicit), "record"
+    map_id = _as_int(record.get("map_id"), maximum=2_000_000_000)
+    if map_id in MAP_DIFFICULTIES:
+        return MAP_DIFFICULTIES[map_id], "map_id"
+    dungeon_id = _as_int(record.get("dungeon_id"), maximum=2_000_000_000)
+    if dungeon_id in DUNGEON_DIFFICULTIES:
+        return DUNGEON_DIFFICULTIES[dungeon_id], "dungeon_id"
+    context = " ".join(
+        _safe_text(record.get(field), 96)
+        for field in ("dungeon_name", "stage_name")
+    )
+    for marker, difficulty in (
+        ("终局挑战", "final_challenge"),
+        ("史诗", "epic"),
+        ("英雄", "heroic"),
+        ("神话", "mythic"),
+        ("困难", "hard"),
+        ("普通", "normal"),
+    ):
+        if marker in context:
+            return difficulty, "display_name"
+    return "", "unavailable"
+
+
 def _json_text(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _prefer_richer_detail(existing: object, incoming: object) -> object:
+    """Merge repeated uploads without discarding a previously captured detail."""
+
+    if isinstance(existing, Mapping) and isinstance(incoming, Mapping):
+        merged = dict(existing)
+        for key, value in incoming.items():
+            merged[key] = _prefer_richer_detail(existing.get(key), value)
+        return merged
+    if isinstance(existing, list) and isinstance(incoming, list):
+        existing_score = (len(existing), len(_json_text(existing)))
+        incoming_score = (len(incoming), len(_json_text(incoming)))
+        return incoming if incoming_score >= existing_score else existing
+    if incoming is None or incoming == "" or incoming == [] or incoming == {}:
+        return existing
+    return incoming
 
 
 def _linear_percentile(sorted_values: list[float], percentile: float) -> float:
@@ -1010,6 +1090,236 @@ class ProfileUploadStore:
         return rows
 
     @staticmethod
+    def _clean_target_rows(value: object, *, maximum: int = MAX_UPLOAD_TARGETS) -> list[dict[str, object]]:
+        if not isinstance(value, list):
+            return []
+        rows: list[dict[str, object]] = []
+        for raw in value[:maximum]:
+            if not isinstance(raw, Mapping):
+                continue
+            row: dict[str, object] = {}
+            for key in ("name", "kind", "entity_type", "health_source"):
+                if raw.get(key) is not None:
+                    row[key] = _safe_text(raw.get(key), 96)
+            for key in (
+                "entity_id",
+                "actor_id",
+                "template_id",
+                "level",
+                "boss_type",
+                "boss_rank",
+                "damage",
+                "hits",
+                "max_hit",
+                "current_hp",
+                "max_hp",
+                "observed_max_hp",
+            ):
+                if raw.get(key) is not None:
+                    row[key] = _as_int(raw.get(key), maximum=4_102_444_800_000_000_000)
+            if raw.get("share") is not None:
+                row["share"] = _as_float(raw.get("share"), maximum=1.0)
+            entity_ids = raw.get("entity_ids")
+            if isinstance(entity_ids, list):
+                row["entity_ids"] = [
+                    _as_int(entity_id, maximum=4_102_444_800_000_000_000)
+                    for entity_id in entity_ids[:32]
+                    if _as_int(entity_id, maximum=4_102_444_800_000_000_000) > 0
+                ]
+            if row.get("name") or row.get("damage") or row.get("template_id"):
+                rows.append(row)
+        return rows
+
+    @staticmethod
+    def _clean_opening_sequence(value: object) -> list[dict[str, object]]:
+        if not isinstance(value, list):
+            return []
+        rows: list[dict[str, object]] = []
+        for raw in value[:MAX_UPLOAD_OPENING_EVENTS]:
+            if not isinstance(raw, Mapping):
+                continue
+            time_ms = _as_int(raw.get("time_ms"), maximum=OPENING_SEQUENCE_MAX_MS)
+            skill_id = _as_int(raw.get("skill_id"), maximum=2_000_000_000)
+            if skill_id <= 0:
+                continue
+            row: dict[str, object] = {
+                "time_ms": time_ms,
+                "skill_id": skill_id,
+                "sequence": _as_int(raw.get("sequence"), maximum=10_000_000),
+                "source": _safe_text(raw.get("source"), 32),
+            }
+            for key in ("damage", "target_id", "target_template_id"):
+                if raw.get(key) is not None:
+                    row[key] = _as_int(raw.get(key), maximum=4_102_444_800_000_000_000)
+            if raw.get("target_name") is not None:
+                row["target_name"] = _safe_text(raw.get("target_name"), 96)
+            rows.append(row)
+        return rows
+
+    @staticmethod
+    def _clean_compact_log(
+        value: object,
+        *,
+        allowed_columns: Mapping[str, str],
+        required_columns: Iterable[str],
+        maximum_rows: int,
+    ) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            return {}
+        raw_columns = value.get("columns")
+        raw_rows = value.get("rows")
+        if not isinstance(raw_columns, list) or not isinstance(raw_rows, list):
+            return {}
+        columns = [str(column) for column in raw_columns if str(column) in allowed_columns]
+        if not set(required_columns).issubset(columns) or len(columns) != len(raw_columns):
+            return {}
+        cleaned_rows: list[list[object]] = []
+        for raw_row in raw_rows[:maximum_rows]:
+            if not isinstance(raw_row, (list, tuple)) or len(raw_row) < len(columns):
+                continue
+            row: list[object] = []
+            for index, column in enumerate(columns):
+                kind = allowed_columns[column]
+                if kind == "text":
+                    row.append(_safe_text(raw_row[index], 96))
+                elif kind == "float":
+                    row.append(_as_float(raw_row[index], maximum=4_102_444_800_000_000_000.0))
+                else:
+                    row.append(_as_int(raw_row[index], maximum=4_102_444_800_000_000_000))
+            cleaned_rows.append(row)
+        if not cleaned_rows:
+            return {}
+        result: dict[str, object] = {
+            "version": _as_int(value.get("version"), maximum=100),
+            "columns": columns,
+            "rows": cleaned_rows,
+        }
+        for key in ("coverage", "source"):
+            if value.get(key) is not None:
+                result[key] = _safe_text(value.get(key), 64)
+        if value.get("origin_started_at_epoch") is not None:
+            result["origin_started_at_epoch"] = _as_float(
+                value.get("origin_started_at_epoch"), maximum=4_102_444_800.0
+            )
+        if value.get("interval_seconds") is not None:
+            result["interval_seconds"] = _as_float(
+                value.get("interval_seconds"), maximum=86_400.0
+            )
+        result["truncated"] = len(raw_rows) > maximum_rows or bool(value.get("truncated"))
+        result["total_rows"] = _as_int(
+            value.get("total_rows", len(raw_rows)), maximum=10_000_000
+        )
+        return result
+
+    @classmethod
+    def _clean_boss_damage(cls, value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            return {}
+        result: dict[str, object] = {}
+        for key in ("coverage", "unavailable_reason"):
+            if value.get(key) is not None:
+                result[key] = _safe_text(value.get(key), 96)
+        for key in (
+            "version",
+            "observed_damage",
+            "team_taken",
+            "unassigned_taken",
+            "hits",
+            "max_hit",
+            "rejected_after_limit",
+        ):
+            if value.get(key) is not None:
+                result[key] = _as_int(value.get(key))
+        if value.get("classification_ratio") is not None:
+            result["classification_ratio"] = _as_float(
+                value.get("classification_ratio"), maximum=1.0
+            )
+        result["truncated"] = bool(value.get("truncated"))
+
+        skills: list[dict[str, object]] = []
+        for raw in value.get("skills", [])[:256] if isinstance(value.get("skills"), list) else []:
+            if not isinstance(raw, Mapping):
+                continue
+            row = {
+                "skill_id": _as_int(raw.get("skill_id"), maximum=2_000_000_000),
+                "name": _safe_text(raw.get("name"), 96),
+                "damage": _as_int(raw.get("damage")),
+                "hits": _as_int(raw.get("hits"), maximum=10_000_000),
+                "max_hit": _as_int(raw.get("max_hit")),
+                "source_count": _as_int(raw.get("source_count"), maximum=10_000),
+                "share": _as_float(raw.get("share"), maximum=1.0),
+                "average_hit": _as_float(raw.get("average_hit"), maximum=1e18),
+            }
+            if row["skill_id"] > 0 or row["damage"] > 0:
+                skills.append(row)
+        result["skills"] = skills
+
+        targets: list[dict[str, object]] = []
+        for raw in value.get("targets", [])[:MAX_UPLOAD_TARGETS] if isinstance(value.get("targets"), list) else []:
+            if not isinstance(raw, Mapping):
+                continue
+            targets.append({
+                "actor_id": _as_int(raw.get("actor_id"), maximum=4_102_444_800_000_000_000),
+                "name": _safe_text(raw.get("name"), 48),
+                "damage": _as_int(raw.get("damage")),
+                "hits": _as_int(raw.get("hits"), maximum=10_000_000),
+                "max_hit": _as_int(raw.get("max_hit")),
+                "share": _as_float(raw.get("share"), maximum=1.0),
+            })
+        result["targets"] = targets
+
+        sources: list[dict[str, object]] = []
+        for raw in value.get("sources", [])[:MAX_UPLOAD_TARGETS] if isinstance(value.get("sources"), list) else []:
+            if not isinstance(raw, Mapping):
+                continue
+            source = {
+                "source_key": _safe_text(raw.get("source_key"), 96),
+                "entity_id": _as_int(raw.get("entity_id"), maximum=4_102_444_800_000_000_000),
+                "template_id": _as_int(raw.get("template_id"), maximum=2_000_000_000),
+                "name": _safe_text(raw.get("name"), 96),
+                "kind": _safe_text(raw.get("kind"), 32),
+                "damage": _as_int(raw.get("damage")),
+                "hits": _as_int(raw.get("hits"), maximum=10_000_000),
+                "max_hit": _as_int(raw.get("max_hit")),
+                "share": _as_float(raw.get("share"), maximum=1.0),
+                "average_hit": _as_float(raw.get("average_hit"), maximum=1e18),
+            }
+            source["skills"] = cls._clean_skill_rows(raw.get("skills"))
+            source["targets"] = cls._clean_target_rows(raw.get("targets"))
+            if isinstance(raw.get("entity_ids"), list):
+                source["entity_ids"] = [
+                    _as_int(value, maximum=4_102_444_800_000_000_000)
+                    for value in raw["entity_ids"][:32]
+                    if _as_int(value, maximum=4_102_444_800_000_000_000) > 0
+                ]
+            sources.append(source)
+        result["sources"] = sources
+
+        event_log = cls._clean_compact_log(
+            value.get("event_log"),
+            allowed_columns={
+                "time_ms": "int",
+                "source_id": "int",
+                "target_id": "int",
+                "skill_id": "int",
+                "damage": "int",
+            },
+            required_columns=("time_ms", "source_id", "target_id", "skill_id", "damage"),
+            maximum_rows=MAX_UPLOAD_BOSS_EVENTS,
+        )
+        if event_log:
+            result["event_log"] = event_log
+        death_log = cls._clean_compact_log(
+            value.get("death_event_log"),
+            allowed_columns={"time_ms": "int", "actor_id": "int", "name": "text"},
+            required_columns=("time_ms", "actor_id"),
+            maximum_rows=10_000,
+        )
+        if death_log:
+            result["death_event_log"] = death_log
+        return result
+
+    @staticmethod
     def clean_equipment_snapshot(value: object) -> dict[str, object]:
         if not isinstance(value, Mapping):
             return {}
@@ -1044,32 +1354,78 @@ class ProfileUploadStore:
             for key in ('slot_name', 'item_name', 'quality_name', 'equipment_mode', 'score_source'):
                 if key in raw:
                     item[key] = _safe_text(raw[key], 96)
-            for key in ('slot', 'item_id', 'quality', 'item_score', 'known_score', 'total_score',
-                        'base_score', 'random_score', 'enhance_score', 'enhance_level',
-                        'enhance_completed_level', 'active_word_count', 'total_word_count', 'word_score'):
+            for key in (
+                'slot', 'item_id', 'quality', 'item_score', 'known_score', 'total_score',
+                'base_score', 'random_score', 'enhance_score', 'enhance_level',
+                'enhance_completed_level', 'enhance_completed_score', 'enhance_level_score',
+                'enhance_stage_count', 'enhance_level_progress_percent', 'enhance_level_remaining',
+                'enhance_overall_percent', 'enhance_progress_percent', 'next_enhance_increment',
+                'next_enhance_level', 'next_enhance_remaining', 'next_enhance_score',
+                'score_breakdown_total', 'auxiliary_id', 'grow_body_id',
+                'active_word_count', 'total_word_count', 'word_score',
+            ):
                 if raw.get(key) is not None:
                     item[key] = _as_int(raw[key])
-            for key in ('score_complete', 'is_pvp'):
+            for key in ('score_complete', 'score_breakdown_complete', 'score_breakdown_matches', 'is_pvp'):
                 if key in raw:
                     item[key] = bool(raw[key])
             metadata = raw.get('metadata')
             if isinstance(metadata, Mapping):
-                item['metadata'] = {key: _safe_text(metadata[key], 96) if key == 'icon' else _as_int(metadata[key])
-                    for key in ('icon', 'item_level', 'required_level', 'quality', 'base_score', 'season_id')
-                    if key in metadata and metadata[key] is not None}
+                item['metadata'] = {
+                    key: (
+                        _safe_text(metadata[key], 96)
+                        if key in {'icon', 'mode', 'random_group'}
+                        else _as_int(metadata[key])
+                    )
+                    for key in (
+                        'icon', 'mode', 'sub_type', 'tag', 'item_level', 'required_level',
+                        'quality', 'base_score', 'season_id', 'item_description_id',
+                        'item_name_id', 'random_group', 'tag_name_id',
+                    )
+                    if key in metadata and metadata[key] is not None
+                }
             affixes = []
             for affix in raw.get('affixes', [])[:32] if isinstance(raw.get('affixes'), list) else []:
                 if isinstance(affix, Mapping):
-                    affixes.append({'name': _safe_text(affix.get('name'), 96),
-                        'category': _safe_text(affix.get('category'), 32), 'score': _as_int(affix.get('score')),
-                        'properties': properties(affix.get('properties'))})
+                    affixes.append({
+                        'name': _safe_text(affix.get('name'), 96),
+                        'category': _safe_text(affix.get('category'), 32),
+                        'effect_type': _safe_text(affix.get('effect_type'), 48),
+                        'property_key': _safe_text(affix.get('property_key'), 64),
+                        'score': _as_int(affix.get('score')),
+                        'word_id': _as_int(affix.get('word_id')),
+                        'class_type': _as_int(affix.get('class_type')),
+                        'property_value': (
+                            affix.get('property_value')
+                            if isinstance(affix.get('property_value'), (int, float))
+                            and math.isfinite(affix['property_value'])
+                            else None
+                        ),
+                        'properties': properties(affix.get('properties')),
+                    })
             item['affixes'] = affixes
             special = raw.get('special_affix')
             if isinstance(special, Mapping):
                 item['special_affix'] = {'name': _safe_text(special.get('name'), 96),
+                    'icon': _safe_text(special.get('icon'), 96),
+                    'name_id': _as_int(special.get('name_id')),
+                    'auxiliary_id': _as_int(special.get('auxiliary_id')),
                     'score': _as_int(special.get('score')), 'properties': properties(special.get('properties')),
                     'passive_skill_ids': [_as_int(sid, maximum=2_000_000_000) for sid in special.get('passive_skill_ids', [])[:16]]
                         if isinstance(special.get('passive_skill_ids'), list) else []}
+            for key in ('word_ids', 'word_scores', 'word_class_types'):
+                if isinstance(raw.get(key), list):
+                    item[key] = [_as_int(value) for value in raw[key][:32]]
+            for key, fields in (
+                ('enhance_schedule', ('level', 'score', 'cumulative_score')),
+                ('enhance_stages', ('stage', 'level', 'percent')),
+            ):
+                if isinstance(raw.get(key), list):
+                    item[key] = [
+                        {field: _as_int(row.get(field)) for field in fields}
+                        for row in raw[key][:32]
+                        if isinstance(row, Mapping)
+                    ]
             items.append(item)
         result['equipment'] = items
         for key in ('gems', 'sets'):
@@ -1119,6 +1475,16 @@ class ProfileUploadStore:
             if field in raw:
                 result[field] = _safe_text(raw.get(field), 48)
         result["skills"] = cls._clean_skill_rows(raw.get("skills"))
+        targets = cls._clean_target_rows(raw.get("targets"))
+        if targets:
+            result["targets"] = targets
+        opening_sequence = cls._clean_opening_sequence(raw.get("opening_sequence"))
+        if opening_sequence:
+            result["opening_sequence"] = opening_sequence
+        if raw.get("opening_sequence_source") is not None:
+            result["opening_sequence_source"] = _safe_text(
+                raw.get("opening_sequence_source"), 32
+            )
         equipment = cls.clean_equipment_snapshot(raw.get('equipment_snapshot'))
         if equipment:
             result['equipment_snapshot'] = equipment
@@ -1127,20 +1493,33 @@ class ProfileUploadStore:
         timeline = raw.get("skill_timeline")
         if isinstance(timeline, list):
             cleaned_timeline: list[dict[str, object]] = []
-            for item in timeline[:5000]:
+            for item in timeline[:MAX_UPLOAD_SKILL_TIMELINE_EVENTS]:
                 if not isinstance(item, dict):
                     continue
-                cleaned_timeline.append(
-                    {
-                        "time_ms": _as_int(item.get("time_ms"), maximum=86_400_000),
-                        "skill_id": _as_int(item.get("skill_id"), maximum=2_000_000_000),
-                        "damage": _as_int(item.get("damage")),
-                        "critical": item.get("critical") if isinstance(item.get("critical"), bool) else None,
-                        "penetrating": item.get("penetrating") if isinstance(item.get("penetrating"), bool) else None,
-                    }
-                )
+                cleaned = {
+                    "time_ms": _as_int(item.get("time_ms"), maximum=86_400_000),
+                    "skill_id": _as_int(item.get("skill_id"), maximum=2_000_000_000),
+                    "damage": _as_int(item.get("damage")),
+                    "critical": item.get("critical") if isinstance(item.get("critical"), bool) else None,
+                    "penetrating": item.get("penetrating") if isinstance(item.get("penetrating"), bool) else None,
+                }
+                for key in ("target_id", "target_template_id"):
+                    if item.get(key) is not None:
+                        cleaned[key] = _as_int(
+                            item.get(key), maximum=4_102_444_800_000_000_000
+                        )
+                if item.get("target_name") is not None:
+                    cleaned["target_name"] = _safe_text(item.get("target_name"), 96)
+                cleaned_timeline.append(cleaned)
             if cleaned_timeline:
                 result["skill_timeline"] = cleaned_timeline
+                result["skill_timeline_total"] = _as_int(
+                    raw.get("skill_timeline_total", len(timeline)), maximum=10_000_000
+                )
+                result["skill_timeline_truncated"] = (
+                    len(timeline) > MAX_UPLOAD_SKILL_TIMELINE_EVENTS
+                    or bool(raw.get("skill_timeline_truncated"))
+                )
         return result
 
     def _parse_participants(
@@ -1197,6 +1576,12 @@ class ProfileUploadStore:
                 + (20 if damage > 0 else 0)
                 + min(30, skill_count)
                 + min(20, timeline_count // 10)
+                + (15 if stats.get("equipment_snapshot") else 0)
+                + (10 if stats.get("targets") else 0)
+                + (10 if stats.get("opening_sequence") else 0)
+                + (10 if "effective_healing" in stats or "hps" in stats else 0)
+                + (10 if "taken" in stats else 0)
+                + (5 if "deaths" in stats else 0)
             )
             participants.append(
                 {
@@ -1298,11 +1683,48 @@ class ProfileUploadStore:
             "archive_reason": archive_reason,
             "completion_confirmed": completion_confirmed,
             "target_filter": _safe_text(encounter.get("target_filter"), 32),
+            "map_id": _as_int(encounter.get("map_id"), maximum=2_000_000_000),
+            "dungeon_name": _safe_text(encounter.get("dungeon_name"), 96),
+            "stage_name": _safe_text(encounter.get("stage_name"), 96),
+            "difficulty_source": _safe_text(encounter.get("difficulty_source"), 32),
             "team_dps": _as_float(encounter.get("team_dps"), maximum=1e18),
             "team_hps": _as_float(encounter.get("team_hps"), maximum=1e18),
             "team_effective_healing": _as_int(encounter.get("team_effective_healing")),
             "team_taken": _as_int(encounter.get("team_taken")),
         }
+        raw_monster = encounter.get("monster")
+        if isinstance(raw_monster, Mapping):
+            cleaned_monster = self._clean_target_rows([raw_monster], maximum=1)
+            if cleaned_monster:
+                payload["monster"] = cleaned_monster[0]
+        cleaned_targets = self._clean_target_rows(encounter.get("targets"))
+        if cleaned_targets:
+            payload["targets"] = cleaned_targets
+        boss_damage = self._clean_boss_damage(encounter.get("boss_damage"))
+        if boss_damage:
+            payload["boss_damage"] = boss_damage
+        boss_hp_samples = self._clean_compact_log(
+            encounter.get("boss_hp_damage_samples"),
+            allowed_columns={
+                "time_seconds": "float",
+                "observed_boss_hp_loss": "int",
+            },
+            required_columns=("time_seconds", "observed_boss_hp_loss"),
+            maximum_rows=MAX_UPLOAD_BOSS_HP_SAMPLES,
+        )
+        if boss_hp_samples:
+            payload["boss_hp_damage_samples"] = boss_hp_samples
+        raw_coverage = encounter.get("module_coverage")
+        if isinstance(raw_coverage, Mapping):
+            payload["module_coverage"] = {
+                str(key)[:64]: (
+                    bool(value)
+                    if isinstance(value, bool)
+                    else _as_int(value, maximum=10_000_000)
+                )
+                for key, value in list(raw_coverage.items())[:64]
+                if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(key))
+            }
         raw_timeline = encounter.get("team_dps_timeline")
         if isinstance(raw_timeline, list):
             timeline: list[dict[str, object]] = []
@@ -1324,6 +1746,12 @@ class ProfileUploadStore:
             + (40 if completion_confirmed else 0)
             + (30 if completeness == "complete" else 0)
             + min(50, sum(int(item["data_quality"]) for item in participants) // max(1, len(participants)))
+            + (10 if difficulty else 0)
+            + (10 if payload.get("monster") else 0)
+            + (10 if payload.get("targets") else 0)
+            + (20 if payload.get("boss_damage") else 0)
+            + (20 if payload.get("boss_hp_damage_samples") else 0)
+            + (10 if payload.get("module_coverage") else 0)
         )
         return {
             "client_encounter_id": client_encounter_id,
@@ -1429,6 +1857,22 @@ class ProfileUploadStore:
         connection: sqlite3.Connection,
         parsed: Mapping[str, object],
     ) -> sqlite3.Row | None:
+        incoming_uploader = next(
+            str(item["character_hash"])
+            for item in parsed["participants"]
+            if bool(item["is_uploader"])
+        )
+        same_client_record = connection.execute(
+            """
+            SELECT e.* FROM encounters e
+            JOIN uploads u ON u.encounter_id=e.encounter_id
+            WHERE e.client_first_encounter_id=? AND u.uploader_character_hash=?
+            ORDER BY u.last_uploaded_at DESC LIMIT 1
+            """,
+            (parsed["client_encounter_id"], incoming_uploader),
+        ).fetchone()
+        if same_client_record is not None:
+            return same_client_record
         exact = connection.execute(
             "SELECT * FROM encounters WHERE encounter_fingerprint=?",
             (parsed["fingerprint"],),
@@ -1458,11 +1902,6 @@ class ProfileUploadStore:
             for item in parsed["participants"]
             if bool(item["identity_resolved"])
         }
-        incoming_uploader = next(
-            str(item["character_hash"])
-            for item in parsed["participants"]
-            if bool(item["is_uploader"])
-        )
         for candidate in candidates:
             if abs(float(candidate["duration_seconds"]) - float(parsed["duration"])) > 5.0:
                 continue
@@ -1652,57 +2091,97 @@ class ProfileUploadStore:
                 public_mode=CASE WHEN public_mode='nickname' THEN public_mode ELSE 'character' END
                 WHERE encounter_id=? AND character_hash=?""",
                 (participant['character_name'], encounter_id, hashed))
-        if int(participant["data_quality"]) >= int(existing["data_quality"]):
-            merged_stats = dict(participant['stats'])
+        try:
             stored_stats = json.loads(str(existing['stats_json']))
-            for field in ('deaths', 'revives', 'death_duration_seconds', 'equipment_snapshot', 'equipment_rating',
-                          'effective_healing', 'total_healing', 'overhealing', 'hps'):
-                if field not in merged_stats and field in stored_stats:
-                    merged_stats[field] = stored_stats[field]
-            stored_healing_skills = {
-                skill.get('skill_id'): skill for skill in stored_stats.get('skills', [])
-                if isinstance(skill, dict) and skill.get('effective_healing', 0) > 0
-            }
-            merged_skills = merged_stats.get('skills', [])
-            if isinstance(merged_skills, list):
-                for skill in merged_skills:
-                    stored_skill = stored_healing_skills.pop(skill.get('skill_id'), None)
-                    if stored_skill and not skill.get('effective_healing'):
-                        for field in ('effective_healing', 'total_healing', 'overhealing',
-                                      'healing_skill_count', 'healing_events'):
-                            if field in stored_skill:
-                                skill[field] = stored_skill[field]
-                merged_skills.extend(stored_healing_skills.values())
-            connection.execute(
-                """
-                UPDATE encounter_participants SET
-                    identity_resolved=?, is_ai=?, profession_id=?, damage=?,
-                    dps=?, hps=?, taken=?, stats_json=?, data_quality=?, last_seen_at=?
-                WHERE encounter_id=? AND character_hash=?
-                """,
-                (
-                    int(bool(participant["identity_resolved"])),
-                    int(bool(participant["is_ai"])),
-                    participant["profession_id"],
-                    participant["damage"],
-                    participant["dps"],
-                    _as_float(merged_stats.get("hps"), maximum=1e18),
-                    participant["taken"],
-                    _json_text(merged_stats),
-                    participant["data_quality"],
-                    timestamp,
-                    encounter_id,
-                    hashed,
-                ),
+        except (TypeError, ValueError):
+            stored_stats = {}
+        if not isinstance(stored_stats, dict):
+            stored_stats = {}
+        incoming_stats = participant['stats']
+        incoming_stats = incoming_stats if isinstance(incoming_stats, Mapping) else {}
+        incoming_quality = int(participant["data_quality"])
+        stored_quality = int(existing["data_quality"])
+        replace_core = incoming_quality >= stored_quality
+        merged_stats = dict(stored_stats)
+        for field, value in incoming_stats.items():
+            if field in {
+                'equipment_snapshot', 'targets', 'opening_sequence',
+                'skill_timeline',
+            }:
+                merged_stats[field] = _prefer_richer_detail(
+                    stored_stats.get(field), value
+                )
+            elif field != 'skills' and (replace_core or field not in stored_stats):
+                merged_stats[field] = value
+
+        stored_skills = {
+            skill.get('skill_id'): skill
+            for skill in stored_stats.get('skills', [])
+            if isinstance(skill, dict)
+        }
+        merged_skills: list[dict[str, object]] = []
+        for skill in incoming_stats.get('skills', []):
+            if not isinstance(skill, Mapping):
+                continue
+            stored_skill = stored_skills.pop(skill.get('skill_id'), None)
+            merged_skill = dict(stored_skill) if isinstance(stored_skill, Mapping) else {}
+            if replace_core:
+                merged_skill.update(skill)
+            else:
+                for field, value in skill.items():
+                    if field not in merged_skill or merged_skill[field] in (None, "", 0):
+                        if value not in (None, ""):
+                            merged_skill[field] = value
+            if isinstance(stored_skill, Mapping):
+                for field in (
+                    'effective_healing', 'total_healing', 'overhealing',
+                    'healing_skill_count', 'healing_events',
+                ):
+                    if stored_skill.get(field) and not skill.get(field):
+                        merged_skill[field] = stored_skill[field]
+            merged_skills.append(merged_skill)
+        merged_skills.extend(
+            dict(skill) for skill in stored_skills.values() if isinstance(skill, Mapping)
+        )
+        if merged_skills or 'skills' in incoming_stats or 'skills' in stored_stats:
+            merged_stats['skills'] = merged_skills
+
+        if 'skill_timeline_total' in incoming_stats or 'skill_timeline_total' in stored_stats:
+            merged_stats['skill_timeline_total'] = max(
+                _as_int(incoming_stats.get('skill_timeline_total')),
+                _as_int(stored_stats.get('skill_timeline_total')),
+                len(merged_stats.get('skill_timeline', [])),
             )
-        else:
-            connection.execute(
-                """
-                UPDATE encounter_participants SET last_seen_at=?
-                WHERE encounter_id=? AND character_hash=?
-                """,
-                (timestamp, encounter_id, hashed),
-            )
+        if incoming_stats.get('skill_timeline_truncated') or stored_stats.get('skill_timeline_truncated'):
+            merged_stats['skill_timeline_truncated'] = True
+        if merged_stats.get('opening_sequence') is stored_stats.get('opening_sequence'):
+            if stored_stats.get('opening_sequence_source'):
+                merged_stats['opening_sequence_source'] = stored_stats['opening_sequence_source']
+
+        connection.execute(
+            """
+            UPDATE encounter_participants SET
+                identity_resolved=?, is_ai=?, profession_id=?, damage=?,
+                dps=?, hps=?, taken=?, stats_json=?, data_quality=?, last_seen_at=?
+            WHERE encounter_id=? AND character_hash=?
+            """,
+            (
+                int(bool(participant["identity_resolved"])) if replace_core else int(existing["identity_resolved"]),
+                int(bool(participant["is_ai"])) if replace_core else int(existing["is_ai"]),
+                participant["profession_id"] if replace_core else existing["profession_id"],
+                participant["damage"] if replace_core else existing["damage"],
+                participant["dps"] if replace_core else existing["dps"],
+                _as_float(merged_stats.get("hps"), maximum=1e18)
+                if "hps" in merged_stats else float(existing["hps"]),
+                _as_int(merged_stats.get("taken"))
+                if "taken" in merged_stats else int(existing["taken"]),
+                _json_text(merged_stats),
+                max(incoming_quality, stored_quality),
+                timestamp,
+                encounter_id,
+                hashed,
+            ),
+        )
 
     def upload_encounter(
         self,
@@ -1793,19 +2272,108 @@ class ProfileUploadStore:
             )
         else:
             encounter_id = str(existing_encounter["encounter_id"])
-            if int(parsed["data_quality"]) > int(existing_encounter["data_quality"]):
-                connection.execute(
-                    """
-                    UPDATE encounters SET payload_json=?, data_quality=?, updated_at=?
-                    WHERE encounter_id=?
-                    """,
-                    (
-                        _json_text(parsed["payload"]),
-                        parsed["data_quality"],
-                        timestamp,
-                        encounter_id,
-                    ),
+            incoming_quality = int(parsed["data_quality"])
+            stored_quality = int(existing_encounter["data_quality"])
+            replace_encounter_core = incoming_quality >= stored_quality
+            try:
+                stored_payload = json.loads(str(existing_encounter["payload_json"]))
+            except (TypeError, ValueError):
+                stored_payload = {}
+            if not isinstance(stored_payload, dict):
+                stored_payload = {}
+            merged_payload = dict(stored_payload)
+            for field, value in parsed["payload"].items():
+                if field in {
+                    "monster",
+                    "targets",
+                    "boss_damage",
+                    "boss_hp_damage_samples",
+                    "module_coverage",
+                    "team_dps_timeline",
+                }:
+                    merged_payload[field] = _prefer_richer_detail(
+                        stored_payload.get(field), value
+                    )
+                elif replace_encounter_core or field not in stored_payload:
+                    merged_payload[field] = value
+            try:
+                stored_template_ids = json.loads(
+                    str(existing_encounter["boss_template_ids_json"])
                 )
+            except (TypeError, ValueError):
+                stored_template_ids = []
+            stored_template_ids = (
+                stored_template_ids if isinstance(stored_template_ids, list) else []
+            )
+            template_ids = (
+                parsed["template_ids"]
+                if len(parsed["template_ids"]) >= len(stored_template_ids)
+                else stored_template_ids
+            )
+            boss_name = (
+                parsed["boss_name"]
+                if parsed["boss_name"]
+                and (replace_encounter_core or not existing_encounter["boss_name"])
+                else existing_encounter["boss_name"]
+            )
+            dungeon_id = (
+                parsed["dungeon_id"]
+                if parsed["dungeon_id"]
+                and (replace_encounter_core or not existing_encounter["dungeon_id"])
+                else existing_encounter["dungeon_id"]
+            )
+            stage_id = (
+                parsed["stage_id"]
+                if parsed["stage_id"]
+                and (replace_encounter_core or not existing_encounter["stage_id"])
+                else existing_encounter["stage_id"]
+            )
+            difficulty = (
+                parsed["difficulty"]
+                if parsed["difficulty"]
+                and (replace_encounter_core or not existing_encounter["difficulty"])
+                else existing_encounter["difficulty"]
+            )
+            game_version = (
+                parsed["game_version"]
+                if parsed["game_version"]
+                and (replace_encounter_core or not existing_encounter["game_version"])
+                else existing_encounter["game_version"]
+            )
+            connection.execute(
+                """
+                UPDATE encounters SET
+                    boss_key=?, boss_name=?, boss_template_ids_json=?,
+                    dungeon_id=?, stage_id=?, difficulty=?, started_at=?,
+                    ended_at=?, duration_seconds=?, team_size=?,
+                    team_total_damage=?, game_version=?, participant_set_hash=?,
+                    payload_json=?, data_quality=?, statistics_status=?,
+                    ranking_status=?, validation_json=?, updated_at=?
+                WHERE encounter_id=?
+                """,
+                (
+                    parsed["boss_key"] if replace_encounter_core else existing_encounter["boss_key"],
+                    boss_name,
+                    _json_text(template_ids),
+                    dungeon_id,
+                    stage_id,
+                    difficulty,
+                    parsed["started_at"] if replace_encounter_core else existing_encounter["started_at"],
+                    parsed["ended_at"] if replace_encounter_core else existing_encounter["ended_at"],
+                    parsed["duration"] if replace_encounter_core else existing_encounter["duration_seconds"],
+                    parsed["team_size"] if replace_encounter_core else existing_encounter["team_size"],
+                    parsed["team_total_damage"] if replace_encounter_core else existing_encounter["team_total_damage"],
+                    game_version,
+                    parsed["participant_set_hash"] if replace_encounter_core else existing_encounter["participant_set_hash"],
+                    _json_text(merged_payload),
+                    max(incoming_quality, stored_quality),
+                    qualification["statistics_status"] if replace_encounter_core else existing_encounter["statistics_status"],
+                    qualification["ranking_status"] if replace_encounter_core else existing_encounter["ranking_status"],
+                    _json_text(qualification) if replace_encounter_core else existing_encounter["validation_json"],
+                    timestamp,
+                    encounter_id,
+                ),
+            )
         for participant in parsed["participants"]:
             self._upsert_participant(connection, encounter_id, participant, timestamp)
         connection.execute(
@@ -2757,8 +3325,54 @@ def _timeline_rows_by_actor(record: Mapping[str, object]) -> dict[int, list[dict
     required = {"time_ms", "actor_id", "skill_id", "damage"}
     if not required.issubset(positions):
         return {}
+    target_metadata: dict[int, dict[str, object]] = {}
+    target_collections: list[object] = [record.get("targets")]
+    monster = record.get("monster")
+    if isinstance(monster, Mapping):
+        target_collections.append([monster])
+    for collection_name in ("participants", "healers"):
+        collection = record.get(collection_name)
+        if not isinstance(collection, list):
+            continue
+        target_collections.extend(
+            row.get("targets")
+            for row in collection
+            if isinstance(row, Mapping)
+        )
+    for collection in target_collections:
+        if not isinstance(collection, list):
+            continue
+        for target in collection:
+            if not isinstance(target, Mapping):
+                continue
+            ids = [target.get("entity_id")]
+            if isinstance(target.get("entity_ids"), list):
+                ids.extend(target["entity_ids"])
+            metadata = {
+                "target_template_id": _as_int(
+                    target.get("template_id"), maximum=2_000_000_000
+                ),
+                "target_name": _safe_text(target.get("name"), 96),
+            }
+            for value in ids:
+                target_id = _as_int(
+                    value, maximum=4_102_444_800_000_000_000
+                )
+                if target_id:
+                    previous = target_metadata.get(target_id, {})
+                    target_metadata[target_id] = {
+                        "target_template_id": (
+                            metadata["target_template_id"]
+                            or previous.get("target_template_id", 0)
+                        ),
+                        "target_name": (
+                            metadata["target_name"]
+                            or previous.get("target_name", "")
+                        ),
+                    }
+
     result: dict[int, list[dict[str, object]]] = {}
-    for raw in rows[:100_000]:
+    for raw in rows[:MAX_UPLOAD_SKILL_TIMELINE_EVENTS]:
         if not isinstance(raw, list):
             continue
         try:
@@ -2778,11 +3392,99 @@ def _timeline_rows_by_actor(record: Mapping[str, object]) -> dict[int, list[dict
                     else None
                 ),
             }
+            if "target_id" in positions:
+                target_id = _as_int(
+                    raw[positions["target_id"]],
+                    maximum=4_102_444_800_000_000_000,
+                )
+                item["target_id"] = target_id
+                metadata = target_metadata.get(target_id, {})
+                if metadata.get("target_template_id"):
+                    item["target_template_id"] = metadata["target_template_id"]
+                if metadata.get("target_name"):
+                    item["target_name"] = metadata["target_name"]
         except (IndexError, TypeError, ValueError, OverflowError):
             continue
         bucket = result.setdefault(actor_id, [])
-        if len(bucket) < 5000:
-            bucket.append(item)
+        bucket.append(item)
+    return result
+
+
+def _opening_rows_by_actor(
+    record: Mapping[str, object],
+    timelines: Mapping[int, list[dict[str, object]]],
+) -> dict[int, list[dict[str, object]]]:
+    result: dict[int, list[dict[str, object]]] = {}
+    cast_log = record.get("skill_cast_log")
+    if isinstance(cast_log, Mapping):
+        columns = cast_log.get("columns")
+        rows = cast_log.get("rows")
+        if isinstance(columns, list) and isinstance(rows, list):
+            positions = {str(name): index for index, name in enumerate(columns)}
+            if {"time_ms", "actor_id", "skill_id"}.issubset(positions):
+                for raw in rows[:MAX_UPLOAD_SKILL_TIMELINE_EVENTS]:
+                    if not isinstance(raw, (list, tuple)):
+                        continue
+                    try:
+                        time_ms = int(raw[positions["time_ms"]])
+                        actor_id = int(raw[positions["actor_id"]])
+                        skill_id = int(raw[positions["skill_id"]])
+                        sequence = (
+                            int(raw[positions["sequence"]] or 0)
+                            if "sequence" in positions
+                            else 0
+                        )
+                    except (IndexError, TypeError, ValueError, OverflowError):
+                        continue
+                    if not 0 <= time_ms <= OPENING_SEQUENCE_MAX_MS or actor_id == 0 or skill_id <= 0:
+                        continue
+                    bucket = result.setdefault(actor_id, [])
+                    if len(bucket) < MAX_UPLOAD_OPENING_EVENTS:
+                        item: dict[str, object] = {
+                            "time_ms": time_ms,
+                            "skill_id": skill_id,
+                            "sequence": sequence,
+                            "source": "successful_cast",
+                        }
+                        for key in ("target_id", "target_template_id"):
+                            if key in positions:
+                                item[key] = _as_int(
+                                    raw[positions[key]],
+                                    maximum=4_102_444_800_000_000_000,
+                                )
+                        if "target_name" in positions:
+                            item["target_name"] = _safe_text(
+                                raw[positions["target_name"]], 96
+                            )
+                        bucket.append(item)
+    for actor_id, events in timelines.items():
+        if actor_id in result:
+            result[actor_id].sort(key=lambda row: (int(row["time_ms"]), int(row["sequence"])))
+            continue
+        bucket: list[dict[str, object]] = []
+        for sequence, event in enumerate(events, start=1):
+            time_ms = _as_int(event.get("time_ms"), maximum=86_400_000)
+            skill_id = _as_int(event.get("skill_id"), maximum=2_000_000_000)
+            if time_ms > OPENING_SEQUENCE_MAX_MS or skill_id <= 0:
+                continue
+            row = {
+                "time_ms": time_ms,
+                "skill_id": skill_id,
+                "sequence": sequence,
+                "source": "damage_hit",
+                "damage": event.get("damage", 0),
+            }
+            if event.get("target_id") is not None:
+                row["target_id"] = event["target_id"]
+            if event.get("target_template_id") is not None:
+                row["target_template_id"] = event["target_template_id"]
+            if event.get("target_name"):
+                row["target_name"] = event["target_name"]
+            bucket.append(row)
+            if len(bucket) >= MAX_UPLOAD_OPENING_EVENTS:
+                break
+        if bucket:
+            result[actor_id] = bucket
     return result
 
 
@@ -2834,9 +3536,6 @@ def build_upload_encounter(
             merged = dict(stage_row)
             merged.update(participant_by_actor[actor_id])
             participant_by_actor[actor_id] = merged
-    for member in participant_by_actor.values():
-        for field in ("effective_healing", "total_healing", "overhealing", "hps"):
-            member.pop(field, None)
     raw_healers = record.get("healers")
     included_healers: list[dict] = []
     if isinstance(raw_healers, list):
@@ -2847,13 +3546,6 @@ def build_upload_encounter(
                 healer.get("actor_id"), minimum=-(1 << 63), maximum=(1 << 63) - 1
             )
             if not actor_id:
-                continue
-            profession_id = _as_int(
-                healer.get("profession_id") or participant_by_actor.get(actor_id, {}).get("profession_id")
-            )
-            if (1_200_001 <= profession_id <= 1_200_007
-                    and profession_id != 1_200_002
-                    and healer.get("effective_healing") is not None):
                 continue
             included_healers.append(healer)
             if actor_id not in participant_by_actor:
@@ -2889,25 +3581,52 @@ def build_upload_encounter(
                 if raw_skill.get("events") is not None:
                     skill["healing_events"] = raw_skill["events"]
             member["skills"] = damage_skills
-    for member in participant_by_actor.values():
-        profession_id = _as_int(member.get("profession_id"))
-        if 1_200_001 <= profession_id <= 1_200_007 and profession_id != 1_200_002:
-            for field in ("effective_healing", "total_healing", "overhealing", "hps"):
-                member.pop(field, None)
-            skills = member.get("skills")
-            if isinstance(skills, list):
-                member["skills"] = [
-                    {key: value for key, value in skill.items()
-                     if key not in ("effective_healing", "total_healing", "overhealing",
-                                    "healing_skill_count", "healing_events")}
-                    for skill in skills if isinstance(skill, dict)
-                ]
+
+    raw_damage_taken = record.get("damage_taken")
+    if isinstance(raw_damage_taken, list):
+        for taken_row in raw_damage_taken:
+            if not isinstance(taken_row, dict):
+                continue
+            actor_id = _as_int(
+                taken_row.get("actor_id"),
+                minimum=-(1 << 63),
+                maximum=(1 << 63) - 1,
+            )
+            if not actor_id:
+                continue
+            if actor_id not in participant_by_actor:
+                participant_by_actor[actor_id] = {"actor_id": actor_id}
+                order.append(actor_id)
+            member = participant_by_actor[actor_id]
+            for field in (
+                "name",
+                "profession_id",
+                "extraordinary_rating",
+                "equipment_snapshot",
+            ):
+                if not member.get(field) and taken_row.get(field) is not None:
+                    member[field] = taken_row[field]
+            if taken_row.get("taken") is not None:
+                member["taken"] = taken_row["taken"]
+            if taken_row.get("share") is not None:
+                member["taken_share"] = taken_row["share"]
+            if taken_row.get("source") is not None:
+                member["taken_source"] = taken_row["source"]
     for actor_id in identities:
         if actor_id not in participant_by_actor:
             participant_by_actor[actor_id] = {"actor_id": actor_id}
             order.append(actor_id)
     order = list(dict.fromkeys(order))[:MAX_ENCOUNTER_PARTICIPANTS]
     timelines = _timeline_rows_by_actor(record)
+    openings = _opening_rows_by_actor(record, timelines)
+    raw_event_log = record.get("event_log")
+    raw_event_rows = (
+        raw_event_log.get("rows") if isinstance(raw_event_log, Mapping) else None
+    )
+    timeline_globally_truncated = (
+        isinstance(raw_event_rows, list)
+        and len(raw_event_rows) > MAX_UPLOAD_SKILL_TIMELINE_EVENTS
+    )
     participants: list[dict[str, object]] = []
     for actor_id in order:
         raw = participant_by_actor[actor_id]
@@ -2955,12 +3674,20 @@ def build_upload_encounter(
             "overhealing",
             "hps",
             "skills",
+            "targets",
             "equipment_snapshot",
         ):
             if field in raw:
                 participant[field] = raw[field]
         if actor_id in timelines:
             participant["skill_timeline"] = timelines[actor_id]
+            participant["skill_timeline_total"] = len(timelines[actor_id])
+            participant["skill_timeline_truncated"] = timeline_globally_truncated
+        if actor_id in openings:
+            participant["opening_sequence"] = openings[actor_id]
+            participant["opening_sequence_source"] = _safe_text(
+                openings[actor_id][0].get("source"), 32
+            )
         participants.append(participant)
 
     deduplicated: list[dict[str, object]] = []
@@ -2975,12 +3702,24 @@ def build_upload_encounter(
                 by_identity_and_damage[key] = participant
             continue
         for field in ("effective_healing", "total_healing", "overhealing", "hps",
-                      "deaths", "revives", "death_duration_seconds", "taken", "equipment_snapshot"):
+                      "deaths", "revives", "death_duration_seconds", "taken",
+                      "taken_share", "taken_source", "equipment_snapshot"):
             if not previous.get(field) and participant.get(field):
                 previous[field] = participant[field]
-        for field in ("skills", "skill_timeline"):
+        for field in ("skills", "targets", "opening_sequence", "skill_timeline"):
             if len(participant.get(field) or []) > len(previous.get(field) or []):
                 previous[field] = participant[field]
+                if field == "opening_sequence":
+                    previous["opening_sequence_source"] = participant.get(
+                        "opening_sequence_source", ""
+                    )
+                elif field == "skill_timeline":
+                    previous["skill_timeline_total"] = participant.get(
+                        "skill_timeline_total", len(participant[field])
+                    )
+                    previous["skill_timeline_truncated"] = participant.get(
+                        "skill_timeline_truncated", False
+                    )
     participants = deduplicated
 
     raw_team_size = _as_int(
@@ -3066,6 +3805,73 @@ def build_upload_encounter(
         team_healing = sum(_as_int(healer.get("effective_healing")) for healer in included_healers)
         healing_duration = _as_float(record.get("hps_duration_seconds", duration), maximum=86_400.0)
         team_hps = team_healing / max(1, int(healing_duration)) if healing_duration > 0 else 0
+    team_taken = record.get("team_taken", 0)
+    if (
+        isinstance(raw_damage_taken, list)
+        and raw_damage_taken
+        and all(
+            isinstance(row, Mapping) and row.get("taken") is not None
+            for row in raw_damage_taken
+        )
+    ):
+        team_taken = sum(_as_int(row.get("taken")) for row in raw_damage_taken)
+
+    difficulty, difficulty_source = _encounter_difficulty(record)
+    module_coverage = {
+        "total_members": len(participants),
+        "resolved_members": sum(bool(row.get("character_id")) for row in participants),
+        "named_members": sum(bool(row.get("game_character_name")) for row in participants),
+        "dps_members": sum(
+            "damage" in row or "dps" in row for row in participants
+        ),
+        "hps_members": sum(
+            "effective_healing" in row or "hps" in row for row in participants
+        ),
+        "dt_members": sum("taken" in row for row in participants),
+        "death_members": sum("deaths" in row for row in participants),
+        "skill_members": sum(bool(row.get("skills")) for row in participants),
+        "target_members": sum(bool(row.get("targets")) for row in participants),
+        "equipment_members": sum(
+            bool(row.get("equipment_snapshot")) for row in participants
+        ),
+        "skill_timeline_members": sum(
+            bool(row.get("skill_timeline")) for row in participants
+        ),
+        "opening_sequence_members": sum(
+            bool(row.get("opening_sequence")) for row in participants
+        ),
+        "successful_cast_opening_members": sum(
+            row.get("opening_sequence_source") == "successful_cast"
+            for row in participants
+        ),
+        "damage_hit_opening_members": sum(
+            row.get("opening_sequence_source") == "damage_hit"
+            for row in participants
+        ),
+        "skill_timeline_truncated": timeline_globally_truncated,
+        "boss_damage": bool(record.get("boss_damage")),
+        "boss_hp_timeline": bool(record.get("boss_hp_damage_samples")),
+        "boss_max_hp": _as_int(monster.get("max_hp")) > 0,
+        "difficulty": bool(difficulty),
+    }
+    required_member_modules = (
+        "dps_members",
+        "hps_members",
+        "dt_members",
+        "death_members",
+        "skill_members",
+        "target_members",
+        "equipment_members",
+        "skill_timeline_members",
+        "opening_sequence_members",
+    )
+    module_coverage["details_complete"] = bool(participants) and all(
+        int(module_coverage[key]) == len(participants)
+        for key in required_member_modules
+    ) and all(
+        bool(module_coverage[key])
+        for key in ("boss_damage", "boss_hp_timeline", "boss_max_hp", "difficulty")
+    )
     return {
         "client_encounter_id": _safe_text(
             record.get("battle_id", record.get("encounter_id")), 96
@@ -3075,7 +3881,11 @@ def build_upload_encounter(
         "duration_seconds": duration,
         "dungeon_id": record.get("dungeon_id", 0),
         "stage_id": record.get("dungeon_stage_id", record.get("stage_id", 0)),
-        "difficulty": record.get("difficulty", ""),
+        "map_id": record.get("map_id", 0),
+        "dungeon_name": record.get("dungeon_name", ""),
+        "stage_name": record.get("stage_name", ""),
+        "difficulty": difficulty,
+        "difficulty_source": difficulty_source,
         "boss_name": _safe_text(monster.get("name"), 96),
         "boss_template_ids": sorted(template_ids),
         "target_filter": record.get("target_filter", ""),
@@ -3089,8 +3899,13 @@ def build_upload_encounter(
         "team_dps": record.get("team_dps", 0),
         "team_hps": team_hps,
         "team_effective_healing": team_healing,
-        "team_taken": record.get("team_taken", 0),
+        "team_taken": team_taken,
         "game_version": _safe_text(game_version, 48),
         "participants": participants,
         "team_dps_timeline": team_timeline,
+        "monster": monster,
+        "targets": targets if isinstance(targets, list) else [],
+        "boss_damage": record.get("boss_damage", {}),
+        "boss_hp_damage_samples": record.get("boss_hp_damage_samples", {}),
+        "module_coverage": module_coverage,
     }

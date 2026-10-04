@@ -201,6 +201,38 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
             "equipment": [{"slot": 1, "item_id": 456}],
         })
 
+    def test_settlement_keeps_only_exact_local_target_distributions(self):
+        tracker = EncounterTracker()
+        encounter = self.wipe(tracker)
+        tracker.accept(self.settlement())
+        base = {
+            "participants": [
+                {
+                    "actor_id": 100,
+                    "is_self": True,
+                    "damage": 100,
+                    "targets": [{"entity_id": 900, "name": "Boss", "damage": 100}],
+                },
+                {
+                    "actor_id": 200,
+                    "damage": 100,
+                    "targets": [{"entity_id": 900, "name": "Boss", "damage": 100}],
+                },
+            ],
+        }
+
+        exact = encounter_history_record(encounter, base)
+        rows = {row["actor_id"]: row for row in exact["participants"]}
+        self.assertEqual(rows[100]["targets"][0]["damage"], 100)
+        self.assertEqual(rows[200]["targets"][0]["damage"], 100)
+        self.assertEqual(exact["map_id"], encounter.map_id)
+
+        base["participants"][1]["targets"][0]["damage"] = 99
+        mismatched = encounter_history_record(encounter, base)
+        rows = {row["actor_id"]: row for row in mismatched["participants"]}
+        self.assertEqual(rows[100]["targets"][0]["damage"], 100)
+        self.assertEqual(rows[200]["targets"], [])
+
     def test_late_settlement_keeps_healer_only_equipment_snapshot(self):
         tracker = EncounterTracker()
         encounter = self.wipe(tracker)

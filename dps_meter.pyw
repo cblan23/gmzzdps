@@ -349,7 +349,7 @@ APP_NAME = "叨叨诡秘助手"
 APP_VERSION = "0.3.5"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.5+20261004.1"
+CLIENT_BUILD = "0.3.5+20261005.1"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
     "runtime-profile.dev.json"
@@ -434,7 +434,7 @@ TEAM_RATING_PREVIEW_AVAILABLE = True
 TEAM_EQUIPMENT_RETRY_CHECK_SECONDS = 2.0
 TEAM_EQUIPMENT_REQUEST_TIMEOUT_SECONDS = 20.0
 TEAM_EQUIPMENT_MAX_ATTEMPTS_PER_RATING = 3
-CAPTURE_TRANSIENT_RESTART_LIMIT = 3
+CAPTURE_TRANSIENT_RESTART_LIMIT = 5
 MAIN_DISPLAY_SCHEMA_VERSION = 4
 MAIN_DISPLAY_SCHEMA_CONFIG_KEY = "main_display_schema_version"
 PROFESSION_DISPLAY_METRICS_CONFIG_KEY = "profession_display_metrics"
@@ -1954,6 +1954,11 @@ def chinese_error_message(value) -> str:
     else:
         text = str(value).strip()
     lower = text.casefold()
+    error_code = capture_failure_error_code(value)
+    if error_code == 1275:
+        return "采集驱动被系统阻止（1275）。请检查安全软件拦截记录和 Windows 驱动策略。"
+    if error_code == 1237:
+        return "采集驱动与本机网络防护可能冲突（1237）。请提交反馈并检查安全软件拦截记录。"
     if (
         "1450" in lower
         and ("windivert" in lower or "系统资源不足" in lower or "resource" in lower)
@@ -1969,6 +1974,20 @@ def chinese_error_message(value) -> str:
         return "战斗数据缓冲区异常，正在尝试重新连接。"
     first_line = text.splitlines()[0] if text else "未知错误"
     return f"连接异常：{first_line}"
+
+
+def capture_failure_error_code(value: object) -> int | None:
+    if isinstance(value, dict):
+        text = str(value.get("details") or value.get("message") or value.get("error") or "")
+    else:
+        text = str(value or "")
+    lower = text.casefold()
+    if "windivert" not in lower and "windows ipv6 receive" not in lower:
+        return None
+    for code in (1275, 1237, 1450, 577, 1753, 5):
+        if re.search(rf"(?<!\d){code}(?!\d)", lower):
+            return code
+    return None
 
 
 def capture_failure_can_retry(value: object) -> bool:
@@ -22407,8 +22426,11 @@ class HookWorker(threading.Thread):
                     )
                 elif kind == "fatal":
                     capture_fatal_seen = True
+                    fatal_fields = payload if isinstance(payload, dict) else {}
                     self._log_experiment_lifecycle(
                         "capture_fatal",
+                        stage=str(fatal_fields.get("stage", ""))[:96],
+                        error_code=capture_failure_error_code(payload),
                         details=str(payload or "")[-2000:],
                     )
                     self._update_diagnostics(stage="fatal")
@@ -23275,6 +23297,8 @@ class DpsWindow:
         self.capture_restart_after_id: str | None = None
         self.capture_fatal_payload: object | None = None
         self.capture_recovery_notice_shown = False
+        self.automatic_capture_feedback_attempted = False
+        self.automatic_capture_feedback_in_progress = False
         # Keep the two recurring Tk callbacks addressable.  A callback that
         # races application shutdown must be cancelled before the root HWND is
         # destroyed; otherwise Tk can invoke a stale redraw on a dead command.
@@ -25599,8 +25623,150 @@ class DpsWindow:
                 parent=getattr(self, "root", None),
             )
 
+    def _queue_automatic_capture_feedback(
+        self, details: object, fatal_payload: object
+    ) -> bool:
+        """Report one unrecoverable capture stop without touching feedback UI."""
+
+        if (
+            getattr(self, "automatic_capture_feedback_attempted", False)
+            or getattr(self, "automatic_capture_feedback_in_progress", False)
+        ):
+            return False
+        licensing = getattr(self, "licensing", None)
+        submit_feedback = getattr(licensing, "submit_feedback", None)
+        if not callable(submit_feedback):
+            return False
+
+        stop_details = details if isinstance(details, dict) else {}
+        failure = fatal_payload if isinstance(fatal_payload, dict) else {}
+        reason = str(stop_details.get("reason") or "unknown")[:96]
+        stage = str(failure.get("stage") or "")[:96]
+        failure_detail = str(
+            failure.get("details")
+            or failure.get("message")
+            or failure.get("error")
+            or fatal_payload
+            or ""
+        )[:1000]
+        error_code = capture_failure_error_code(fatal_payload)
+        try:
+            restart_attempts = max(
+                0, int(getattr(self, "capture_restart_attempts", 0) or 0)
+            )
+        except (TypeError, ValueError, OverflowError):
+            restart_attempts = 0
+
+        character_name = str(
+            getattr(self, "current_character_name", "") or ""
+        ).strip()[:48]
+        if not character_name:
+            feedback_character_name = getattr(self, "_feedback_character_name", None)
+            if callable(feedback_character_name):
+                try:
+                    character_name = str(feedback_character_name() or "").strip()[:48]
+                except (AttributeError, TypeError, ValueError):
+                    character_name = ""
+
+        capture_snapshot: dict[str, object] = {}
+        diagnostic_snapshot = getattr(
+            getattr(self, "worker", None), "diagnostic_snapshot", None
+        )
+        if callable(diagnostic_snapshot):
+            try:
+                snapshot = diagnostic_snapshot()
+                if isinstance(snapshot, dict):
+                    capture_snapshot = snapshot
+            except Exception as exc:
+                capture_snapshot = {
+                    "snapshot_error": f"{type(exc).__name__}: {exc}"[:240]
+                }
+
+        diagnostics = {
+            "app_version": CLIENT_BUILD,
+            "display_version": APP_VERSION,
+            "build_id": RELEASE_IDENTITY.build_id,
+            "capture_pipeline": capture_snapshot,
+            "automatic_capture_stop": {
+                "reason": reason,
+                "stage": stage,
+                "details": failure_detail,
+                "error_code": error_code,
+                "restart_attempts": restart_attempts,
+            },
+        }
+        content_lines = [
+            "自动反馈：采集已停止",
+            f"停止原因：{reason}",
+        ]
+        if stage:
+            content_lines.append(f"故障阶段：{stage}")
+        if error_code is not None:
+            content_lines.append(f"错误码：{error_code}")
+        content_lines.append(f"自动重连次数：{restart_attempts}")
+        if failure_detail:
+            content_lines.append(f"故障信息：{failure_detail}")
+        content = "\n".join(content_lines)[:2000]
+
+        self.automatic_capture_feedback_attempted = True
+        self.automatic_capture_feedback_in_progress = True
+        write_capture_lifecycle_event(
+            "automatic_capture_feedback_queued",
+            component="main_window",
+            reason=reason,
+            error_code=error_code,
+            restart_attempts=restart_attempts,
+        )
+
+        def submit() -> None:
+            accepted = False
+            feedback_id = ""
+            result_message = ""
+            try:
+                result = submit_feedback(
+                    category="connection",
+                    content=content,
+                    character_name=character_name,
+                    diagnostics=diagnostics,
+                )
+                accepted = bool(result.accepted)
+                feedback_id = str(result.feedback_id or "")[:32]
+                result_message = str(result.message or "")[:240]
+            except LicensingConnectionError as exc:
+                result_message = str(exc)[:240]
+            except Exception as exc:
+                result_message = f"{type(exc).__name__}: {exc}"[:240]
+            finally:
+                self.automatic_capture_feedback_in_progress = False
+                write_capture_lifecycle_event(
+                    "automatic_capture_feedback_completed",
+                    component="main_window",
+                    accepted=accepted,
+                    feedback_id=feedback_id,
+                    result_message=result_message,
+                )
+
+        try:
+            threading.Thread(
+                target=submit,
+                name="capture-stop-feedback",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            self.automatic_capture_feedback_in_progress = False
+            write_capture_lifecycle_event(
+                "automatic_capture_feedback_completed",
+                component="main_window",
+                accepted=False,
+                feedback_id="",
+                result_message=f"{type(exc).__name__}: {exc}"[:240],
+            )
+            return False
+        return True
+
     def _handle_capture_worker_stopped(self, payload: object) -> None:
         details = payload if isinstance(payload, dict) else {}
+        fatal_payload = getattr(self, "capture_fatal_payload", None)
         requested = bool(details.get("requested", False))
         terminal = bool(details.get("terminal", False))
         intentional = bool(
@@ -25620,9 +25786,7 @@ class DpsWindow:
         if intentional or self.capture_restart_after_id is not None:
             return
         if terminal:
-            retryable = capture_failure_can_retry(
-                getattr(self, "capture_fatal_payload", None)
-            )
+            retryable = capture_failure_can_retry(fatal_payload)
             if retryable and int(self.capture_restart_attempts) < CAPTURE_TRANSIENT_RESTART_LIMIT:
                 # WinDivert error 1450 is commonly recoverable after the old
                 # receive handle has been released. Reconnect a few times;
@@ -25644,6 +25808,7 @@ class DpsWindow:
                         text="采集已停止，请重启助手",
                         fg=ERROR,
                     )
+                self._queue_automatic_capture_feedback(details, fatal_payload)
                 self._show_capture_recovery_notice()
                 self._schedule_layered_main_render()
                 return
@@ -25658,8 +25823,12 @@ class DpsWindow:
             self.startup_capture_pending = False
             self.startup_wait_reason = "capture_error"
             self.startup_wait_started_at = 0.0
+            notice = "采集已停止，请重启助手后再试。若仍然失败，请提交反馈。"
+            if capture_failure_error_code(fatal_payload) in (1275, 1237):
+                notice = f"{chinese_error_message(fatal_payload)} 处理后请重启助手。"
+            self._queue_automatic_capture_feedback(details, fatal_payload)
             self._show_capture_recovery_notice(
-                "采集已停止，请重启助手后再试。若仍然失败，请提交反馈。"
+                notice
             )
             self._schedule_layered_main_render()
             return
@@ -45468,6 +45637,11 @@ class DpsWindow:
                 "v0.3.5",
                 """v0.3.5更新日志
 
+2026-10-05 自动上传与采集稳定性修复（0.3.5+20261005.1）
+Boss 战胜利后自动上传本场实际捕获的全员 DPS、HPS、承伤、死亡、技能、目标、装备、暴击、起手与命中时间轴。
+上传副本难度、Boss 最大血量、血量曲线和首领伤害详情；重复上传同一场时补齐较完整的数据。
+采集异常会自动重连；确认无法恢复时自动提交一次采集中断诊断反馈，现有统计口径和操作方式不变。
+
 2026-10-04 网站数据修复（0.3.5+20261004.1）
 战斗上传补齐治疗量、治疗技能次数、总治疗和过量治疗，并按客户端展示规则过滤非治疗职业旧记录。
 修复服务端战斗时钟与抓包时间偏差、重复采集 ID 导致的历史上传失败。
@@ -57603,8 +57777,21 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             raise ProfileUploadError(rejection_code)
         character_name = self._history_upload_character_name(record)
         character_id = recorded_self_character_id(record)
+        upload_record = dict(record)
+        summary = build_history_summary(record)
+        for field in (
+            "dungeon_id",
+            "stage_id",
+            "dungeon_name",
+            "stage_name",
+        ):
+            value = summary.get(field)
+            if value not in (None, "", 0):
+                upload_record[field] = value
+        if summary.get("stage_id") not in (None, "", 0):
+            upload_record["dungeon_stage_id"] = summary["stage_id"]
         payload = build_upload_encounter(
-            record,
+            upload_record,
             character_id,
             current_character_name=character_name,
             game_version=str(record.get("game_version", "") or ""),

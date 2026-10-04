@@ -27,6 +27,8 @@
 
 受保护构建与 Authenticode 签名是独立选项。当前 GitHub `v0.3.5` 候选包为受保护构建，EXE 未进行 Authenticode 签名。
 
+准备正式签名包时，在上述命令中再加 `-OfficialRelease -SigningCertificateThumbprint "<代码签名证书指纹>"`。脚本会在签名后验证 EXE 的签名状态和发布者证书；本机没有可用的代码签名证书时，不能生成已签名包。签名有助于建立发布者身份，但不能保证安全软件一定放行采集驱动。
+
 ## 输出与验收
 
 输出包括 EXE、更新日志、`update.json`、`release-manifest-<build-id>.json` 和 `build-allowlist-<build-id>.json`。

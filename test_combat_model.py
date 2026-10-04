@@ -22388,7 +22388,12 @@ class CombatModelTests(unittest.TestCase):
         self.assertNotIn("from tkinter import messagebox", source)
         self.assertNotIn("messagebox.", source)
         self.assertNotIn("tk.Radiobutton(", source)
-        self.assertIn("ModernChoiceCard(", upload_source)
+        self.assertNotIn("ModernChoiceCard(", upload_source)
+        self.assertNotIn('"anonymous"', upload_source)
+        self.assertIn(
+            'self._start_history_upload(clean_battle_id, "character")',
+            upload_source,
+        )
         self.assertNotIn("tk.Text(", uploads_source)
         self.assertIn("ModernScrollbar(", uploads_source)
         self.assertIn("MODAL_BACKDROP", modal_source)

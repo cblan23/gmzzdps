@@ -85,6 +85,9 @@ class HybridSelectionTests(unittest.TestCase):
         self.assertIsNotNone(receiver.raw)
         self.assertIsNone(receiver.windivert)
         divert.assert_not_called()
+        frame = object()
+        receiver.raw.next_frame = Mock(return_value=frame)
+        self.assertIs(receiver.next_frame(), frame)
         receiver.close()
 
     def test_dual_stack_uses_both_sources(self):
@@ -106,6 +109,39 @@ class HybridSelectionTests(unittest.TestCase):
         )
         self.assertIsNone(receiver.raw)
         self.assertEqual(receiver.windivert.versions, frozenset({4}))
+        receiver.close()
+
+    def test_runtime_raw_failure_switches_to_windivert_without_restart(self):
+        raw = Mock(side_effect=FakeReceiver)
+        divert = Mock(side_effect=FakeReceiver)
+        receiver = WindowsHybridReceiver(
+            [endpoint("192.0.2.10", 32100)], raw_factory=raw, windivert_factory=divert
+        )
+        first_raw = receiver.raw
+        first_raw.next_frame = Mock(side_effect=RuntimeError("raw receive blocked"))
+
+        self.assertIsNone(receiver.next_frame())
+        self.assertTrue(first_raw.closed)
+        self.assertIsNone(receiver.raw)
+        self.assertEqual(receiver.windivert.versions, frozenset({4}))
+        self.assertEqual(receiver.counters["capture_adapter_errors"], 1)
+        frame = object()
+        receiver.windivert.next_frame = Mock(return_value=frame)
+        self.assertIs(receiver.next_frame(), frame)
+        receiver.refresh([endpoint("192.0.2.10", 32100)])
+        self.assertEqual(raw.call_count, 1)
+        receiver.close()
+
+    def test_runtime_raw_failure_reports_windivert_block(self):
+        receiver = WindowsHybridReceiver(
+            [endpoint("192.0.2.10", 32100)],
+            raw_factory=FakeReceiver,
+            windivert_factory=Mock(side_effect=RuntimeError("WinDivert 错误 1275")),
+        )
+        receiver.raw.next_frame = Mock(side_effect=RuntimeError("raw receive blocked"))
+
+        with self.assertRaisesRegex(RuntimeError, "1275"):
+            receiver.next_frame()
         receiver.close()
 
 

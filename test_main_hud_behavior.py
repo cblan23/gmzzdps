@@ -682,10 +682,181 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertFalse(window.startup_capture_pending)
         self.assertEqual(scheduled, [])
 
+    def test_blocked_capture_driver_reports_actionable_notice(self):
+        window, _ = make_window()
+        notices = []
+        window.closing = False
+        window.authorization_resetting = False
+        window.license_network_paused = False
+        window.capture_started = True
+        window.capture_restart_after_id = None
+        window.heartbeat_worker = None
+        window.dot = SimpleNamespace(configure=lambda **_kwargs: None)
+        window.status_label = SimpleNamespace(configure=lambda **_kwargs: None)
+        window._show_notice = lambda *args, **_kwargs: notices.append(args)
+        window._schedule_layered_main_render = lambda: None
+        failure = {
+            "stage": "built_in_capture_unavailable",
+            "details": "WinDivert 错误 1275：驱动被系统阻止",
+        }
+
+        window._dispatch_message("fatal", failure)
+        window._handle_capture_worker_stopped(
+            {"reason": "capture_loop_returned", "requested": False, "terminal": True}
+        )
+
+        self.assertIn("1275", notices[0][1])
+        self.assertIn("安全软件拦截记录", notices[0][1])
+        self.assertIsNone(window.capture_restart_after_id)
+        self.assertIn("1237", chinese_error_message("Windows IPv6 receive failed (1237)"))
+
+    def test_terminal_capture_stop_submits_automatic_feedback_once(self):
+        window, _ = make_window()
+        notices = []
+        lifecycle_events = []
+        feedback_content = object()
+        feedback_status_label = object()
+        feedback_submit_button = object()
+        submit_feedback = mock.Mock(
+            return_value=SimpleNamespace(
+                accepted=True,
+                feedback_id="FB-AUTOMATIC",
+                message="反馈已提交。",
+            )
+        )
+        window.connected = True
+        window.closing = False
+        window.authorization_resetting = False
+        window.license_network_paused = False
+        window.capture_started = True
+        window.capture_restart_after_id = None
+        window.capture_restart_attempts = 2
+        window.capture_recovery_notice_shown = False
+        window.automatic_capture_feedback_attempted = False
+        window.automatic_capture_feedback_in_progress = False
+        window.startup_identity_pending = True
+        window.startup_capture_pending = True
+        window.startup_wait_reason = "starting"
+        window.startup_wait_started_at = 100.0
+        window.current_character_name = "自动反馈角色"
+        window.heartbeat_worker = None
+        window.dot = SimpleNamespace(configure=lambda **_kwargs: None)
+        window.status_label = SimpleNamespace(configure=lambda **_kwargs: None)
+        window._show_notice = lambda *args, **_kwargs: notices.append(args)
+        window._schedule_layered_main_render = lambda: None
+        window.licensing = SimpleNamespace(submit_feedback=submit_feedback)
+        window.worker = SimpleNamespace(
+            diagnostic_snapshot=lambda: {
+                "stage": "fatal",
+                "capture_backend": "windows-hybrid",
+            }
+        )
+        window.feedback_submitting = True
+        window.feedback_content = feedback_content
+        window.feedback_status_label = feedback_status_label
+        window.feedback_submit_button = feedback_submit_button
+        failure = {
+            "stage": "built_in_capture_unavailable",
+            "details": "WinDivert 错误 1275：驱动被系统阻止",
+        }
+        window.capture_fatal_payload = failure
+        stopped = {
+            "reason": "capture_loop_returned",
+            "requested": False,
+            "terminal": True,
+        }
+
+        class ImmediateThread:
+            def __init__(self, *, target, name, daemon):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        globals_ = window._queue_automatic_capture_feedback.__globals__
+        with (
+            mock.patch.object(globals_["threading"], "Thread", ImmediateThread),
+            mock.patch.dict(
+                globals_,
+                {
+                    "write_capture_lifecycle_event": lambda message, **fields: (
+                        lifecycle_events.append((message, fields))
+                    )
+                },
+            ),
+        ):
+            window._handle_capture_worker_stopped(stopped)
+            window.capture_started = True
+            window.capture_fatal_payload = failure
+            window._handle_capture_worker_stopped(stopped)
+
+        submit_feedback.assert_called_once()
+        submitted = submit_feedback.call_args.kwargs
+        self.assertEqual(submitted["category"], "connection")
+        self.assertEqual(submitted["character_name"], "自动反馈角色")
+        self.assertIn("自动反馈：采集已停止", submitted["content"])
+        self.assertIn("错误码：1275", submitted["content"])
+        self.assertEqual(
+            submitted["diagnostics"]["automatic_capture_stop"],
+            {
+                "reason": "capture_loop_returned",
+                "stage": "built_in_capture_unavailable",
+                "details": "WinDivert 错误 1275：驱动被系统阻止",
+                "error_code": 1275,
+                "restart_attempts": 2,
+            },
+        )
+        self.assertEqual(
+            submitted["diagnostics"]["capture_pipeline"]["stage"], "fatal"
+        )
+        self.assertTrue(window.automatic_capture_feedback_attempted)
+        self.assertFalse(window.automatic_capture_feedback_in_progress)
+        self.assertEqual(
+            [
+                event[0]
+                for event in lifecycle_events
+                if event[0].startswith("automatic_capture_feedback_")
+            ],
+            [
+                "automatic_capture_feedback_queued",
+                "automatic_capture_feedback_completed",
+            ],
+        )
+        self.assertTrue(window.feedback_submitting)
+        self.assertIs(window.feedback_content, feedback_content)
+        self.assertIs(window.feedback_status_label, feedback_status_label)
+        self.assertIs(window.feedback_submit_button, feedback_submit_button)
+
+    def test_intentional_capture_stops_do_not_queue_automatic_feedback(self):
+        window, _ = make_window()
+        queued = mock.Mock()
+        window.capture_started = True
+        window.capture_restart_after_id = None
+        window.capture_fatal_payload = {
+            "details": "WinDivert 错误 1275：驱动被系统阻止"
+        }
+        window._queue_automatic_capture_feedback = queued
+        window.closing = True
+        window.authorization_resetting = False
+        window.license_network_paused = False
+
+        window._handle_capture_worker_stopped(
+            {"reason": "window_close", "requested": True, "terminal": True}
+        )
+        window.capture_started = True
+        window.closing = False
+        window.authorization_resetting = True
+        window._handle_capture_worker_stopped(
+            {"reason": "authorization_reset", "requested": False, "terminal": True}
+        )
+
+        queued.assert_not_called()
+
     def test_transient_capture_resource_error_retries_then_prompts_restart(self):
         window, _ = make_window()
         scheduled = []
         notices = []
+        automatic_feedback_attempts = []
         window.connected = True
         window.closing = False
         window.authorization_resetting = False
@@ -705,12 +876,17 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         window._show_notice = lambda *args, **kwargs: notices.append((args, kwargs))
         window._schedule_layered_main_render = lambda: None
+        window._queue_automatic_capture_feedback = (
+            lambda *_args: automatic_feedback_attempts.append(
+                window.capture_restart_attempts
+            )
+        )
 
         failure = {
             "stage": "built_in_capture_unavailable",
             "details": "Windows IPv6 被动采集无法启动（WinDivert 错误 1450）：系统资源不足",
         }
-        for _attempt in range(4):
+        for _attempt in range(6):
             window.capture_started = True
             window.capture_restart_after_id = None
             window._dispatch_message("fatal", failure)
@@ -722,9 +898,10 @@ class MainHudBehaviorTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(len(scheduled), 3)
+        self.assertEqual(len(scheduled), 5)
         self.assertEqual(len(notices), 1)
         self.assertIn("请重启助手", notices[0][0][1])
+        self.assertEqual(automatic_feedback_attempts, [5])
 
     def test_team_application_notices_overlay_above_heading_for_ten_seconds(self):
         window, _ = make_window()
@@ -1564,7 +1741,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(window.pvp_team_offset, 1)
         self.assertEqual(renders, [True])
 
-    def test_victory_upload_is_queued_anonymously_without_manual_button(self):
+    def test_victory_upload_is_queued_with_character_without_manual_button(self):
         window, _ = make_window()
         callbacks = []
         uploads = []
@@ -1594,7 +1771,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         self.assertEqual(
             uploads,
-            [("victory-one", "anonymous", {"silent": True})],
+            [("victory-one", "character", {"silent": True})],
         )
 
     def test_different_game_pid_resets_old_role_before_marking_connected(self):

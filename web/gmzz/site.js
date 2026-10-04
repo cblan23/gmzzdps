@@ -346,6 +346,10 @@
       normal: "普通",
       hard: "困难",
       nightmare: "噩梦",
+      epic: "史诗",
+      heroic: "英雄",
+      mythic: "神话",
+      final_challenge: "终局挑战",
       unknown: "未标记难度",
     }[difficulty] || difficulty || "全部难度";
   }
@@ -1001,10 +1005,8 @@
     setPage("UPLOAD GUIDE", "如何上传战斗记录", "加QQ群下载叨叨dps-log：1094925831 / 165966739。通过客户端上传战斗记录。");
     const flow = element("div", "share-flow");
     [
-      ["完成一场 Boss 战斗", "登录客户端并保持采集运行。已启用自动上传时，胜利记录会自动同步；伤害木桩不进入上传。"],
-      ["上传已有记录", "打开客户端“战斗记录”，点击该场记录右侧的“上传”。失败时可在同一位置重试；未上传的本地记录不会出现在网站。"],
-      ["同步角色信息", "网站展示记录中采集到的角色名称、职业、技能和装备。旧记录未采集的字段会标注为未记录。"],
-      ["查询与分享", "上传完成后进入“历史战斗”，或搜索公开名称。打开详情可复制战报链接；完整度不足的历史会展示原因，不进入正式排行。"],
+      ["完成一场 Boss 战斗", "登录客户端并保持采集运行。Boss 战胜利后会自动上传；伤害木桩不进入上传。"],
+      ["查询与分享", "自动上传完成后进入“历史战斗”，或搜索角色名称。打开详情可查看已捕获模块并复制战报链接；缺少的模块会明确标注覆盖状态。"],
     ].forEach(([title, copy], index) => {
       const step = element("article", "share-step");
       step.appendChild(element("div", "step-index", String(index + 1).padStart(2, "0")));
@@ -1114,20 +1116,28 @@
     return node;
   }
 
-  function renderEventTable(events, className = "skill-events") {
+  function renderEventTable(events, className = "skill-events", metadata = {}) {
     const details = element("details", className);
-    details.appendChild(element("summary", "", `逐次打击记录 · ${events.length ? `${formatInteger(events.length)} 条` : "本场未上传"}`));
+    const total = Number(metadata.total);
+    const countText = events.length
+      ? `${formatInteger(events.length)} 条${Number.isFinite(total) && total > events.length ? ` / 共 ${formatInteger(total)} 条` : ""}`
+      : "本场未上传";
+    details.appendChild(element("summary", "", `逐次打击记录 · ${countText}`));
     if (!events.length) {
       details.appendChild(element("p", "detail-note", "本场未采集逐次事件，仍可查看已收录的技能汇总。"));
       return details;
     }
+    if (metadata.truncated) {
+      details.appendChild(element("p", "detail-note", "事件数量超过单场上传上限；这里显示已上传的真实事件，覆盖状态已标记为截断。"));
+    }
     const body = element("div", "skill-event-body");
+    const showTarget = events.some((event) => event.target_name || Number(event.target_id));
     let page = 0;
     const render = () => {
       body.replaceChildren();
       const table = element("table", "event-table");
       const head = element("thead"), header = element("tr");
-      ["时间", "技能", "伤害", "类型"].forEach((text) => header.appendChild(element("th", "", text)));
+      ["时间", "技能", ...(showTarget ? ["目标"] : []), "伤害", "类型"].forEach((text) => header.appendChild(element("th", "", text)));
       head.appendChild(header);
       table.appendChild(head);
       const tbody = element("tbody");
@@ -1137,8 +1147,11 @@
         name.appendChild(identity);
         const flags = [event.critical === true ? "暴击" : "", event.penetrating === true ? "穿刺" : ""].filter(Boolean);
         const type = flags.join(" · ") || (event.critical === false && event.penetrating === false ? "普通" : "标记不完整");
-        row.append(element("td", "", `${(Number(event.time_ms) / 1000).toFixed(2)} 秒`), name,
-          element("td", "", formatInteger(event.damage)), element("td", event.critical ? "crit-text" : event.penetrating ? "pierce-text" : "", type));
+        row.append(element("td", "", `${(Number(event.time_ms) / 1000).toFixed(2)} 秒`), name);
+        if (showTarget) {
+          row.appendChild(element("td", "event-target", event.target_name || (Number(event.target_id) ? `目标 ${event.target_id}` : "--")));
+        }
+        row.append(element("td", "", formatInteger(event.damage)), element("td", event.critical ? "crit-text" : event.penetrating ? "pierce-text" : "", type));
         tbody.appendChild(row);
       });
       table.appendChild(tbody);
@@ -1190,6 +1203,73 @@
     return section;
   }
 
+  function renderTargetDistribution(targets, totalDamage) {
+    const section = element("section", "detail-module target-panel");
+    const rows = (Array.isArray(targets) ? targets : [])
+      .filter((target) => Number(target.damage) > 0 || target.name)
+      .sort((a, b) => Number(b.damage || 0) - Number(a.damage || 0));
+    section.appendChild(sectionHeading("目标分布", rows.length ? `${rows.length} 个已记录目标` : "未采集"));
+    if (!rows.length) {
+      section.appendChild(element("p", "detail-note", "本场没有该成员的可靠目标分布；不会按总伤害推测目标。"));
+      return section;
+    }
+    const total = Number(totalDamage) || rows.reduce((sum, target) => sum + Number(target.damage || 0), 0);
+    const list = element("div", "target-list");
+    rows.forEach((target) => {
+      const damage = Number(target.damage || 0);
+      const share = Number.isFinite(Number(target.share)) ? Number(target.share) : damage / Math.max(1, total);
+      const row = element("div", "target-row");
+      const identity = element("div", "target-identity");
+      identity.append(
+        element("strong", "", target.name || `目标 ${target.entity_id || target.template_id || "--"}`),
+        element("span", "", target.kind || (target.template_id ? `模板 ${target.template_id}` : "已记录目标")),
+      );
+      const track = element("div", "target-track");
+      const fill = element("span");
+      fill.style.setProperty("--target-share", `${Math.max(0, Math.min(100, share * 100))}%`);
+      track.appendChild(fill);
+      row.append(identity, track, element("b", "", formatInteger(damage)), element("span", "target-share", formatPercent(share)));
+      list.appendChild(row);
+    });
+    section.appendChild(list);
+    return section;
+  }
+
+  function renderOpeningSequence(stats) {
+    const section = element("section", "detail-module opening-panel");
+    const rows = (Array.isArray(stats.opening_sequence) ? [...stats.opening_sequence] : [])
+      .sort((a, b) => Number(a.time_ms) - Number(b.time_ms) || Number(a.sequence) - Number(b.sequence));
+    const source = stats.opening_sequence_source || rows[0]?.source;
+    const sourceLabel = source === "successful_cast"
+      ? "真实成功施法"
+      : source === "damage_hit"
+        ? "真实伤害命中顺序"
+        : "来源未标记";
+    section.appendChild(sectionHeading("起手序列", rows.length ? `${rows.length} 条 · ${sourceLabel}` : "未采集"));
+    if (!rows.length) {
+      section.appendChild(element("p", "detail-note", "本场没有该成员的施法或命中时间记录。"));
+      return section;
+    }
+    const list = element("ol", "opening-list");
+    rows.forEach((entry) => {
+      const item = element("li", "opening-item");
+      const skill = {skill_id: entry.skill_id};
+      item.appendChild(skillIcon(skill));
+      const copy = element("div");
+      copy.append(
+        element("strong", "", skillDisplayName(skill)),
+        element("span", "", `${(Number(entry.time_ms) / 1000).toFixed(2)} 秒${entry.target_name ? ` · ${entry.target_name}` : ""}${Number(entry.damage) > 0 ? ` · ${formatInteger(entry.damage)} 伤害` : ""}`),
+      );
+      item.appendChild(copy);
+      list.appendChild(item);
+    });
+    section.appendChild(list);
+    if (source === "damage_hit") {
+      section.appendChild(element("p", "detail-note", "该成员没有可用的成功施法回执；顺序来自真实伤害命中时间，不代表技能按键或施法成功时间。"));
+    }
+    return section;
+  }
+
   function renderEquipment(snapshot) {
     const section = element("section", "equipment-panel");
     const equipment = Array.isArray(snapshot?.equipment) ? snapshot.equipment : [];
@@ -1224,9 +1304,26 @@
       detail.appendChild(summary);
       const body = element("div", "equipment-body");
       body.appendChild(element("p", "detail-note", `装备编号 ${item.item_id} · 物品评分 ${formatInteger(item.item_score)} · 强化评分 ${formatInteger(item.enhance_score)}${item.score_complete === false ? " · 评分不完整" : ""}`));
+      const enhancementValues = [
+        ["当前强化", item.enhance_level === undefined ? null : `+${item.enhance_level}`],
+        ["强化进度", item.enhance_level_progress_percent === undefined ? null : `${item.enhance_level_progress_percent}%`],
+        ["下一级", item.next_enhance_level === undefined ? null : `+${item.next_enhance_level}`],
+        ["还需评分", item.next_enhance_remaining],
+        ["基础评分", item.base_score],
+        ["词条评分", item.word_score ?? item.random_score],
+      ].filter((entry) => entry[1] !== null && entry[1] !== undefined);
+      if (enhancementValues.length) {
+        const enhancement = element("div", "enhancement-grid");
+        enhancementValues.forEach(([label, value]) => {
+          const metric = element("div");
+          metric.append(element("span", "", label), element("b", "", typeof value === "number" ? formatInteger(value) : value));
+          enhancement.appendChild(metric);
+        });
+        body.appendChild(enhancement);
+      }
       (item.affixes || []).forEach((affix) => {
         const row = element("div", "equipment-affix");
-        row.appendChild(element("strong", "", affix.name || "未知词条"));
+        row.appendChild(element("strong", "", `${affix.name || "未知词条"}${Number(affix.score) > 0 ? ` · ${formatInteger(affix.score)} 分` : ""}`));
         properties(affix.properties, row);
         body.appendChild(row);
       });
@@ -1308,7 +1405,15 @@
     }
     overview.appendChild(metrics);
     const timeline = Array.isArray(stats.skill_timeline) ? [...stats.skill_timeline].sort((a, b) => a.time_ms - b.time_ms) : [];
-    overview.append(renderCriticalLuck(stats), renderEventTable(timeline));
+    overview.append(
+      renderTargetDistribution(stats.targets, participant?.damage),
+      renderCriticalLuck(stats),
+      renderOpeningSequence(stats),
+      renderEventTable(timeline, "skill-events", {
+        total: stats.skill_timeline_total,
+        truncated: stats.skill_timeline_truncated,
+      }),
+    );
     panel.appendChild(overview);
     panel.appendChild(sectionHeading(mode === "hps" ? "治疗技能构成" : "技能构成", mode === "hps"
       ? "按有效治疗排序 · 点击技能展开详情"
@@ -1465,6 +1570,223 @@
     return section;
   }
 
+  function compactLogRows(log) {
+    if (!log || !Array.isArray(log.columns) || !Array.isArray(log.rows)) return [];
+    return log.rows.map((values) => {
+      if (!Array.isArray(values)) return values && typeof values === "object" ? values : {};
+      return Object.fromEntries(log.columns.map((column, index) => [column, values[index]]));
+    });
+  }
+
+  function bossHealthTimeline(encounter) {
+    const section = element("section", "history-chart boss-health-chart");
+    const log = encounter.data?.boss_hp_damage_samples;
+    const samples = compactLogRows(log)
+      .map((row) => ({time: Number(row.time_seconds), loss: Number(row.observed_boss_hp_loss)}))
+      .filter((row) => Number.isFinite(row.time) && Number.isFinite(row.loss))
+      .sort((a, b) => a.time - b.time);
+    const monster = encounter.data?.monster || {};
+    const maxHp = Number(monster.max_hp || monster.observed_max_hp || 0);
+    section.appendChild(sectionHeading("Boss 血量曲线", samples.length ? `${samples.length} 个真实采样点` : "未采集"));
+    if (!samples.length) {
+      section.appendChild(element("p", "detail-note", "本场未上传 Boss 血量采样。"));
+      return section;
+    }
+    const points = samples.map((sample) => ({
+      ...sample,
+      value: maxHp > 0 ? Math.max(0, maxHp - sample.loss) : sample.loss,
+    }));
+    const width = 1000, height = 210, left = 82, bottom = 175, right = 975, top = 15;
+    const maxTime = Math.max(1, ...points.map((point) => point.time));
+    const maxValue = maxHp > 0 ? maxHp : Math.max(1, ...points.map((point) => point.value));
+    const svg = svgNode(section, "svg", {viewBox: `0 0 ${width} ${height}`, role: "img", tabindex: "0", "aria-label": "Boss 血量曲线，左右方向键查看采样值"});
+    [0, .5, 1].forEach((fraction) => {
+      const y = bottom - fraction * (bottom - top);
+      svgNode(svg, "line", {x1: left, x2: right, y1: y, y2: y, class: "chart-grid"});
+      svgNode(svg, "text", {x: left - 10, y: y + 4, "text-anchor": "end"}, maxHp > 0 ? formatCompact(maxValue * fraction) : formatCompact(maxValue * fraction));
+      svgNode(svg, "text", {x: left + fraction * (right - left), y: 200, "text-anchor": "middle"}, formatDuration(maxTime * fraction));
+    });
+    const definitions = svgNode(svg, "defs");
+    const gradient = svgNode(definitions, "linearGradient", {id: "boss-hp-gradient", x1: 0, y1: 0, x2: 0, y2: 1});
+    svgNode(gradient, "stop", {offset: "0%", "stop-color": "#fa87a0", "stop-opacity": ".28"});
+    svgNode(gradient, "stop", {offset: "100%", "stop-color": "#fa87a0", "stop-opacity": ".02"});
+    const coordinate = (point) => `${left + point.time / maxTime * (right - left)},${bottom - point.value / maxValue * (bottom - top)}`;
+    const curve = points.map(coordinate).join(" ");
+    svgNode(svg, "polygon", {points: `${left},${bottom} ${curve} ${right},${bottom}`, fill: "url(#boss-hp-gradient)"});
+    svgNode(svg, "polyline", {points: curve, class: "boss-hp-line"});
+    const crosshair = svgNode(svg, "line", {y1: top, y2: bottom, class: "chart-crosshair"});
+    const marker = svgNode(svg, "circle", {r: 4, class: "boss-hp-marker"});
+    const readout = element("p", "chart-readout boss-hp-readout");
+    let selected = points.length - 1;
+    const show = () => {
+      const point = points[selected];
+      const [x, y] = coordinate(point).split(",");
+      marker.setAttribute("cx", x);
+      marker.setAttribute("cy", y);
+      crosshair.setAttribute("x1", x);
+      crosshair.setAttribute("x2", x);
+      readout.textContent = maxHp > 0
+        ? `${point.time.toFixed(1)} 秒 · Boss 血量 ${formatInteger(point.value)} / ${formatInteger(maxHp)} · 已损失 ${formatInteger(point.loss)}`
+        : `${point.time.toFixed(1)} 秒 · 已观测血量损失 ${formatInteger(point.loss)}`;
+    };
+    svg.addEventListener("pointermove", (event) => {
+      const bounds = svg.getBoundingClientRect();
+      const time = ((event.clientX - bounds.left) / bounds.width * width - left) / (right - left) * maxTime;
+      selected = points.reduce((best, point, index) => Math.abs(point.time - time) < Math.abs(points[best].time - time) ? index : best, 0);
+      show();
+    });
+    svg.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      selected = Math.max(0, Math.min(points.length - 1, selected + (event.key === "ArrowRight" ? 1 : -1)));
+      show();
+    });
+    show();
+    const legend = element("div", "chart-legend");
+    legend.append(element("span", "boss-hp-legend", maxHp > 0 ? `Boss 最大血量 ${formatInteger(maxHp)}` : "已观测血量损失"), element("span", "", "悬停或左右方向键查看采样"));
+    section.append(legend, readout);
+    return section;
+  }
+
+  function renderModuleCoverage(encounter) {
+    const coverage = encounter.data?.module_coverage;
+    if (!coverage || typeof coverage !== "object") return null;
+    const total = Number(coverage.total_members) || encounter.participants?.length || 0;
+    const details = element("details", "coverage-panel");
+    details.appendChild(element("summary", "", `数据模块覆盖 · ${coverage.details_complete ? "本场所列模块完整" : "按实际捕获展示"}`));
+    const grid = element("div", "coverage-grid");
+    [
+      ["DPS", "dps_members"], ["HPS", "hps_members"], ["承伤", "dt_members"],
+      ["死亡", "death_members"], ["技能汇总", "skill_members"], ["目标分布", "target_members"],
+      ["装备快照", "equipment_members"], ["命中时间轴", "skill_timeline_members"], ["起手序列", "opening_sequence_members"],
+    ].forEach(([label, key]) => {
+      const value = Number(coverage[key]) || 0;
+      const item = element("div", `coverage-item${value === total && total ? " is-complete" : value ? " is-partial" : " is-missing"}`);
+      item.append(element("span", "", label), element("b", "", `${value} / ${total}`));
+      grid.appendChild(item);
+    });
+    [
+      ["Boss 伤害", "boss_damage"], ["Boss 血量", "boss_hp_timeline"],
+      ["Boss 最大血量", "boss_max_hp"], ["副本难度", "difficulty"],
+    ].forEach(([label, key]) => {
+      const available = Boolean(coverage[key]);
+      const item = element("div", `coverage-item${available ? " is-complete" : " is-missing"}`);
+      item.append(element("span", "", label), element("b", "", available ? "已记录" : "未记录"));
+      grid.appendChild(item);
+    });
+    details.append(grid, element("p", "detail-note", `成功施法起手 ${formatInteger(coverage.successful_cast_opening_members || 0)} 人；伤害命中起手 ${formatInteger(coverage.damage_hit_opening_members || 0)} 人。缺少队友逐次事件时不会生成推测时间点。`));
+    return details;
+  }
+
+  function renderBossEventTable(bossDamage) {
+    const details = element("details", "skill-events boss-events");
+    const events = compactLogRows(bossDamage?.event_log).sort((a, b) => Number(a.time_ms) - Number(b.time_ms));
+    details.appendChild(element("summary", "", `首领伤害时间轴 · ${events.length ? `${formatInteger(events.length)} 条` : "未采集"}`));
+    if (!events.length) return details;
+    const targetNames = new Map((bossDamage.targets || []).map((target) => [Number(target.actor_id), target.name || `成员 ${target.actor_id}`]));
+    const sourceNames = new Map();
+    (bossDamage.sources || []).forEach((source) => {
+      sourceNames.set(Number(source.entity_id), source.name || "首领或机制");
+      (source.entity_ids || []).forEach((id) => sourceNames.set(Number(id), source.name || "首领或机制"));
+    });
+    const body = element("div", "skill-event-body");
+    let page = 0;
+    const render = () => {
+      body.replaceChildren();
+      const table = element("table", "event-table");
+      const head = element("thead"), header = element("tr");
+      ["时间", "来源", "技能", "受击成员", "伤害"].forEach((label) => header.appendChild(element("th", "", label)));
+      head.appendChild(header);
+      const tbody = element("tbody");
+      events.slice(page * 50, (page + 1) * 50).forEach((event) => {
+        const row = element("tr"), skillCell = element("td"), identity = element("span", "event-skill");
+        const skill = {skill_id: event.skill_id};
+        identity.append(skillIcon(skill), element("span", "", skillDisplayName(skill)));
+        skillCell.appendChild(identity);
+        row.append(
+          element("td", "", `${(Number(event.time_ms) / 1000).toFixed(2)} 秒`),
+          element("td", "", sourceNames.get(Number(event.source_id)) || `来源 ${event.source_id || "--"}`),
+          skillCell,
+          element("td", "", targetNames.get(Number(event.target_id)) || `成员 ${event.target_id || "--"}`),
+          element("td", "taken-text", formatInteger(event.damage)),
+        );
+        tbody.appendChild(row);
+      });
+      table.appendChild(tbody);
+      body.appendChild(table);
+      const pager = element("div", "history-pagination");
+      const previous = button("portal-refresh", "上一页"), next = button("portal-refresh", "下一页");
+      previous.disabled = page === 0;
+      next.disabled = (page + 1) * 50 >= events.length;
+      previous.addEventListener("click", () => { page--; render(); });
+      next.addEventListener("click", () => { page++; render(); });
+      pager.append(previous, element("span", "", `${page + 1} / ${Math.ceil(events.length / 50)}`), next);
+      body.appendChild(pager);
+    };
+    render();
+    details.appendChild(body);
+    return details;
+  }
+
+  function renderBossDamage(encounter) {
+    const section = element("section", "boss-damage-panel");
+    const bossDamage = encounter.data?.boss_damage || {};
+    const hasData = Number(bossDamage.observed_damage) > 0 || (bossDamage.sources || []).length || (bossDamage.skills || []).length;
+    section.appendChild(sectionHeading("Boss 伤害", hasData ? ({complete: "数据完整", observed_partial: "已观测部分", conflict: "数据冲突"}[bossDamage.coverage] || "已记录") : "未采集"));
+    if (!hasData) {
+      section.appendChild(element("p", "detail-note", bossDamage.unavailable_reason === "training_dummy" ? "训练目标不会主动造成伤害。" : "本场没有已确认的首领或机制伤害事件。"));
+      return section;
+    }
+    const metrics = element("div", "boss-metrics");
+    [["已归类首领伤害", bossDamage.observed_damage], ["团队承伤", bossDamage.team_taken], ["归类比例", formatPercent(bossDamage.classification_ratio)], ["命中次数", bossDamage.hits], ["最高一击", bossDamage.max_hit]].forEach(([label, value]) => metrics.appendChild(metricCard(label, typeof value === "string" ? value : formatInteger(value))));
+    section.appendChild(metrics);
+
+    const sources = (Array.isArray(bossDamage.sources) ? bossDamage.sources : []).sort((a, b) => Number(b.damage || 0) - Number(a.damage || 0));
+    section.appendChild(sectionHeading("首领与机制来源", sources.length ? `${sources.length} 个确认来源` : "未记录来源"));
+    const sourceGrid = element("div", "boss-source-grid");
+    sources.forEach((source) => {
+      const card = element("article", "boss-source-card");
+      card.append(
+        element("strong", "", source.name || "首领或机制"),
+        element("span", "", `${formatInteger(source.damage)} 伤害 · ${formatPercent(source.share)} · ${formatInteger(source.hits)} 次`),
+      );
+      const skills = element("div", "boss-source-skills");
+      (source.skills || []).slice(0, 12).forEach((skill) => {
+        const item = element("span", "event-skill");
+        item.append(skillIcon(skill), element("span", "", `${skillDisplayName(skill)} ${formatInteger(skill.damage)}`));
+        skills.appendChild(item);
+      });
+      card.appendChild(skills);
+      sourceGrid.appendChild(card);
+    });
+    section.appendChild(sourceGrid);
+
+    const skills = (Array.isArray(bossDamage.skills) ? bossDamage.skills : []).sort((a, b) => Number(b.damage || 0) - Number(a.damage || 0));
+    section.appendChild(sectionHeading("首领技能构成", skills.length ? `${skills.length} 个技能` : "未记录技能"));
+    const skillList = element("div", "boss-skill-list");
+    skills.forEach((skill, index) => {
+      const row = element("div", "boss-skill-row");
+      const identity = element("div", "skill-identity");
+      identity.append(skillIcon(skill), element("span", "skill-name", skillDisplayName(skill)));
+      row.append(identity, element("b", "", formatInteger(skill.damage)), element("span", "", formatPercent(skill.share)), element("span", "", `${formatInteger(skill.hits)} 次`), element("span", "", `最高 ${formatInteger(skill.max_hit)}`));
+      row.style.setProperty("--skill-color", SKILL_COLORS[index % SKILL_COLORS.length]);
+      skillList.appendChild(row);
+    });
+    section.appendChild(skillList);
+
+    const targets = (Array.isArray(bossDamage.targets) ? bossDamage.targets : []).sort((a, b) => Number(b.damage || 0) - Number(a.damage || 0));
+    section.appendChild(sectionHeading("受击成员", targets.length ? `${targets.length} 名已记录成员` : "未记录"));
+    const targetList = element("div", "boss-target-list");
+    targets.forEach((target) => {
+      const row = element("div", "boss-target-row");
+      row.append(element("strong", "", target.name || `成员 ${target.actor_id || "--"}`), element("b", "", formatInteger(target.damage)), element("span", "", formatPercent(target.share)), element("span", "", `${formatInteger(target.hits)} 次 · 最高 ${formatInteger(target.max_hit)}`));
+      targetList.appendChild(row);
+    });
+    section.append(targetList, renderBossEventTable(bossDamage));
+    if (bossDamage.truncated) section.appendChild(element("p", "detail-note", "首领伤害事件超过上传上限，本页已明确标记为截断。"));
+    return section;
+  }
+
   function renderEncounterBody(encounter) {
     const fragment = document.createDocumentFragment();
     const hero = element("section", "encounter-hero");
@@ -1473,10 +1795,13 @@
     else hero.appendChild(element("div", "encounter-boss-icon"));
     const heroCopy = element("div");
     heroCopy.appendChild(element("h2", "encounter-name", encounter.boss_name || "未知首领"));
+    const location = [encounter.data?.dungeon_name, encounter.data?.stage_name]
+      .filter((value, index, values) => value && values.indexOf(value) === index)
+      .join(" · ");
     heroCopy.appendChild(element(
       "div",
       "encounter-subtitle",
-      `${performanceDifficultyLabel(encounter.difficulty || "unknown")} · 关卡 ${Number(encounter.stage_id) || "--"} · ${formatDate(encounter.ended_at)} · ${Number(encounter.team_size) || 0} 人`,
+      `${location ? `${location} · ` : ""}${performanceDifficultyLabel(encounter.difficulty || "unknown")} · 关卡 ${Number(encounter.stage_id) || "--"} · ${formatDate(encounter.ended_at)} · ${Number(encounter.team_size) || 0} 人`,
     ));
     hero.appendChild(heroCopy);
     const [label, resultClass] = resultLabel(encounter.data?.result, encounter.data?.completion_confirmed);
@@ -1507,8 +1832,11 @@
     const metrics = element("div", "metric-grid");
     metrics.appendChild(metricCard("团队总伤害", formatCompact(encounter.team_total_damage), "本场累计"));
     metrics.appendChild(metricCard("团队 DPS", formatInteger(encounter.data?.team_dps), "有效战斗时间"));
+    metrics.appendChild(metricCard("团队有效治疗", formatCompact(encounter.data?.team_effective_healing), "本场累计"));
+    metrics.appendChild(metricCard("团队 HPS", formatInteger(encounter.data?.team_hps), "有效治疗时间"));
     metrics.appendChild(metricCard("战斗时长", formatDuration(encounter.duration_seconds), "分:秒"));
     metrics.appendChild(metricCard("团队承伤", formatCompact(encounter.data?.team_taken), "本场累计"));
+    metrics.appendChild(metricCard("Boss 最大血量", formatCompact(encounter.data?.monster?.max_hp || encounter.data?.monster?.observed_max_hp), "本场采集"));
     const deaths = metricCard("团队死亡次数", encounter.team_deaths === null || encounter.team_deaths === undefined
       ? encounter.recorded_deaths === null || encounter.recorded_deaths === undefined ? "未记录" : `${formatInteger(encounter.recorded_deaths)} 次已记录`
       : `${formatInteger(encounter.team_deaths)} 次`, `已记录 ${encounter.death_recorded_members || 0} / ${encounter.death_total_members || 0} 名成员`);
@@ -1516,9 +1844,12 @@
     metrics.appendChild(deaths);
     fragment.appendChild(metrics);
     fragment.appendChild(teamTimeline(encounter));
+    fragment.appendChild(bossHealthTimeline(encounter));
+    const coverage = renderModuleCoverage(encounter);
+    if (coverage) fragment.appendChild(coverage);
 
     const tabs = element("div", "mode-tabs");
-    [["dps", "伤害 DPS"], ["hps", "治疗 HPS"], ["dt", "承伤 DT"]].forEach(([mode, labelText]) => {
+    [["dps", "伤害 DPS"], ["hps", "治疗 HPS"], ["dt", "承伤 DT"], ["boss_damage", "Boss 伤害"]].forEach(([mode, labelText]) => {
       const tab = button(`mode-tab${state.encounterMode === mode ? " is-active" : ""}`, labelText);
       tab.addEventListener("click", () => {
         state.encounterMode = mode;
@@ -1527,6 +1858,11 @@
       tabs.appendChild(tab);
     });
     fragment.appendChild(tabs);
+
+    if (state.encounterMode === "boss_damage") {
+      fragment.appendChild(renderBossDamage(encounter));
+      return fragment;
+    }
 
     const participantsSection = element("section");
     const skillsPanel = element("section", "skills-panel");

@@ -303,7 +303,7 @@ try:
         click('#uploadStatusBtn')
         assert evaluate("document.querySelector('#uploadPopover').getBoundingClientRect().right<=innerWidth")
         click('#uploadStatusBtn')
-        route('share', "document.querySelectorAll('.share-step').length===4")
+        route('share', "document.querySelectorAll('.share-step').length===2")
         assert evaluate("document.documentElement.scrollWidth<=innerWidth")
         route('history', "document.querySelector('.history-row:not(.history-head)')")
         assert evaluate("document.documentElement.scrollWidth<=innerWidth")

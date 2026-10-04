@@ -1006,8 +1006,8 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(member['skills'][0]['damage'], 1_500)
         self.assertEqual(member['skills'][0]['effective_healing'], 200)
         self.assertEqual(member['skills'][2]['healing_skill_count'], 3)
-        self.assertEqual(payload['team_effective_healing'], 600)
-        self.assertNotIn('effective_healing', payload['participants'][1])
+        self.assertEqual(payload['team_effective_healing'], 1_100)
+        self.assertEqual(payload['participants'][1]['effective_healing'], 500)
 
         receipt = self.store.upload_encounter(
             self.connection, self.first, payload,
@@ -1035,6 +1035,221 @@ class ProfileUploadTests(unittest.TestCase):
         repeated = self.store.public_encounter(self.connection, receipt['encounter_id'])
         self.assertEqual(repeated['participants'][0]['stats']['effective_healing'], 600)
         self.assertEqual(repeated['participants'][0]['stats']['skills'][2]['effective_healing'], 400)
+
+    def test_complete_client_modules_survive_cleaning_and_older_retry(self) -> None:
+        equipment = {
+            'equipment_score': 20_000,
+            'equipment_score_complete': True,
+            'equipment': [{
+                'slot': 1,
+                'item_id': 3010455,
+                'item_name': '知识之刃',
+                'enhance_level': 5,
+                'enhance_completed_score': 400,
+                'enhance_level_progress_percent': 100,
+                'next_enhance_level': 6,
+                'next_enhance_remaining': 80,
+                'metadata': {
+                    'icon': '3010455',
+                    'mode': 'adventure',
+                    'random_group': 'Type1_1',
+                    'owner': self.first,
+                },
+                'affixes': [{
+                    'name': '暴击',
+                    'word_id': 3930658,
+                    'class_type': 1,
+                    'effect_type': 'FightProp',
+                    'property_key': 'Crit_N',
+                    'property_value': 123,
+                    'properties': [{'key': 'Crit_N', 'name': '暴击', 'value': 123}],
+                }],
+                'details': {'uid': self.second},
+            }],
+        }
+        record = {
+            'battle_id': 'all-modules-001',
+            'started_at_epoch': 1_799_999_970.0,
+            'ended_at_epoch': 1_800_000_000.0,
+            'duration_seconds': 30.0,
+            'dps_duration_seconds': 30.0,
+            'hps_duration_seconds': 30.0,
+            'dungeon_id': 5_100_064,
+            'dungeon_stage_id': 5_150_113,
+            'map_id': 5_200_224,
+            'dungeon_name': '大帝重临',
+            'stage_name': '罗塞尔的残留意志',
+            'team_size': 2,
+            'total_damage': 3_000,
+            'archive_reason': 'target_defeated',
+            'monster': {
+                'entity_id': 99,
+                'template_id': 7_110_208,
+                'name': '罗塞尔的残留意志',
+                'boss_type': 3,
+                'current_hp': 0,
+                'max_hp': 50_000_000,
+            },
+            'targets': [{
+                'entity_id': 99,
+                'template_id': 7_110_208,
+                'name': '罗塞尔的残留意志',
+                'boss_type': 3,
+                'max_hp': 50_000_000,
+            }],
+            'participants': [
+                {
+                    'actor_id': 11,
+                    'name': 'Player One',
+                    'is_self': True,
+                    'user_token': self.first,
+                    'profession_id': 1_200_001,
+                    'damage': 2_000,
+                    'dps': 66.67,
+                    'deaths': 1,
+                    'skills': [{'skill_id': 101, 'name': 'Strike', 'damage': 2_000}],
+                    'targets': [{'entity_id': 99, 'name': '罗塞尔的残留意志', 'damage': 2_000, 'share': 1.0}],
+                    'equipment_snapshot': copy.deepcopy(equipment),
+                },
+                {
+                    'actor_id': 12,
+                    'name': 'Player Two',
+                    'user_token': self.second,
+                    'profession_id': 1_200_002,
+                    'damage': 1_000,
+                    'dps': 33.33,
+                    'deaths': 0,
+                    'skills': [{'skill_id': 202, 'name': 'Judgement', 'damage': 1_000}],
+                    'targets': [{'entity_id': 99, 'name': '罗塞尔的残留意志', 'damage': 1_000, 'share': 1.0}],
+                    'equipment_snapshot': copy.deepcopy(equipment),
+                },
+            ],
+            'healers': [
+                {'actor_id': 11, 'profession_id': 1_200_001, 'effective_healing': 240,
+                 'total_healing': 300, 'overhealing': 60, 'hps': 8.0,
+                 'skills': [{'skill_id': 303, 'name': 'Support', 'effective_healing': 240}]},
+                {'actor_id': 12, 'profession_id': 1_200_002, 'effective_healing': 60,
+                 'total_healing': 80, 'overhealing': 20, 'hps': 2.0,
+                 'skills': [{'skill_id': 404, 'name': 'Heal', 'effective_healing': 60}]},
+            ],
+            'damage_taken': [
+                {'actor_id': 11, 'taken': 700, 'share': .7, 'source': 'server_team_counter'},
+                {'actor_id': 12, 'taken': 300, 'share': .3, 'source': 'server_team_counter'},
+            ],
+            'event_log': {
+                'columns': ['time_ms', 'actor_id', 'target_id', 'skill_id', 'damage', 'critical', 'penetrating'],
+                'rows': [[500, 11, 99, 101, 2_000, True, False], [1_000, 12, 99, 202, 1_000, False, True]],
+            },
+            'skill_cast_log': {
+                'columns': ['time_ms', 'actor_id', 'skill_id', 'target_id', 'sequence'],
+                'rows': [[250, 11, 101, 99, 1]],
+            },
+            'boss_damage': {
+                'version': 1,
+                'coverage': 'complete',
+                'observed_damage': 1_000,
+                'team_taken': 1_000,
+                'classification_ratio': 1.0,
+                'hits': 2,
+                'max_hit': 700,
+                'skills': [{'skill_id': 900, 'name': 'Boss Hit', 'damage': 1_000, 'hits': 2, 'max_hit': 700}],
+                'sources': [{
+                    'source_key': 'boss:7110208', 'entity_id': 99, 'entity_ids': [99],
+                    'template_id': 7_110_208, 'name': '罗塞尔的残留意志',
+                    'damage': 1_000, 'hits': 2,
+                    'skills': [{'skill_id': 900, 'name': 'Boss Hit', 'damage': 1_000}],
+                    'targets': [{'actor_id': 11, 'name': 'Player One', 'damage': 700},
+                                {'actor_id': 12, 'name': 'Player Two', 'damage': 300}],
+                }],
+                'targets': [{'actor_id': 11, 'name': 'Player One', 'damage': 700},
+                            {'actor_id': 12, 'name': 'Player Two', 'damage': 300}],
+                'event_log': {
+                    'columns': ['time_ms', 'source_id', 'target_id', 'skill_id', 'damage'],
+                    'rows': [[2_000, 99, 11, 900, 700], [3_000, 99, 12, 900, 300]],
+                },
+            },
+            'boss_hp_damage_samples': {
+                'version': 1,
+                'columns': ['time_seconds', 'observed_boss_hp_loss'],
+                'rows': [[0, 0], [10, 1_000], [30, 3_000]],
+                'coverage': 'observed_boss_hp_loss',
+                'interval_seconds': 1,
+            },
+            'damage_accounting': {'stage_summary_validations': [{
+                'completion_confirmed': True,
+                'actors': [
+                    {'actor_id': 11, 'user_token': self.first},
+                    {'actor_id': 12, 'user_token': self.second},
+                ],
+            }]},
+        }
+
+        payload = build_upload_encounter(record, self.first, current_character_name='Player One')
+        self.assertEqual(payload['difficulty'], 'normal')
+        self.assertEqual(payload['difficulty_source'], 'map_id')
+        self.assertEqual(payload['team_effective_healing'], 300)
+        self.assertEqual(payload['team_taken'], 1_000)
+        self.assertTrue(payload['module_coverage']['details_complete'])
+        self.assertEqual(payload['participants'][0]['effective_healing'], 240)
+        self.assertEqual(payload['participants'][0]['taken'], 700)
+        self.assertEqual(payload['participants'][0]['opening_sequence_source'], 'successful_cast')
+        self.assertEqual(payload['participants'][1]['opening_sequence_source'], 'damage_hit')
+        self.assertEqual(payload['participants'][1]['opening_sequence'][0]['target_name'], '罗塞尔的残留意志')
+        self.assertEqual(payload['participants'][1]['opening_sequence'][0]['target_template_id'], 7_110_208)
+        self.assertEqual(payload['participants'][0]['skill_timeline'][0]['target_name'], '罗塞尔的残留意志')
+
+        missing_death_record = copy.deepcopy(record)
+        missing_death_record['battle_id'] = 'all-modules-missing-death'
+        missing_death_record['participants'][1].pop('deaths')
+        missing_death = build_upload_encounter(missing_death_record, self.first)
+        self.assertEqual(missing_death['module_coverage']['death_members'], 1)
+        self.assertFalse(missing_death['module_coverage']['details_complete'])
+
+        castle_record = copy.deepcopy(record)
+        castle_record['battle_id'] = 'all-modules-castle-hard'
+        castle_record['map_id'] = 0
+        castle_record['dungeon_id'] = 5_100_047
+        castle_record['dungeon_name'] = '五月庄园·城堡'
+        castle_record['stage_name'] = '子爵夫人'
+        castle_payload = build_upload_encounter(castle_record, self.first)
+        self.assertEqual(castle_payload['difficulty'], 'hard')
+        self.assertEqual(castle_payload['difficulty_source'], 'dungeon_id')
+
+        receipt = self.store.upload_encounter(
+            self.connection, self.first, payload,
+            public_mode='character', app_version='0.3.5',
+        )
+        detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        stats = detail['participants'][0]['stats']
+        self.assertEqual(stats['targets'][0]['damage'], 2_000)
+        self.assertEqual(stats['opening_sequence'][0]['skill_id'], 101)
+        self.assertEqual(stats['skill_timeline'][0]['target_name'], '罗塞尔的残留意志')
+        self.assertEqual(stats['equipment_snapshot']['equipment'][0]['next_enhance_level'], 6)
+        self.assertEqual(stats['equipment_snapshot']['equipment'][0]['affixes'][0]['word_id'], 3_930_658)
+        self.assertEqual(detail['data']['monster']['max_hp'], 50_000_000)
+        self.assertEqual(detail['data']['boss_damage']['event_log']['rows'][0][-1], 700)
+        self.assertEqual(detail['data']['boss_hp_damage_samples']['rows'][-1], [30.0, 3_000])
+        self.assertTrue(detail['data']['module_coverage']['details_complete'])
+
+        older = copy.deepcopy(payload)
+        for field in ('monster', 'targets', 'boss_damage', 'boss_hp_damage_samples', 'module_coverage'):
+            older.pop(field, None)
+        for member in older['participants']:
+            for field in ('targets', 'opening_sequence', 'opening_sequence_source',
+                          'skill_timeline', 'skill_timeline_total', 'skill_timeline_truncated',
+                          'equipment_snapshot', 'effective_healing', 'total_healing',
+                          'overhealing', 'hps', 'taken', 'taken_share', 'taken_source'):
+                member.pop(field, None)
+        self.store.upload_encounter(
+            self.connection, self.first, older,
+            public_mode='character', app_version='0.3.5',
+        )
+        repeated = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        self.assertEqual(repeated['data']['monster']['max_hp'], 50_000_000)
+        self.assertEqual(repeated['participants'][0]['stats']['targets'][0]['damage'], 2_000)
+        text = json.dumps(repeated, ensure_ascii=False)
+        for hidden in (self.first, self.second, '"owner"', '"uid"', '"details"', 'character_hash'):
+            self.assertNotIn(hidden, text)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ class WindowsHybridReceiver:
         self.local_addresses: set[str] = set()
         self.counters: Counter[str] = Counter()
         self.errors: dict[str, str] = {}
+        self.raw_runtime_failed = False
         self.cursor = 0
         self.closed = False
         try:
@@ -77,8 +78,8 @@ class WindowsHybridReceiver:
     def refresh(self, endpoints: Iterable[object]) -> None:
         endpoints = list(endpoints)
         ipv4, ipv6 = self._sets(endpoints)
-        raw_failed = False
-        if ipv4:
+        raw_failed = self.raw_runtime_failed
+        if ipv4 and not self.raw_runtime_failed:
             try:
                 if self.raw is None:
                     self.raw = self.raw_factory(ipv4, poll_seconds=0.003)
@@ -135,7 +136,17 @@ class WindowsHybridReceiver:
         for offset in range(len(receivers)):
             index = (self.cursor + offset) % len(receivers)
             receiver = receivers[index]
-            frame = receiver.next_frame()
+            try:
+                frame = receiver.next_frame()
+            except (OSError, RuntimeError) as exc:
+                if receiver is not self.raw:
+                    raise
+                self.errors["raw"] = f"{type(exc).__name__}: {exc}"
+                self.counters["capture_adapter_errors"] += 1
+                self.raw_runtime_failed = True
+                self._close_child("raw")
+                self.refresh(self.endpoints)
+                return None
             self.counters.update(receiver.counters)
             receiver.counters.clear()
             if frame is not None:

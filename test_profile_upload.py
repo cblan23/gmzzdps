@@ -910,5 +910,88 @@ class ProfileUploadTests(unittest.TestCase):
             build_upload_encounter(record, self.second)
 
 
+    def test_healing_details_survive_upload_and_old_client_retry(self) -> None:
+        record = {
+            'battle_id': 'local-healing-001',
+            'started_at_epoch': 1_799_999_860.0,
+            'ended_at_epoch': 1_800_000_000.0,
+            'duration_seconds': 120.0,
+            'duration_source': 'server_encounter_clock',
+            'dungeon_id': 515,
+            'dungeon_stage_id': 9001,
+            'team_size': 2,
+            'total_damage': 3_000,
+            'team_effective_healing': 600,
+            'archive_reason': 'target_defeated',
+            'monster': {'name': 'Test Boss', 'template_id': 7100208},
+            'participants': [
+                {'actor_id': 11, 'name': 'Player One', 'is_self': True,
+                 'user_token': self.first, 'profession_id': 1200002,
+                 'damage': 2_000, 'dps': 16.67,
+                 'skills': [{'skill_id': 101, 'name': 'Strike', 'damage': 1_500},
+                            {'skill_id': 202, 'name': 'Hit', 'damage': 500}]},
+                {'actor_id': 12, 'name': 'Player Two', 'user_token': self.second,
+                 'profession_id': 1200001, 'damage': 1_000, 'dps': 8.33},
+            ],
+            'healers': [
+                {'actor_id': 11, 'effective_healing': 600, 'hps': 5.0,
+                 'total_healing': 800, 'overhealing': 200,
+                 'skills': [{'skill_id': 101, 'name': 'Strike', 'effective_healing': 200,
+                             'total_healing': 250, 'overhealing': 50, 'server_skill_count': 2},
+                            {'skill_id': 303, 'name': 'Heal', 'effective_healing': 400,
+                             'total_healing': 550, 'overhealing': 150, 'server_skill_count': 3}]},
+                {'actor_id': 12, 'profession_id': 1200001, 'effective_healing': 500,
+                 'skills': [{'skill_id': 404, 'effective_healing': 500}]},
+            ],
+            'damage_accounting': {'stage_summary_validations': [
+                {'completion_confirmed': True, 'actors': [
+                    {'actor_id': 11, 'user_token': self.first},
+                    {'actor_id': 12, 'user_token': self.second, 'effective_healing': 500},
+                    {'actor_id': 13, 'user_token': self.second, 'profession_id': 1200001,
+                     'damage': 1_000},
+                ]},
+            ]},
+        }
+        payload = build_upload_encounter(record, self.first)
+        self.assertEqual(payload['started_at_epoch'], 1_799_999_880.0)
+        self.assertEqual(len(payload['participants']), 2)
+        member = payload['participants'][0]
+        self.assertEqual(member['effective_healing'], 600)
+        self.assertEqual(member['hps'], 5.0)
+        self.assertEqual(len(member['skills']), 3)
+        self.assertEqual(member['skills'][0]['damage'], 1_500)
+        self.assertEqual(member['skills'][0]['effective_healing'], 200)
+        self.assertEqual(member['skills'][2]['healing_skill_count'], 3)
+        self.assertEqual(payload['team_effective_healing'], 600)
+        self.assertNotIn('effective_healing', payload['participants'][1])
+
+        receipt = self.store.upload_encounter(
+            self.connection, self.first, payload,
+            public_mode='character', app_version='0.3.5',
+        )
+        detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        stats = detail['participants'][0]['stats']
+        self.assertEqual(stats['effective_healing'], 600)
+        self.assertEqual(stats['total_healing'], 800)
+        self.assertEqual(stats['skills'][0]['total_healing'], 250)
+        self.assertEqual(stats['skills'][2]['healing_skill_count'], 3)
+
+        older_payload = copy.deepcopy(payload)
+        older_member = older_payload['participants'][0]
+        for field in ('effective_healing', 'total_healing', 'overhealing', 'hps'):
+            older_member.pop(field)
+        for skill in older_member['skills']:
+            for field in ('effective_healing', 'total_healing', 'overhealing',
+                          'healing_skill_count', 'healing_events'):
+                skill.pop(field, None)
+        self.store.upload_encounter(
+            self.connection, self.first, older_payload,
+            public_mode='character', app_version='0.3.5',
+        )
+        repeated = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        self.assertEqual(repeated['participants'][0]['stats']['effective_healing'], 600)
+        self.assertEqual(repeated['participants'][0]['stats']['skills'][2]['effective_healing'], 400)
+
+
 if __name__ == "__main__":
     unittest.main()

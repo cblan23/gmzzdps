@@ -24,7 +24,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
             "monster": {"template_id": 7109821, "name": "Boss"},
         }
 
-    def test_victory_queues_one_anonymous_upload(self):
+    def test_victory_queues_one_named_upload(self):
         self.assertTrue(self.window._queue_automatic_victory_upload(self.record))
         self.assertFalse(self.window._queue_automatic_victory_upload(self.record))
         self.window.root.after.assert_called_once()
@@ -32,7 +32,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.assertEqual(delay, 0)
         callback()
         self.window._start_history_upload.assert_called_once_with(
-            "victory-1", "anonymous", silent=True
+            "victory-1", "character", silent=True
         )
 
     def test_wipe_and_training_dummy_never_upload(self):
@@ -106,7 +106,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         globals_ = self.window._start_history_upload.__globals__
         thread_factory = mock.Mock()
         with mock.patch.object(globals_["threading"], "Thread", thread_factory):
-            self.window._start_history_upload("victory-1", "anonymous", silent=True)
+            self.window._start_history_upload("victory-1", "character", silent=True)
         thread_factory.return_value.start.assert_called_once()
         self.assertTrue(thread_factory.call_args.kwargs["daemon"])
         self.window.licensing.upload_encounter.assert_not_called()
@@ -119,7 +119,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.window._set_combat_upload_state.assert_called_with(
             "victory-1", "uploaded", rank=None, encounter_id="", upload_id="",
             message="", upload_status="", statistics_status="", ranking_status="",
-            validation_reasons=(), public_mode="anonymous",
+            validation_reasons=(), public_mode="character",
         )
         self.window._close_history_modal.assert_not_called()
         self.window._show_notice.assert_not_called()
@@ -129,7 +129,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
     def test_silent_validation_failure_does_not_open_dialog(self):
         self.prepare_sender()
         self.window._build_history_upload_payload.side_effect = ProfileUploadError("BAD_ENCOUNTER")
-        self.window._start_history_upload("victory-1", "anonymous", silent=True)
+        self.window._start_history_upload("victory-1", "character", silent=True)
         self.assertEqual(self.window._set_combat_upload_state.call_args.args,
                          ("victory-1", "failed"))
         self.window._close_history_modal.assert_not_called()

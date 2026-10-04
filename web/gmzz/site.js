@@ -1067,8 +1067,9 @@
     return cell;
   }
 
-  function skillDisplayName(skill) {
+  function skillDisplayName(skill, mode = "dps") {
     const skillId = Number(skill?.skill_id);
+    if (skillId === 0 && mode === "hps") return "未归类治疗";
     const rawName = String(skill?.name || "").trim();
     const placeholder = !rawName
       || rawName === "未知技能"
@@ -1309,7 +1310,9 @@
     const timeline = Array.isArray(stats.skill_timeline) ? [...stats.skill_timeline].sort((a, b) => a.time_ms - b.time_ms) : [];
     overview.append(renderCriticalLuck(stats), renderEventTable(timeline));
     panel.appendChild(overview);
-    panel.appendChild(sectionHeading("技能构成", `暴击 ${formatPercent(stats.critical_rate)} · 穿刺 ${formatPercent(stats.penetration_rate)} · 点击技能展开详情`));
+    panel.appendChild(sectionHeading(mode === "hps" ? "治疗技能构成" : "技能构成", mode === "hps"
+      ? "按有效治疗排序 · 点击技能展开详情"
+      : `暴击 ${formatPercent(stats.critical_rate)} · 穿刺 ${formatPercent(stats.penetration_rate)} · 点击技能展开详情`));
     const key = mode === "hps" ? "effective_healing" : "damage";
     const skills = (Array.isArray(stats.skills) ? stats.skills : []).map((skill) => ({...skill, metricValue: Number(skill[key] || 0)})).filter((skill) => skill.metricValue > 0).sort((a, b) => b.metricValue - a.metricValue);
     if (mode === "dt" || !skills.length) {
@@ -1318,7 +1321,7 @@
       const total = mode === "hps" ? Number(stats.effective_healing) || skills.reduce((sum, skill) => sum + skill.metricValue, 0) : Number(participant.damage) || skills.reduce((sum, skill) => sum + skill.metricValue, 0);
       const composition = element("div", "skill-composition"), legend = element("div", "skill-legend");
       const head = element("div", "skill-row skill-head");
-      ["技能 / 展开详情", mode === "hps" ? "有效治疗" : "伤害", "占比", "记录次数", "最高一击"].forEach((label) => head.appendChild(element("div", "", label)));
+      ["技能 / 展开详情", mode === "hps" ? "有效治疗" : "伤害", "占比", mode === "hps" ? "技能次数" : "记录次数", mode === "hps" ? "过量治疗" : "最高一击"].forEach((label) => head.appendChild(element("div", "", label)));
       const list = element("div", "skill-list");
       skills.forEach((skill, index) => {
         const color = SKILL_COLORS[index % SKILL_COLORS.length];
@@ -1327,10 +1330,12 @@
         detail.style.setProperty("--skill-color", color);
         const summary = element("summary", "skill-row");
         const identity = element("div", "skill-identity"), copy = element("div");
-        copy.append(element("span", "skill-name", skillDisplayName(skill)), element("span", "skill-share-track"));
+        copy.append(element("span", "skill-name", skillDisplayName(skill, mode)), element("span", "skill-share-track"));
         copy.lastChild.style.setProperty("--share", `${Math.min(100, skill.metricValue / Math.max(1, total) * 100)}%`);
         identity.append(skillIcon(skill), copy);
-        summary.append(identity, element("div", "number-cell", formatInteger(skill.metricValue)), element("div", "number-cell", formatPercent(skill.metricValue / Math.max(1, total))), element("div", "number-cell", Number(skill.hits) > 0 ? formatInteger(skill.hits) : "未记录"), element("div", "number-cell", mode === "dps" && Number(skill.max_hit) > 0 ? formatInteger(skill.max_hit) : "--"));
+        const shownCount = mode === "hps" ? skill.healing_skill_count ?? skill.healing_events : skill.hits;
+        const lastMetric = mode === "hps" ? skill.overhealing : skill.max_hit;
+        summary.append(identity, element("div", "number-cell", formatInteger(skill.metricValue)), element("div", "number-cell", formatPercent(skill.metricValue / Math.max(1, total))), element("div", "number-cell", shownCount !== null && shownCount !== undefined ? formatInteger(shownCount) : "未记录"), element("div", "number-cell", lastMetric !== null && lastMetric !== undefined ? formatInteger(lastMetric) : "--"));
         detail.appendChild(summary);
         const body = element("div", "skill-detail-body");
         const events = timeline.filter((event) => Number(event.skill_id) === Number(skill.skill_id));
@@ -1344,9 +1349,15 @@
         const damageEvents = events.filter((event) => Number(event.damage) > 0);
         const average = mode === "dps" && damageEvents.length ? sampled / damageEvents.length : null;
         const maxHit = mode === "dps" ? Number(skill.max_hit) || (damageEvents.length ? Math.max(...damageEvents.map((event) => Number(event.damage))) : null) : null;
-        [["记录次数", Number(skill.hits) || null], ["平均每次打击", average], ["最高一击", maxHit]].forEach(([label, value]) => cards.appendChild(metricCard(label, formatInteger(value))));
-        cards.append(metricCard(skill.critical_rate !== undefined ? "汇总暴击率" : "事件暴击率", formatPercent(critRate)), metricCard(skill.penetration_rate !== undefined ? "汇总穿刺率" : "事件穿刺率", formatPercent(pierceRate)));
-        body.append(cards, element("p", "detail-note", `技能编号 ${skill.skill_id}${castCount ? " · 次数为服务端技能计数，不能当作打击次数" : ""}。${mode === "dps" ? `已采集 ${events.length} 条事件，覆盖该技能伤害 ${formatPercent(sampled / Math.max(1, skill.damage))}；暴击标记 ${knownCrit.length} 条，穿刺标记 ${knownPierce.length} 条。平均每次打击按已采集的伤害事件计算。` : "治疗逐次事件未上传，统计来自有效治疗汇总。"}`));
+        if (mode === "hps") {
+          [["有效治疗", skill.effective_healing], ["总治疗", skill.total_healing], ["过量治疗", skill.overhealing], ["技能次数", skill.healing_skill_count ?? skill.healing_events]].forEach(([label, value]) => cards.appendChild(metricCard(label, value === null || value === undefined ? "未记录" : formatInteger(value))));
+        } else {
+          [["记录次数", Number(skill.hits) || null], ["平均每次打击", average], ["最高一击", maxHit]].forEach(([label, value]) => cards.appendChild(metricCard(label, formatInteger(value))));
+          cards.append(metricCard(skill.critical_rate !== undefined ? "汇总暴击率" : "事件暴击率", formatPercent(critRate)), metricCard(skill.penetration_rate !== undefined ? "汇总穿刺率" : "事件穿刺率", formatPercent(pierceRate)));
+        }
+        body.append(cards, element("p", "detail-note", mode === "dps"
+          ? `技能编号 ${skill.skill_id}${castCount ? " · 次数为服务端技能计数，不能当作打击次数" : ""}。已采集 ${events.length} 条事件，覆盖该技能伤害 ${formatPercent(sampled / Math.max(1, skill.damage))}；暴击标记 ${knownCrit.length} 条，穿刺标记 ${knownPierce.length} 条。平均每次打击按已采集的伤害事件计算。`
+          : `技能编号 ${skill.skill_id}。治疗逐次事件未上传，技能次数为服务端汇总。`));
         let initialized = false;
         detail.addEventListener("toggle", () => {
           if (!detail.open || initialized) return;
@@ -1355,13 +1366,13 @@
         });
         detail.appendChild(body);
         list.appendChild(detail);
-        const segment = button("composition-segment", "", `${skillDisplayName(skill)} · ${formatPercent(skill.metricValue / Math.max(1, total))}`);
+        const segment = button("composition-segment", "", `${skillDisplayName(skill, mode)} · ${formatPercent(skill.metricValue / Math.max(1, total))}`);
         segment.style.background = color;
         segment.style.flexGrow = skill.metricValue;
         const open = () => { detail.open = true; detail.scrollIntoView({block: "nearest", behavior: "smooth"}); };
         segment.addEventListener("click", open);
         composition.appendChild(segment);
-        const label = button("skill-legend-item", skillDisplayName(skill));
+        const label = button("skill-legend-item", skillDisplayName(skill, mode));
         label.style.setProperty("--skill-color", color);
         label.addEventListener("click", open);
         legend.appendChild(label);

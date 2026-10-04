@@ -349,7 +349,7 @@ APP_NAME = "叨叨诡秘助手"
 APP_VERSION = "0.3.5"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.5+20261003.1"
+CLIENT_BUILD = "0.3.5+20261004.1"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
     "runtime-profile.dev.json"
@@ -23894,15 +23894,7 @@ class DpsWindow:
         self.combat_upload_states = normalize_combat_upload_states(
             load_json_object(UPLOAD_STATE_PATH)
         )
-        upload_public_mode = str(
-            self.config.get(UPLOAD_PUBLIC_MODE_CONFIG_KEY, "anonymous")
-            or "anonymous"
-        ).casefold()
-        self.upload_public_mode = (
-            upload_public_mode
-            if upload_public_mode in {"anonymous", "character"}
-            else "anonymous"
-        )
+        self.upload_public_mode = "character"
         self.config[UPLOAD_PUBLIC_MODE_CONFIG_KEY] = self.upload_public_mode
         save_config(self.config)
 
@@ -31817,7 +31809,7 @@ class DpsWindow:
         self.tray_feedback_hidden = False
 
     def _queue_automatic_victory_upload(self, record: object) -> bool:
-        """Upload a saved victory once, anonymously and outside combat handling."""
+        """Upload a saved victory once outside combat handling."""
 
         if (
             not isinstance(record, dict)
@@ -31852,7 +31844,7 @@ class DpsWindow:
             after(
                 0,
                 lambda selected_id=battle_id: self._start_history_upload(
-                    selected_id, "anonymous", silent=True
+                    selected_id, "character", silent=True
                 ),
             )
         except tk.TclError:
@@ -45476,6 +45468,11 @@ class DpsWindow:
                 "v0.3.5",
                 """v0.3.5更新日志
 
+2026-10-04 网站数据修复（0.3.5+20261004.1）
+战斗上传补齐治疗量、治疗技能次数、总治疗和过量治疗，并按客户端展示规则过滤非治疗职业旧记录。
+修复服务端战斗时钟与抓包时间偏差、重复采集 ID 导致的历史上传失败。
+上传界面显示已捕获角色名，不再提供匿名选择；缺失姓名标记为未记录。
+
 2026-10-03 修复构建（0.3.5+20261003.1）
 四方联赛装备查询按角色、评分和对局去重，响应超时从请求发出后开始计算。
 完整装备回复改由后台线程存档，避免同步文件写入拖延战斗消息。
@@ -57677,16 +57674,8 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             return "break"
 
         self.pending_upload_battle_id = ""
-        default_mode = str(
-            getattr(self, "upload_public_mode", "anonymous") or "anonymous"
-        )
-        if default_mode not in {"anonymous", "character"}:
-            default_mode = "anonymous"
-        if default_mode == "character" and not character_name:
-            default_mode = "anonymous"
-        mode_var = tk.StringVar(master=self.history_window, value=default_mode)
         _panel, body, _overlay = self._open_history_modal(
-            "上传战斗记录", width=520, height=348
+            "上传战斗记录", width=520, height=286
         )
         # Reserve the action area before laying out the content. Tk pack
         # otherwise gives the last-packed footer only the leftover pixels.
@@ -57718,7 +57707,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         ).pack(side="left", fill="both", expand=True, padx=(11, 8))
         tk.Label(
             encounter_bar,
-            text="仅控制本人",
+            text="显示已记录姓名",
             bg="#17344a",
             fg=PVE_MODE_FOREGROUND,
             padx=8,
@@ -57727,47 +57716,26 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         ).pack(side="right", padx=9)
         tk.Label(
             body,
-            text="选择本场公开身份",
+            text="本场网页显示的角色名",
             bg=PANEL,
             fg="#cbd7e2",
             anchor="w",
             font=self._ui_font("strong"),
         ).pack(fill="x", pady=(0, 7))
-        for mode, caption, detail in (
-            (
-                "anonymous",
-                "匿名上传",
-                "本人不公开角色名称，仍可正常上传与统计",
-            ),
-            (
-                "character",
-                "用户 ID 显示上传",
-                f"公开显示本场自动识别到的本人角色名：{character_name or '未识别'}",
-            ),
-        ):
-            option = ModernChoiceCard(
-                body,
-                caption,
-                mode_var,
-                mode,
-                font=self._ui_font("body"),
-                detail=detail,
-                detail_font=self._ui_font("micro"),
-                disabled=mode == "character" and not bool(character_name),
-            )
-            option.pack(fill="x", pady=(0, 7))
         tk.Label(
             body,
-            text="此选择只影响你本人；其他队友始终显示为匿名玩家。",
+            text=f"本人：{character_name or '未记录姓名'}。其他成员显示本场已捕获的姓名；缺失时标记为未记录。",
             bg=PANEL,
             fg=MUTED,
             anchor="w",
+            wraplength=470,
+            justify="left",
             font=self._ui_font("micro"),
         ).pack(fill="x", pady=(1, 8))
         self._history_modal_action(
             actions,
             "确认上传",
-            lambda: self._start_history_upload(clean_battle_id, mode_var.get()),
+            lambda: self._start_history_upload(clean_battle_id, "character"),
             primary=True,
         ).pack(side="right")
         self._history_modal_action(
@@ -57784,7 +57752,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         silent: bool = False,
     ) -> None:
         clean_battle_id = str(battle_id or "").strip()
-        mode = str(public_mode or "anonymous").casefold()
+        mode = str(public_mode or "character").casefold()
         if mode not in {"anonymous", "character"}:
             return
         if silent and (
@@ -57814,16 +57782,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                     "无法上传战斗记录", exc.message, parent=self.history_window
                 )
             return
-        if mode == "character" and not character_name:
-            if silent:
-                self._set_combat_upload_state(
-                    clean_battle_id,
-                    "failed",
-                    message="本场用户 ID 缺失，请使用匿名上传。",
-                )
-            else:
-                self._profile_modal_status("本场用户 ID 缺失，请使用匿名上传。")
-            return
+        mode = "character" if character_name else "anonymous"
 
         character_id = next(
             (

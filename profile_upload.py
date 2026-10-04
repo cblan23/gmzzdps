@@ -984,6 +984,12 @@ class ProfileUploadStore:
                     "max_hit": _as_int(raw.get("max_hit")),
                     "source": _safe_text(raw.get("source"), 48),
                 }
+            for key in ('total_healing', 'overhealing'):
+                if raw.get(key) is not None:
+                    row[key] = _as_int(raw[key])
+            for key in ('healing_skill_count', 'healing_events'):
+                if raw.get(key) is not None:
+                    row[key] = _as_int(raw[key], maximum=10_000_000)
             for key in ('count_semantics',):
                 if raw.get(key):
                     row[key] = _safe_text(raw[key], 48)
@@ -1644,9 +1650,24 @@ class ProfileUploadStore:
         if int(participant["data_quality"]) >= int(existing["data_quality"]):
             merged_stats = dict(participant['stats'])
             stored_stats = json.loads(str(existing['stats_json']))
-            for field in ('deaths', 'revives', 'death_duration_seconds', 'equipment_snapshot', 'equipment_rating'):
+            for field in ('deaths', 'revives', 'death_duration_seconds', 'equipment_snapshot', 'equipment_rating',
+                          'effective_healing', 'total_healing', 'overhealing', 'hps'):
                 if field not in merged_stats and field in stored_stats:
                     merged_stats[field] = stored_stats[field]
+            stored_healing_skills = {
+                skill.get('skill_id'): skill for skill in stored_stats.get('skills', [])
+                if isinstance(skill, dict) and skill.get('effective_healing', 0) > 0
+            }
+            merged_skills = merged_stats.get('skills', [])
+            if isinstance(merged_skills, list):
+                for skill in merged_skills:
+                    stored_skill = stored_healing_skills.pop(skill.get('skill_id'), None)
+                    if stored_skill and not skill.get('effective_healing'):
+                        for field in ('effective_healing', 'total_healing', 'overhealing',
+                                      'healing_skill_count', 'healing_events'):
+                            if field in stored_skill:
+                                skill[field] = stored_skill[field]
+                merged_skills.extend(stored_healing_skills.values())
             connection.execute(
                 """
                 UPDATE encounter_participants SET
@@ -1660,7 +1681,7 @@ class ProfileUploadStore:
                     participant["profession_id"],
                     participant["damage"],
                     participant["dps"],
-                    participant["hps"],
+                    _as_float(merged_stats.get("hps"), maximum=1e18),
                     participant["taken"],
                     _json_text(merged_stats),
                     participant["data_quality"],
@@ -2806,6 +2827,74 @@ def build_upload_encounter(
             merged = dict(stage_row)
             merged.update(participant_by_actor[actor_id])
             participant_by_actor[actor_id] = merged
+    for member in participant_by_actor.values():
+        for field in ("effective_healing", "total_healing", "overhealing", "hps"):
+            member.pop(field, None)
+    raw_healers = record.get("healers")
+    included_healers: list[dict] = []
+    if isinstance(raw_healers, list):
+        for healer in raw_healers:
+            if not isinstance(healer, dict):
+                continue
+            actor_id = _as_int(
+                healer.get("actor_id"), minimum=-(1 << 63), maximum=(1 << 63) - 1
+            )
+            if not actor_id:
+                continue
+            profession_id = _as_int(
+                healer.get("profession_id") or participant_by_actor.get(actor_id, {}).get("profession_id")
+            )
+            if (1_200_001 <= profession_id <= 1_200_007
+                    and profession_id != 1_200_002
+                    and healer.get("effective_healing") is not None):
+                continue
+            included_healers.append(healer)
+            if actor_id not in participant_by_actor:
+                participant_by_actor[actor_id] = {"actor_id": actor_id}
+                order.append(actor_id)
+            member = participant_by_actor[actor_id]
+            for field in ("name", "profession_id", "extraordinary_rating", "equipment_snapshot"):
+                if not member.get(field) and healer.get(field) is not None:
+                    member[field] = healer[field]
+            for field in ("effective_healing", "total_healing", "overhealing", "hps"):
+                if healer.get(field) is not None:
+                    member[field] = healer[field]
+            raw_damage_skills = member.get("skills")
+            damage_skills = [dict(skill) for skill in raw_damage_skills if isinstance(skill, dict)] if isinstance(raw_damage_skills, list) else []
+            by_skill_id = {skill.get("skill_id"): skill for skill in damage_skills}
+            for raw_skill in healer.get("skills", []) if isinstance(healer.get("skills"), list) else []:
+                if not isinstance(raw_skill, dict):
+                    continue
+                skill_id = raw_skill.get("skill_id")
+                skill = by_skill_id.get(skill_id)
+                if skill is None:
+                    skill = {"skill_id": skill_id, "name": raw_skill.get("name", ""),
+                             "source": raw_skill.get("source", "")}
+                    damage_skills.append(skill)
+                    by_skill_id[skill_id] = skill
+                if not skill.get("name") and raw_skill.get("name"):
+                    skill["name"] = raw_skill["name"]
+                for field in ("effective_healing", "total_healing", "overhealing"):
+                    if raw_skill.get(field) is not None:
+                        skill[field] = raw_skill[field]
+                if raw_skill.get("server_skill_count") is not None:
+                    skill["healing_skill_count"] = raw_skill["server_skill_count"]
+                if raw_skill.get("events") is not None:
+                    skill["healing_events"] = raw_skill["events"]
+            member["skills"] = damage_skills
+    for member in participant_by_actor.values():
+        profession_id = _as_int(member.get("profession_id"))
+        if 1_200_001 <= profession_id <= 1_200_007 and profession_id != 1_200_002:
+            for field in ("effective_healing", "total_healing", "overhealing", "hps"):
+                member.pop(field, None)
+            skills = member.get("skills")
+            if isinstance(skills, list):
+                member["skills"] = [
+                    {key: value for key, value in skill.items()
+                     if key not in ("effective_healing", "total_healing", "overhealing",
+                                    "healing_skill_count", "healing_events")}
+                    for skill in skills if isinstance(skill, dict)
+                ]
     for actor_id in identities:
         if actor_id not in participant_by_actor:
             participant_by_actor[actor_id] = {"actor_id": actor_id}
@@ -2866,6 +2955,26 @@ def build_upload_encounter(
         if actor_id in timelines:
             participant["skill_timeline"] = timelines[actor_id]
         participants.append(participant)
+
+    deduplicated: list[dict[str, object]] = []
+    by_identity_and_damage: dict[tuple[str, int, int], dict[str, object]] = {}
+    for participant in participants:
+        identity_value = str(participant["character_id"] or "")
+        key = (identity_value, _as_int(participant["profession_id"]), _as_int(participant.get("damage")))
+        previous = by_identity_and_damage.get(key) if identity_value else None
+        if previous is None:
+            deduplicated.append(participant)
+            if identity_value:
+                by_identity_and_damage[key] = participant
+            continue
+        for field in ("effective_healing", "total_healing", "overhealing", "hps",
+                      "deaths", "revives", "death_duration_seconds", "taken", "equipment_snapshot"):
+            if not previous.get(field) and participant.get(field):
+                previous[field] = participant[field]
+        for field in ("skills", "skill_timeline"):
+            if len(participant.get(field) or []) > len(previous.get(field) or []):
+                previous[field] = participant[field]
+    participants = deduplicated
 
     raw_team_size = _as_int(
         record.get("team_size"), minimum=1, maximum=MAX_ENCOUNTER_PARTICIPANTS
@@ -2935,6 +3044,21 @@ def build_upload_encounter(
     started_at = record.get("started_at_epoch")
     ended_at = record.get("ended_at_epoch")
     duration = record.get("duration_seconds", record.get("dps_duration_seconds"))
+    if str(record.get("duration_source") or "") == "server_encounter_clock":
+        parsed_start = _as_float(started_at, maximum=4_102_444_800.0)
+        parsed_end = _as_float(ended_at, maximum=4_102_444_800.0)
+        parsed_duration = _as_float(duration, maximum=86_400.0)
+        if parsed_start > 0 and parsed_end >= parsed_start and parsed_duration > 0:
+            if abs((parsed_end - parsed_start) - parsed_duration) > max(10.0, parsed_duration * .1):
+                started_at = parsed_end - parsed_duration
+    team_healing = record.get("team_effective_healing", 0)
+    team_hps = record.get("team_hps", 0)
+    if isinstance(raw_healers, list) and raw_healers and all(
+        healer.get("effective_healing") is not None for healer in included_healers
+    ):
+        team_healing = sum(_as_int(healer.get("effective_healing")) for healer in included_healers)
+        healing_duration = _as_float(record.get("hps_duration_seconds", duration), maximum=86_400.0)
+        team_hps = team_healing / max(1, int(healing_duration)) if healing_duration > 0 else 0
     return {
         "client_encounter_id": _safe_text(
             record.get("battle_id", record.get("encounter_id")), 96
@@ -2956,8 +3080,8 @@ def build_upload_encounter(
         "team_size": team_size,
         "team_total_damage": record.get("total_damage", 0),
         "team_dps": record.get("team_dps", 0),
-        "team_hps": record.get("team_hps", 0),
-        "team_effective_healing": record.get("team_effective_healing", 0),
+        "team_hps": team_hps,
+        "team_effective_healing": team_healing,
         "team_taken": record.get("team_taken", 0),
         "game_version": _safe_text(game_version, 48),
         "participants": participants,

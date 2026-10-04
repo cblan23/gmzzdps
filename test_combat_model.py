@@ -22060,9 +22060,10 @@ class CombatModelTests(unittest.TestCase):
 
         self.assertNotIn("_show_profile_setup_choice", confirmation_source)
         self.assertNotIn("upload_profile", confirmation_source)
-        self.assertIn('"anonymous"', confirmation_source)
-        self.assertIn('"匿名上传"', confirmation_source)
-        self.assertIn('"用户 ID 显示上传"', confirmation_source)
+        self.assertNotIn('"anonymous"', confirmation_source)
+        self.assertNotIn('"匿名上传"', confirmation_source)
+        self.assertIn('"显示已记录姓名"', confirmation_source)
+        self.assertIn('"character"', confirmation_source)
         self.assertNotIn("使用上传昵称", confirmation_source)
 
     def test_history_upload_click_explains_identity_and_legacy_blocks(self):

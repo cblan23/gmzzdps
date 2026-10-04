@@ -84,3 +84,99 @@ button:disabled{opacity:.4;cursor:default}
 @media(max-width:400px){.brand-name{font-size:14px}.brand img{width:29px;height:29px}.upload-status-btn{font-size:10px;gap:5px}.brand{gap:7px}.header-inner{width:calc(100% - 28px)}.participant-row{grid-template-columns:25px minmax(105px,1fr) 60px 44px;gap:5px}.participant-row .identity-kind{font-size:9px}.history-pagination{gap:10px}.hero h1{font-size:34px}}
 @media(max-width:800px){.brand{order:0}.upload-area{order:1}.nav{order:2}.history-row .boss-name,.history-row .boss-stage{white-space:normal}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+
+/* Battle details share one palette across metrics, curves and skill events. */
+:root{--damage:#61b6ff;--healing:#48d6b0;--taken:#ffbf6b;--critical:#bd95ff;--death:#fa87a0}
+.metric-grid:has(.death-metric){grid-template-columns:repeat(5,minmax(0,1fr))}
+.damage-metric .metric-value,.history-chart .chart-readout{color:var(--damage)}
+.healing-metric .metric-value{color:var(--healing)}
+.taken-metric .metric-value{color:var(--taken)}
+.death-metric .metric-value,.death-count{color:var(--death)}
+.death-count{font-size:12px;font-variant-numeric:tabular-nums;line-height:1.6;white-space:normal}
+.history-row{grid-template-columns:minmax(180px,1.3fr) minmax(145px,1fr) minmax(135px,.9fr) 125px minmax(170px,1.1fr) 74px}
+.participants-list .participant-row{grid-template-columns:32px minmax(180px,1fr) minmax(100px,1fr) 120px 75px 75px;gap:14px;border-bottom-color:#26323c}
+.participants-list .participant-head{min-height:36px;font-size:11px;color:#8b98a3;background:#111820;cursor:default}
+.participants-list .participant-row.is-selected{background:rgba(97,182,255,.07);box-shadow:inset 3px 0 var(--damage)}
+.participants-list.mode-hps .number-cell.primary{color:var(--healing)}
+.participants-list.mode-dt .number-cell.primary{color:var(--taken)}
+.participants-list.mode-dps .number-cell.primary{color:var(--damage)}
+.metric-fill{background:linear-gradient(90deg,color-mix(in srgb,var(--member-color,var(--damage)) 25%,transparent),var(--member-color,var(--damage)))}
+.history-chart svg{color:var(--damage)}
+.chart-crosshair{stroke:#8fbcdf;stroke-dasharray:4 4;stroke-opacity:.6;vector-effect:non-scaling-stroke}
+.chart-legend{display:flex;flex-wrap:wrap;gap:18px;color:#99acbb;font-size:11px;margin:12px 0}
+.chart-legend span:before{content:"";display:inline-block;width:9px;height:9px;margin-right:6px;border-radius:3px;background:var(--legend-color,#667582)}
+.normal-legend{--legend-color:var(--damage)}
+.crit-legend,.observed-legend{--legend-color:var(--critical)}
+.expected-legend{--legend-color:var(--healing)}
+.unknown-legend{--legend-color:#667582}
+.skill-icon{width:36px;height:36px;object-fit:contain;border:1px solid #384655;border-radius:7px;background:#101821;flex-shrink:0}
+.event-skill{display:flex;gap:8px;align-items:center}
+.event-skill .skill-icon{width:23px;height:23px;border-radius:4px}
+.crit-text{color:var(--critical)!important}
+.pierce-text{color:var(--taken)!important}
+.skill-composition{display:flex;height:16px;gap:3px;overflow:hidden;border-radius:5px;background:#26323c;margin:18px 0}
+.composition-segment{flex-basis:0;min-width:2px;border:0;cursor:pointer;transition:filter .15s}
+.composition-segment:hover{filter:brightness(1.3)}
+.composition-unclassified{flex-basis:0;background:#56616d}
+.skill-legend{display:flex;gap:8px 14px;flex-wrap:wrap;margin:0 0 18px}
+.skill-legend-item{color:#b6c5d0;background:none;border:0;font:inherit;font-size:11px;cursor:pointer;display:flex;gap:6px;align-items:center;padding:4px 0}
+.skill-legend-item:before{content:"";display:block;width:8px;height:8px;border-radius:2px;background:var(--skill-color)}
+.skill-list{border:1px solid #27313b;border-radius:8px;overflow:hidden}
+.skill-row{grid-template-columns:minmax(180px,1.5fr) minmax(110px,1fr) 80px 90px 100px;min-width:0;border-bottom-color:#26323c}
+.skill-detail:last-child>summary{border-bottom:0}
+.skill-detail>summary{cursor:pointer;list-style:none;position:relative;padding-right:30px;background:#10171d}
+.skill-detail>summary::-webkit-details-marker,.equipment-summary::-webkit-details-marker{display:none}
+.skill-detail>summary:after{content:"+";position:absolute;right:12px;color:var(--skill-color);font-size:17px}
+.skill-detail[open]>summary:after{content:"−"}
+.skill-detail>summary:hover,.equipment-summary:hover{background:#15202a}
+.skill-identity{display:flex;gap:10px;align-items:center;min-width:0}
+.skill-identity>div{min-width:0;flex:1}
+.skill-name{display:block;white-space:normal;overflow-wrap:anywhere;font-size:13px}
+.skill-share-track{display:block;height:3px;background:#24303a;margin-top:7px;border-radius:2px}
+.skill-share-track:before{content:"";display:block;height:100%;width:var(--share,0%);background:var(--skill-color);border-radius:inherit}
+.skill-detail-body{padding:20px;background:#0b1117;border-bottom:1px solid #27313b}
+.skill-detail-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.skill-detail-metrics .metric-card{padding:12px}
+.skill-detail-metrics .metric-value{font-size:19px}
+.skill-detail-body svg{width:100%;max-height:240px;display:block}
+.skill-detail-body svg text,.luck-panel svg text{fill:#8b98a3;font:12px "Microsoft YaHei",sans-serif}
+.hit-bar-normal{fill:var(--damage)}
+.hit-bar-critical{fill:var(--critical)}
+.hit-bar-unknown{fill:#667582}
+.per-skill-events{margin-top:16px;font-size:12px;color:#a3b3c0;overflow-x:auto}
+.per-skill-events summary{cursor:pointer;line-height:2}
+.luck-panel,.equipment-panel{padding:22px;border:1px solid #27313b;border-radius:9px;background:#0e151c;margin:20px 0}
+.luck-panel{background:linear-gradient(120deg,rgba(137,97,210,.09),#0e151c 65%);border-color:#39334e}
+.luck-verdict{display:flex;align-items:baseline;gap:14px}
+.luck-verdict strong{color:var(--critical);font-size:22px;font-weight:600}
+.luck-verdict span{color:#a7a0bd;font-size:12px}
+.luck-panel svg{width:100%;max-height:220px;margin-top:16px}
+.luck-area{fill:rgba(189,149,255,.12)}
+.luck-line{fill:none;stroke:var(--critical);stroke-width:2}
+.luck-expected{stroke:var(--healing);stroke-dasharray:5 4}
+.luck-observed{stroke:var(--critical);stroke-width:2}
+.luck-dot{fill:var(--critical);stroke:#181322;stroke-width:2}
+.luck-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:14px}
+.luck-metrics .metric-card{padding:12px;background:#121922;border-color:#313344}
+.luck-metrics .metric-value{font-size:20px}
+.equipment-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.equipment-metrics .metric-value{font-size:22px;color:#ffbf6b}
+.equipment-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:26px;align-items:start}
+.equipment-item{border:1px solid #2e3b48;border-radius:7px;overflow:hidden;background:#111a23;min-width:0}
+.equipment-summary{list-style:none;display:flex;gap:12px;align-items:center;padding:14px;cursor:pointer}
+.equipment-icon{width:48px;height:48px;flex-shrink:0;object-fit:contain;border-radius:6px;background:#1c242e;border:1px solid #3c4b5d}
+.equipment-summary>div{display:grid;gap:8px;min-width:0;flex:1}
+.equipment-summary strong{font-size:13px;font-weight:500;color:#bd95ff;overflow-wrap:anywhere}
+.equipment-summary span{font-size:11px;color:#92a4b3}
+.equipment-summary .equipment-score{color:#ffbf6b;font-size:14px;flex-shrink:0}
+.equipment-body{padding:4px 14px 16px;border-top:1px solid #2e3b48}
+.equipment-affix,.equipment-special{display:flex;flex-wrap:wrap;gap:8px;font-size:12px;line-height:1.8;margin-top:10px}
+.equipment-affix strong,.equipment-special strong{color:#b3c8d9;font-weight:500;flex-basis:100%}
+.equipment-property{color:#8fb8dc;background:#142536;padding:2px 7px;border-radius:3px}
+.equipment-special{padding:12px;background:#211b2d;border-radius:5px}
+.equipment-special strong{color:var(--critical)}
+.equipment-attributes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;border:1px solid #27313b;border-radius:6px;overflow:hidden}
+.equipment-attributes>div{display:flex;gap:10px;justify-content:space-between;padding:12px;background:#111a23;font-size:12px;color:#94a8ba}
+.equipment-attributes b{color:#d0dfeb;font-weight:500}
+@media(max-width:1100px){.history-row{grid-template-columns:minmax(145px,1.3fr) minmax(110px,1fr) minmax(110px,1fr) 115px minmax(120px,1fr) 66px;gap:10px}.metric-grid:has(.death-metric){grid-template-columns:repeat(3,minmax(0,1fr))}.participants-list .participant-row{grid-template-columns:28px minmax(155px,1fr) minmax(65px,1fr) 95px 65px 60px;gap:10px}}
+@media(max-width:800px){.history-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.history-head{display:none}.participants-list .participant-row{grid-template-columns:24px minmax(0,1fr) 75px 60px;gap:8px}.participants-list .participant-row .metric-track{display:none}.participants-list .participant-row>.number-cell:not(.primary){display:none}.participants-list .participant-head{display:none}.participants-list .death-count{text-align:right;font-size:11px}.skills-panel{overflow:visible}.skill-row{grid-template-columns:minmax(0,1fr) 80px 50px;gap:8px;padding:10px 28px 10px 10px}.skill-row>:nth-child(4),.skill-row>:nth-child(5){display:none}.skill-identity{gap:7px}.skill-icon{width:30px;height:30px}.skill-name{font-size:11px}.skill-row .number-cell{font-size:12px}.skill-detail-body{padding:12px}.skill-detail-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.skill-detail-metrics .metric-value{font-size:17px}.luck-panel,.equipment-panel{padding:14px}.luck-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.luck-metrics .metric-value{font-size:16px}.equipment-grid{grid-template-columns:1fr}.equipment-attributes{grid-template-columns:repeat(2,minmax(0,1fr))}.equipment-summary{padding:12px}.equipment-metrics .metric-value{font-size:18px}.metric-grid:has(.death-metric){grid-template-columns:repeat(2,minmax(0,1fr))}.skill-events{overflow-x:auto}.event-table{font-size:11px}.event-table td{overflow-wrap:anywhere}.event-skill .skill-icon{width:20px;height:20px}.luck-panel svg{min-height:120px}}

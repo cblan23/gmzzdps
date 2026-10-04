@@ -14,6 +14,7 @@ import websocket
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--url', default='https://gmzz.daodaogame.vip')
 parser.add_argument('--output', type=Path, default=Path('.codex-tmp/gmzz-web-verification'))
+parser.add_argument('--feature-ids', type=Path, help='Public encounter IDs to inspect for recovered equipment and rich skill data')
 args = parser.parse_args()
 output = args.output.resolve()
 output.mkdir(parents=True, exist_ok=True)
@@ -67,7 +68,8 @@ def ready(expression, timeout=25):
         if evaluate(f'Boolean({expression})'):
             return
         time.sleep(.1)
-    raise AssertionError(f'Page did not become ready: {expression}\n' + str(evaluate('document.body.innerText'))[:1400])
+    diagnostics = evaluate("[...document.images].filter(e=>!e.complete||!e.naturalWidth).map(e=>({src:e.src,loading:e.loading,complete:e.complete,rect:{top:e.getBoundingClientRect().top,width:e.getBoundingClientRect().width},hidden:!!e.closest('details:not([open])')}))")
+    raise AssertionError(f'Page did not become ready: {expression}\n' + str(diagnostics)[:3000] + '\n' + str(evaluate('document.body.innerText'))[:1400])
 
 
 def click(selector):
@@ -151,7 +153,7 @@ try:
     first = history['records'][0]
     detail = evaluate(f"fetch('/api/v1/dps/public/encounters/{first['encounter_id']}').then(r=>r.json()).then(d=>d.encounter)")
     assert evaluate("document.querySelector('.encounter-name').textContent") == detail['boss_name']
-    assert evaluate("document.querySelectorAll('.participant-row').length") == len(detail['participants'])
+    assert evaluate("document.querySelectorAll('.participant-row[data-slot]').length") == len(detail['participants'])
     assert first['encounter_id'] in evaluate('location.hash')
     assert evaluate("document.querySelector('.qualification-note').textContent")
     for participant in detail['participants']:
@@ -181,9 +183,60 @@ try:
     screenshot('battle-desktop.png')
     check('battle detail, team members, individual skills, events, curve and metric tabs')
 
+    assert evaluate("[...document.querySelectorAll('.metric-label')].some(e=>e.textContent==='团队死亡次数')")
+    for participant in detail['participants']:
+        expected_deaths = f"{participant['stats']['deaths']:,} 次" if participant['stats'].get('deaths') is not None else '未记录'
+        assert evaluate(f"document.querySelector('.participant-row[data-slot=\"{participant['slot']}\"] .death-count').textContent") == expected_deaths
+    assert '匿名' not in evaluate('document.body.innerText')
+    assert evaluate("document.querySelector('.profession-icon').alt") in ('歌颂者', '观众', '占卜家', '仲裁人', '学徒', '战士', '窥秘人', '未知职业')
+    check('actual death counts, missing death coverage and career selection names')
+
+    feature_ids = json.loads(args.feature_ids.read_text(encoding='utf-8')) if args.feature_ids else [r['encounter_id'] for r in history['records'][:10]]
+    features = evaluate(f"Promise.all({json.dumps(feature_ids)}.map(id=>fetch('/api/v1/dps/public/encounters/'+id).then(r=>r.json()).then(d=>d.encounter)))")
+    gear = next(((battle, p) for battle in features for p in battle['participants'] if p['stats'].get('equipment_snapshot', {}).get('equipment')), None)
+    luck = next(((battle, p) for battle in features for p in battle['participants'] if p['stats'].get('critical_luck') and p['stats'].get('skills')), None)
+    assert luck is not None, 'No real encounter with critical luck samples was verified'
+    if args.feature_ids:
+        assert gear is not None, 'No restored equipment snapshot was found'
+    for kind, chosen in (('equipment', gear), ('critical_luck', luck)):
+        if chosen is None:
+            continue
+        battle, participant = chosen
+        route(f"battle?id={battle['encounter_id']}", f"location.hash.includes('{battle['encounter_id']}') && document.querySelector('.encounter-name')?.textContent==={json.dumps(battle['boss_name'])} && document.querySelector('.skill-events')")
+        click(f'.participant-row[data-slot="{participant["slot"]}"]')
+        if kind == 'equipment':
+            snapshot = participant['stats']['equipment_snapshot']
+            assert evaluate("document.querySelectorAll('.equipment-item').length") == len(snapshot['equipment'])
+            click('.equipment-item summary')
+            assert evaluate("document.querySelector('.equipment-item').open")
+            assert evaluate("document.querySelector('.equipment-item .equipment-body').textContent")
+            ready("[...document.querySelectorAll('.equipment-icon')].every(e=>e.complete && e.naturalWidth>0)")
+            assert evaluate("[...document.querySelectorAll('.equipment-icon')].some(e=>e.src.includes('/assets/equipment/'))")
+            screenshot('equipment-desktop.png')
+            check('restored battle equipment, original item icons, affixes and attributes')
+        else:
+            model = participant['stats']['critical_luck']
+            assert model['verdict'] in evaluate("document.querySelector('.luck-verdict').textContent")
+            assert str(model['known_hits']) in evaluate("document.querySelector('.luck-panel').textContent.replaceAll(',','')")
+            assert evaluate("document.querySelector('.luck-panel .luck-observed')!==null")
+            sampled_skill = next(s for s in participant['stats']['skills'] if s.get('damage', 0)>0 and any(e['skill_id']==s['skill_id'] and e['damage']>0 for e in participant['stats']['skill_timeline']))
+            click(f'.skill-detail[data-skill-id="{sampled_skill["skill_id"]}"] summary')
+            ready("document.querySelector('.skill-detail[open] .per-skill-events')")
+            assert '暴击率' in evaluate("document.querySelector('.skill-detail[open]').textContent")
+            assert '平均每次' in evaluate("document.querySelector('.skill-detail[open]').textContent")
+            assert evaluate("document.querySelector('.skill-detail[open] .skill-detail-body svg')!==null")
+            click('.skill-detail[open] .per-skill-events summary')
+            assert evaluate("document.querySelectorAll('.skill-detail[open] .event-table tbody tr').length") > 0
+            ready("[...document.querySelectorAll('.skill-icon')].filter(e=>{const r=e.getBoundingClientRect();return e.checkVisibility()&&r.width>0&&r.bottom>0&&r.top<innerHeight}).every(e=>e.complete && e.naturalWidth>0)")
+            assert evaluate("document.querySelectorAll('.composition-segment').length") == len([s for s in participant['stats']['skills'] if s.get('damage', 0)>0])
+            screenshot('skills-desktop.png')
+            evaluate("document.querySelector('.luck-panel').scrollIntoView({block:'start'})")
+            screenshot('critical-luck-desktop.png')
+            check('real crit luck distribution, expanded skill metrics, damage histogram and per-skill events')
     click('.portal-back')
     ready("location.hash.startsWith('#history') && document.querySelector('.history-filters')")
-    named = evaluate("fetch('/api/v1/dps/public/records?eligibility=included').then(r=>r.json()).then(d=>d.records.find(r=>r.public_mode!=='anonymous'))")
+
+    named = evaluate("fetch('/api/v1/dps/public/records?eligibility=included').then(r=>r.json()).then(d=>d.records.find(r=>r.public_mode!=='unrecorded'))")
     if named:
         route('home', "!document.querySelector('.portal-shell').classList.contains('is-visible')")
         evaluate(f"document.querySelector('.search input').value={json.dumps(named['display_name'])}")
@@ -246,6 +299,23 @@ try:
             assert evaluate("document.documentElement.scrollWidth<=innerWidth")
             evaluate("document.querySelector('.portal-scroll').scrollTop=0")
             screenshot('battle-mobile.png')
+            if gear:
+                battle, participant = gear
+                route(f"battle?id={battle['encounter_id']}", "document.querySelector('.skill-events')")
+                click(f'.participant-row[data-slot="{participant["slot"]}"]')
+                click('.equipment-item summary')
+                assert evaluate("document.querySelector('.equipment-grid').scrollWidth<=innerWidth")
+                screenshot('equipment-mobile.png')
+            battle, participant = luck
+            route(f"battle?id={battle['encounter_id']}", "document.querySelector('.skill-events')")
+            click(f'.participant-row[data-slot="{participant["slot"]}"]')
+            sampled_skill = next(s for s in participant['stats']['skills'] if s.get('damage', 0)>0 and any(e['skill_id']==s['skill_id'] and e['damage']>0 for e in participant['stats']['skill_timeline']))
+            click(f'.skill-detail[data-skill-id="{sampled_skill["skill_id"]}"] summary')
+            ready("document.querySelector('.skill-detail[open] .per-skill-events')")
+            assert evaluate("document.querySelector('.skill-detail[open]').getBoundingClientRect().right<=innerWidth")
+            screenshot('skills-mobile.png')
+            evaluate("document.querySelector('.luck-panel').scrollIntoView({block:'start'})")
+            screenshot('critical-luck-mobile.png')
             route('home', "!document.querySelector('.portal-shell').classList.contains('is-visible')")
             screenshot('home-mobile.png')
         check(f'responsive navigation, upload help and content at {width}x{height}')

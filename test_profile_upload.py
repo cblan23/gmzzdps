@@ -13,6 +13,7 @@ from profile_upload import (
     initialize_profile_schema,
     normalize_nickname,
     recorded_self_character_id,
+    _timeline_rows_by_actor,
 )
 
 
@@ -22,6 +23,96 @@ def character_token(role_number: int, prefix: int = 1) -> str:
 
 
 class ProfileUploadTests(unittest.TestCase):
+    def test_deaths_are_public_and_incomplete_team_totals_remain_unknown(self):
+        payload = self.encounter(self.first)
+        payload['participants'][0]['deaths'] = 2
+        receipt = self.store.upload_encounter(self.connection, self.first, payload, public_mode='character', app_version='0.3.5')
+        detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        history = self.store.public_history(self.connection)['records'][0]
+        for data in (detail, history):
+            self.assertIsNone(data['team_deaths'])
+            self.assertEqual(data['recorded_deaths'], 2)
+            self.assertEqual(data['death_recorded_members'], 1)
+            self.assertEqual(data['death_total_members'], 2)
+        self.assertEqual(detail['participants'][0]['deaths'], 2)
+        self.assertIsNone(detail['participants'][1]['deaths'])
+        payload['participants'][1]['deaths'] = 0
+        self.store.upload_encounter(self.connection, self.first, payload, public_mode='character', app_version='0.3.5')
+        self.assertEqual(self.store.public_encounter(self.connection, receipt['encounter_id'])['team_deaths'], 2)
+        self.assertEqual(self.store.public_history(self.connection)['records'][0]['team_deaths'], 2)
+
+    def test_missing_names_are_marked_unrecorded(self):
+        payload = self.encounter(self.first)
+        for member in payload['participants']:
+            member['game_character_name'] = ''
+        receipt = self.store.upload_encounter(self.connection, self.first, payload, public_mode='anonymous', app_version='0.3.5')
+        detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        self.assertEqual(detail['participants'][0]['public_mode'], 'unrecorded')
+        self.assertEqual(detail['participants'][0]['display_name'], '未记录姓名 · 成员01')
+
+    def test_death_total_is_incomplete_when_roster_members_are_missing(self):
+        payload = self.encounter(self.first)
+        payload['team_size'] = 3
+        for member in payload['participants']:
+            member['deaths'] = 0
+        receipt = self.store.upload_encounter(self.connection, self.first, payload, public_mode='character', app_version='0.3.5')
+        detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        self.assertIsNone(detail['team_deaths'])
+        self.assertEqual(detail['recorded_deaths'], 0)
+        self.assertEqual(detail['death_recorded_members'], 2)
+        self.assertEqual(detail['death_total_members'], 3)
+
+    def test_equipment_upload_preserves_display_fields_without_raw_identifiers(self):
+        payload = self.encounter(self.first)
+        payload['participants'][0]['equipment_snapshot'] = {
+            'equipment_score': 12345, 'equipment_score_complete': True,
+            'attributes': {'pCrit': 400, 'mAtkMin': 500},
+            'equipment': [{'slot': 1, 'item_id': 3060643, 'item_name': '裂金之战刃', 'enhance_level': 4,
+                'metadata': {'icon': '3060643', 'item_level': 60, 'owner': self.first},
+                'details': {'uid': self.second},
+                'affixes': [{'name': '暴击', 'properties': [{'key': 'Crit_N', 'name': '暴击', 'value': 123}]}],
+                'special_affix': {'name': '特殊效果', 'passive_skill_ids': [86010010]}}],
+        }
+        payload['participants'][0]['skills'][0].update(critical_hits=2, penetration_hits=1, critical_rate=.5, count_semantics='server_skill_count')
+        receipt = self.store.upload_encounter(self.connection, self.first, payload, public_mode='character', app_version='0.3.5')
+        detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        stats = detail['participants'][0]['stats']
+        self.assertEqual(stats['equipment_rating'], 12345)
+        item = stats['equipment_snapshot']['equipment'][0]
+        self.assertEqual(item['enhance_level'], 4)
+        self.assertEqual(item['affixes'][0]['properties'][0]['value'], 123)
+        self.assertEqual(item['special_affix']['passive_skill_ids'], [86010010])
+        self.assertEqual(stats['skills'][0]['critical_hits'], 2)
+        self.assertEqual(stats['skills'][0]['count_semantics'], 'server_skill_count')
+        text = json.dumps(detail, ensure_ascii=False)
+        for hidden in (self.first, self.second, 'owner', 'uid', 'character_hash'):
+            self.assertNotIn(hidden, text)
+        self.store.upload_encounter(self.connection, self.first, self.encounter(self.first), public_mode='character', app_version='0.3.5')
+        repeated = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        self.assertEqual(repeated['participants'][0]['stats']['equipment_snapshot']['equipment'][0]['item_id'], 3060643)
+
+    def test_event_payload_preserves_unknown_flags_and_known_false(self):
+        record = {'event_log': {'columns': ['time_ms', 'actor_id', 'skill_id', 'damage', 'critical'],
+            'rows': [[10, 2, 101, 200, None], [20, 2, 101, 300, 0], [30, 2, 101, 600, 1]]}}
+        events = _timeline_rows_by_actor(record)[2]
+        self.assertEqual([row['critical'] for row in events], [None, False, True])
+        self.assertTrue(all(row['penetrating'] is None for row in events))
+        clean = self.store._clean_participant_stats({'skill_timeline': events})
+        self.assertEqual(clean['skill_timeline'], events)
+
+    def test_critical_luck_requires_known_events_and_rewards_high_damage_crits(self):
+        events = [{'skill_id': 101, 'damage': 100 * (i + 1) * (2 if i >= 5 else 1), 'critical': i >= 5} for i in range(10)]
+        damage = sum(row['damage'] for row in events)
+        self.assertIsNone(self.store.critical_luck_model({'skill_timeline': events[:7]}, damage))
+        self.assertIsNone(self.store.critical_luck_model({'skill_timeline': [{**row, 'critical': None} for row in events]}, damage))
+        model = self.store.critical_luck_model({'skill_timeline': events}, damage * 2)
+        self.assertEqual(model['critical_hits'], 5)
+        self.assertEqual(model['known_hits'], 10)
+        self.assertEqual(model['coverage'], .5)
+        self.assertAlmostEqual(model['observed'], damage * 2)
+        self.assertGreater(model['extra'], 0)
+        self.assertGreater(model['percentile'], .5)
+
     def test_captured_victory_can_upload_without_settlement_detail_packet(self):
         local = {'archive_reason': 'target_defeated', 'result': 'defeated', 'completion_confirmed': False,
                  'monster': {'name': '异化猎犬', 'template_id': 7109821}}
@@ -95,7 +186,7 @@ class ProfileUploadTests(unittest.TestCase):
                 {
                     "character_id": self.first,
                     "is_uploader": uploader == self.first,
-                    "game_character_name": "夜行者" if uploader == self.first else "泄露甲",
+                    "game_character_name": "夜行者",
                     "profession_id": 1200001,
                     "damage": 2_000_000,
                     "dps": 16666.67,
@@ -104,7 +195,7 @@ class ProfileUploadTests(unittest.TestCase):
                 {
                     "character_id": self.second,
                     "is_uploader": uploader == self.second,
-                    "game_character_name": "审判者" if uploader == self.second else "泄露乙",
+                    "game_character_name": "审判者",
                     "profession_id": 1200002,
                     "damage": 1_000_000,
                     "dps": 8333.33,
@@ -214,7 +305,7 @@ class ProfileUploadTests(unittest.TestCase):
         with self.assertRaisesRegex(ProfileUploadError, "已过期"):
             self.store.redeem_link_code(self.connection, self.second, link["code"])
 
-    def test_participant_uploads_merge_and_only_self_becomes_public(self) -> None:
+    def test_participant_uploads_merge_and_preserve_captured_names(self) -> None:
         profile_a = self.create_profile(self.first, "上传者甲", "夜行者")
         profile_b = self.create_profile(self.second, "上传者乙", "审判者")
         first_receipt = self.store.upload_encounter(
@@ -229,8 +320,8 @@ class ProfileUploadTests(unittest.TestCase):
             self.connection, first_receipt["encounter_id"]
         )
         self.assertEqual(public["participants"][0]["display_name"], "上传者甲")
-        self.assertEqual(public["participants"][1]["display_name"], "匿名玩家02")
-        self.assertNotIn("泄露乙", json.dumps(public, ensure_ascii=False))
+        self.assertEqual(public["participants"][1]["display_name"], "审判者")
+        self.assertNotIn(self.second, json.dumps(public, ensure_ascii=False))
 
         second_receipt = self.store.upload_encounter(
             self.connection,
@@ -267,7 +358,7 @@ class ProfileUploadTests(unittest.TestCase):
             self.connection.execute("SELECT COUNT(*) FROM encounters").fetchone()[0], 1
         )
 
-    def test_unlinked_character_can_upload_anonymously_or_show_own_character_name(self) -> None:
+    def test_legacy_anonymous_mode_publishes_available_character_name(self) -> None:
         first_receipt = self.store.upload_encounter(
             self.connection,
             self.first,
@@ -282,13 +373,13 @@ class ProfileUploadTests(unittest.TestCase):
             (first_receipt["upload_id"],),
         ).fetchone()
         self.assertIsNone(upload["profile_id"])
-        self.assertEqual(upload["public_mode"], "anonymous")
-        self.assertEqual(upload["public_character_name"], "")
+        self.assertEqual(upload["public_mode"], "character")
+        self.assertEqual(upload["public_character_name"], "夜行者")
         public = self.store.public_encounter(
             self.connection, first_receipt["encounter_id"]
         )
-        self.assertEqual(public["participants"][0]["display_name"], "匿名玩家01")
-        self.assertEqual(public["participants"][0]["public_mode"], "anonymous")
+        self.assertEqual(public["participants"][0]["display_name"], "夜行者")
+        self.assertEqual(public["participants"][0]["public_mode"], "character")
         self.assertEqual(public["participants"][0]["profile_id"], "")
 
         second_receipt = self.store.upload_encounter(
@@ -613,7 +704,7 @@ class ProfileUploadTests(unittest.TestCase):
             {row["display_name"] for row in leaderboard}, {"共同榜单身份"}
         )
 
-    def test_public_history_browses_nonranking_records_and_keeps_anonymous_names_private(self) -> None:
+    def test_public_history_browses_nonranking_records_and_searches_captured_names(self) -> None:
         profile = self.create_profile(self.first, "历史查询")
         first = self.encounter(self.first)
         receipt = self.store.upload_encounter(self.connection, self.first, first, public_mode="nickname", app_version="0.3.5")
@@ -622,23 +713,25 @@ class ProfileUploadTests(unittest.TestCase):
         second['started_at_epoch'] -= 3600
         second['ended_at_epoch'] -= 3600
         second['team_total_damage'] += 100_000
-        second['participants'][0]['game_character_name'] = '不能公开的名称'
+        second['participants'][0]['game_character_name'] = '历史角色名'
         partial = self.store.upload_encounter(self.connection, self.first, second, public_mode="anonymous", app_version="0.3.5")
         self.assertEqual(partial['statistics_status'], 'not_eligible')
         history = self.store.public_history(self.connection, limit=1)
         self.assertEqual(history['total'], 2)
         self.assertEqual(history['records'][0]['encounter_id'], receipt['encounter_id'])
         page_two = self.store.public_history(self.connection, limit=1, offset=1)
-        self.assertEqual(page_two['records'][0]['public_mode'], 'anonymous')
-        self.assertEqual(page_two['records'][0]['profile_id'], '')
+        self.assertEqual(page_two['records'][0]['public_mode'], 'character')
+        self.assertEqual(page_two['records'][0]['display_name'], '历史角色名')
+        self.assertEqual(page_two['records'][0]['profile_id'], profile['profile_id'])
         self.assertIn('TEAM_TOTAL_MISMATCH', page_two['records'][0]['qualification_reasons'])
-        for hidden in ('不能公开的名称', '泄露乙', self.first, self.second, 'character_hash'):
+        for hidden in (self.first, self.second, 'character_hash'):
             self.assertNotIn(hidden, json.dumps(page_two, ensure_ascii=False))
-        self.assertEqual(self.store.public_history(self.connection, query='不能公开的名称')['total'], 0)
-        self.assertEqual(self.store.public_history(self.connection, query='历史查询')['total'], 1)
+        self.assertEqual(self.store.public_history(self.connection, query='历史角色名')['total'], 1)
+        self.assertEqual(self.store.public_history(self.connection, query='审判者')['total'], 2)
+        self.assertEqual(self.store.public_history(self.connection, query='历史查询')['total'], 2)
         self.store.rename_profile(self.connection, self.first, '改名历史')
         self.assertEqual(self.store.public_history(self.connection, query='历史查询')['total'], 0)
-        self.assertEqual(self.store.public_history(self.connection, query='改名历史')['total'], 1)
+        self.assertEqual(self.store.public_history(self.connection, query='改名历史')['total'], 2)
         self.assertEqual(self.store.public_history(self.connection, eligibility='not_eligible')['total'], 1)
         self.assertEqual(self.store.public_history(self.connection, eligibility='included')['total'], 1)
         statistics = self.store.public_statistics(self.connection)
@@ -658,7 +751,7 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(history['records'][0]['display_name'], '上传乙')
         self.assertEqual(history['records'][0]['encounter_id'], receipt['encounter_id'])
         self.assertEqual(self.store.public_history(self.connection, query='夜行者')['total'], 1)
-        self.assertEqual(self.store.public_history(self.connection, query='上传甲')['total'], 0)
+        self.assertEqual(self.store.public_history(self.connection, query='上传甲')['total'], 1)
         self.assertEqual(self.store.public_history(self.connection, boss='测试首领', profession=1200002, difficulty='normal', started_after=1_799_999_999, ended_before=1_800_000_001)['total'], 1)
         for filters in ({'boss': '其他首领'}, {'profession': 1200007}, {'difficulty': 'hard'}, {'started_after': 1_800_000_001}, {'ended_before': 1_800_000_000}, {'query': "' OR 1=1 --"}):
             self.assertEqual(self.store.public_history(self.connection, **filters)['total'], 0)
@@ -805,7 +898,7 @@ class ProfileUploadTests(unittest.TestCase):
             [item["is_uploader"] for item in payload["participants"]],
             [True, False],
         )
-        self.assertEqual(payload["participants"][1]["game_character_name"], "")
+        self.assertEqual(payload["participants"][1]["game_character_name"], "队友")
         self.assertEqual(
             [point["time"] for point in payload["team_dps_timeline"]],
             [1.25, 2.5, 3.75, 5, 0],

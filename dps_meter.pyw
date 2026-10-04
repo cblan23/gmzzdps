@@ -55276,7 +55276,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                     self.history_detail_label.configure(
                         text=(
                             f"暴击率 {critical_text}  ·  穿刺率 {penetration_text}  ·  "
-                            f"死亡 {deaths}  ·  "
+                            f"死亡次数 {self._history_optional_number(selected_participant.get('deaths') if isinstance(selected_participant, dict) else None)}  ·  "
                             f"复活 {revives}  ·  死亡时间 {format_duration(death_duration)}"
                             f"{detail_suffix}"
                         )
@@ -55448,7 +55448,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             "share": "占比",
             "critical": "暴击率",
             "penetration": "穿刺率",
-            "deaths": "死亡",
+            "deaths": "死亡次数",
             "revives": "复活",
             "death_time": "死亡时间",
             "effective": "有效治疗",
@@ -55739,7 +55739,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             micro_linespace = self._ui_font("micro").metrics("linespace")
             number_linespace = self._ui_font("number_strong").metrics("linespace")
         row_height = (
-            max(78, strong_linespace + number_linespace + micro_linespace + 14)
+            max(96, strong_linespace + number_linespace + micro_linespace * 2 + 20)
             if narrow_detail_roster
             else max(43, strong_linespace + micro_linespace + 12)
             if compact_detail_roster
@@ -55904,11 +55904,17 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                     amount_label = "伤害"
                 rate_text = f"{self._history_optional_number(rate)}  {rate_label}"
                 share_text = f"占比 {share * 100:.1f}%" if share is not None else "占比 --"
+                death_text = (
+                    f"死亡 {self._history_optional_number(participant.get('deaths'))}"
+                )
+                if not narrow_detail_roster:
+                    rating_text += f" · {death_text}"
                 rating_color = "#8bc7d4" if is_ai else ACCENT if rating is not None else SUBTLE
                 if narrow_detail_roster:
                     name_y = top + 6 + strong_linespace / 2
                     rate_y = top + 9 + strong_linespace + number_linespace / 2
-                    meta_y = bottom - 5 - micro_linespace / 2
+                    death_y = bottom - 5 - micro_linespace / 2
+                    meta_y = death_y - micro_linespace - 4
                     short_rating = (
                         "人机" if is_ai else f"评分 {format_number(rating)}"
                         if rating is not None else "评分 --"
@@ -55941,6 +55947,10 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                     canvas.create_text(
                         width - 13, meta_y, text=share_text,
                         fill=MUTED, anchor="e", font=self._ui_font("micro"), tags=(tag,),
+                    )
+                    canvas.create_text(
+                        width - 13, death_y, text=death_text,
+                        fill="#e47c80", anchor="e", font=self._ui_font("micro"), tags=(tag,),
                     )
                 else:
                     detail_text = (

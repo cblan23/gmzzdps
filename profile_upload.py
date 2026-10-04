@@ -13,6 +13,7 @@ import sqlite3
 import time
 import unicodedata
 from dataclasses import dataclass
+from statistics import median
 from typing import Callable, Iterable, Mapping
 
 
@@ -386,6 +387,9 @@ def initialize_profile_schema(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_encounter_participants_profile
             ON encounter_participants(profile_id, encounter_id);
+        CREATE INDEX IF NOT EXISTS idx_encounter_participants_character_names
+            ON encounter_participants(public_character_name, encounter_id)
+            WHERE public_character_name!='';
         CREATE INDEX IF NOT EXISTS idx_encounter_participants_public_character
             ON encounter_participants(public_character_name, encounter_id)
             WHERE public_mode='character';
@@ -970,8 +974,7 @@ class ProfileUploadStore:
             effective_healing = _as_int(raw.get("effective_healing"))
             if skill_id <= 0 and damage <= 0 and effective_healing <= 0:
                 continue
-            rows.append(
-                {
+            row = {
                     "skill_id": skill_id,
                     "name": _safe_text(raw.get("name"), 64),
                     "damage": damage,
@@ -981,8 +984,89 @@ class ProfileUploadStore:
                     "max_hit": _as_int(raw.get("max_hit")),
                     "source": _safe_text(raw.get("source"), 48),
                 }
-            )
+            for key in ('count_semantics',):
+                if raw.get(key):
+                    row[key] = _safe_text(raw[key], 48)
+            if raw.get('server_skill_count') is not None:
+                row['server_skill_count'] = _as_int(raw['server_skill_count'], maximum=10_000_000)
+            for key in ('critical_hits', 'penetration_hits', 'damage_hits', 'healing_hits'):
+                if raw.get(key) is not None:
+                    row[key] = _as_int(raw[key], maximum=10_000_000)
+            for key in ('critical_rate', 'penetration_rate'):
+                if raw.get(key) is not None:
+                    row[key] = _as_float(raw[key], maximum=1.0)
+            rows.append(row)
         return rows
+
+    @staticmethod
+    def clean_equipment_snapshot(value: object) -> dict[str, object]:
+        if not isinstance(value, Mapping):
+            return {}
+        result: dict[str, object] = {}
+        for key in ('captured_at', 'source', 'equipment_score_source'):
+            if key in value:
+                result[key] = _safe_text(value[key], 96)
+        for key in ('captured_at_ns', 'extraordinary_rating', 'equipment_score',
+                    'equipment_known_score', 'active_word_count', 'total_word_count', 'pvp_equipment_count'):
+            if value.get(key) is not None:
+                result[key] = _as_int(value[key], maximum=4_102_444_800_000_000_000)
+        for key in ('partial', 'equipment_score_complete'):
+            if key in value:
+                result[key] = bool(value[key])
+        attributes = value.get('attributes')
+        if isinstance(attributes, Mapping):
+            result['attributes'] = {str(key): _as_float(number, maximum=1e18)
+                for key, number in list(attributes.items())[:96]
+                if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,63}', str(key))
+                and isinstance(number, (int, float)) and math.isfinite(number)}
+
+        def properties(raw):
+            return [{'key': _safe_text(row.get('key'), 64), 'name': _safe_text(row.get('name'), 96),
+                     'value': row.get('value') if isinstance(row.get('value'), (int, float)) and math.isfinite(row['value']) else None}
+                    for row in raw[:32] if isinstance(row, Mapping)] if isinstance(raw, list) else []
+
+        items = []
+        for raw in value.get('equipment', [])[:24] if isinstance(value.get('equipment'), list) else []:
+            if not isinstance(raw, Mapping):
+                continue
+            item = {}
+            for key in ('slot_name', 'item_name', 'quality_name', 'equipment_mode', 'score_source'):
+                if key in raw:
+                    item[key] = _safe_text(raw[key], 96)
+            for key in ('slot', 'item_id', 'quality', 'item_score', 'known_score', 'total_score',
+                        'base_score', 'random_score', 'enhance_score', 'enhance_level',
+                        'enhance_completed_level', 'active_word_count', 'total_word_count', 'word_score'):
+                if raw.get(key) is not None:
+                    item[key] = _as_int(raw[key])
+            for key in ('score_complete', 'is_pvp'):
+                if key in raw:
+                    item[key] = bool(raw[key])
+            metadata = raw.get('metadata')
+            if isinstance(metadata, Mapping):
+                item['metadata'] = {key: _safe_text(metadata[key], 96) if key == 'icon' else _as_int(metadata[key])
+                    for key in ('icon', 'item_level', 'required_level', 'quality', 'base_score', 'season_id')
+                    if key in metadata and metadata[key] is not None}
+            affixes = []
+            for affix in raw.get('affixes', [])[:32] if isinstance(raw.get('affixes'), list) else []:
+                if isinstance(affix, Mapping):
+                    affixes.append({'name': _safe_text(affix.get('name'), 96),
+                        'category': _safe_text(affix.get('category'), 32), 'score': _as_int(affix.get('score')),
+                        'properties': properties(affix.get('properties'))})
+            item['affixes'] = affixes
+            special = raw.get('special_affix')
+            if isinstance(special, Mapping):
+                item['special_affix'] = {'name': _safe_text(special.get('name'), 96),
+                    'score': _as_int(special.get('score')), 'properties': properties(special.get('properties')),
+                    'passive_skill_ids': [_as_int(sid, maximum=2_000_000_000) for sid in special.get('passive_skill_ids', [])[:16]]
+                        if isinstance(special.get('passive_skill_ids'), list) else []}
+            items.append(item)
+        result['equipment'] = items
+        for key in ('gems', 'sets'):
+            if key in value:
+                result[key] = [{'name': _safe_text(row.get('name'), 96), 'item_id': _as_int(row.get('item_id')),
+                    'level': _as_int(row.get('level')), 'properties': properties(row.get('properties'))}
+                    for row in value[key][:32] if isinstance(row, Mapping)] if isinstance(value[key], list) else None
+        return result
 
     @classmethod
     def _clean_participant_stats(cls, raw: Mapping[str, object]) -> dict[str, object]:
@@ -1024,6 +1108,11 @@ class ProfileUploadStore:
             if field in raw:
                 result[field] = _safe_text(raw.get(field), 48)
         result["skills"] = cls._clean_skill_rows(raw.get("skills"))
+        equipment = cls.clean_equipment_snapshot(raw.get('equipment_snapshot'))
+        if equipment:
+            result['equipment_snapshot'] = equipment
+            if equipment.get('equipment_score') is not None and equipment.get('equipment_score_complete'):
+                result['equipment_rating'] = equipment['equipment_score']
         timeline = raw.get("skill_timeline")
         if isinstance(timeline, list):
             cleaned_timeline: list[dict[str, object]] = []
@@ -1035,8 +1124,8 @@ class ProfileUploadStore:
                         "time_ms": _as_int(item.get("time_ms"), maximum=86_400_000),
                         "skill_id": _as_int(item.get("skill_id"), maximum=2_000_000_000),
                         "damage": _as_int(item.get("damage")),
-                        "critical": bool(item.get("critical")),
-                        "penetrating": bool(item.get("penetrating")),
+                        "critical": item.get("critical") if isinstance(item.get("critical"), bool) else None,
+                        "penetrating": item.get("penetrating") if isinstance(item.get("penetrating"), bool) else None,
                     }
                 )
             if cleaned_timeline:
@@ -1105,11 +1194,7 @@ class ProfileUploadStore:
                     "identity_resolved": resolved,
                     "is_ai": is_ai,
                     "is_uploader": is_uploader,
-                    "character_name": (
-                        _safe_text(raw.get("game_character_name"), 48)
-                        if is_uploader
-                        else ""
-                    ),
+                    "character_name": _safe_text(raw.get("game_character_name"), 48),
                     "profession_id": _as_int(
                         raw.get("profession_id"), maximum=2_000_000_000
                     ),
@@ -1526,9 +1611,9 @@ class ProfileUploadStore:
                 """
                 INSERT INTO encounter_participants(
                     encounter_id, character_hash, slot_number, identity_resolved,
-                    is_ai, profile_id, profession_id, damage, dps, hps, taken,
+                    is_ai, profile_id, profession_id, public_mode, public_character_name, damage, dps, hps, taken,
                     stats_json, data_quality, first_seen_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     encounter_id,
@@ -1538,6 +1623,8 @@ class ProfileUploadStore:
                     int(bool(participant["is_ai"])),
                     str(profile["profile_id"]) if profile is not None else None,
                     participant["profession_id"],
+                    'character' if participant['character_name'] else 'nickname' if profile is not None else 'anonymous',
+                    participant['character_name'],
                     participant["damage"],
                     participant["dps"],
                     participant["hps"],
@@ -1549,7 +1636,17 @@ class ProfileUploadStore:
                 ),
             )
             return
+        if participant['character_name']:
+            connection.execute("""UPDATE encounter_participants SET public_character_name=?,
+                public_mode=CASE WHEN public_mode='nickname' THEN public_mode ELSE 'character' END
+                WHERE encounter_id=? AND character_hash=?""",
+                (participant['character_name'], encounter_id, hashed))
         if int(participant["data_quality"]) >= int(existing["data_quality"]):
+            merged_stats = dict(participant['stats'])
+            stored_stats = json.loads(str(existing['stats_json']))
+            for field in ('deaths', 'revives', 'death_duration_seconds', 'equipment_snapshot', 'equipment_rating'):
+                if field not in merged_stats and field in stored_stats:
+                    merged_stats[field] = stored_stats[field]
             connection.execute(
                 """
                 UPDATE encounter_participants SET
@@ -1565,7 +1662,7 @@ class ProfileUploadStore:
                     participant["dps"],
                     participant["hps"],
                     participant["taken"],
-                    _json_text(participant["stats"]),
+                    _json_text(merged_stats),
                     participant["data_quality"],
                     timestamp,
                     encounter_id,
@@ -1619,6 +1716,8 @@ class ProfileUploadStore:
         )
         if mode == "character" and not public_character_name:
             raise ProfileUploadError("BAD_ENCOUNTER")
+        if mode == 'anonymous':
+            mode = 'character' if public_character_name else 'nickname' if profile is not None else 'anonymous'
         clean_app_version = _safe_text(app_version, 48)
         qualification = self._qualification(
             parsed, app_version=clean_app_version, uploader=uploader
@@ -1686,13 +1785,13 @@ class ProfileUploadStore:
         connection.execute(
             """
             UPDATE encounter_participants SET
-                profile_id=?, public_mode=?, public_character_name=?, last_seen_at=?
+                profile_id=?, public_mode=?, public_character_name=COALESCE(NULLIF(?, ''), public_character_name), last_seen_at=?
             WHERE encounter_id=? AND character_hash=?
             """,
             (
                 profile_id,
                 mode,
-                public_character_name if mode == "character" else "",
+                public_character_name,
                 timestamp,
                 encounter_id,
                 uploader_hash,
@@ -1891,9 +1990,68 @@ class ProfileUploadStore:
         mode = str(row["public_mode"])
         if mode == "nickname" and row["nickname"]:
             return str(row["nickname"]), "nickname", str(row["profile_id"] or "")
-        if mode == "character" and row["public_character_name"]:
+        if row["public_character_name"]:
             return str(row["public_character_name"]), "character", str(row["profile_id"] or "")
-        return f"匿名玩家{anonymous_number:02d}", "anonymous", ""
+        if row['nickname']:
+            return str(row['nickname']), 'nickname', str(row['profile_id'] or '')
+        return f"未记录姓名 · 成员{anonymous_number:02d}", "unrecorded", ""
+
+    @staticmethod
+    def critical_luck_model(stats: Mapping[str, object], damage: int) -> dict[str, object] | None:
+        """Use the desktop crit-placement estimate, keeping observed crit counts fixed."""
+        groups: dict[int, list[dict[str, object]]] = {}
+        for event in stats.get('skill_timeline', []) if isinstance(stats.get('skill_timeline'), list) else []:
+            if isinstance(event, dict) and isinstance(event.get('critical'), bool) and _as_int(event.get('damage')) > 0:
+                groups.setdefault(_as_int(event.get('skill_id')), []).append(event)
+        count = sum(map(len, groups.values()))
+        if count < 8:
+            return None
+        ratios = {}
+        for sid, events in groups.items():
+            crit = [float(e['damage']) for e in events if e['critical']]
+            normal = [float(e['damage']) for e in events if not e['critical']]
+            if crit and normal:
+                ratios[sid] = min(2.8, max(1.1, median(crit) / median(normal)))
+        multiplier = median(ratios.values()) if ratios else 1.5
+        observed = expected = variance = 0.0
+        for sid, events in groups.items():
+            n, k = len(events), sum(e['critical'] for e in events)
+            ratio = ratios.get(sid, multiplier)
+            bases = [float(e['damage']) / ratio if e['critical'] else float(e['damage']) for e in events]
+            deltas = [base * (ratio - 1) for base in bases]
+            observed += sum(float(e['damage']) for e in events)
+            expected += sum(bases) + sum(deltas) * k / n
+            if n > 1 and 0 < k < n:
+                mean = sum(deltas) / n
+                variance += k * (n - k) / (n * (n - 1)) * sum((d - mean) ** 2 for d in deltas)
+        if expected <= 0:
+            return None
+        sample_damage = observed
+        if damage > 0 and observed > 0:
+            scale = damage / observed
+            observed *= scale
+            expected *= scale
+            variance *= scale * scale
+        sigma = max(math.sqrt(variance), expected * .0008, 1)
+        z = (observed - expected) / sigma
+        percentile = min(.999, max(.001, .5 * (1 + math.erf(z / math.sqrt(2)))))
+        verdict = '非常好运' if percentile >= .9 else '略有好运' if percentile >= .67 else '接近期望' if percentile > .33 else '略显倒霉' if percentile > .1 else '非常倒霉'
+        return {'observed': observed, 'expected': expected, 'sigma': sigma, 'z_score': z,
+                'percentile': percentile, 'verdict': verdict, 'extra': observed - expected,
+                'extra_ratio': (observed - expected) / expected, 'known_hits': count,
+                'critical_hits': sum(e['critical'] for events in groups.values() for e in events),
+                'critical_rate': sum(e['critical'] for events in groups.values() for e in events) / count,
+                'multiplier': multiplier, 'sample_damage': sample_damage,
+                'coverage': min(1, sample_damage / damage) if damage > 0 else None}
+
+    @staticmethod
+    def _death_summary(stats: list[Mapping[str, object]], team_size: int = 0) -> dict[str, object]:
+        known = [row['deaths'] for row in stats if row.get('deaths') is not None]
+        recorded = sum(_as_int(value) for value in known)
+        total = max(len(stats), team_size)
+        return {'team_deaths': recorded if total and len(known) == total else None,
+                'recorded_deaths': recorded if known else None,
+                'death_recorded_members': len(known), 'death_total_members': total}
 
     def public_encounter(
         self, connection: sqlite3.Connection, encounter_id: object
@@ -1923,6 +2081,8 @@ class ProfileUploadStore:
                 stats = json.loads(str(row["stats_json"]))
             except (TypeError, ValueError):
                 stats = {}
+            if isinstance(stats, dict):
+                stats['critical_luck'] = self.critical_luck_model(stats, int(row['damage']))
             participants.append(
                 {
                     "slot": int(row["slot_number"]),
@@ -1935,6 +2095,7 @@ class ProfileUploadStore:
                     "dps": float(row["dps"]),
                     "hps": float(row["hps"]),
                     "taken": int(row["taken"]),
+                    "deaths": stats.get('deaths') if isinstance(stats, dict) else None,
                     "stats": stats if isinstance(stats, dict) else {},
                 }
             )
@@ -1960,6 +2121,7 @@ class ProfileUploadStore:
             "qualification_reasons": json.loads(str(encounter["validation_json"])).get("reasons", []),
             "data": payload if isinstance(payload, dict) else {},
             "participants": participants,
+            **self._death_summary([participant['stats'] for participant in participants], int(encounter['team_size'])),
         }
 
     def public_history(
@@ -1997,15 +2159,14 @@ class ProfileUploadStore:
             conditions.append("e.ended_at<?")
             params.append(before)
         if needle:
-            # Search only the identity that the participant elected to publish.
+            # Captured character names and profile nicknames are searchable.
             conditions.append("""e.encounter_id IN (
                 SELECT p.encounter_id FROM encounter_participants p
-                WHERE p.public_mode='character'
+                WHERE p.public_character_name!=''
                     AND instr(lower(p.public_character_name), lower(?))>0
                 UNION
-                SELECT p.encounter_id FROM encounter_participants p
-                JOIN profiles pr ON pr.profile_id=p.profile_id
-                WHERE p.public_mode='nickname' AND instr(lower(pr.nickname), lower(?))>0
+                SELECT p.encounter_id FROM encounter_participants p WHERE p.profile_id IN (
+                    SELECT pr.profile_id FROM profiles pr WHERE instr(lower(pr.nickname), lower(?))>0)
             )""")
             params.extend((needle, needle))
         where = " AND ".join(conditions)
@@ -2023,7 +2184,7 @@ class ProfileUploadStore:
             for member in connection.execute(
                 f"""SELECT p.encounter_id, p.slot_number, p.public_mode,
                     p.public_character_name, p.profile_id, p.profession_id,
-                    p.dps, p.damage, pr.nickname FROM encounter_participants p
+                    p.dps, p.damage, p.stats_json, pr.nickname FROM encounter_participants p
                     LEFT JOIN profiles pr ON pr.profile_id=p.profile_id
                     WHERE p.encounter_id IN ({placeholders}) ORDER BY p.slot_number""", ids,
             ):
@@ -2034,8 +2195,10 @@ class ProfileUploadStore:
             for member in members.get(str(row['encounter_id']), []):
                 name, mode, profile_id = self._public_participant_name(member, int(member['slot_number']))
                 public_members.append((member, name, mode, profile_id))
-            selected = next((item for item in public_members if item[2] != 'anonymous'
-                             and (not needle or needle.casefold() in item[1].casefold())), None)
+            selected = next((item for item in public_members if item[2] != 'unrecorded'
+                             and (not needle or needle.casefold() in item[1].casefold()
+                                  or needle.casefold() in str(item[0]['public_character_name']).casefold()
+                                  or needle.casefold() in str(item[0]['nickname'] or '').casefold())), None)
             if selected is None and public_members:
                 selected = public_members[0]
             payload = json.loads(str(row['payload_json']))
@@ -2049,12 +2212,14 @@ class ProfileUploadStore:
                 'completion_confirmed': bool(payload.get('completion_confirmed')),
                 'statistics_status': str(row['statistics_status']), 'ranking_status': str(row['ranking_status']),
                 'qualification_reasons': validation.get('reasons', []), 'game_version': str(row['game_version']),
+                **self._death_summary([json.loads(str(member['stats_json'])) for member in members.get(str(row['encounter_id']), [])], int(row['team_size'])),
             }
             if selected:
                 member, name, mode, profile_id = selected
                 record.update(display_name=name, public_mode=mode, profile_id=profile_id,
                               profession_id=int(member['profession_id']), slot=int(member['slot_number']),
                               dps=float(member['dps']), damage=int(member['damage']))
+                record['deaths'] = json.loads(str(member['stats_json'])).get('deaths')
             records.append(record)
         return {'records': records, 'total': int(total), 'limit': page_size, 'offset': page_offset}
 
@@ -2576,13 +2741,13 @@ def _timeline_rows_by_actor(record: Mapping[str, object]) -> dict[int, list[dict
                 "damage": raw[positions["damage"]],
                 "critical": (
                     bool(raw[positions["critical"]])
-                    if "critical" in positions
-                    else False
+                    if "critical" in positions and raw[positions['critical']] in (True, False, 0, 1)
+                    else None
                 ),
                 "penetrating": (
                     bool(raw[positions["penetrating"]])
-                    if "penetrating" in positions
-                    else False
+                    if "penetrating" in positions and raw[positions['penetrating']] in (True, False, 0, 1)
+                    else None
                 ),
             }
         except (IndexError, TypeError, ValueError, OverflowError):
@@ -2661,11 +2826,7 @@ def build_upload_encounter(
             "character_id": identity_value,
             "is_ai": is_ai,
             "is_uploader": is_uploader,
-            "game_character_name": (
-                _safe_text(current_character_name or raw.get("name"), 48)
-                if is_uploader
-                else ""
-            ),
+            "game_character_name": _safe_text(current_character_name if is_uploader and current_character_name else raw.get("name"), 48),
             "profession_id": _as_int(
                 raw.get("profession_id"), maximum=2_000_000_000
             ),
@@ -2698,6 +2859,7 @@ def build_upload_encounter(
             "overhealing",
             "hps",
             "skills",
+            "equipment_snapshot",
         ):
             if field in raw:
                 participant[field] = raw[field]

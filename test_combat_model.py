@@ -21572,7 +21572,7 @@ class CombatModelTests(unittest.TestCase):
                 "participants": [{
                     "actor_id": 10, "name": "绵竹绵·投影", "profession_id": 1_200_005,
                     "is_ai": True, "damage": 7_750_812, "dps": 41_896,
-                    "share": 0.131,
+                    "share": 0.131, "deaths": 2,
                 }],
             }
             window._selected_history_record = lambda: record
@@ -21596,10 +21596,13 @@ class CombatModelTests(unittest.TestCase):
             rate = next(box for text, box in boxes.items() if "DPS" in text)
             amount = next(box for text, box in boxes.items() if "伤害" in text)
             share = next(box for text, box in boxes.items() if "占比" in text)
+            death = next(box for text, box in boxes.items() if text == "死亡 2")
             self.assertLessEqual(name[2], rating[0])
             self.assertLessEqual(amount[2], share[0])
             self.assertLessEqual(name[3], rate[1])
             self.assertLessEqual(rate[3], amount[1])
+            self.assertLessEqual(amount[3], death[1])
+            self.assertLessEqual(death[2], canvas.winfo_width())
         finally:
             root.destroy()
 

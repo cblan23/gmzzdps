@@ -649,7 +649,7 @@ class MonitorServerTests(unittest.TestCase):
                 {
                     "character_id": first,
                     "is_uploader": uploader == first,
-                    "game_character_name": "夜行者" if uploader == first else "不应公开甲",
+                    "game_character_name": "夜行者",
                     "profession_id": 1,
                     "damage": 2_000_000,
                     "dps": 16666.67,
@@ -657,7 +657,7 @@ class MonitorServerTests(unittest.TestCase):
                 {
                     "character_id": second,
                     "is_uploader": uploader == second,
-                    "game_character_name": "审判者" if uploader == second else "不应公开乙",
+                    "game_character_name": "审判者",
                     "profession_id": 2,
                     "damage": 1_000_000,
                     "dps": 8333.33,
@@ -675,7 +675,7 @@ class MonitorServerTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(value["error"], "invalid_session")
 
-    def test_unlinked_character_upload_route_supports_anonymous_and_user_id_modes(self):
+    def test_unlinked_character_upload_route_uses_captured_names_for_legacy_modes(self):
         first = profile_character_token(8051)
         second = profile_character_token(8052)
         session = self.start_card_session("d" * 32)
@@ -701,7 +701,7 @@ class MonitorServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             public["encounter"]["participants"][0]["display_name"],
-            "匿名玩家01",
+            "夜行者",
         )
 
         status, displayed = self.request(
@@ -792,7 +792,7 @@ class MonitorServerTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_profile_upload_http_flow_merges_sources_and_keeps_teammates_private(self):
+    def test_profile_upload_http_flow_merges_sources_and_shows_captured_names(self):
         first = profile_character_token(8101)
         second = profile_character_token(8102)
         session_a = self.start_card_session("a" * 32)
@@ -866,9 +866,9 @@ class MonitorServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             [row["display_name"] for row in public_first["encounter"]["participants"]],
-            ["接口甲", "匿名玩家02"],
+            ["接口甲", "审判者"],
         )
-        self.assertNotIn("不应公开乙", json.dumps(public_first, ensure_ascii=False))
+        self.assertNotIn(second, json.dumps(public_first, ensure_ascii=False))
 
         status, uploaded_b = self.request(
             "/api/v1/dps/encounters/upload",

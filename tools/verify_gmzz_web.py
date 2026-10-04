@@ -129,9 +129,11 @@ try:
     assert evaluate("document.querySelector('#historySummary').textContent") == f"当前 {history['total']:,} 场历史战斗"
     assert evaluate("document.querySelector('.kicker').textContent") == '叨叨诡秘dps-logs'
     assert evaluate("getComputedStyle(document.querySelector('.kicker')).textTransform") == 'none'
+    assert evaluate("document.querySelector('.hero h1')") is None
     assert evaluate("document.querySelector('#qualifiedSummary, .home-data-separator')") is None
     assert evaluate("document.querySelector('.nav a[href=\"#records\"]').textContent") == '数据排行'
     assert all(group in evaluate("document.querySelector('.home-help').textContent") for group in ('1094925831', '165966739'))
+    assert evaluate("document.querySelector('.home-help').tagName") == 'DIV'
     screenshot('home-desktop.png')
     check('homepage real history count and updated labels')
 
@@ -142,6 +144,7 @@ try:
     assert evaluate("document.querySelector('.upload-step:nth-child(3) small').textContent") == '自动上传'
     assert evaluate("document.querySelector('.upload-tip')") is None
     assert evaluate("document.querySelector('#manualUploadBtn')") is None
+    assert evaluate("document.querySelectorAll('.upload-step').length") == 2
     screenshot('upload-popover-desktop.png')
     call('Input.dispatchKeyEvent', {'type': 'keyDown', 'key': 'Escape', 'code': 'Escape', 'windowsVirtualKeyCode': 27})
     assert evaluate("document.querySelector('#uploadPopover').hidden")
@@ -299,8 +302,8 @@ try:
         assert evaluate("document.querySelector('#uploadStatusBtn').getBoundingClientRect().bottom<=document.querySelector('.header').getBoundingClientRect().bottom")
         click('#uploadStatusBtn')
         assert evaluate("document.querySelector('#uploadPopover').getBoundingClientRect().right<=innerWidth")
-        click('.home-help')
-        ready("document.querySelectorAll('.share-step').length===4")
+        click('#uploadStatusBtn')
+        route('share', "document.querySelectorAll('.share-step').length===4")
         assert evaluate("document.documentElement.scrollWidth<=innerWidth")
         route('history', "document.querySelector('.history-row:not(.history-head)')")
         assert evaluate("document.documentElement.scrollWidth<=innerWidth")

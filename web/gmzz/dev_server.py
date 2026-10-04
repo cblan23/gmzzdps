@@ -22,7 +22,7 @@ class SiteHandler(http.server.SimpleHTTPRequestHandler):
 
     def _proxy_public_api(self) -> None:
         request = urllib.request.Request(
-            f"{PUBLIC_API_ORIGIN}{self.path}",
+            f"{self.server.public_api_origin}{self.path}",
             headers={"Accept": "application/json", "User-Agent": "gmzz-site-dev/1"},
         )
         try:
@@ -56,12 +56,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8087)
+    parser.add_argument("--api-origin", default=PUBLIC_API_ORIGIN)
     args = parser.parse_args()
     site_root = pathlib.Path(__file__).resolve().parent
     handler = lambda *handler_args, **handler_kwargs: SiteHandler(  # noqa: E731
         *handler_args, directory=str(site_root), **handler_kwargs
     )
     server = http.server.ThreadingHTTPServer((args.host, args.port), handler)
+    server.public_api_origin = args.api_origin.rstrip('/')
     print(f"GMZZ site: http://{args.host}:{args.port}", flush=True)
     server.serve_forever()
 

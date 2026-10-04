@@ -1602,6 +1602,25 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 statistics = profile_upload_store().public_statistics(connection)
             self._json(HTTPStatus.OK, {"ok": True, "statistics": statistics})
             return
+        if path == "/api/v1/dps/public/catalog":
+            with database() as connection:
+                catalog = profile_upload_store().public_catalog(connection)
+            self._json(HTTPStatus.OK, {"ok": True, "catalog": catalog})
+            return
+        if path == "/api/v1/dps/public/records":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            def value(name, default=''):
+                return query.get(name, [default])[0]
+            with database() as connection:
+                history = profile_upload_store().public_history(
+                    connection, query=value('q'), boss=value('boss'),
+                    profession=value('profession', '0'), difficulty=value('difficulty'),
+                    eligibility=value('eligibility', 'all'), started_after=value('after', '0'),
+                    ended_before=value('before', '0'), limit=value('limit', '25'),
+                    offset=value('offset', '0'),
+                )
+            self._json(HTTPStatus.OK, {"ok": True, **history})
+            return
         if path == "/api/v1/dps/public/performance":
             query = parse_qs(parsed.query, keep_blank_values=True)
 

@@ -931,6 +931,20 @@ class MonitorServerTests(unittest.TestCase):
         status, leaderboard = self.request("/api/v1/dps/public/leaderboards")
         self.assertEqual(status, 200)
         self.assertEqual(len(leaderboard["leaderboards"]), 2)
+        status, history = self.request('/api/v1/dps/public/records?limit=1')
+        self.assertEqual(status, 200)
+        self.assertEqual(history['total'], 1)
+        self.assertEqual(history['records'][0]['encounter_id'], encounter_id)
+        self.assertNotIn('character_hash', json.dumps(history))
+        status, filtered = self.request('/api/v1/dps/public/records?q=%E6%8E%A5%E5%8F%A3%E7%94%B2%E6%96%B0&eligibility=included')
+        self.assertEqual(status, 200)
+        self.assertEqual(filtered['total'], 1)
+        status, empty = self.request('/api/v1/dps/public/records?offset=99999&limit=invalid')
+        self.assertEqual(status, 200)
+        self.assertEqual(empty['records'], [])
+        status, catalog = self.request('/api/v1/dps/public/catalog')
+        self.assertEqual(status, 200)
+        self.assertEqual(catalog['catalog']['bosses'][0]['records'], 1)
         status, performance = self.request(
             "/api/v1/dps/public/performance?boss=drill&metric=dps"
             "&rating_basis=extraordinary&min_rating=0&max_rating=200000"

@@ -613,6 +613,72 @@ class ProfileUploadTests(unittest.TestCase):
             {row["display_name"] for row in leaderboard}, {"共同榜单身份"}
         )
 
+    def test_public_history_browses_nonranking_records_and_keeps_anonymous_names_private(self) -> None:
+        profile = self.create_profile(self.first, "历史查询")
+        first = self.encounter(self.first)
+        receipt = self.store.upload_encounter(self.connection, self.first, first, public_mode="nickname", app_version="0.3.5")
+        second = self.encounter(self.first)
+        second['client_encounter_id'] = 'older-partial'
+        second['started_at_epoch'] -= 3600
+        second['ended_at_epoch'] -= 3600
+        second['team_total_damage'] += 100_000
+        second['participants'][0]['game_character_name'] = '不能公开的名称'
+        partial = self.store.upload_encounter(self.connection, self.first, second, public_mode="anonymous", app_version="0.3.5")
+        self.assertEqual(partial['statistics_status'], 'not_eligible')
+        history = self.store.public_history(self.connection, limit=1)
+        self.assertEqual(history['total'], 2)
+        self.assertEqual(history['records'][0]['encounter_id'], receipt['encounter_id'])
+        page_two = self.store.public_history(self.connection, limit=1, offset=1)
+        self.assertEqual(page_two['records'][0]['public_mode'], 'anonymous')
+        self.assertEqual(page_two['records'][0]['profile_id'], '')
+        self.assertIn('TEAM_TOTAL_MISMATCH', page_two['records'][0]['qualification_reasons'])
+        for hidden in ('不能公开的名称', '泄露乙', self.first, self.second, 'character_hash'):
+            self.assertNotIn(hidden, json.dumps(page_two, ensure_ascii=False))
+        self.assertEqual(self.store.public_history(self.connection, query='不能公开的名称')['total'], 0)
+        self.assertEqual(self.store.public_history(self.connection, query='历史查询')['total'], 1)
+        self.store.rename_profile(self.connection, self.first, '改名历史')
+        self.assertEqual(self.store.public_history(self.connection, query='历史查询')['total'], 0)
+        self.assertEqual(self.store.public_history(self.connection, query='改名历史')['total'], 1)
+        self.assertEqual(self.store.public_history(self.connection, eligibility='not_eligible')['total'], 1)
+        self.assertEqual(self.store.public_history(self.connection, eligibility='included')['total'], 1)
+        statistics = self.store.public_statistics(self.connection)
+        self.assertEqual(statistics['history_encounters'], 2)
+        self.assertEqual(statistics['encounters'], 1)
+        catalog = self.store.public_catalog(self.connection)
+        self.assertEqual(catalog['bosses'][0]['records'], 2)
+        self.assertEqual(catalog['bosses'][0]['included'], 1)
+
+    def test_public_history_deduplicates_shared_uploads_and_applies_filters(self) -> None:
+        self.create_profile(self.first, '上传甲')
+        self.create_profile(self.second, '上传乙')
+        receipt = self.store.upload_encounter(self.connection, self.first, self.encounter(self.first), public_mode='character', app_version='0.3.5')
+        self.store.upload_encounter(self.connection, self.second, self.encounter(self.second), public_mode='nickname', app_version='0.3.5')
+        history = self.store.public_history(self.connection, query='上传乙')
+        self.assertEqual(history['total'], 1)
+        self.assertEqual(history['records'][0]['display_name'], '上传乙')
+        self.assertEqual(history['records'][0]['encounter_id'], receipt['encounter_id'])
+        self.assertEqual(self.store.public_history(self.connection, query='夜行者')['total'], 1)
+        self.assertEqual(self.store.public_history(self.connection, query='上传甲')['total'], 0)
+        self.assertEqual(self.store.public_history(self.connection, boss='测试首领', profession=1200002, difficulty='normal', started_after=1_799_999_999, ended_before=1_800_000_001)['total'], 1)
+        for filters in ({'boss': '其他首领'}, {'profession': 1200007}, {'difficulty': 'hard'}, {'started_after': 1_800_000_001}, {'ended_before': 1_800_000_000}, {'query': "' OR 1=1 --"}):
+            self.assertEqual(self.store.public_history(self.connection, **filters)['total'], 0)
+        page = self.store.public_history(self.connection, limit='invalid', offset='-3')
+        self.assertEqual(page['limit'], 1)
+        self.assertEqual(page['offset'], 0)
+        self.assertEqual(self.store.public_history(self.connection, limit=999)['limit'], 50)
+
+    def test_public_performance_accepts_actual_boss_names_without_preview_samples(self) -> None:
+        self.create_profile(self.first, '真实样本')
+        record = self.encounter(self.first)
+        for participant in record['participants']:
+            participant['extraordinary_rating'] = 30_000
+        self.store.upload_encounter(self.connection, self.first, record, public_mode='nickname', app_version='0.3.5')
+        performance = self.store.public_performance(self.connection, boss='name:测试首领')
+        self.assertEqual(performance['selection']['boss_name'], '测试首领')
+        self.assertEqual(performance['source'], 'real_uploads')
+        self.assertGreater(performance['total_samples'], 0)
+        self.assertEqual(self.store.public_performance(self.connection, boss='name:不存在的首领')['total_samples'], 0)
+
     def test_public_performance_builds_real_profession_percentiles_and_filters(self) -> None:
         profile = self.create_profile(self.first, "洞察测试")
         for index in range(5):
@@ -704,6 +770,13 @@ class ProfileUploadTests(unittest.TestCase):
             "archive_reason": "target_defeated",
             "monster": {"name": "首领", "template_id": 7100208},
             "targets": [{"template_id": 7100208, "boss_type": 3}],
+            "team_dps_timeline": [
+                {"time_seconds": 1.25, "team_dps": 100, "source": "capture"},
+                {"time": 2.5, "time_seconds": 99, "dps": 200},
+                {"elapsed_seconds": 3.75, "dps": 250},
+                {"second": 5, "dps": 300},
+                {"dps": 350},
+            ],
             "participants": [
                 {"actor_id": 11, "name": "本人", "is_self": True, "damage": 200},
                 {"actor_id": 12, "name": "队友", "is_self": False, "damage": 100},
@@ -733,6 +806,13 @@ class ProfileUploadTests(unittest.TestCase):
             [True, False],
         )
         self.assertEqual(payload["participants"][1]["game_character_name"], "")
+        self.assertEqual(
+            [point["time"] for point in payload["team_dps_timeline"]],
+            [1.25, 2.5, 3.75, 5, 0],
+        )
+        self.assertEqual(payload["team_dps_timeline"][0]["source"], "capture")
+        self.assertEqual(payload["team_dps_timeline"][0]["dps"], 100)
+        self.assertEqual(payload["team_dps_timeline"][1]["team_dps"], 200)
         with self.assertRaisesRegex(ProfileUploadError, "本机角色"):
             build_upload_encounter(record, self.second)
 

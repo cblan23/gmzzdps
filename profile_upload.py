@@ -386,6 +386,14 @@ def initialize_profile_schema(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_encounter_participants_profile
             ON encounter_participants(profile_id, encounter_id);
+        CREATE INDEX IF NOT EXISTS idx_encounter_participants_public_character
+            ON encounter_participants(public_character_name, encounter_id)
+            WHERE public_mode='character';
+        CREATE INDEX IF NOT EXISTS idx_encounter_participants_public_nickname
+            ON encounter_participants(profile_id, encounter_id)
+            WHERE public_mode='nickname';
+        CREATE INDEX IF NOT EXISTS idx_encounter_participants_profession
+            ON encounter_participants(profession_id, encounter_id);
         CREATE TABLE IF NOT EXISTS uploads (
             upload_id TEXT PRIMARY KEY,
             encounter_id TEXT NOT NULL REFERENCES encounters(encounter_id)
@@ -1210,6 +1218,7 @@ class ProfileUploadStore:
                         "time": _as_float(item.get("time"), maximum=86_400.0),
                         "dps": _as_float(item.get("dps"), maximum=1e18),
                         "team_dps": _as_float(item.get("team_dps"), maximum=1e18),
+                        "source": _safe_text(item.get("source"), 48),
                     }
                 )
             if timeline:
@@ -1947,8 +1956,117 @@ class ProfileUploadStore:
             "team_total_damage": int(encounter["team_total_damage"]),
             "statistics_status": str(encounter["statistics_status"]),
             "ranking_status": str(encounter["ranking_status"]),
+            "game_version": str(encounter["game_version"]),
+            "qualification_reasons": json.loads(str(encounter["validation_json"])).get("reasons", []),
             "data": payload if isinstance(payload, dict) else {},
             "participants": participants,
+        }
+
+    def public_history(
+        self, connection: sqlite3.Connection, *, query: object = "",
+        boss: object = "", profession: object = 0, difficulty: object = "",
+        eligibility: object = "all", started_after: object = 0,
+        ended_before: object = 0, limit: object = 25, offset: object = 0,
+    ) -> dict[str, object]:
+        """Browse stored battles independently of leaderboard qualification."""
+        needle = _safe_text(query, 48).strip()
+        conditions = ["EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)"]
+        params: list[object] = []
+        boss_name = _safe_text(boss, 96)
+        if boss_name:
+            conditions.append("e.boss_name=?")
+            params.append(boss_name)
+        selected_profession = _as_int(profession, maximum=2_000_000_000)
+        if selected_profession:
+            conditions.append("e.encounter_id IN (SELECT p.encounter_id FROM encounter_participants p WHERE p.profession_id=?)")
+            params.append(selected_profession)
+        selected_difficulty = _safe_text(difficulty, 32).casefold()
+        if selected_difficulty and selected_difficulty != "all":
+            conditions.append("e.difficulty=?")
+            params.append(selected_difficulty)
+        if eligibility == "included":
+            conditions.append("e.statistics_status='included'")
+        elif eligibility == "not_eligible":
+            conditions.append("e.statistics_status!='included'")
+        after = _as_float(started_after, maximum=4_102_444_800)
+        before = _as_float(ended_before, maximum=4_102_444_800)
+        if after:
+            conditions.append("e.ended_at>=?")
+            params.append(after)
+        if before:
+            conditions.append("e.ended_at<?")
+            params.append(before)
+        if needle:
+            # Search only the identity that the participant elected to publish.
+            conditions.append("""e.encounter_id IN (
+                SELECT p.encounter_id FROM encounter_participants p
+                WHERE p.public_mode='character'
+                    AND instr(lower(p.public_character_name), lower(?))>0
+                UNION
+                SELECT p.encounter_id FROM encounter_participants p
+                JOIN profiles pr ON pr.profile_id=p.profile_id
+                WHERE p.public_mode='nickname' AND instr(lower(pr.nickname), lower(?))>0
+            )""")
+            params.extend((needle, needle))
+        where = " AND ".join(conditions)
+        total = connection.execute(f"SELECT COUNT(*) FROM encounters e WHERE {where}", params).fetchone()[0]
+        page_size = _as_int(limit, minimum=1, maximum=50)
+        page_offset = _as_int(offset, maximum=1_000_000)
+        rows = connection.execute(
+            f"SELECT e.* FROM encounters e WHERE {where} ORDER BY e.ended_at DESC, e.encounter_id DESC LIMIT ? OFFSET ?",
+            (*params, page_size, page_offset),
+        ).fetchall()
+        members: dict[str, list[sqlite3.Row]] = {}
+        if rows:
+            ids = [str(row['encounter_id']) for row in rows]
+            placeholders = ','.join('?' for _ in ids)
+            for member in connection.execute(
+                f"""SELECT p.encounter_id, p.slot_number, p.public_mode,
+                    p.public_character_name, p.profile_id, p.profession_id,
+                    p.dps, p.damage, pr.nickname FROM encounter_participants p
+                    LEFT JOIN profiles pr ON pr.profile_id=p.profile_id
+                    WHERE p.encounter_id IN ({placeholders}) ORDER BY p.slot_number""", ids,
+            ):
+                members.setdefault(str(member['encounter_id']), []).append(member)
+        records = []
+        for row in rows:
+            public_members = []
+            for member in members.get(str(row['encounter_id']), []):
+                name, mode, profile_id = self._public_participant_name(member, int(member['slot_number']))
+                public_members.append((member, name, mode, profile_id))
+            selected = next((item for item in public_members if item[2] != 'anonymous'
+                             and (not needle or needle.casefold() in item[1].casefold())), None)
+            if selected is None and public_members:
+                selected = public_members[0]
+            payload = json.loads(str(row['payload_json']))
+            validation = json.loads(str(row['validation_json']))
+            record = {
+                'encounter_id': str(row['encounter_id']), 'boss_name': str(row['boss_name']),
+                'stage_id': int(row['stage_id']), 'difficulty': str(row['difficulty']),
+                'ended_at': float(row['ended_at']), 'duration_seconds': float(row['duration_seconds']),
+                'team_size': int(row['team_size']), 'team_total_damage': int(row['team_total_damage']),
+                'team_dps': payload.get('team_dps'), 'result': payload.get('result', 'undetermined'),
+                'completion_confirmed': bool(payload.get('completion_confirmed')),
+                'statistics_status': str(row['statistics_status']), 'ranking_status': str(row['ranking_status']),
+                'qualification_reasons': validation.get('reasons', []), 'game_version': str(row['game_version']),
+            }
+            if selected:
+                member, name, mode, profile_id = selected
+                record.update(display_name=name, public_mode=mode, profile_id=profile_id,
+                              profession_id=int(member['profession_id']), slot=int(member['slot_number']),
+                              dps=float(member['dps']), damage=int(member['damage']))
+            records.append(record)
+        return {'records': records, 'total': int(total), 'limit': page_size, 'offset': page_offset}
+
+    def public_catalog(self, connection: sqlite3.Connection) -> dict[str, object]:
+        rows = connection.execute("""SELECT boss_name, COUNT(*) AS records,
+            SUM(statistics_status='included') AS included, MAX(ended_at) AS last_at
+            FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
+            GROUP BY boss_name ORDER BY included DESC, last_at DESC""").fetchall()
+        return {
+            'bosses': [{'name': str(row['boss_name']), 'records': int(row['records']),
+                        'included': int(row['included']), 'last_at': float(row['last_at'])} for row in rows],
+            'difficulties': [str(row[0]) for row in connection.execute("SELECT DISTINCT difficulty FROM encounters WHERE difficulty!='' ORDER BY difficulty")],
         }
 
     def public_statistics(self, connection: sqlite3.Connection) -> dict[str, object]:
@@ -1963,11 +2081,17 @@ class ProfileUploadStore:
         uploads = connection.execute(
             "SELECT COUNT(*) FROM uploads WHERE statistics_status='included'"
         ).fetchone()[0]
+        history = connection.execute("""SELECT COUNT(*) AS encounters, MAX(ended_at) AS last_at
+            FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)""").fetchone()
+        last_uploaded = connection.execute("SELECT MAX(last_uploaded_at) FROM uploads").fetchone()[0]
         return {
             "encounters": int(summary["encounters"] if summary else 0),
             "uploads": int(uploads),
             "total_damage": int(summary["total_damage"] if summary else 0),
             "duration_seconds": float(summary["duration_seconds"] if summary else 0),
+            "history_encounters": int(history['encounters']),
+            "last_encounter_at": history['last_at'],
+            "last_uploaded_at": last_uploaded,
         }
 
     def public_performance(
@@ -1987,8 +2111,14 @@ class ProfileUploadStore:
     ) -> dict[str, object]:
         """Return privacy-safe profession percentiles for public raid insights."""
 
-        boss_key = _public_performance_boss_key(boss)
-        boss_config = PUBLIC_PERFORMANCE_BOSSES[boss_key]
+        requested_boss = _safe_text(boss, 128)
+        if requested_boss.startswith('name:'):
+            boss_key = requested_boss
+            boss_config = {'name': requested_boss[5:], 'dungeon_name': '',
+                           'stage_ids': (), 'aliases': (requested_boss[5:],)}
+        else:
+            boss_key = _public_performance_boss_key(boss)
+            boss_config = PUBLIC_PERFORMANCE_BOSSES[boss_key]
         selected_difficulty = _public_performance_difficulty(difficulty)
         selected_metric = _safe_text(metric, 24).casefold()
         if selected_metric not in PUBLIC_PERFORMANCE_METRICS:
@@ -2012,7 +2142,7 @@ class ProfileUploadStore:
 
         stage_ids = tuple(int(value) for value in boss_config["stage_ids"])
         aliases = tuple(str(value) for value in boss_config["aliases"])
-        stage_placeholders = ",".join("?" for _ in stage_ids)
+        stage_placeholders = ",".join("?" for _ in stage_ids) or "NULL"
         alias_placeholders = ",".join("?" for _ in aliases)
         rows = connection.execute(
             f"""
@@ -2633,10 +2763,11 @@ def build_upload_encounter(
             team_timeline.append(
                 {
                     "time": item.get(
-                        "time", item.get("elapsed_seconds", item.get("second", 0))
+                        "time", item.get("time_seconds", item.get("elapsed_seconds", item.get("second", 0)))
                     ),
                     "dps": item.get("dps", item.get("team_dps", 0)),
                     "team_dps": item.get("team_dps", item.get("dps", 0)),
+                    "source": _safe_text(item.get("source"), 48),
                 }
             )
     started_at = record.get("started_at_epoch")

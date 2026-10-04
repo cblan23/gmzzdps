@@ -16,37 +16,6 @@
     1200006: "黄昏",
     1200007: "隐者",
   };
-  const INSIGHTS_PREVIEW_DATA = {
-    drill: {
-      bossName: "钻头",
-      dungeonName: "记忆的传承",
-      encounterCount: 46,
-      groups: [
-        [1200003, 78, 15100, 18400, 22600, 26400, 30100, 35800],
-        [1200006, 69, 14700, 17900, 21900, 25700, 29400, 34900],
-        [1200005, 57, 13900, 17100, 21100, 24800, 28300, 33700],
-        [1200001, 51, 13200, 16300, 20200, 23800, 27200, 32400],
-        [1200007, 47, 12700, 15700, 19500, 23100, 26400, 31500],
-        [1200004, 42, 12000, 15100, 18800, 22300, 25500, 30400],
-        [1200002, 36, 2800, 4100, 5900, 7900, 9800, 12600],
-      ],
-    },
-    viscountess: {
-      bossName: "子爵夫人",
-      dungeonName: "五月庄园·城堡",
-      encounterCount: 32,
-      groups: [
-        [1200006, 62, 14200, 17800, 22200, 25800, 29100, 34400],
-        [1200003, 58, 13600, 17100, 21400, 24900, 28200, 33100],
-        [1200005, 44, 12800, 16200, 20500, 24100, 27400, 32200],
-        [1200001, 39, 12100, 15600, 19800, 23200, 26500, 30900],
-        [1200007, 37, 11800, 15100, 19100, 22500, 25700, 30100],
-        [1200004, 31, 11000, 14500, 18400, 21800, 24900, 29200],
-        [1200002, 28, 2400, 3600, 5200, 7100, 8900, 11800],
-      ],
-    },
-  };
-
   if (!scene || !searchForm || !searchInput) return;
 
   const portal = document.createElement("section");
@@ -81,25 +50,28 @@
     statistics: null,
     leaderboards: null,
     bossCatalog: null,
+    catalog: null,
     skillNames: null,
     basePromise: null,
     skillNamesPromise: null,
     renderToken: 0,
     insightsRequestToken: 0,
     insightsSelectedProfession: 0,
+    insightsInitialized: false,
     insightsFilters: {
       boss: "drill",
-      difficulty: "normal",
+      difficulty: "all",
       metric: "dps",
       ratingBasis: "extraordinary",
       minRating: 0,
-      maxRating: 120000,
+      maxRating: 200000,
       gameVersion: "all",
       sort: "p50",
       calibrated: false,
-      demo: false,
     },
     encounterMode: "dps",
+    encounterSlot: 0,
+    detailReturnRoute: "#history",
   };
 
   function element(tag, className, text) {
@@ -144,21 +116,24 @@
       state.statistics = null;
       state.leaderboards = null;
       state.bossCatalog = null;
+      state.catalog = null;
       state.basePromise = null;
     }
-    if (state.statistics && state.leaderboards && state.bossCatalog) return;
+    if (state.statistics && state.leaderboards && state.bossCatalog && state.catalog) return;
     if (state.basePromise) return state.basePromise;
     state.basePromise = Promise.all([
       fetchJson(`${API_ROOT}/statistics`),
       fetchJson(`${API_ROOT}/leaderboards?limit=500`),
       fetchJson("assets/bosses/boss_icon_sources.json"),
+      fetchJson(`${API_ROOT}/catalog`),
     ])
-      .then(([statistics, leaderboards, bossCatalog]) => {
+      .then(([statistics, leaderboards, bossCatalog, catalog]) => {
         state.statistics = statistics.statistics || {};
         state.leaderboards = Array.isArray(leaderboards.leaderboards)
           ? leaderboards.leaderboards
           : [];
         state.bossCatalog = bossCatalog || {};
+        state.catalog = catalog.catalog || {};
       })
       .finally(() => {
         state.basePromise = null;
@@ -186,12 +161,14 @@
   }
 
   function formatInteger(value) {
+    if (value === undefined || value === null || value === "") return "--";
     const number = Number(value);
     if (!Number.isFinite(number)) return "--";
     return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(number);
   }
 
   function formatCompact(value) {
+    if (value === undefined || value === null || value === "") return "--";
     const number = Number(value);
     if (!Number.isFinite(number)) return "--";
     if (Math.abs(number) < 10000) return formatInteger(number);
@@ -223,6 +200,7 @@
   }
 
   function formatPercent(value) {
+    if (value === undefined || value === null || value === "") return "--";
     const number = Number(value);
     if (!Number.isFinite(number)) return "--";
     return `${(number * 100).toFixed(number >= 0.1 ? 1 : 2)}%`;
@@ -322,29 +300,11 @@
     return cell;
   }
 
-  function rememberedViewerProfileId() {
-    try {
-      const value = String(window.sessionStorage.getItem("gmzz.viewerProfileId") || "");
-      return /^prf_[A-Za-z0-9_-]{8,64}$/.test(value) ? value : "";
-    } catch (_error) {
-      return "";
-    }
-  }
-
-  function rememberViewerProfileId(profileId) {
-    const value = String(profileId || "");
-    if (!/^prf_[A-Za-z0-9_-]{8,64}$/.test(value)) return;
-    try {
-      window.sessionStorage.setItem("gmzz.viewerProfileId", value);
-    } catch (_error) {
-      // Private browsing can disable storage; the public page still works.
-    }
-  }
-
-  function openEncounter(encounterId, profileId = "") {
+  function openEncounter(encounterId) {
     const id = String(encounterId || "");
     if (!/^enc_[A-Za-z0-9_-]{8,64}$/.test(id)) return;
-    rememberViewerProfileId(profileId);
+    state.detailReturnRoute = window.location.hash || "#history";
+    state.encounterSlot = 0;
     window.location.hash = `battle?id=${encodeURIComponent(id)}`;
   }
 
@@ -383,6 +343,7 @@
       normal: "普通",
       hard: "困难",
       nightmare: "噩梦",
+      unknown: "未标记难度",
     }[difficulty] || difficulty || "全部难度";
   }
 
@@ -392,100 +353,7 @@
     return metric === "boss_damage" ? formatCompact(number) : formatInteger(number);
   }
 
-  function previewPerformance(serverValue, filters) {
-    const previewConfig = INSIGHTS_PREVIEW_DATA[filters.boss]
-      || INSIGHTS_PREVIEW_DATA.viscountess;
-    const difficultyScale = {
-      all: 1,
-      normal: 1,
-      hard: 1.14,
-      nightmare: 1.27,
-    }[filters.difficulty] || 1;
-    const ratingMidpoint = (Number(filters.minRating) + Number(filters.maxRating)) / 2;
-    const ratingScale = Math.max(0.76, Math.min(1.18, 0.76 + ratingMidpoint / 285000));
-    const metricScale = filters.metric === "boss_damage" ? 305 : 1;
-    const calibratedFactors = {
-      1200001: 1.015,
-      1200002: 1.08,
-      1200003: 0.985,
-      1200004: 1.025,
-      1200005: 1.0,
-      1200006: 0.96,
-      1200007: 1.01,
-    };
-    const width = Math.max(10000, Number(filters.maxRating) - Number(filters.minRating));
-    const sampleScale = Math.max(0.22, Math.min(1, width / 120000));
-    const groups = previewConfig.groups.map((source, index) => {
-      const [professionId, samples, p10, p25, p50, p75, p90, best] = source;
-      const calibrationScale = filters.calibrated ? calibratedFactors[professionId] : 1;
-      const scale = difficultyScale * ratingScale * metricScale * calibrationScale;
-      const values = [p10, p25, p50, p75, p90, best].map((value) => value * scale);
-      const mineValue = index === 2 ? values[2] + (values[3] - values[2]) * 0.48 : 0;
-      return {
-        profession_id: professionId,
-        sample_count: Math.max(6, Math.round(samples * sampleScale)),
-        p10: values[0],
-        p25: values[1],
-        p50: values[2],
-        p75: values[3],
-        p90: values[4],
-        best: values[5],
-        target_rating: ratingMidpoint,
-        calibration_applied: filters.calibrated,
-        best_record: null,
-        mine: index === 2 ? {
-          value: mineValue,
-          raw_value: mineValue,
-          percentile: 68,
-          exceeds_percent: 67,
-          gap_to_p75: values[3] - mineValue,
-          gap_to_p90: values[4] - mineValue,
-          demo: true,
-        } : null,
-      };
-    });
-    const sortKey = filters.sort || "p50";
-    groups.sort((a, b) => Number(b[sortKey] || 0) - Number(a[sortKey] || 0));
-    return {
-      ...(serverValue || {}),
-      source: "preview",
-      preview: true,
-      preview_kind: filters.demo ? "demo" : "upcoming",
-      selection: {
-        boss: filters.boss,
-        boss_name: previewConfig.bossName,
-        dungeon_name: previewConfig.dungeonName,
-        difficulty: filters.difficulty,
-        metric: filters.metric,
-        rating_basis: filters.ratingBasis,
-        min_rating: filters.minRating,
-        max_rating: filters.maxRating,
-        game_version: filters.gameVersion,
-        sort: filters.sort,
-        calibrated: filters.calibrated,
-      },
-      availability: {
-        difficulties: ["normal", "hard", "nightmare"],
-        game_versions: ["preview"],
-        extraordinary_rating: true,
-        equipment_rating: true,
-        rating_min: 0,
-        rating_max: 120000,
-      },
-      total_samples: groups.reduce((sum, row) => sum + row.sample_count, 0),
-      total_encounters: Math.max(4, Math.round(previewConfig.encounterCount * sampleScale)),
-      updated_at: Date.now() / 1000,
-      groups,
-      calibration: {
-        requested: filters.calibrated,
-        applied_groups: filters.calibrated ? groups.length : 0,
-        minimum_samples_per_profession: 4,
-      },
-    };
-  }
-
   async function fetchPerformance(filters) {
-    if (filters.demo) return previewPerformance(null, filters);
     const params = new URLSearchParams({
       boss: filters.boss,
       difficulty: filters.difficulty,
@@ -497,13 +365,8 @@
       sort: filters.sort,
       calibrated: filters.calibrated ? "1" : "0",
     });
-    const profileId = rememberedViewerProfileId();
-    if (profileId) params.set("profile_id", profileId);
     const payload = await fetchJson(`${API_ROOT}/performance?${params}`);
     const performance = payload.performance || {};
-    if (filters.boss === "viscountess" && !(performance.groups || []).length) {
-      return previewPerformance(performance, filters);
-    }
     return performance;
   }
 
@@ -648,24 +511,15 @@
       "performance-update",
       `有效样本 ${formatInteger(performance.total_samples)} · ${formatInteger(performance.total_encounters)} 场战斗 · 更新 ${formatDate(performance.updated_at)}`,
     ));
-    if (filters.boss === "drill") {
-      const previewToggle = element(
-        "a",
-        "performance-preview-toggle",
-        filters.demo ? "返回真实数据" : "查看完整效果",
-      );
-      previewToggle.href = filters.demo
-        ? "#insights?boss=drill"
-        : "#insights?boss=drill&demo=1";
-      overviewMeta.appendChild(previewToggle);
-    }
     overview.appendChild(overviewMeta);
     fragment.appendChild(overview);
 
     const updateFilters = (patch) => {
       Object.assign(state.insightsFilters, patch);
       state.insightsSelectedProfession = 0;
-      renderInsights(routeToken);
+      renderInsights(routeToken).catch(() => {
+        if (routeToken === state.renderToken) showStatus("统计暂时无法加载", "请稍后重试。", true);
+      });
     };
 
     const modeBar = element("div", "performance-modebar");
@@ -835,35 +689,16 @@
     filterHead.appendChild(element("strong", "", "筛选条件"));
     filterHead.appendChild(element("span", "", "FILTERS"));
     filter.appendChild(filterHead);
-    const bossOptions = [
-      { value: "drill", label: "钻头" },
-      { value: "viscountess", label: "子爵夫人 · 预览" },
-    ];
-    filter.appendChild(performanceFilterField("副本", performanceSelect([
-      { value: "drill", label: "记忆的传承" },
-      { value: "viscountess", label: "五月庄园·城堡" },
-    ], filters.boss, (value) => updateFilters({
-      boss: value,
-      difficulty: "normal",
-      ratingBasis: "extraordinary",
-      demo: false,
-      gameVersion: "all",
-      minRating: 0,
-      maxRating: 120000,
-    }), "副本")));
+    const bossOptions = (state.catalog?.bosses || []).map((boss) => ({
+      value: `name:${boss.name}`, label: `${boss.name} · ${boss.records} 场历史`,
+    }));
+    if (!bossOptions.some((boss) => boss.value === filters.boss)) {
+      bossOptions.unshift({value: filters.boss, label: selection.boss_name || "钻头"});
+    }
     filter.appendChild(performanceFilterField("Boss", performanceSelect(
-      bossOptions,
-      filters.boss,
-      (value) => updateFilters({
-        boss: value,
-        difficulty: "normal",
-        ratingBasis: "extraordinary",
-        demo: false,
-        gameVersion: "all",
-        minRating: 0,
-        maxRating: 120000,
-      }),
-      "Boss",
+      bossOptions, filters.boss, (value) => updateFilters({
+        boss: value, difficulty: "all", gameVersion: "all", minRating: 0, maxRating: 200000,
+      }), "Boss",
     )));
     filter.appendChild(performanceFilterField("难度", performanceSegments([
       { value: "all", label: "全部" },
@@ -975,15 +810,6 @@
       "",
       "P10 / P25 / P50 / P75 / P90 来自相同条件下的真实有效样本；重复、不完整和异常战斗不进入正式统计。",
     ));
-    if (performance.preview) {
-      note.appendChild(element(
-        "p",
-        "performance-preview-note",
-        performance.preview_kind === "demo"
-          ? "当前为前端演示样本，仅用于查看完整图表效果，不写入数据库，也不进入真实统计。"
-          : "子爵夫人尚未产生正式样本，当前数据仅用于查看页面效果；产生有效上传后会自动切换为真实统计。",
-      ));
-    }
     filter.appendChild(note);
     layout.appendChild(filter);
     fragment.appendChild(layout);
@@ -998,28 +824,34 @@
     );
     showStatus("正在计算职业表现分布");
     const requestToken = ++state.insightsRequestToken;
-    let performance;
-    try {
-      performance = await fetchPerformance(state.insightsFilters);
-    } catch (error) {
-      if (state.insightsFilters.boss !== "viscountess") throw error;
-      performance = previewPerformance(null, state.insightsFilters);
+    await loadBaseData();
+    if (token !== state.renderToken) return;
+    if (!state.insightsInitialized && !parseRoute().params.get("boss")) {
+      const available = (state.catalog?.bosses || []).find((boss) => Number(boss.included) > 0);
+      if (available) state.insightsFilters.boss = `name:${available.name}`;
     }
+    state.insightsInitialized = true;
+    const performance = await fetchPerformance(state.insightsFilters);
     if (token !== state.renderToken || requestToken !== state.insightsRequestToken) return;
     renderPerformancePage(performance, token);
   }
 
   async function renderRecords(token) {
-    setPage("PEAK RECORDS", "巅峰记录", "榜单按首领、关卡与职业分别计算名次；仅展示符合公开与排行条件的上传记录。");
+    setPage("BOSS RANKINGS", "Boss 排行", "名次按首领、关卡与职业分别计算；仅完整、通过验证的战斗进入排行。其他记录可在历史战斗中浏览。");
     showStatus("正在读取巅峰记录");
     await loadBaseData();
     if (token !== state.renderToken) return;
 
-    const rows = [...(state.leaderboards || [])].sort((a, b) => {
+    const params = parseRoute().params;
+    const rows = [...(state.leaderboards || [])].filter((row) =>
+      (!params.get("boss") || row.boss_name === params.get("boss"))
+      && (!params.get("profession") || String(row.profession_id) === params.get("profession"))
+    ).sort((a, b) => {
       const dps = Number(b.dps || 0) - Number(a.dps || 0);
       return dps || Number(b.ended_at || 0) - Number(a.ended_at || 0);
     });
     const fragment = document.createDocumentFragment();
+    fragment.appendChild(historyFilters(params, true));
     fragment.appendChild(sectionHeading("伤害 DPS 排行", rows.length ? `共 ${rows.length} 条` : "暂无记录"));
     if (rows.length) {
       fragment.appendChild(recordList(rows));
@@ -1032,51 +864,144 @@
   }
 
   async function renderSearch(token, query) {
-    const cleaned = String(query || "").trim().slice(0, 48);
-    setPage("BATTLE SEARCH", "战斗记录搜索");
-    const summary = element("p", "search-summary");
-    summary.append("正在搜索：");
-    summary.appendChild(element("strong", "", cleaned || "--"));
-    contentNode.appendChild(summary);
-    showStatus("正在搜索公开记录");
-    await loadBaseData();
+    await renderHistory(token, String(query || "").trim().slice(0, 48));
+  }
+
+  function historyFilters(params, ranking = false) {
+    const form = element("form", "history-filters");
+    const field = (labelText, name, options) => {
+      const label = element("label", "history-field");
+      label.appendChild(element("span", "", labelText));
+      const control = element(options ? "select" : "input");
+      control.name = name;
+      if (options) options.forEach(([value, text]) => {
+        const option = element("option", "", text);
+        option.value = value;
+        control.appendChild(option);
+      });
+      else control.type = name === "from" || name === "to" ? "date" : "search";
+      control.value = params.get(name) || "";
+      if (name === "q") { control.placeholder = "角色名 / 公开昵称"; control.maxLength = 48; }
+      label.appendChild(control);
+      form.appendChild(label);
+      if (options || control.type === "date") control.addEventListener("change", () => form.requestSubmit());
+    };
+    if (!ranking) field("角色查询", "q");
+    field("Boss", "boss", [["", "全部 Boss"], ...(state.catalog?.bosses || []).map((boss) => [boss.name, `${boss.name} (${boss.records})`])]);
+    field("职业", "profession", [["", "全部职业"], ...Object.entries(PROFESSIONS)]);
+    if (!ranking) {
+      field("数据条件", "eligibility", [["", "全部历史"], ["included", "有效统计"], ["not_eligible", "未纳入统计"]]);
+      field("难度", "difficulty", [["", "全部难度"], ...(state.catalog?.difficulties || []).map((value) => [value, performanceDifficultyLabel(value)])]);
+      field("开始日期", "from");
+      field("结束日期", "to");
+    }
+    const submit = button("portal-refresh", "查询");
+    submit.type = "submit";
+    const clear = element("a", "history-reset", "清空筛选");
+    clear.href = ranking ? "#records" : "#history";
+    form.append(submit, clear);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const values = new URLSearchParams();
+      new FormData(form).forEach((value, name) => { if (String(value).trim()) values.set(name, String(value).trim()); });
+      const next = `${ranking ? "#records" : "#history"}${values.size ? `?${values}` : ""}`;
+      if (next === window.location.hash) renderRoute(true);
+      else window.location.hash = next;
+    });
+    return form;
+  }
+
+  function qualificationText(reasons) {
+    const labels = {
+      ENCOUNTER_NOT_COMPLETED: "未确认通关", PARTICIPANT_IDENTITY_INCOMPLETE: "角色身份不完整",
+      TEAM_TOTAL_MISMATCH: "团队总量不一致", CAPTURE_INCOMPLETE: "采集不完整",
+      BOSS_UNSUPPORTED: "首领未纳入统计", DIFFICULTY_INVALID: "关卡信息不完整",
+      CLIENT_VERSION_UNSUPPORTED: "客户端版本未支持", GAME_VERSION_UNSUPPORTED: "游戏版本未支持",
+      DURATION_INVALID: "战斗时长异常", KEY_DATA_MISSING: "关键数据缺失",
+    };
+    return (Array.isArray(reasons) ? reasons : []).map((reason) => labels[reason] || "数据未满足统计条件").join("、");
+  }
+
+  async function renderHistory(token, searchQuery = null) {
+    const params = parseRoute().params;
+    if (searchQuery !== null) params.set("q", searchQuery);
+    setPage("BATTLE HISTORY", params.get("q") ? `角色历史 · ${params.get("q")}` : "历史战斗",
+      "浏览已收录的战斗与原始表现。匿名记录不支持按名称搜索，未纳入排行的历史仍可查看详情。");
+    showStatus("正在读取历史战斗");
+    const request = new URLSearchParams();
+    ["q", "boss", "profession", "difficulty", "eligibility", "offset"].forEach((name) => {
+      if (params.get(name)) request.set(name, params.get(name));
+    });
+    request.set("limit", "25");
+    for (const [field, key] of [["from", "after"], ["to", "before"]]) {
+      const value = params.get(field);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(value || "")) {
+        let epoch = new Date(`${value}T00:00:00+08:00`).getTime() / 1000;
+        if (field === "to") epoch += 86400;
+        request.set(key, String(epoch));
+      }
+    }
+    const [, history] = await Promise.all([loadBaseData(), fetchJson(`${API_ROOT}/records?${request}`)]);
     if (token !== state.renderToken) return;
-
-    const needle = cleaned.toLocaleLowerCase("zh-CN");
-    const rows = (state.leaderboards || [])
-      .filter((row) => {
-        if (!needle || row.public_mode === "anonymous") return false;
-        return String(row.display_name || "").toLocaleLowerCase("zh-CN").includes(needle);
-      })
-      .sort((a, b) => Number(b.ended_at || 0) - Number(a.ended_at || 0));
-
     const fragment = document.createDocumentFragment();
-    const nextSummary = element("p", "search-summary");
-    nextSummary.append("搜索 ");
-    nextSummary.appendChild(element("strong", "", cleaned || "--"));
-    nextSummary.append(`，找到 ${rows.length} 条公开记录`);
-    fragment.appendChild(nextSummary);
-    if (rows.length) {
-      fragment.appendChild(recordList(rows, { sequentialRank: true }));
-    } else {
+    fragment.appendChild(historyFilters(params));
+    fragment.appendChild(sectionHeading("战斗记录", `共 ${formatInteger(history.total)} 场 · 时间按北京时间显示`));
+    const list = element("div", "history-list");
+    const head = element("div", "history-row history-head");
+    ["Boss / 结果", "公开玩家", "团队 DPS / 总伤害", "时长 / 人数", "时间 / 数据状态", ""].forEach((label) => head.appendChild(element("div", "", label)));
+    list.appendChild(head);
+    for (const row of history.records || []) {
+      const record = element("article", "history-row");
+      const boss = bossCell(row);
+      const [result, className] = resultLabel(row.result, row.completion_confirmed);
+      boss.querySelector(".boss-stage").textContent = `${performanceDifficultyLabel(row.difficulty || "unknown")} · ${result}`;
+      boss.classList.add(className.trim() || "is-complete");
+      record.append(boss, identityCell(row));
+      const totals = element("div", "history-number");
+      totals.append(element("b", "", formatInteger(row.team_dps)), element("small", "", `${formatCompact(row.team_total_damage)} 总伤害`));
+      const time = element("div", "history-number");
+      time.append(element("b", "", formatDuration(row.duration_seconds)), element("small", "", `${row.team_size} 人`));
+      const info = element("div", "history-info");
+      info.appendChild(element("span", "", formatDate(row.ended_at)));
+      const status = element("small", row.statistics_status === "included" ? "history-included" : "history-partial",
+        row.statistics_status === "included" ? "有效统计" : qualificationText(row.qualification_reasons) || "未纳入统计");
+      info.appendChild(status);
+      const open = button("row-open", "详情 →", `查看 ${row.boss_name} 战斗详情`);
+      open.addEventListener("click", () => openEncounter(row.encounter_id));
+      record.append(totals, time, info, open);
+      list.appendChild(record);
+    }
+    if ((history.records || []).length) fragment.appendChild(list);
+    else {
       const empty = element("div", "portal-status");
-      const wrap = element("div");
-      wrap.appendChild(element("strong", "", "没有找到公开战斗记录"));
-      wrap.appendChild(element("span", "", "请检查角色名称或上传昵称，匿名记录无法通过名称搜索。"));
-      empty.appendChild(wrap);
+      empty.appendChild(element("span", "", "没有符合条件的战斗。可清空筛选，或检查角色是否以公开名称上传。"));
       fragment.appendChild(empty);
     }
+    const pagination = element("nav", "history-pagination");
+    pagination.setAttribute("aria-label", "历史分页");
+    const move = (offset) => {
+      params.set("offset", String(offset));
+      window.location.hash = `history?${params}`;
+    };
+    const previous = button("portal-refresh", "上一页");
+    previous.disabled = history.offset === 0;
+    previous.addEventListener("click", () => move(Math.max(0, history.offset - history.limit)));
+    const next = button("portal-refresh", "下一页");
+    next.disabled = history.offset + history.limit >= history.total;
+    next.addEventListener("click", () => move(history.offset + history.limit));
+    pagination.append(previous, element("span", "", `${Math.floor(history.offset / history.limit) + 1} / ${Math.max(1, Math.ceil(history.total / history.limit))}`), next);
+    fragment.appendChild(pagination);
     contentNode.replaceChildren(fragment);
   }
 
   function renderShare() {
-    setPage("SHARE BATTLE", "如何分享战斗记录", "战斗记录由玩家主动选择上传；未上传的本地记录不会出现在网站中。");
+    setPage("UPLOAD GUIDE", "如何上传战斗记录", "通过叨叨诡秘客户端上传；网页不直接读取游戏或本机记录。");
     const flow = element("div", "share-flow");
     [
-      ["完成一场战斗", "在客户端的“战斗记录”中选择需要分享的记录。"],
-      ["点击上传", "在该场记录的操作区域点击“上传”，首次使用时按提示创建上传身份。"],
-      ["确认公开方式", "选择匿名、角色名称或上传昵称后确认；网站只展示你选择公开的信息。"],
-      ["搜索与分享", "上传完成后，可在首页输入角色名称或昵称打开公开记录并分享页面地址。"],
+      ["完成一场 Boss 战斗", "登录客户端并保持采集运行。已启用自动上传时，胜利记录会自动同步；伤害木桩不进入上传。"],
+      ["上传已有记录", "打开客户端“战斗记录”，点击该场记录右侧的“上传”。失败时可在同一位置重试；未上传的本地记录不会出现在网站。"],
+      ["确认公开方式", "选择匿名、公开角色名称或上传昵称。匿名记录仍可浏览战报，其他成员保留各自的公开设置。"],
+      ["查询与分享", "上传完成后进入“历史战斗”，或搜索公开名称。打开详情可复制战报链接；完整度不足的历史会展示原因，不进入正式排行。"],
     ].forEach(([title, copy], index) => {
       const step = element("article", "share-step");
       step.appendChild(element("div", "step-index", String(index + 1).padStart(2, "0")));
@@ -1087,6 +1012,11 @@
       flow.appendChild(step);
     });
     contentNode.appendChild(flow);
+    const link = element("a", "portal-refresh guide-download", "下载 Windows 客户端 ↗");
+    link.href = "https://github.com/cblan23/gmzzdps/releases/tag/v0.3.5-r1";
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    contentNode.appendChild(link);
   }
 
   function encounterMetric(mode, participant, durationSeconds = 0) {
@@ -1095,9 +1025,10 @@
       if (reportedHps > 0) return reportedHps;
       const duration = Number(durationSeconds);
       const effectiveHealing = Number(participant.stats?.effective_healing || 0);
-      return duration > 0 ? effectiveHealing / duration : 0;
+      return participant.stats?.effective_healing !== undefined && duration > 0 ? effectiveHealing / duration : Number.NaN;
     }
-    if (mode === "dt") return Number(participant.taken || participant.stats?.taken || 0);
+    if (mode === "dt") return participant.stats?.taken !== undefined || Number(participant.taken) > 0
+      ? Number(participant.taken || participant.stats?.taken || 0) : Number.NaN;
     return Number(participant.dps || participant.stats?.dps || 0);
   }
 
@@ -1109,7 +1040,7 @@
         : Number.NaN;
     if (Number.isFinite(storedShare)) return storedShare;
     const total = participants.reduce(
-      (sum, row) => sum + encounterMetric(mode, row, durationSeconds),
+      (sum, row) => sum + (encounterMetric(mode, row, durationSeconds) || 0),
       0,
     );
     return total > 0
@@ -1157,6 +1088,58 @@
   function renderSkills(panel, participant, mode) {
     panel.replaceChildren();
     const stats = participant?.stats || {};
+    const overview = element("div", "participant-overview");
+    overview.appendChild(sectionHeading(participant ? `${participant.display_name} · 个人数据` : "个人数据"));
+    if (participant?.public_mode !== "anonymous") {
+      const history = element("a", "history-reset", "查看该公开名称的历史 →");
+      history.href = `#history?q=${encodeURIComponent(participant.display_name)}`;
+      overview.appendChild(history);
+    }
+    const metrics = element("div", "participant-metrics");
+    for (const [label, value] of [["总伤害", participant?.damage], ["有效治疗", stats.effective_healing],
+      ["承伤", stats.taken], ["死亡次数", stats.deaths], ["死亡时长", stats.death_duration_seconds], ["非凡评分", stats.extraordinary_rating]]) {
+      metrics.appendChild(metricCard(label, label === "死亡时长"
+        ? value !== undefined ? `${Number(value).toFixed(1)} 秒` : "--" : formatInteger(value)));
+    }
+    overview.appendChild(metrics);
+    const details = element("details", "skill-events");
+    const timeline = Array.isArray(stats.skill_timeline) ? [...stats.skill_timeline].sort((a, b) => a.time_ms - b.time_ms) : [];
+    details.appendChild(element("summary", "", `逐次打击记录 · ${timeline.length ? `${formatInteger(timeline.length)} 条` : "本场未上传"}`));
+    if (timeline.length) {
+      const body = element("div", "skill-event-body");
+      let page = 0;
+      const render = () => {
+        body.replaceChildren();
+        const table = element("table", "event-table");
+        const header = element("tr");
+        ["时间", "技能", "伤害", "类型"].forEach((text) => header.appendChild(element("th", "", text)));
+        const thead = element("thead");
+        thead.appendChild(header);
+        table.appendChild(thead);
+        const tbody = element("tbody");
+        timeline.slice(page * 50, (page + 1) * 50).forEach((event) => {
+          const row = element("tr");
+          [`${(Number(event.time_ms) / 1000).toFixed(2)} 秒`, skillDisplayName(event), formatInteger(event.damage),
+            [event.critical ? "暴击" : "", event.penetrating ? "穿刺" : ""].filter(Boolean).join(" · ") || "普通"].forEach((text) => row.appendChild(element("td", "", text)));
+          tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        body.appendChild(table);
+        const pager = element("div", "history-pagination");
+        const previous = button("portal-refresh", "上一页");
+        previous.disabled = page === 0;
+        previous.addEventListener("click", () => { page--; render(); });
+        const next = button("portal-refresh", "下一页");
+        next.disabled = (page + 1) * 50 >= timeline.length;
+        next.addEventListener("click", () => { page++; render(); });
+        pager.append(previous, element("span", "", `${page + 1} / ${Math.ceil(timeline.length / 50)}`), next);
+        body.appendChild(pager);
+      };
+      render();
+      details.appendChild(body);
+    } else details.appendChild(element("p", "", "没有逐次事件不代表没有造成伤害；下方技能汇总仍使用已收录的数据。"));
+    overview.appendChild(details);
+    panel.appendChild(overview);
     const skills = Array.isArray(stats.skills) ? stats.skills : [];
     panel.appendChild(sectionHeading(
       participant ? `${participant.display_name || "匿名玩家"} · 技能构成` : "技能构成",
@@ -1204,12 +1187,77 @@
       row.appendChild(element("div", "number-cell", Number(skill.max_hit) > 0 ? formatInteger(skill.max_hit) : "--"));
       panel.appendChild(row);
     });
+    if (Number(stats.unclassified_damage) > 0) {
+      panel.appendChild(element("p", "detail-note", `另有 ${formatInteger(stats.unclassified_damage)} 伤害未归类到具体技能。`));
+    }
   }
 
-  function resultLabel(value) {
+  function resultLabel(value, confirmed = true) {
+    if (value === "defeated" && !confirmed) return ["击败 · 未确认结算", " is-interrupted"];
     if (value === "defeated") return ["胜利", ""];
     if (value === "failed") return ["失败", " is-failed"];
-    return ["中断", " is-interrupted"];
+    if (value === "interrupted") return ["中断", " is-interrupted"];
+    return ["未确认", " is-interrupted"];
+  }
+
+  function teamTimeline(encounter) {
+    const source = encounter.data?.team_dps_timeline;
+    const points = (Array.isArray(source) ? source : [])
+      .filter((point) => Number.isFinite(Number(point.time)) && Number.isFinite(Number(point.team_dps ?? point.dps)))
+      .sort((a, b) => Number(a.time) - Number(b.time));
+    const section = element("section", "history-chart");
+    const timed = points.some((point) => Number(point.time) > 0);
+    section.appendChild(sectionHeading(timed ? "团队 DPS 时间曲线" : "团队 DPS 采样曲线", points.length ? `${formatInteger(points.length)} 个采样点` : "未上传"));
+    if (!points.length) { section.appendChild(element("p", "detail-note", "本场未上传时间曲线，可继续查看成员和技能汇总。")); return section; }
+    const width = 1000, height = 210, left = 70, bottom = 175, right = 975, top = 15;
+    const maxTime = timed ? Math.max(1, ...points.map((point) => Number(point.time))) : Math.max(1, points.length - 1);
+    const position = (point, index) => timed ? Number(point.time) : index;
+    const maxDps = Math.max(1, ...points.map((point) => Number(point.team_dps ?? point.dps)));
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "团队 DPS 曲线，左右方向键查看采样值");
+    svg.setAttribute("tabindex", "0");
+    const node = (name, attrs, text) => {
+      const child = document.createElementNS(svg.namespaceURI, name);
+      Object.entries(attrs).forEach(([key, value]) => child.setAttribute(key, value));
+      if (text !== undefined) child.textContent = text;
+      svg.appendChild(child);
+      return child;
+    };
+    [0, .5, 1].forEach((fraction) => {
+      const y = bottom - fraction * (bottom - top);
+      node("line", {x1: left, x2: right, y1: y, y2: y, class: "chart-grid"});
+      node("text", {x: left - 10, y: y + 4, "text-anchor": "end"}, formatCompact(maxDps * fraction));
+      node("text", {x: left + fraction * (right - left), y: 200, "text-anchor": "middle"}, timed ? formatDuration(maxTime * fraction) : `第 ${Math.round(maxTime * fraction) + 1} 个`);
+    });
+    node("polyline", {points: points.map((point, index) => `${left + position(point, index) / maxTime * (right - left)},${bottom - Number(point.team_dps ?? point.dps) / maxDps * (bottom - top)}`).join(" "), class: "chart-line"});
+    const marker = node("circle", {r: 4, class: "chart-marker"});
+    const readout = element("p", "chart-readout");
+    let selected = points.length - 1;
+    const show = () => {
+      const point = points[selected];
+      const dps = Number(point.team_dps ?? point.dps);
+      marker.setAttribute("cx", left + position(point, selected) / maxTime * (right - left));
+      marker.setAttribute("cy", bottom - dps / maxDps * (bottom - top));
+      readout.textContent = `${timed ? `${Number(point.time).toFixed(1)} 秒` : `第 ${selected + 1} 个采样`} · 团队 DPS ${formatInteger(dps)}`;
+    };
+    svg.addEventListener("pointermove", (event) => {
+      const bounds = svg.getBoundingClientRect();
+      const time = ((event.clientX - bounds.left) / bounds.width * width - left) / (right - left) * maxTime;
+      selected = points.reduce((best, point, index) => Math.abs(position(point, index) - time) < Math.abs(position(points[best], best) - time) ? index : best, 0);
+      show();
+    });
+    svg.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      selected = Math.max(0, Math.min(points.length - 1, selected + (event.key === "ArrowRight" ? 1 : -1)));
+      show();
+    });
+    show();
+    section.append(svg, readout);
+    if (!timed) section.appendChild(element("p", "detail-note", "旧上传记录缺少采样时间，曲线按采样顺序展示，无法确定每个点发生在第几秒。"));
+    return section;
   }
 
   function renderEncounterBody(encounter) {
@@ -1223,12 +1271,33 @@
     heroCopy.appendChild(element(
       "div",
       "encounter-subtitle",
-      `关卡 ${Number(encounter.stage_id) || "--"} · ${formatDate(encounter.ended_at)} · ${Number(encounter.team_size) || 0} 人`,
+      `${performanceDifficultyLabel(encounter.difficulty || "unknown")} · 关卡 ${Number(encounter.stage_id) || "--"} · ${formatDate(encounter.ended_at)} · ${Number(encounter.team_size) || 0} 人`,
     ));
     hero.appendChild(heroCopy);
-    const [label, resultClass] = resultLabel(encounter.data?.result);
+    const [label, resultClass] = resultLabel(encounter.data?.result, encounter.data?.completion_confirmed);
     hero.appendChild(element("div", `result-badge${resultClass}`, label));
     fragment.appendChild(hero);
+    const actions = element("div", "encounter-actions");
+    const copy = button("portal-refresh", "复制战报链接");
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(window.location.href); copy.textContent = "已复制"; }
+      catch (_error) {
+        const input = element("input", "share-url");
+        input.value = window.location.href;
+        input.readOnly = true;
+        actions.appendChild(input);
+        input.select();
+        copy.disabled = true;
+        copy.textContent = "复制选中的地址";
+      }
+    });
+    const back = element("a", "history-reset", "返回历史战斗 →");
+    back.href = state.detailReturnRoute;
+    actions.append(copy, back);
+    fragment.appendChild(actions);
+    const included = encounter.statistics_status === "included";
+    fragment.appendChild(element("p", `qualification-note${included ? " is-included" : ""}`,
+      included ? "本场已纳入有效统计与排行。" : `本场作为历史记录收录，未纳入正式统计：${qualificationText(encounter.qualification_reasons) || "数据未满足统计条件"}。`));
 
     const metrics = element("div", "metric-grid");
     metrics.appendChild(metricCard("团队总伤害", formatCompact(encounter.team_total_damage), "本场累计"));
@@ -1236,6 +1305,7 @@
     metrics.appendChild(metricCard("战斗时长", formatDuration(encounter.duration_seconds), "分:秒"));
     metrics.appendChild(metricCard("团队承伤", formatCompact(encounter.data?.team_taken), "本场累计"));
     fragment.appendChild(metrics);
+    fragment.appendChild(teamTimeline(encounter));
 
     const tabs = element("div", "mode-tabs");
     [["dps", "伤害 DPS"], ["hps", "治疗 HPS"], ["dt", "承伤 DT"]].forEach(([mode, labelText]) => {
@@ -1253,26 +1323,27 @@
     const participants = Array.isArray(encounter.participants) ? encounter.participants : [];
     const durationSeconds = Number(encounter.duration_seconds) || 0;
     const sorted = [...participants].sort(
-      (a, b) => encounterMetric(state.encounterMode, b, durationSeconds)
-        - encounterMetric(state.encounterMode, a, durationSeconds),
+      (a, b) => (encounterMetric(state.encounterMode, b, durationSeconds) || 0)
+        - (encounterMetric(state.encounterMode, a, durationSeconds) || 0),
     );
     participantsSection.appendChild(sectionHeading("团队成员", `${sorted.length} 名成员 · ${encounterMetricLabel(state.encounterMode)}`));
     const list = element("div", "records-list");
     const maxMetric = Math.max(
       1,
-      ...sorted.map((participant) => encounterMetric(state.encounterMode, participant, durationSeconds)),
+      ...sorted.map((participant) => encounterMetric(state.encounterMode, participant, durationSeconds) || 0),
     );
     let selectedRow = null;
 
     sorted.forEach((participant, index) => {
       const row = button("participant-row", "");
+      row.dataset.slot = participant.slot;
       row.setAttribute("aria-label", `查看 ${participant.display_name || "匿名玩家"} 的技能数据`);
       row.appendChild(element("div", `rank-cell${index < 3 ? " is-top" : ""}`, index + 1));
       row.appendChild(participantIdentity(participant));
       const track = element("div", "metric-track");
       const fill = element("div", "metric-fill");
       const metric = encounterMetric(state.encounterMode, participant, durationSeconds);
-      fill.style.setProperty("--fill", `${Math.max(0, Math.min(100, metric / maxMetric * 100))}%`);
+      fill.style.setProperty("--fill", `${Math.max(0, Math.min(100, (metric || 0) / maxMetric * 100))}%`);
       track.appendChild(fill);
       row.appendChild(track);
       row.appendChild(element("div", "number-cell primary", formatInteger(metric)));
@@ -1285,18 +1356,20 @@
         selectedRow?.classList.remove("is-selected");
         row.classList.add("is-selected");
         selectedRow = row;
+        state.encounterSlot = participant.slot;
         renderSkills(skillsPanel, participant, state.encounterMode);
       });
       list.appendChild(row);
-      if (index === 0) selectedRow = row;
+      if (participant.slot === state.encounterSlot) selectedRow = row;
     });
+    if (!selectedRow) selectedRow = list.querySelector(".participant-row");
     participantsSection.appendChild(list);
     fragment.appendChild(participantsSection);
     fragment.appendChild(skillsPanel);
 
     window.requestAnimationFrame(() => {
-      if (selectedRow) selectedRow.classList.add("is-selected");
-      renderSkills(skillsPanel, sorted[0], state.encounterMode);
+      if (selectedRow) selectedRow.click();
+      else renderSkills(skillsPanel, null, state.encounterMode);
     });
     return fragment;
   }
@@ -1309,7 +1382,7 @@
     const id = String(encounterId || "");
     if (!/^enc_[A-Za-z0-9_-]{8,64}$/.test(id)) {
       setPage("BATTLE DETAIL", "战斗详情");
-      showStatus("战斗记录地址无效", "请从搜索结果或巅峰记录中重新打开。", false);
+      showStatus("战斗记录地址无效", "请从历史战斗或搜索结果中重新打开。", false);
       return;
     }
     setPage("BATTLE DETAIL", "战斗详情");
@@ -1324,6 +1397,7 @@
       if (!encounter) throw new Error("encounter_not_found");
       titleNode.textContent = encounter.boss_name || "战斗详情";
       renderEncounterBodyIntoPage(encounter);
+      document.title = `${encounter.boss_name || "战斗详情"} · 叨叨诡秘`;
     });
   }
 
@@ -1351,14 +1425,11 @@
 
   async function renderRoute(force = false) {
     const route = parseRoute();
+    const token = ++state.renderToken;
     const isHome = route.name === "home";
     const requestedInsightsBoss = route.name === "insights" ? route.params.get("boss") : "";
-    if (["drill", "viscountess"].includes(requestedInsightsBoss)) {
+    if (requestedInsightsBoss && (requestedInsightsBoss.startsWith("name:") || ["drill", "viscountess"].includes(requestedInsightsBoss))) {
       state.insightsFilters.boss = requestedInsightsBoss;
-    }
-    if (route.name === "insights") {
-      state.insightsFilters.demo = state.insightsFilters.boss === "drill"
-        && route.params.get("demo") === "1";
     }
     scene.classList.toggle("portal-open", !isHome);
     portal.classList.toggle("is-visible", !isHome);
@@ -1366,17 +1437,17 @@
     portal.setAttribute("aria-hidden", isHome ? "true" : "false");
     setActiveNavigation(route.name);
     if (isHome) {
-      document.title = "记录每一场战斗";
+      document.title = "叨叨诡秘 · DPS Logs";
       return;
     }
 
-    const token = ++state.renderToken;
     document.title = "叨叨诡秘助手 · 战斗记录";
-    refreshButton.hidden = route.name === "share" || route.name === "battle";
+    refreshButton.hidden = route.name === "share";
     try {
       if (force) await loadBaseData(true);
       if (route.name === "insights") await renderInsights(token);
       else if (route.name === "records") await renderRecords(token);
+      else if (route.name === "history") await renderHistory(token);
       else if (route.name === "search") await renderSearch(token, route.params.get("q"));
       else if (route.name === "share") renderShare();
       else if (route.name === "battle") await renderEncounter(token, route.params.get("id"));
@@ -1399,9 +1470,31 @@
   });
 
   backButton.addEventListener("click", () => {
-    window.location.hash = "";
+    window.location.hash = parseRoute().name === "battle" ? state.detailReturnRoute : "home";
   });
   refreshButton.addEventListener("click", () => renderRoute(true));
   window.addEventListener("hashchange", () => renderRoute(false));
+  const uploadButton = document.getElementById("uploadStatusBtn");
+  const uploadPopover = document.getElementById("uploadPopover");
+  const setPopover = (open) => {
+    uploadPopover.hidden = !open;
+    uploadPopover.classList.toggle("open", open);
+    uploadButton.setAttribute("aria-expanded", String(open));
+  };
+  uploadButton.addEventListener("click", () => setPopover(uploadPopover.hidden));
+  document.addEventListener("click", (event) => { if (!event.target.closest(".upload-area")) setPopover(false); });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !uploadPopover.hidden) { setPopover(false); uploadButton.focus(); } });
+  document.getElementById("manualUploadBtn").addEventListener("click", () => setPopover(false));
+  fetchJson(`${API_ROOT}/statistics`).then(({statistics}) => {
+    const count = formatInteger(statistics.history_encounters);
+    document.getElementById("historySummary").textContent = `浏览 ${count} 场历史战斗 →`;
+    document.getElementById("qualifiedSummary").textContent = `${formatInteger(statistics.encounters)} 场有效统计`;
+    document.getElementById("uploadCount").textContent = `${count} 场`;
+    document.getElementById("lastUpload").textContent = statistics.last_uploaded_at ? formatDate(statistics.last_uploaded_at) : "暂无上传";
+  }).catch(() => {
+    document.getElementById("qualifiedSummary").textContent = "统计暂时无法读取";
+    document.getElementById("uploadCount").textContent = "暂时无法读取";
+    document.getElementById("lastUpload").textContent = "暂时无法读取";
+  });
   renderRoute(false);
 })();

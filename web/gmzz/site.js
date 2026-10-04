@@ -998,7 +998,7 @@
   }
 
   function renderShare() {
-    setPage("UPLOAD GUIDE", "如何上传战斗记录", "通过叨叨诡秘客户端上传；网页不直接读取游戏或本机记录。");
+    setPage("UPLOAD GUIDE", "如何上传战斗记录", "加QQ群下载叨叨dps-log：1094925831 / 165966739。通过客户端上传战斗记录。");
     const flow = element("div", "share-flow");
     [
       ["完成一场 Boss 战斗", "登录客户端并保持采集运行。已启用自动上传时，胜利记录会自动同步；伤害木桩不进入上传。"],
@@ -1015,11 +1015,6 @@
       flow.appendChild(step);
     });
     contentNode.appendChild(flow);
-    const link = element("a", "portal-refresh guide-download", "下载 Windows 客户端 ↗");
-    link.href = "https://github.com/cblan23/gmzzdps/releases/tag/v0.3.5-r1";
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    contentNode.appendChild(link);
   }
 
   function encounterMetric(mode, participant, durationSeconds = 0) {

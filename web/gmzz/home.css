@@ -252,30 +252,6 @@ button,input{font:inherit}
   color:#67737d;
   margin-top:3px;
 }
-.upload-tip{
-  padding:9px 10px;
-  border-radius:6px;
-  background:#0e1318;
-  border:1px solid #252f37;
-  color:#74808a;
-  font-size:9px;
-  line-height:1.6;
-}
-.manual-upload-btn{
-  width:100%;
-  height:35px;
-  margin-top:10px;
-  border-radius:6px;
-  border:1px solid #36423b;
-  background:#121b15;
-  color:#9bd379;
-  font-size:11px;
-  cursor:pointer;
-}
-.manual-upload-btn:hover{
-  border-color:#4d6542;
-  background:#172219;
-}
 
 
 /* 主视觉 */
@@ -296,7 +272,6 @@ button,input{font:inherit}
   color:#83909a;
   font-size:11px;
   letter-spacing:2px;
-  text-transform:uppercase;
   margin-bottom:14px;
 }
 .kicker::before,.kicker::after{

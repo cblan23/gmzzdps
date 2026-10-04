@@ -6,10 +6,10 @@
   <meta name="description" content="叨叨诡秘战斗历史：查询公开角色、Boss 战报、团队 DPS、治疗、承伤和职业表现。">
   <title>叨叨诡秘 · DPS Logs</title>
   <link rel="icon" href="assets/app_icon.ico">
-  <link rel="stylesheet" href="home.css?v=20261004-details-1">
+  <link rel="stylesheet" href="home.css?v=20261004-home-copy-3">
   <link rel="stylesheet" href="site.css?v=20261004-details-1">
-  <link rel="stylesheet" href="history.css?v=20261004-details-1">
-  <script src="site.js?v=20261004-data-details-2" defer></script>
+  <link rel="stylesheet" href="history.css?v=20261004-home-copy-3">
+  <script src="site.js?v=20261004-home-copy-3" defer></script>
 </head>
 <body>
 <div class="scene" id="scene">
@@ -22,7 +22,7 @@
       <nav class="nav" aria-label="主导航">
         <a href="#home">首页</a>
         <a href="#history">历史战斗</a>
-        <a href="#records">Boss 排行</a>
+        <a href="#records">数据排行</a>
         <a href="#insights">职业统计</a>
       </nav>
       <div class="upload-area">
@@ -36,17 +36,15 @@
           <div class="upload-guide">
             <div class="upload-guide-title">怎么上传？</div>
             <div class="upload-step"><span class="step-no">1</span><div><b>打开叨叨诡秘客户端</b><small>登录后保持客户端正常运行</small></div></div>
-            <div class="upload-step"><span class="step-no">2</span><div><b>完成一场 Boss 战斗</b><small>启用自动上传后，胜利记录会自动同步</small></div></div>
+            <div class="upload-step"><span class="step-no">2</span><div><b>一场 BOSS 战斗胜利</b><small>自动上传</small></div></div>
             <div class="upload-step"><span class="step-no">3</span><div><b>同步角色信息</b><small>展示角色名称、职业、技能与已采集的装备</small></div></div>
           </div>
-          <div class="upload-tip">收录时间是全站数据时间。网页不读取游戏；记录完整度决定是否进入排行。</div>
-          <a class="manual-upload-btn share-link" id="manualUploadBtn" href="#share">如何上传已有记录 →</a>
         </div>
       </div>
     </div>
   </header>
   <main class="hero">
-    <div class="kicker">DPS DATABASE</div>
+    <div class="kicker">叨叨诡秘dps-logs</div>
     <h1>叨叨诡秘</h1>
     <div class="subtitle">Boss 战斗数据查询</div>
     <form class="search" role="search">
@@ -54,8 +52,8 @@
       <button type="submit" aria-label="搜索战斗记录">→</button>
     </form>
     <div class="search-note">查询角色的 <b>Boss 战斗记录与 DPS 表现</b></div>
-    <div class="home-data" aria-live="polite"><a href="#history" id="historySummary">浏览历史战斗 →</a><span class="home-data-separator">·</span><span id="qualifiedSummary">正在读取统计</span></div>
-    <a class="home-help" href="#share">加QQ群下载叨叨dps-log</a>
+    <div class="home-data" aria-live="polite"><span id="historySummary">正在读取历史战斗场次</span></div>
+    <a class="home-help" href="#share">加QQ群下载叨叨dps-log：1094925831 / 165966739</a>
   </main>
   <div class="fog" aria-hidden="true"></div><div class="skyline" aria-hidden="true"><div class="layer"></div></div>
   <noscript><p class="noscript-note">请启用 JavaScript 查看历史列表和战斗详情。</p></noscript>

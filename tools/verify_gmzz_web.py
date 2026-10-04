@@ -125,13 +125,24 @@ try:
     statistics = evaluate("fetch('/api/v1/dps/public/statistics').then(r=>r.json()).then(d=>d.statistics)")
     history = evaluate("fetch('/api/v1/dps/public/records?limit=25').then(r=>r.json())")
     assert history['total'] == statistics['history_encounters'] > statistics['encounters']
-    assert str(history['total']) in evaluate("document.querySelector('#historySummary').textContent.replaceAll(',','')")
+    assert evaluate("document.querySelector('#historySummary').tagName") == 'SPAN'
+    assert evaluate("document.querySelector('#historySummary').textContent") == f"当前 {history['total']:,} 场历史战斗"
+    assert evaluate("document.querySelector('.kicker').textContent") == '叨叨诡秘dps-logs'
+    assert evaluate("getComputedStyle(document.querySelector('.kicker')).textTransform") == 'none'
+    assert evaluate("document.querySelector('#qualifiedSummary, .home-data-separator')") is None
+    assert evaluate("document.querySelector('.nav a[href=\"#records\"]').textContent") == '数据排行'
+    assert all(group in evaluate("document.querySelector('.home-help').textContent") for group in ('1094925831', '165966739'))
     screenshot('home-desktop.png')
-    check('homepage real history and qualified counts')
+    check('homepage real history count and updated labels')
 
     click('#uploadStatusBtn')
     ready("!document.querySelector('#uploadPopover').hidden")
     assert evaluate("document.querySelector('#lastUpload').textContent") != '正在读取'
+    assert evaluate("document.querySelector('.upload-step:nth-child(3) b').textContent") == '一场 BOSS 战斗胜利'
+    assert evaluate("document.querySelector('.upload-step:nth-child(3) small').textContent") == '自动上传'
+    assert evaluate("document.querySelector('.upload-tip')") is None
+    assert evaluate("document.querySelector('#manualUploadBtn')") is None
+    screenshot('upload-popover-desktop.png')
     call('Input.dispatchKeyEvent', {'type': 'keyDown', 'key': 'Escape', 'code': 'Escape', 'windowsVirtualKeyCode': 27})
     assert evaluate("document.querySelector('#uploadPopover').hidden")
     click('.nav a[href="#history"]')
@@ -262,6 +273,7 @@ try:
     check('search empty state and untrusted names rendered as text')
 
     route('records', "document.querySelector('.record-row') && document.querySelector('.history-filters')")
+    assert evaluate("document.querySelector('.portal-title').textContent") == '数据排行'
     ranking = evaluate("fetch('/api/v1/dps/public/leaderboards?limit=500').then(r=>r.json()).then(d=>d.leaderboards)")
     assert evaluate("document.querySelectorAll('.record-row').length") == len(ranking)
     chosen = ranking[0]
@@ -287,7 +299,7 @@ try:
         assert evaluate("document.querySelector('#uploadStatusBtn').getBoundingClientRect().bottom<=document.querySelector('.header').getBoundingClientRect().bottom")
         click('#uploadStatusBtn')
         assert evaluate("document.querySelector('#uploadPopover').getBoundingClientRect().right<=innerWidth")
-        click('#manualUploadBtn')
+        click('.home-help')
         ready("document.querySelectorAll('.share-step').length===4")
         assert evaluate("document.documentElement.scrollWidth<=innerWidth")
         route('history', "document.querySelector('.history-row:not(.history-head)')")

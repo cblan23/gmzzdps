@@ -840,7 +840,7 @@
   }
 
   async function renderRecords(token) {
-    setPage("BOSS RANKINGS", "Boss 排行", "名次按首领、关卡与职业分别计算；仅完整、通过验证的战斗进入排行。其他记录可在历史战斗中浏览。");
+    setPage("DATA RANKINGS", "数据排行", "名次按首领、关卡与职业分别计算；仅完整、通过验证的战斗进入排行。其他记录可在历史战斗中浏览。");
     showStatus("正在读取巅峰记录");
     await loadBaseData();
     if (token !== state.renderToken) return;
@@ -1700,15 +1700,13 @@
   uploadButton.addEventListener("click", () => setPopover(uploadPopover.hidden));
   document.addEventListener("click", (event) => { if (!event.target.closest(".upload-area")) setPopover(false); });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !uploadPopover.hidden) { setPopover(false); uploadButton.focus(); } });
-  document.getElementById("manualUploadBtn").addEventListener("click", () => setPopover(false));
   fetchJson(`${API_ROOT}/statistics`).then(({statistics}) => {
     const count = formatInteger(statistics.history_encounters);
-    document.getElementById("historySummary").textContent = `浏览 ${count} 场历史战斗 →`;
-    document.getElementById("qualifiedSummary").textContent = `${formatInteger(statistics.encounters)} 场有效统计`;
+    document.getElementById("historySummary").textContent = `当前 ${count} 场历史战斗`;
     document.getElementById("uploadCount").textContent = `${count} 场`;
     document.getElementById("lastUpload").textContent = statistics.last_uploaded_at ? formatDate(statistics.last_uploaded_at) : "暂无上传";
   }).catch(() => {
-    document.getElementById("qualifiedSummary").textContent = "统计暂时无法读取";
+    document.getElementById("historySummary").textContent = "暂时无法读取历史战斗场次";
     document.getElementById("uploadCount").textContent = "暂时无法读取";
     document.getElementById("lastUpload").textContent = "暂时无法读取";
   });

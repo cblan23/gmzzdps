@@ -49,6 +49,16 @@ class ProfileUploadTests(unittest.TestCase):
         detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
         self.assertEqual(detail['participants'][0]['public_mode'], 'unrecorded')
         self.assertEqual(detail['participants'][0]['display_name'], '未记录姓名 · 成员01')
+        leaderboard = self.store.public_leaderboards(self.connection)
+        self.assertEqual(leaderboard[0]['public_mode'], 'unrecorded')
+        self.assertEqual(leaderboard[0]['display_name'], '未记录姓名')
+
+    def test_legacy_anonymous_leaderboard_uses_captured_name(self):
+        payload = self.encounter(self.first)
+        self.store.upload_encounter(self.connection, self.first, payload, public_mode='anonymous', app_version='0.3.5')
+        leaderboard = self.store.public_leaderboards(self.connection)
+        self.assertEqual(leaderboard[0]['public_mode'], 'character')
+        self.assertEqual(leaderboard[0]['display_name'], '夜行者')
 
     def test_death_total_is_incomplete_when_roster_members_are_missing(self):
         payload = self.encounter(self.first)

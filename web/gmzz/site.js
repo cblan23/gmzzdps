@@ -1551,7 +1551,7 @@
     sorted.forEach((participant, index) => {
       const row = button("participant-row", "");
       row.dataset.slot = participant.slot;
-      row.setAttribute("aria-label", `查看 ${participant.display_name || "匿名玩家"} 的技能数据`);
+      row.setAttribute("aria-label", `查看 ${participant.display_name || "未记录姓名"} 的技能数据`);
       row.appendChild(element("div", `rank-cell${index < 3 ? " is-top" : ""}`, index + 1));
       row.appendChild(participantIdentity(participant));
       const track = element("div", "metric-track");

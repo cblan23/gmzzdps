@@ -2583,24 +2583,16 @@ class ProfileUploadStore:
             """,
             (min(500, max(1, int(limit))),),
         ).fetchall()
-        return [
-            {
+        result = []
+        for row in rows:
+            display_name, public_mode, profile_id = self._public_participant_name(row, 0)
+            if public_mode == "unrecorded":
+                display_name = "未记录姓名"
+            result.append({
                 "encounter_id": str(row["encounter_id"]),
-                "profile_id": (
-                    str(row["profile_id"] or "")
-                    if str(row["public_mode"]) != "anonymous"
-                    else ""
-                ),
-                "display_name": (
-                    str(row["public_character_name"])
-                    if str(row["public_mode"]) == "character"
-                    else (
-                        str(row["nickname"])
-                        if str(row["public_mode"]) == "nickname" and row["nickname"]
-                        else "匿名玩家"
-                    )
-                ),
-                "public_mode": str(row["public_mode"]),
+                "profile_id": profile_id,
+                "display_name": display_name,
+                "public_mode": public_mode,
                 "boss_name": str(row["boss_name"]),
                 "stage_id": int(row["stage_id"]),
                 "profession_id": int(row["profession_id"]),
@@ -2608,9 +2600,8 @@ class ProfileUploadStore:
                 "dps": float(row["dps"]),
                 "rank": int(row["rank_number"]),
                 "ended_at": float(row["ended_at"]),
-            }
-            for row in rows
-        ]
+            })
+        return result
 
 
 def _record_actor_identity_map(record: Mapping[str, object]) -> dict[int, str]:

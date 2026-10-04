@@ -6,6 +6,8 @@ search, qualified Boss rankings, real profession statistics, and battle details.
 Captured character names are displayed and searchable. Incomplete historical
 records remain browsable; only qualified records enter rankings. Missing data is shown as unavailable. Curves without
 recorded timestamps use sample order instead of invented elapsed seconds.
+Battles containing a projection member (`is_ai` or a captured name ending in
+`·投影`) are excluded from all public history, detail, rankings, and statistics.
 
 Run locally:
 

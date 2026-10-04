@@ -71,6 +71,11 @@ PUBLIC_PERFORMANCE_METRICS = frozenset({"dps", "boss_damage"})
 PUBLIC_PERFORMANCE_SORTS = frozenset(
     {"p10", "p25", "p50", "p75", "p90", "best", "sample_count"}
 )
+PUBLIC_NO_PROJECTION_SQL = """NOT EXISTS (
+    SELECT 1 FROM encounter_participants projection
+    WHERE projection.encounter_id=e.encounter_id
+      AND (projection.is_ai=1 OR projection.public_character_name LIKE '%·投影')
+)"""
 
 
 PROFILE_ERROR_MESSAGES = {
@@ -2079,7 +2084,7 @@ class ProfileUploadStore:
     ) -> dict[str, object] | None:
         public_id = _safe_text(encounter_id, 64)
         encounter = connection.execute(
-            "SELECT * FROM encounters WHERE encounter_id=?",
+            f"SELECT e.* FROM encounters e WHERE e.encounter_id=? AND {PUBLIC_NO_PROJECTION_SQL}",
             (public_id,),
         ).fetchone()
         if encounter is None:
@@ -2153,7 +2158,8 @@ class ProfileUploadStore:
     ) -> dict[str, object]:
         """Browse stored battles independently of leaderboard qualification."""
         needle = _safe_text(query, 48).strip()
-        conditions = ["EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)"]
+        conditions = ["EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)",
+                      PUBLIC_NO_PROJECTION_SQL]
         params: list[object] = []
         boss_name = _safe_text(boss, 96)
         if boss_name:
@@ -2245,31 +2251,39 @@ class ProfileUploadStore:
         return {'records': records, 'total': int(total), 'limit': page_size, 'offset': page_offset}
 
     def public_catalog(self, connection: sqlite3.Connection) -> dict[str, object]:
-        rows = connection.execute("""SELECT boss_name, COUNT(*) AS records,
+        rows = connection.execute(f"""SELECT boss_name, COUNT(*) AS records,
             SUM(statistics_status='included') AS included, MAX(ended_at) AS last_at
             FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
+                AND {PUBLIC_NO_PROJECTION_SQL}
             GROUP BY boss_name ORDER BY included DESC, last_at DESC""").fetchall()
         return {
             'bosses': [{'name': str(row['boss_name']), 'records': int(row['records']),
                         'included': int(row['included']), 'last_at': float(row['last_at'])} for row in rows],
-            'difficulties': [str(row[0]) for row in connection.execute("SELECT DISTINCT difficulty FROM encounters WHERE difficulty!='' ORDER BY difficulty")],
+            'difficulties': [str(row[0]) for row in connection.execute(
+                f"SELECT DISTINCT e.difficulty FROM encounters e WHERE e.difficulty!='' AND {PUBLIC_NO_PROJECTION_SQL} ORDER BY e.difficulty")],
         }
 
     def public_statistics(self, connection: sqlite3.Connection) -> dict[str, object]:
         summary = connection.execute(
-            """
+            f"""
             SELECT COUNT(*) AS encounters,
                 COALESCE(SUM(team_total_damage), 0) AS total_damage,
                 COALESCE(SUM(duration_seconds), 0) AS duration_seconds
-            FROM encounters WHERE statistics_status='included'
+            FROM encounters e WHERE e.statistics_status='included'
+                AND {PUBLIC_NO_PROJECTION_SQL}
             """
         ).fetchone()
         uploads = connection.execute(
-            "SELECT COUNT(*) FROM uploads WHERE statistics_status='included'"
+            f"""SELECT COUNT(*) FROM uploads u
+                JOIN encounters e ON e.encounter_id=u.encounter_id
+                WHERE u.statistics_status='included' AND {PUBLIC_NO_PROJECTION_SQL}"""
         ).fetchone()[0]
-        history = connection.execute("""SELECT COUNT(*) AS encounters, MAX(ended_at) AS last_at
-            FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)""").fetchone()
-        last_uploaded = connection.execute("SELECT MAX(last_uploaded_at) FROM uploads").fetchone()[0]
+        history = connection.execute(f"""SELECT COUNT(*) AS encounters, MAX(ended_at) AS last_at
+            FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
+                AND {PUBLIC_NO_PROJECTION_SQL}""").fetchone()
+        last_uploaded = connection.execute(f"""SELECT MAX(u.last_uploaded_at) FROM uploads u
+            JOIN encounters e ON e.encounter_id=u.encounter_id
+            WHERE {PUBLIC_NO_PROJECTION_SQL}""").fetchone()[0]
         return {
             "encounters": int(summary["encounters"] if summary else 0),
             "uploads": int(uploads),
@@ -2339,6 +2353,7 @@ class ProfileUploadStore:
             FROM encounters e
             JOIN encounter_participants ep ON ep.encounter_id=e.encounter_id
             WHERE e.statistics_status='included'
+                AND {PUBLIC_NO_PROJECTION_SQL}
                 AND ep.identity_resolved=1
                 AND ep.is_ai=0
                 AND ep.profession_id>0
@@ -2563,7 +2578,7 @@ class ProfileUploadStore:
         self, connection: sqlite3.Connection, *, limit: int = 100
     ) -> list[dict[str, object]]:
         rows = connection.execute(
-            """
+            f"""
             SELECT u.encounter_id, u.public_mode, u.public_character_name,
                 u.profile_id, pr.nickname, e.boss_name, e.stage_id, e.ended_at,
                 ep.profession_id, ep.damage, ep.dps,
@@ -2578,6 +2593,7 @@ class ProfileUploadStore:
                 AND ep.character_hash=u.uploader_character_hash
             LEFT JOIN profiles pr ON pr.profile_id=u.profile_id
             WHERE u.ranking_status='eligible'
+                AND {PUBLIC_NO_PROJECTION_SQL}
             ORDER BY e.ended_at DESC, ep.dps DESC
             LIMIT ?
             """,

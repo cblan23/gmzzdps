@@ -770,6 +770,40 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(page['offset'], 0)
         self.assertEqual(self.store.public_history(self.connection, limit=999)['limit'], 50)
 
+    def test_projection_encounters_are_hidden_from_all_public_views(self) -> None:
+        normal = self.encounter(self.first)
+        for participant in normal['participants']:
+            participant['extraordinary_rating'] = 30_000
+        visible = self.store.upload_encounter(
+            self.connection, self.first, normal, public_mode='character', app_version='0.3.5')
+
+        hidden_ids = []
+        for index in (1, 2):
+            encounter = copy.deepcopy(normal)
+            encounter['client_encounter_id'] = f'projection-{index}'
+            encounter['started_at_epoch'] += index * 3600
+            encounter['ended_at_epoch'] += index * 3600
+            if index == 1:
+                encounter['participants'][1]['game_character_name'] = '审判者·投影'
+            else:
+                encounter['participants'][1]['character_id'] = character_token(2002, 0x6A)
+            receipt = self.store.upload_encounter(
+                self.connection, self.first, encounter, public_mode='character', app_version='0.3.5')
+            hidden_ids.append(receipt['encounter_id'])
+
+        self.assertEqual(self.store.public_history(self.connection)['total'], 1)
+        self.assertEqual(self.store.public_history(self.connection, query='夜行者')['total'], 1)
+        self.assertEqual(self.store.public_history(self.connection, query='投影')['total'], 0)
+        self.assertEqual(self.store.public_history(self.connection)['records'][0]['encounter_id'], visible['encounter_id'])
+        self.assertTrue(all(self.store.public_encounter(self.connection, encounter_id) is None for encounter_id in hidden_ids))
+        statistics = self.store.public_statistics(self.connection)
+        self.assertEqual(statistics['history_encounters'], 1)
+        self.assertEqual(statistics['encounters'], 1)
+        self.assertEqual(statistics['uploads'], 1)
+        self.assertEqual(self.store.public_catalog(self.connection)['bosses'][0]['records'], 1)
+        self.assertEqual({row['encounter_id'] for row in self.store.public_leaderboards(self.connection)}, {visible['encounter_id']})
+        self.assertEqual(self.store.public_performance(self.connection, boss='name:测试首领')['total_encounters'], 1)
+
     def test_public_performance_accepts_actual_boss_names_without_preview_samples(self) -> None:
         self.create_profile(self.first, '真实样本')
         record = self.encounter(self.first)

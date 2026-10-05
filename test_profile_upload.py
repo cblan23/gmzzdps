@@ -954,6 +954,48 @@ class ProfileUploadTests(unittest.TestCase):
             build_upload_encounter(record, self.second)
 
 
+    def test_client_payload_uses_archived_tokens_and_top_level_completion(self) -> None:
+        record = {
+            "encounter_id": "source-real-shape",
+            "started_at_epoch": 100.0,
+            "ended_at_epoch": 130.0,
+            "duration_seconds": 30.0,
+            "team_size": 2,
+            "archive_reason": "target_defeated",
+            "result": "defeated",
+            "completion_confirmed": True,
+            "monster": {"name": "Boss", "template_id": 7100208},
+            "participants": [
+                {
+                    "actor_id": 11,
+                    "name": "Player One",
+                    "is_self": True,
+                    "user_token": self.first,
+                    "damage": 200,
+                },
+                {
+                    "actor_id": 12,
+                    "name": "Player Two",
+                    "user_token": self.second,
+                    "damage": 100,
+                },
+            ],
+            "participant_identities": [
+                {"iid": 11, "id": self.first},
+                {"iid": 12, "id": self.second},
+            ],
+            "damage_accounting": {"stage_summary_validations": []},
+        }
+
+        payload = build_upload_encounter(record, self.first)
+
+        self.assertTrue(payload["completion_confirmed"])
+        self.assertEqual(payload["data_completeness"], "complete")
+        self.assertEqual(
+            [item["character_id"] for item in payload["participants"]],
+            [self.first, self.second],
+        )
+
     def test_healing_details_survive_upload_and_old_client_retry(self) -> None:
         record = {
             'battle_id': 'local-healing-001',

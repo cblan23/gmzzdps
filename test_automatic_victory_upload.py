@@ -52,7 +52,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.window._history_record_for_upload = mock.Mock(return_value=waiting)
         self.window._schedule_team_equipment_profiles = mock.Mock(return_value=False)
         self.window._attach_pve_equipment_snapshots = mock.Mock(
-            side_effect=lambda record: record
+            side_effect=lambda record, **_options: record
         )
 
         self.assertTrue(self.window._queue_automatic_victory_upload(waiting))
@@ -60,6 +60,9 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         first_callback()
 
         self.window._start_history_upload.assert_not_called()
+        self.window._schedule_team_equipment_profiles.assert_called_once_with(
+            extra_attempt_tokens={"teammate-uid"}
+        )
         self.assertEqual(self.window.root.after.call_count, 2)
         waiting["participants"][0]["equipment_snapshot"] = {
             "equipment": [{"slot": 1, "item_id": 123}]

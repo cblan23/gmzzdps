@@ -3345,16 +3345,21 @@ def _record_actor_identity_map(record: Mapping[str, object]) -> dict[int, str]:
         for participant in raw_participants:
             if isinstance(participant, dict):
                 remember(
-                    participant.get("actor_id"),
-                    participant.get("_character_id", participant.get("character_id")),
+                    participant.get("actor_id") or participant.get("iid"),
+                    participant.get("_character_id")
+                    or participant.get("character_id")
+                    or participant.get("user_token")
+                    or participant.get("id"),
                 )
     raw_identities = record.get("participant_identities")
     if isinstance(raw_identities, list):
         for item in raw_identities:
             if isinstance(item, dict):
                 remember(
-                    item.get("actor_id"),
-                    item.get("character_id", item.get("user_token")),
+                    item.get("actor_id") or item.get("iid"),
+                    item.get("character_id")
+                    or item.get("user_token")
+                    or item.get("id"),
                 )
     accounting = record.get("damage_accounting")
     if isinstance(accounting, dict):
@@ -3880,11 +3885,13 @@ def build_upload_encounter(
         template_ids.add(primary_template)
     accounting = record.get("damage_accounting")
     validations = accounting.get("stage_summary_validations") if isinstance(accounting, dict) else []
-    completion_confirmed = any(
-        bool(item.get("completion_confirmed"))
-        for item in validations
-        if isinstance(item, dict)
-    ) if isinstance(validations, list) else False
+    completion_confirmed = bool(record.get("completion_confirmed"))
+    if not completion_confirmed and isinstance(validations, list):
+        completion_confirmed = any(
+            bool(item.get("completion_confirmed"))
+            for item in validations
+            if isinstance(item, dict)
+        )
     archive_reason = _safe_text(record.get("archive_reason"), 48).casefold()
     raw_result = _safe_text(record.get("result"), 32).casefold()
     result_aliases = {

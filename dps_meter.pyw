@@ -349,7 +349,7 @@ APP_NAME = "叨叨诡秘助手"
 APP_VERSION = "0.3.5"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.5+20261005.2"
+CLIENT_BUILD = "0.3.5+20261006.1"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
     "runtime-profile.dev.json"
@@ -32160,6 +32160,7 @@ class DpsWindow:
         battle_id: str,
         fallback_record: dict,
         equipment_deadline: float,
+        equipment_capture_deadline_ns: int,
     ) -> None:
         if (
             bool(getattr(self, "closing", False))
@@ -32170,7 +32171,10 @@ class DpsWindow:
         record = self._history_record_for_upload(battle_id)
         if not isinstance(record, dict):
             record = fallback_record
-        enriched = self._attach_pve_equipment_snapshots(record)
+        enriched = self._attach_pve_equipment_snapshots(
+            record,
+            capture_deadline_ns=equipment_capture_deadline_ns,
+        )
         if enriched is not record:
             record = enriched
             store = getattr(self, "history_store", None)
@@ -32184,7 +32188,7 @@ class DpsWindow:
         missing_tokens = self._missing_upload_equipment_tokens(record)
         schedule = getattr(self, "_schedule_team_equipment_profiles", None)
         if missing_tokens and callable(schedule):
-            schedule()
+            schedule(extra_attempt_tokens=missing_tokens)
         requested_at = getattr(self, "team_equipment_requested_at", {})
         pending_tokens = (
             missing_tokens.intersection(requested_at)
@@ -32198,7 +32202,10 @@ class DpsWindow:
                     after(
                         AUTOMATIC_UPLOAD_EQUIPMENT_POLL_MS,
                         lambda: self._continue_automatic_victory_upload(
-                            battle_id, record, equipment_deadline
+                            battle_id,
+                            record,
+                            equipment_deadline,
+                            equipment_capture_deadline_ns,
                         ),
                     )
                     return
@@ -32242,11 +32249,17 @@ class DpsWindow:
             equipment_deadline = (
                 time.monotonic() + AUTOMATIC_UPLOAD_EQUIPMENT_WAIT_SECONDS
             )
+            equipment_capture_deadline_ns = time.time_ns() + int(
+                AUTOMATIC_UPLOAD_EQUIPMENT_WAIT_SECONDS * 1_000_000_000
+            )
             after(
                 0,
                 lambda selected_id=battle_id, saved_record=record: (
                     self._continue_automatic_victory_upload(
-                        selected_id, saved_record, equipment_deadline
+                        selected_id,
+                        saved_record,
+                        equipment_deadline,
+                        equipment_capture_deadline_ns,
                     )
                 ),
             )
@@ -32328,7 +32341,12 @@ class DpsWindow:
             controller.repository.save(tracker)
         return changed_any
 
-    def _attach_pve_equipment_snapshots(self, record: dict) -> dict:
+    def _attach_pve_equipment_snapshots(
+        self,
+        record: dict,
+        *,
+        capture_deadline_ns: int = 0,
+    ) -> dict:
         """Attach same-character gear captured by the official settlement edge."""
 
         try:
@@ -32349,6 +32367,10 @@ class DpsWindow:
         # UID and exact rating remain mandatory below, so this does not attach
         # arbitrary current gear to an older fight.
         snapshot_cutoff_ns = max(ended_ns, settlement_ns)
+        try:
+            automatic_upload_cutoff_ns = max(0, int(capture_deadline_ns or 0))
+        except (TypeError, ValueError, OverflowError):
+            automatic_upload_cutoff_ns = 0
 
         def valid_snapshot(value: object, expected_rating: object) -> dict | None:
             if not isinstance(value, dict):
@@ -32357,12 +32379,16 @@ class DpsWindow:
                 captured_ns = int(value.get("captured_at_ns") or 0)
             except (TypeError, ValueError, OverflowError):
                 return None
-            if captured_ns <= 0 or captured_ns > snapshot_cutoff_ns:
-                return None
             expected = normalize_extraordinary_rating(expected_rating)
             captured = normalize_extraordinary_rating(
                 value.get("extraordinary_rating")
             )
+            allowed_cutoff_ns = max(
+                snapshot_cutoff_ns,
+                automatic_upload_cutoff_ns if expected is not None else 0,
+            )
+            if captured_ns <= 0 or captured_ns > allowed_cutoff_ns:
+                return None
             if expected is not None and captured != expected:
                 return None
             if captured_ns > ended_ns and expected is None:
@@ -32455,7 +32481,10 @@ class DpsWindow:
                                 account_key,
                                 token,
                                 (
-                                    snapshot_cutoff_ns
+                                    max(
+                                        snapshot_cutoff_ns,
+                                        automatic_upload_cutoff_ns,
+                                    )
                                     if normalize_extraordinary_rating(
                                         expected_rating
                                     ) is not None
@@ -45915,6 +45944,10 @@ class DpsWindow:
             (
                 "v0.3.5",
                 """v0.3.5更新日志
+
+2026-10-06 实战上传补全（0.3.5+20261006.1）
+兼容本地历史记录的实际角色身份字段与顶层通关标记，自动上传会保留已确认的胜利结果和全员身份。
+装备缺失的真人成员在八秒上传宽限内额外补查一次；仅归档角色 ID 与非凡评分精确匹配的快照，避免战后换装污染本场记录。
 
 2026-10-05 自动上传装备补全（0.3.5+20261005.2）
 Boss 战胜利后会短暂等待已发出的队伍装备查询，并在生成上传包前再次补齐本场真实成员的装备快照。
@@ -62248,13 +62281,22 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             hashlib.sha256(identity.encode("utf-8")).digest()[:4], "little"
         ) or 1
 
-    def _schedule_team_equipment_profiles(self) -> bool:
+    def _schedule_team_equipment_profiles(
+        self,
+        *,
+        extra_attempt_tokens: set[str] | None = None,
+    ) -> bool:
         model = getattr(self, "model", None)
         worker = getattr(self, "worker", None)
         submit = getattr(worker, "schedule_equipment_profiles", None)
         session_reader = getattr(worker, "equipment_session", None)
         if model is None or not callable(submit) or not callable(session_reader):
             return False
+        extra_attempt_tokens = {
+            str(token or "").strip()
+            for token in (extra_attempt_tokens or set())
+            if str(token or "").strip()
+        }
         game_pid, capture_session_id = session_reader()
         party_session_id = self._team_equipment_party_session_id()
         local_token = self._team_equipment_local_token()
@@ -62476,6 +62518,11 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             not in requested_tokens
             and attempts.get(str(member["user_token"]), 0)
             < TEAM_EQUIPMENT_MAX_ATTEMPTS_PER_RATING
+            + (
+                1
+                if str(member["user_token"]) in extra_attempt_tokens
+                else 0
+            )
         ]
         if not members_to_query:
             return False

@@ -2,7 +2,7 @@
 
 Windows 游戏战斗统计工具，提供悬浮 HUD、队伍 DPS / HPS / 承伤、首领信息、战斗记录与 PvP 场次分析。
 
-**当前版本：v0.3.5** · 客户端构建 `0.3.5+20261005.2` · GitHub 程序包为预发布版本。
+**当前版本：v0.3.5** · 客户端构建 `0.3.5+20261006.1` · GitHub 程序包为预发布版本。
 
 [下载 Windows 便携包](https://github.com/cblan23/gmzzdps/releases/tag/v0.3.5-r1) · [使用指南](docs/usage.md) · [常见问题](使用问题大全.md) · [构建与发布](docs/build.md) · [验证状态](docs/release-v0.3.5.md)
 

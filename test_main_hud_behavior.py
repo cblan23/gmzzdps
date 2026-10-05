@@ -1374,9 +1374,20 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertFalse(window._schedule_team_equipment_profiles())
         self.assertEqual(len(submissions), 3)
 
+        self.assertTrue(window._schedule_team_equipment_profiles(
+            extra_attempt_tokens={'self-token'}
+        ))
+        window.team_equipment_requested_at['self-token'] = (
+            time.monotonic() - 21
+        )
+        self.assertFalse(window._schedule_team_equipment_profiles(
+            extra_attempt_tokens={'self-token'}
+        ))
+        self.assertEqual(len(submissions), 4)
+
         window.model.entity_extraordinary_ratings[1] = 90_001
         self.assertTrue(window._schedule_team_equipment_profiles())
-        self.assertEqual(len(submissions), 4)
+        self.assertEqual(len(submissions), 5)
         self.assertEqual(window.team_equipment_attempts['self-token'], 1)
 
     def test_equipment_reply_rating_does_not_invalidate_its_own_snapshot(self):

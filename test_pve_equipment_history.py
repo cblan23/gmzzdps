@@ -193,6 +193,41 @@ class PveEquipmentHistoryTests(unittest.TestCase):
         self.assertIs(captured, record)
         self.assertNotIn("equipment_snapshot", captured["participants"][0])
 
+    def test_automatic_upload_grace_accepts_matching_post_settlement_snapshot(self):
+        window = self.window()
+        window.team_equipment_profiles = {
+            "self-uid": {
+                "equipment_snapshot": {
+                    "captured_at_ns": 123_000_000_000,
+                    "extraordinary_rating": 90_001,
+                    "equipment": [{"slot": 1, "item_id": 889}],
+                }
+            }
+        }
+        record = {
+            "ended_at_epoch": 100,
+            "settlement_received_at": 120,
+            "self_character_id": "self-uid",
+            "participants": [
+                {
+                    "actor_id": 1,
+                    "is_self": True,
+                    "extraordinary_rating": 90_001,
+                }
+            ],
+        }
+
+        self.assertIs(window._attach_pve_equipment_snapshots(record), record)
+        captured = window._attach_pve_equipment_snapshots(
+            record,
+            capture_deadline_ns=128_000_000_000,
+        )
+
+        self.assertEqual(
+            captured["participants"][0]["equipment_snapshot"]["equipment"][0]["item_id"],
+            889,
+        )
+
     def test_archive_lookup_uses_delayed_settlement_cutoff(self):
         window = self.window()
         window.team_equipment_profiles = {}

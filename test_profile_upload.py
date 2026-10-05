@@ -1077,6 +1077,10 @@ class ProfileUploadTests(unittest.TestCase):
             'dungeon_id': 5_100_064,
             'dungeon_stage_id': 5_150_113,
             'map_id': 5_200_224,
+            'brass_tome_status': 'enabled',
+            'brass_tome_enabled': True,
+            'brass_tome_challenge_ids': [10_101, 10_102],
+            'brass_tome_source': 'live_lua_dungeon_and_brass_tome',
             'dungeon_name': '大帝重临',
             'stage_name': '罗塞尔的残留意志',
             'team_size': 2,
@@ -1187,6 +1191,10 @@ class ProfileUploadTests(unittest.TestCase):
         payload = build_upload_encounter(record, self.first, current_character_name='Player One')
         self.assertEqual(payload['difficulty'], 'normal')
         self.assertEqual(payload['difficulty_source'], 'map_id')
+        self.assertEqual(payload['brass_tome_status'], 'enabled')
+        self.assertTrue(payload['brass_tome_enabled'])
+        self.assertEqual(payload['brass_tome_challenge_ids'], [10_101, 10_102])
+        self.assertTrue(payload['module_coverage']['brass_tome'])
         self.assertEqual(payload['team_effective_healing'], 300)
         self.assertEqual(payload['team_taken'], 1_000)
         self.assertTrue(payload['module_coverage']['details_complete'])
@@ -1230,6 +1238,26 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(detail['data']['boss_damage']['event_log']['rows'][0][-1], 700)
         self.assertEqual(detail['data']['boss_hp_damage_samples']['rows'][-1], [30.0, 3_000])
         self.assertTrue(detail['data']['module_coverage']['details_complete'])
+        self.assertEqual(detail['brass_tome_status'], 'enabled')
+        self.assertEqual(detail['data']['brass_tome_challenge_ids'], [10_101, 10_102])
+        self.assertEqual(
+            self.store.public_history(self.connection)['records'][0][
+                'brass_tome_status'
+            ],
+            'enabled',
+        )
+
+        unknown_record = copy.deepcopy(record)
+        unknown_record['battle_id'] = 'all-modules-unknown-brass'
+        unknown_record.pop('brass_tome_status')
+        unknown_record.pop('brass_tome_enabled')
+        unknown_record.pop('brass_tome_challenge_ids')
+        unknown_record.pop('brass_tome_source')
+        unknown_payload = build_upload_encounter(unknown_record, self.first)
+        self.assertEqual(unknown_payload['brass_tome_status'], 'unknown')
+        self.assertIsNone(unknown_payload['brass_tome_enabled'])
+        self.assertFalse(unknown_payload['module_coverage']['brass_tome'])
+        self.assertFalse(unknown_payload['module_coverage']['details_complete'])
 
         older = copy.deepcopy(payload)
         for field in ('monster', 'targets', 'boss_damage', 'boss_hp_damage_samples', 'module_coverage'):

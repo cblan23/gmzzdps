@@ -261,6 +261,99 @@ class PveEquipmentHistoryTests(unittest.TestCase):
         saved = window.history_store.save.call_args.args[0]
         self.assertEqual(saved["participants"][0]["equipment_snapshot"]["equipment"][0]["item_id"], 456)
 
+    def test_upload_payload_refreshes_equipment_after_initial_history_save(self):
+        window = self.window()
+        self_token = "AQAAAOwNKLYHAAAA"
+        window.model.actor_character_ids = {1: self_token}
+        window.team_equipment_profiles = {
+            self_token: window.team_equipment_profiles["self-uid"]
+        }
+        record = {
+            "encounter_id": "late-equipment",
+            "ended_at_epoch": 100,
+            "started_at_epoch": 90,
+            "duration_seconds": 10,
+            "archive_reason": "target_defeated",
+            "completion_confirmed": True,
+            "total_damage": 100,
+            "team_size": 1,
+            "monster": {"name": "Boss", "template_id": 7_100_208},
+            "self_character_id": self_token,
+            "participant_identities": [
+                {"actor_id": 1, "character_id": self_token}
+            ],
+            "participants": [
+                {
+                    "actor_id": 1,
+                    "is_self": True,
+                    "name": "Player",
+                    "damage": 100,
+                }
+            ],
+        }
+        window.history_store = mock.Mock()
+        window.history_store.load.return_value = record
+        window.history_records = []
+
+        _record, payload, _name = window._build_history_upload_payload(
+            "late-equipment"
+        )
+
+        snapshot = payload["participants"][0]["equipment_snapshot"]
+        self.assertEqual(snapshot["equipment"][0]["item_id"], 123)
+        window.history_store.save.assert_called_once()
+
+    def test_archive_does_not_copy_disabled_brass_state_after_dungeon_exit(self):
+        window = self.window()
+        window.worker = SimpleNamespace(diagnostic_snapshot=lambda: {
+            "dungeon_id": 0,
+            "map_id": 5_231_162,
+            "in_dungeon": False,
+            "brass_tome_status": "disabled",
+            "brass_tome_challenge_ids": [],
+            "dungeon_context_source": "live_lua_dungeon_and_brass_tome",
+        })
+        window.history_store = mock.Mock()
+        window._queue_automatic_victory_upload = mock.Mock()
+        record = {
+            "ended_at_epoch": 100,
+            "dungeon_id": 5_100_064,
+            "map_id": 5_200_224,
+            "brass_tome_status": "unknown",
+            "participants": [],
+        }
+
+        self.assertTrue(window._save_combat_history_record(record))
+
+        saved = window.history_store.save.call_args.args[0]
+        self.assertEqual(saved["brass_tome_status"], "unknown")
+
+    def test_archive_copies_disabled_brass_state_in_same_dungeon(self):
+        window = self.window()
+        window.worker = SimpleNamespace(diagnostic_snapshot=lambda: {
+            "dungeon_id": 5_100_064,
+            "map_id": 5_200_224,
+            "in_dungeon": True,
+            "brass_tome_status": "disabled",
+            "brass_tome_challenge_ids": [],
+            "dungeon_context_source": "live_lua_dungeon_and_brass_tome",
+        })
+        window.history_store = mock.Mock()
+        window._queue_automatic_victory_upload = mock.Mock()
+        record = {
+            "ended_at_epoch": 100,
+            "dungeon_id": 5_100_064,
+            "map_id": 5_200_224,
+            "brass_tome_status": "unknown",
+            "participants": [],
+        }
+
+        self.assertTrue(window._save_combat_history_record(record))
+
+        saved = window.history_store.save.call_args.args[0]
+        self.assertEqual(saved["brass_tome_status"], "disabled")
+        self.assertFalse(saved["brass_tome_enabled"])
+
     def test_detail_gear_tab_reuses_pvp_equipment_cards_without_changing_meter(self):
         window = self.window()
         window.history_meter_mode = "dps"

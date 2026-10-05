@@ -349,7 +349,7 @@ APP_NAME = "叨叨诡秘助手"
 APP_VERSION = "0.3.5"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.5+20261005.1"
+CLIENT_BUILD = "0.3.5+20261005.2"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
     "runtime-profile.dev.json"
@@ -434,6 +434,8 @@ TEAM_RATING_PREVIEW_AVAILABLE = True
 TEAM_EQUIPMENT_RETRY_CHECK_SECONDS = 2.0
 TEAM_EQUIPMENT_REQUEST_TIMEOUT_SECONDS = 20.0
 TEAM_EQUIPMENT_MAX_ATTEMPTS_PER_RATING = 3
+AUTOMATIC_UPLOAD_EQUIPMENT_WAIT_SECONDS = 8.0
+AUTOMATIC_UPLOAD_EQUIPMENT_POLL_MS = 250
 CAPTURE_TRANSIENT_RESTART_LIMIT = 5
 MAIN_DISPLAY_SCHEMA_VERSION = 4
 MAIN_DISPLAY_SCHEMA_CONFIG_KEY = "main_display_schema_version"
@@ -3482,13 +3484,24 @@ class CombatModel:
         self.session_number = 0
         self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
         self.current_dungeon_id = 0
+        self.current_map_id = 0
+        self.current_in_dungeon: bool | None = None
         self.current_dungeon_stage_id = 0
         self.current_dungeon_stage_phase = 0
         self.current_dungeon_context_filetime = 0
+        self.current_dungeon_context_source = ""
+        self.current_brass_tome_status = "unknown"
+        self.current_brass_tome_challenge_ids: list[int] = []
+        self.current_brass_tome_source = ""
         self.encounter_dungeon_id = 0
+        self.encounter_map_id = 0
         self.encounter_dungeon_stage_id = 0
         self.encounter_dungeon_stage_phase = 0
         self.encounter_dungeon_context_filetime = 0
+        self.encounter_dungeon_context_source = ""
+        self.encounter_brass_tome_status = "unknown"
+        self.encounter_brass_tome_challenge_ids: list[int] = []
+        self.encounter_brass_tome_source = ""
         self.game_server_duration_seconds = 0.0
         self.game_server_duration_summary_id = ""
         self.game_server_duration_policy = ""
@@ -3537,6 +3550,7 @@ class CombatModel:
             return
         try:
             dungeon_id = max(0, int(payload.get("dungeon_id", 0) or 0))
+            map_id = max(0, int(payload.get("map_id", 0) or 0))
             stage_id = max(
                 0, int(payload.get("dungeon_stage_id", 0) or 0)
             )
@@ -3548,32 +3562,99 @@ class CombatModel:
             )
         except (TypeError, ValueError, OverflowError):
             return
-        if dungeon_id:
+        in_dungeon = payload.get("in_dungeon")
+        if not isinstance(in_dungeon, bool):
+            in_dungeon = None
+        if in_dungeon is False:
+            self.current_dungeon_id = 0
+        elif dungeon_id:
             self.current_dungeon_id = dungeon_id
+        if map_id:
+            self.current_map_id = map_id
+        self.current_in_dungeon = in_dungeon
         if stage_id:
             self.current_dungeon_stage_id = stage_id
         self.current_dungeon_stage_phase = stage_phase
         self.current_dungeon_context_filetime = max(
             self.current_dungeon_context_filetime, context_filetime
         )
+        context_source = str(payload.get("dungeon_context_source", "") or "")[:64]
+        if context_source:
+            self.current_dungeon_context_source = context_source
+
+        brass_status = str(
+            payload.get("brass_tome_status", "unknown") or "unknown"
+        ).casefold()
+        if brass_status not in {"enabled", "disabled", "unknown"}:
+            brass_status = "unknown"
+        raw_challenge_ids = payload.get("brass_tome_challenge_ids")
+        challenge_ids = set()
+        if isinstance(raw_challenge_ids, (list, tuple)):
+            for raw_id in raw_challenge_ids[:64]:
+                try:
+                    challenge_id = int(raw_id)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if 0 < challenge_id <= 1_000_000_000:
+                    challenge_ids.add(challenge_id)
+        brass_source = str(
+            payload.get("brass_tome_source")
+            or payload.get("dungeon_context_source")
+            or ""
+        )[:64]
+        self.current_brass_tome_status = brass_status
+        self.current_brass_tome_challenge_ids = sorted(challenge_ids)
+        if brass_source:
+            self.current_brass_tome_source = brass_source
 
         combat_started = bool(self.first_damage_time or self.first_healing_time)
         if not combat_started:
             self.encounter_dungeon_id = self.current_dungeon_id
+            self.encounter_map_id = self.current_map_id
             self.encounter_dungeon_stage_id = self.current_dungeon_stage_id
             self.encounter_dungeon_stage_phase = self.current_dungeon_stage_phase
             self.encounter_dungeon_context_filetime = (
                 self.current_dungeon_context_filetime
             )
+            self.encounter_dungeon_context_source = (
+                self.current_dungeon_context_source
+            )
+            self.encounter_brass_tome_status = self.current_brass_tome_status
+            self.encounter_brass_tome_challenge_ids = list(
+                self.current_brass_tome_challenge_ids
+            )
+            self.encounter_brass_tome_source = self.current_brass_tome_source
             return
         if not self.encounter_dungeon_id and self.current_dungeon_id:
             self.encounter_dungeon_id = self.current_dungeon_id
+        if not self.encounter_map_id and self.current_map_id:
+            self.encounter_map_id = self.current_map_id
         if not self.encounter_dungeon_stage_id and self.current_dungeon_stage_id:
             self.encounter_dungeon_stage_id = self.current_dungeon_stage_id
         if not self.encounter_dungeon_stage_phase and stage_phase:
             self.encounter_dungeon_stage_phase = stage_phase
         if not self.encounter_dungeon_context_filetime and context_filetime:
             self.encounter_dungeon_context_filetime = context_filetime
+        if (
+            not self.encounter_dungeon_context_source
+            and self.current_dungeon_context_source
+        ):
+            self.encounter_dungeon_context_source = self.current_dungeon_context_source
+        if brass_status == "enabled":
+            self.encounter_brass_tome_status = "enabled"
+            self.encounter_brass_tome_challenge_ids = sorted(
+                set(self.encounter_brass_tome_challenge_ids) | challenge_ids
+            )
+            if brass_source:
+                self.encounter_brass_tome_source = brass_source
+        elif (
+            brass_status == "disabled"
+            and self.encounter_brass_tome_status == "unknown"
+            and in_dungeon is not False
+        ):
+            self.encounter_brass_tome_status = "disabled"
+            if brass_source:
+                self.encounter_brass_tome_source = brass_source
 
     def ingest_enrage_countdown(self, payload: object) -> bool:
         """Retain a verified phase edge for the read-only enrage predictor."""
@@ -3904,11 +3985,18 @@ class CombatModel:
         self.session_number += 1
         self.encounter_id = f"{self.run_id}-{self.session_number:06d}"
         self.encounter_dungeon_id = self.current_dungeon_id
+        self.encounter_map_id = self.current_map_id
         self.encounter_dungeon_stage_id = self.current_dungeon_stage_id
         self.encounter_dungeon_stage_phase = self.current_dungeon_stage_phase
         self.encounter_dungeon_context_filetime = (
             self.current_dungeon_context_filetime
         )
+        self.encounter_dungeon_context_source = self.current_dungeon_context_source
+        self.encounter_brass_tome_status = self.current_brass_tome_status
+        self.encounter_brass_tome_challenge_ids = list(
+            self.current_brass_tome_challenge_ids
+        )
+        self.encounter_brass_tome_source = self.current_brass_tome_source
         self.game_server_duration_seconds = 0.0
         self.game_server_duration_summary_id = ""
         self.game_server_duration_policy = ""
@@ -8776,6 +8864,7 @@ class CombatModel:
             "saved_at_epoch": now,
             "saved_at": self._iso_timestamp(now),
             "dungeon_id": int(self.encounter_dungeon_id or 0),
+            "map_id": int(self.encounter_map_id or 0),
             "dungeon_stage_id": int(self.encounter_dungeon_stage_id or 0),
             "dungeon_stage_phase": int(
                 self.encounter_dungeon_stage_phase or 0
@@ -8783,7 +8872,20 @@ class CombatModel:
             "dungeon_context_filetime": int(
                 self.encounter_dungeon_context_filetime or 0
             ),
-            "dungeon_context_source": "explicit_protocol_fields",
+            "dungeon_context_source": (
+                self.encounter_dungeon_context_source
+                or "explicit_protocol_fields"
+            ),
+            "brass_tome_status": self.encounter_brass_tome_status,
+            "brass_tome_enabled": (
+                True if self.encounter_brass_tome_status == "enabled"
+                else False if self.encounter_brass_tome_status == "disabled"
+                else None
+            ),
+            "brass_tome_challenge_ids": list(
+                self.encounter_brass_tome_challenge_ids
+            ),
+            "brass_tome_source": self.encounter_brass_tome_source,
             "duration_seconds": duration,
             "dps_duration_seconds": dps_duration,
             "hps_duration_seconds": hps_duration,
@@ -20244,9 +20346,15 @@ class HookWorker(threading.Thread):
             "outbound_observer_installed": False,
             "outbound_observer_records": 0,
             "dungeon_id": 0,
+            "map_id": 0,
+            "in_dungeon": None,
             "dungeon_stage_id": 0,
             "dungeon_stage_phase": 0,
             "dungeon_context_filetime": 0,
+            "dungeon_context_source": "",
+            "brass_tome_status": "unknown",
+            "brass_tome_enabled": None,
+            "brass_tome_challenge_ids": [],
             "reconnect_dungeon_candidates": [],
             "damage_source": "none",
             "game_pid": 0,
@@ -21328,6 +21436,13 @@ class HookWorker(threading.Thread):
                     self.emit("settlement_experiment_record", summaries)
         for record in team_profile_records:
             write_capture_record(log_handle, record)
+            if record.get("method") == "ReadOnlyCurrentEncounterContext":
+                apply_context = getattr(
+                    parser, "apply_read_only_encounter_context", None
+                )
+                if callable(apply_context):
+                    apply_context(record)
+                continue
             if record.get("method") == "ReadOnlyCurrentDungeonRoster":
                 apply_roster = getattr(
                     parser, "apply_read_only_group_roster", None
@@ -31977,6 +32092,120 @@ class DpsWindow:
         self.feedback_submit_button = None
         self.tray_feedback_hidden = False
 
+    @staticmethod
+    def _missing_upload_equipment_tokens(record: object) -> set[str]:
+        if not isinstance(record, dict):
+            return set()
+        identities = record.get("participant_identities")
+        if not isinstance(identities, list):
+            identities = record.get("participants_snapshot")
+        actor_tokens: dict[int, str] = {}
+        if isinstance(identities, list):
+            for identity in identities:
+                if not isinstance(identity, dict):
+                    continue
+                try:
+                    actor_id = int(
+                        identity.get("actor_id") or identity.get("iid") or 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                token = str(
+                    identity.get("character_id")
+                    or identity.get("user_token")
+                    or identity.get("id")
+                    or ""
+                ).strip()
+                if actor_id and token:
+                    actor_tokens[actor_id] = token
+
+        missing: set[str] = set()
+        participants = record.get("participants")
+        if not isinstance(participants, list):
+            return missing
+        self_character_id = str(record.get("self_character_id") or "").strip()
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            name = str(participant.get("name", "") or "").strip()
+            if (
+                history_participant_is_ai(participant)
+                or name.endswith(PROJECTION_NAME_SUFFIX)
+            ):
+                continue
+            snapshot = participant.get("equipment_snapshot")
+            if (
+                isinstance(snapshot, dict)
+                and isinstance(snapshot.get("equipment"), list)
+                and bool(snapshot["equipment"])
+            ):
+                continue
+            token = str(
+                participant.get("user_token")
+                or participant.get("character_id")
+                or actor_tokens.get(participant.get("actor_id"))
+                or (
+                    self_character_id
+                    if participant.get("is_self") is True
+                    else ""
+                )
+                or ""
+            ).strip()
+            if token:
+                missing.add(token)
+        return missing
+
+    def _continue_automatic_victory_upload(
+        self,
+        battle_id: str,
+        fallback_record: dict,
+        equipment_deadline: float,
+    ) -> None:
+        if (
+            bool(getattr(self, "closing", False))
+            or self._history_upload_state(battle_id).get("state", "pending")
+            != "pending"
+        ):
+            return
+        record = self._history_record_for_upload(battle_id)
+        if not isinstance(record, dict):
+            record = fallback_record
+        enriched = self._attach_pve_equipment_snapshots(record)
+        if enriched is not record:
+            record = enriched
+            store = getattr(self, "history_store", None)
+            save = getattr(store, "save", None)
+            if callable(save):
+                try:
+                    save(record)
+                except (OSError, TypeError, ValueError):
+                    pass
+
+        missing_tokens = self._missing_upload_equipment_tokens(record)
+        schedule = getattr(self, "_schedule_team_equipment_profiles", None)
+        if missing_tokens and callable(schedule):
+            schedule()
+        requested_at = getattr(self, "team_equipment_requested_at", {})
+        pending_tokens = (
+            missing_tokens.intersection(requested_at)
+            if isinstance(requested_at, dict)
+            else set()
+        )
+        if pending_tokens and time.monotonic() < equipment_deadline:
+            after = getattr(getattr(self, "root", None), "after", None)
+            if callable(after):
+                try:
+                    after(
+                        AUTOMATIC_UPLOAD_EQUIPMENT_POLL_MS,
+                        lambda: self._continue_automatic_victory_upload(
+                            battle_id, record, equipment_deadline
+                        ),
+                    )
+                    return
+                except tk.TclError:
+                    pass
+        self._start_history_upload(battle_id, "character", silent=True)
+
     def _queue_automatic_victory_upload(self, record: object) -> bool:
         """Upload a saved victory once outside combat handling."""
 
@@ -32010,10 +32239,15 @@ class DpsWindow:
             return False
         queued.add(battle_id)
         try:
+            equipment_deadline = (
+                time.monotonic() + AUTOMATIC_UPLOAD_EQUIPMENT_WAIT_SECONDS
+            )
             after(
                 0,
-                lambda selected_id=battle_id: self._start_history_upload(
-                    selected_id, "character", silent=True
+                lambda selected_id=battle_id, saved_record=record: (
+                    self._continue_automatic_victory_upload(
+                        selected_id, saved_record, equipment_deadline
+                    )
                 ),
             )
         except tk.TclError:
@@ -32258,6 +32492,7 @@ class DpsWindow:
             enriched_record["capture_pipeline_at_archive"] = capture_snapshot
             for record_key, capture_key in (
                 ("dungeon_id", "dungeon_id"),
+                ("map_id", "map_id"),
                 ("dungeon_stage_id", "dungeon_stage_id"),
                 ("dungeon_stage_phase", "dungeon_stage_phase"),
                 ("dungeon_context_filetime", "dungeon_context_filetime"),
@@ -32271,6 +32506,50 @@ class DpsWindow:
                     enriched_record[record_key] = capture_value
                     enriched_record["dungeon_context_source"] = (
                         "explicit_protocol_fields_at_archive"
+                    )
+            current_brass_status = str(
+                enriched_record.get("brass_tome_status", "unknown") or "unknown"
+            ).casefold()
+            capture_brass_status = str(
+                capture_snapshot.get("brass_tome_status", "unknown") or "unknown"
+            ).casefold()
+            if (
+                current_brass_status not in {"enabled", "disabled"}
+                and capture_brass_status in {"enabled", "disabled"}
+            ):
+                def context_id(value: object) -> int:
+                    try:
+                        return max(0, int(value or 0))
+                    except (TypeError, ValueError, OverflowError):
+                        return 0
+
+                record_dungeon_id = context_id(
+                    enriched_record.get("dungeon_id")
+                )
+                record_map_id = context_id(enriched_record.get("map_id"))
+                capture_dungeon_id = context_id(
+                    capture_snapshot.get("dungeon_id")
+                )
+                capture_map_id = context_id(capture_snapshot.get("map_id"))
+                same_dungeon_context = bool(
+                    capture_snapshot.get("in_dungeon") is True
+                    and (record_dungeon_id > 0 or record_map_id > 0)
+                    and (
+                        record_dungeon_id <= 0
+                        or record_dungeon_id == capture_dungeon_id
+                    )
+                    and (record_map_id <= 0 or record_map_id == capture_map_id)
+                )
+                if capture_brass_status == "enabled" or same_dungeon_context:
+                    enriched_record["brass_tome_status"] = capture_brass_status
+                    enriched_record["brass_tome_enabled"] = (
+                        capture_brass_status == "enabled"
+                    )
+                    raw_ids = capture_snapshot.get("brass_tome_challenge_ids")
+                    if isinstance(raw_ids, list):
+                        enriched_record["brass_tome_challenge_ids"] = list(raw_ids)
+                    enriched_record["brass_tome_source"] = str(
+                        capture_snapshot.get("dungeon_context_source", "") or ""
                     )
             adapter = getattr(self, "settlement_history_adapter", None)
             controller = getattr(self, "settlement_ui", None)
@@ -45637,6 +45916,10 @@ class DpsWindow:
                 "v0.3.5",
                 """v0.3.5更新日志
 
+2026-10-05 自动上传装备补全（0.3.5+20261005.2）
+Boss 战胜利后会短暂等待已发出的队伍装备查询，并在生成上传包前再次补齐本场真实成员的装备快照。
+投影与 AI 成员不会阻塞上传；上传继续包含全员战斗模块、副本难度、Boss 血量与黄铜书挑战状态。
+
 2026-10-05 自动上传与采集稳定性修复（0.3.5+20261005.1）
 Boss 战胜利后自动上传本场实际捕获的全员 DPS、HPS、承伤、死亡、技能、目标、装备、暴击、起手与命中时间轴。
 上传副本难度、Boss 最大血量、血量曲线和首领伤害详情；重复上传同一场时补齐较完整的数据。
@@ -57772,6 +58055,16 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             raise ProfileUploadError(
                 "BAD_ENCOUNTER", "这场战斗记录已不存在，请刷新战斗列表。"
             )
+        enriched = self._attach_pve_equipment_snapshots(record)
+        if enriched is not record:
+            record = enriched
+            store = getattr(self, "history_store", None)
+            save = getattr(store, "save", None)
+            if callable(save):
+                try:
+                    save(record)
+                except (OSError, TypeError, ValueError):
+                    pass
         rejection_code = encounter_upload_rejection_code(record)
         if rejection_code:
             raise ProfileUploadError(rejection_code)
@@ -66119,13 +66412,24 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         model.local_player_name = ""
         model.scene_id = None
         model.current_dungeon_id = 0
+        model.current_map_id = 0
+        model.current_in_dungeon = None
         model.current_dungeon_stage_id = 0
         model.current_dungeon_stage_phase = 0
         model.current_dungeon_context_filetime = 0
+        model.current_dungeon_context_source = ""
+        model.current_brass_tome_status = "unknown"
+        model.current_brass_tome_challenge_ids = []
+        model.current_brass_tome_source = ""
         model.encounter_dungeon_id = 0
+        model.encounter_map_id = 0
         model.encounter_dungeon_stage_id = 0
         model.encounter_dungeon_stage_phase = 0
         model.encounter_dungeon_context_filetime = 0
+        model.encounter_dungeon_context_source = ""
+        model.encounter_brass_tome_status = "unknown"
+        model.encounter_brass_tome_challenge_ids = []
+        model.encounter_brass_tome_source = ""
         model.closed_encounter_target_ids.clear()
         model.awaiting_post_exit_context = False
 

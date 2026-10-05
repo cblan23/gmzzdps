@@ -22928,6 +22928,51 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertNotIn(MONSTER_ID, model.entity_fight_attributes)
 
+    def test_encounter_context_archives_map_and_sticky_brass_tome_state(self):
+        model = CombatModel(run_id="brass-tome-context-test")
+        model.ingest_dungeon_context({
+            "dungeon_id": 5_100_064,
+            "map_id": 5_200_224,
+            "in_dungeon": True,
+            "brass_tome_status": "enabled",
+            "brass_tome_challenge_ids": [10_101],
+            "dungeon_context_source": "live_lua_dungeon_and_brass_tome",
+            "dungeon_context_filetime": BASE_FILETIME,
+        })
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_profile({
+            "entity_id": MONSTER_ID,
+            "entity_type": "Boss",
+            "boss_rank": 3,
+            "name": "Boss",
+        })
+        model.ingest_monster({
+            "entity_id": MONSTER_ID,
+            "template_id": 7_110_208,
+            "name": "Boss",
+            "current_hp": 1_000,
+            "max_hp": 1_000,
+            "filetime_100ns": BASE_FILETIME,
+        })
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 100))
+
+        model.ingest_dungeon_context({
+            "map_id": 5_231_162,
+            "in_dungeon": False,
+            "brass_tome_status": "disabled",
+            "dungeon_context_source": "live_lua_dungeon_and_brass_tome",
+            "dungeon_context_filetime": BASE_FILETIME + 100_000,
+        })
+        self.assertEqual(model.encounter_brass_tome_status, "enabled")
+        self.assertEqual(model.encounter_map_id, 5_200_224)
+
+        self.assertTrue(model.archive_current("completed"))
+        record = model.pop_completed_combats()[0]
+        self.assertEqual(record["map_id"], 5_200_224)
+        self.assertEqual(record["brass_tome_status"], "enabled")
+        self.assertTrue(record["brass_tome_enabled"])
+        self.assertEqual(record["brass_tome_challenge_ids"], [10_101])
+
 
 if __name__ == "__main__":
     unittest.main()

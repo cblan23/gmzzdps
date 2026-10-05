@@ -354,6 +354,14 @@
     }[difficulty] || difficulty || "全部难度";
   }
 
+  function brassTomeLabel(status) {
+    return {
+      enabled: "已开启",
+      disabled: "未开启",
+      unknown: "未确认",
+    }[String(status || "unknown").toLowerCase()] || "未确认";
+  }
+
   function performanceValue(value, metric) {
     const number = Number(value);
     if (!Number.isFinite(number)) return "--";
@@ -961,7 +969,7 @@
       const record = element("article", "history-row");
       const boss = bossCell(row);
       const [result, className] = resultLabel(row.result, row.completion_confirmed);
-      boss.querySelector(".boss-stage").textContent = `${performanceDifficultyLabel(row.difficulty || "unknown")} · ${result}`;
+      boss.querySelector(".boss-stage").textContent = `${performanceDifficultyLabel(row.difficulty || "unknown")} · 黄铜书${brassTomeLabel(row.brass_tome_status)} · ${result}`;
       boss.classList.add(className.trim() || "is-complete");
       record.append(boss, identityCell(row));
       const totals = element("div", "history-number");
@@ -1668,6 +1676,7 @@
     [
       ["Boss 伤害", "boss_damage"], ["Boss 血量", "boss_hp_timeline"],
       ["Boss 最大血量", "boss_max_hp"], ["副本难度", "difficulty"],
+      ["黄铜书状态", "brass_tome"],
     ].forEach(([label, key]) => {
       const available = Boolean(coverage[key]);
       const item = element("div", `coverage-item${available ? " is-complete" : " is-missing"}`);
@@ -1803,6 +1812,18 @@
       "encounter-subtitle",
       `${location ? `${location} · ` : ""}${performanceDifficultyLabel(encounter.difficulty || "unknown")} · 关卡 ${Number(encounter.stage_id) || "--"} · ${formatDate(encounter.ended_at)} · ${Number(encounter.team_size) || 0} 人`,
     ));
+    const context = element("div", "encounter-context");
+    context.append(
+      element("span", "encounter-context-item", `副本难度：${performanceDifficultyLabel(encounter.difficulty || "unknown")}`),
+      element("span", `encounter-context-item brass-${encounter.brass_tome_status || "unknown"}`, `黄铜书：${brassTomeLabel(encounter.brass_tome_status)}`),
+    );
+    const challengeIds = Array.isArray(encounter.brass_tome_challenge_ids)
+      ? encounter.brass_tome_challenge_ids.filter((value) => Number(value) > 0)
+      : [];
+    if (challengeIds.length) {
+      context.appendChild(element("span", "encounter-context-item", `挑战编号：${challengeIds.join("、")}`));
+    }
+    heroCopy.appendChild(context);
     hero.appendChild(heroCopy);
     const [label, resultClass] = resultLabel(encounter.data?.result, encounter.data?.completion_confirmed);
     hero.appendChild(element("div", `result-badge${resultClass}`, label));

@@ -1297,6 +1297,20 @@ class NetworkPacketParserTests(unittest.TestCase):
         )
         parser.process(
             packet(
+                "OnMsgDungeonReadinessCheck",
+                [0, 5_200_149, "", 1_787_851_808, 12, 1],
+                sequence=2,
+            )
+        )
+        parser.process(
+            packet(
+                "OnMsgDungeonReadinessCheck",
+                [0, []],
+                sequence=3,
+            )
+        )
+        parser.process(
+            packet(
                 "OnMsgUpdateStageCombatStatistics",
                 [
                     {
@@ -1307,19 +1321,20 @@ class NetworkPacketParserTests(unittest.TestCase):
                         ]
                     }
                 ],
-                sequence=2,
+                sequence=4,
             )
         )
         parser.process(
             packet(
                 "OnMsgReconnectOrEnter",
                 [{"$map": [[3, 5_100_054], [8, 5_150_060], [9, 86_021_070]]}],
-                sequence=3,
+                sequence=5,
             )
         )
 
         context = parser.current_dungeon_context()
         self.assertEqual(context["dungeon_id"], 5_100_054)
+        self.assertEqual(context["map_id"], 5_200_149)
         self.assertEqual(context["dungeon_stage_id"], 5_150_059)
         self.assertEqual(context["dungeon_stage_phase"], 2)
         self.assertEqual(
@@ -1328,8 +1343,45 @@ class NetworkPacketParserTests(unittest.TestCase):
         )
         self.assertEqual(
             context["dungeon_context_filetime"],
-            packet("", [], sequence=3)["filetime_100ns"],
+            packet("", [], sequence=5)["filetime_100ns"],
         )
+
+    def test_brass_tome_start_is_retained_and_finish_does_not_clear_it(self):
+        self.assertTrue(should_decode_network_arguments("OnMsgBrassInChallengeStart"))
+        self.assertTrue(should_retain_network_record("OnMsgBrassInChallengeFinish"))
+        parser = NetworkPacketParser()
+
+        parser.process(packet("OnMsgBrassInChallengeStart", [[], 0], sequence=1))
+        self.assertEqual(parser.current_dungeon_context()["brass_tome_status"], "enabled")
+
+        parser.process(packet("OnMsgBrassInChallengeFinish", [[], 0], sequence=2))
+        self.assertEqual(parser.current_dungeon_context()["brass_tome_status"], "enabled")
+
+    def test_twice_confirmed_read_only_context_preserves_three_states(self):
+        parser = NetworkPacketParser()
+        base = {
+            "method": "ReadOnlyCurrentEncounterContext",
+            "capture_source": "npcap_read_only_encounter_context",
+            "dungeon_id": 5_100_064,
+            "map_id": 5_200_224,
+            "in_dungeon": True,
+            "filetime_100ns": 100,
+            "context_source": "live_lua_dungeon_and_brass_tome",
+        }
+        self.assertTrue(parser.apply_read_only_encounter_context({
+            **base,
+            "brass_tome_status": "disabled",
+        }))
+        self.assertEqual(parser.current_dungeon_context()["brass_tome_status"], "disabled")
+        self.assertFalse(parser.current_dungeon_context()["brass_tome_enabled"])
+
+        parser.apply_read_only_encounter_context({
+            **base,
+            "filetime_100ns": 101,
+            "brass_tome_status": "unknown",
+        })
+        self.assertEqual(parser.current_dungeon_context()["brass_tome_status"], "unknown")
+        self.assertIsNone(parser.current_dungeon_context()["brass_tome_enabled"])
 
     def test_scene_boundaries_clear_only_the_previous_stage_context(self):
         for method, args in (

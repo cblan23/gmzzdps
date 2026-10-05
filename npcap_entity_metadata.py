@@ -253,6 +253,7 @@ class PassiveTeamProfilePoller:
         self._startup_profile_published = False
         self._local_role_generation = 0
         self._roster_signature = None
+        self._encounter_context_signature = None
         self._thread = threading.Thread(
             target=self._run,
             name="NpcapLiveTeamProfiles",
@@ -451,6 +452,7 @@ class PassiveTeamProfilePoller:
             self._refresh_local_role(reader)
             next_poll = 0.0
             next_roster_poll = 0.0
+            next_encounter_context_poll = 0.0
             next_local_role_check = 0.0
             while not self._stop.is_set():
                 now = time.monotonic()
@@ -492,6 +494,39 @@ class PassiveTeamProfilePoller:
                                 })
                                 self._counters["live_dungeon_roster_updates"] += 1
                     next_roster_poll = time.monotonic() + max(2.0, self.interval_seconds)
+                if now >= next_encounter_context_poll:
+                    context_reader = getattr(reader, "current_encounter_context", None)
+                    context = context_reader() if callable(context_reader) else None
+                    confirmed = context_reader() if context is not None else None
+                    if context is not None and context == confirmed:
+                        signature = (
+                            context.get("dungeon_id", 0),
+                            context.get("map_id", 0),
+                            context.get("in_dungeon"),
+                            context.get("brass_tome_status", "unknown"),
+                            tuple(context.get("brass_tome_challenge_ids", ())),
+                        )
+                        if signature != self._encounter_context_signature:
+                            self._encounter_context_signature = signature
+                            unix_ns = time.time_ns()
+                            with self._lock:
+                                self._ready.append({
+                                    "method": "ReadOnlyCurrentEncounterContext",
+                                    "function": "LuaDungeonAndBrassTomeContext",
+                                    "capture_source": "npcap_read_only_encounter_context",
+                                    "filetime_100ns": (
+                                        unix_ns // 100 + 116444736000000000
+                                    ),
+                                    "capture_timestamp_ns": unix_ns,
+                                    "sequence": -1,
+                                    **context,
+                                })
+                                self._counters[
+                                    "live_encounter_context_updates"
+                                ] += 1
+                    next_encounter_context_poll = (
+                        time.monotonic() + max(2.0, self.interval_seconds)
+                    )
                 refresh_requested = self._take_refresh_request()
                 tokens = self._active_tokens()
                 if tokens and (refresh_requested or now >= next_poll):

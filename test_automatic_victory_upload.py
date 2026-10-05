@@ -35,6 +35,64 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
             "victory-1", "character", silent=True
         )
 
+    def test_pending_equipment_response_is_attached_before_upload(self):
+        waiting = {
+            **self.record,
+            "ended_at_epoch": 100,
+            "participants": [
+                {
+                    "actor_id": 2,
+                    "user_token": "teammate-uid",
+                    "name": "Teammate",
+                }
+            ],
+        }
+        self.window.team_equipment_requested_at = {"teammate-uid": 1.0}
+        self.window.team_equipment_profiles = {}
+        self.window._history_record_for_upload = mock.Mock(return_value=waiting)
+        self.window._schedule_team_equipment_profiles = mock.Mock(return_value=False)
+        self.window._attach_pve_equipment_snapshots = mock.Mock(
+            side_effect=lambda record: record
+        )
+
+        self.assertTrue(self.window._queue_automatic_victory_upload(waiting))
+        first_callback = self.window.root.after.call_args.args[1]
+        first_callback()
+
+        self.window._start_history_upload.assert_not_called()
+        self.assertEqual(self.window.root.after.call_count, 2)
+        waiting["participants"][0]["equipment_snapshot"] = {
+            "equipment": [{"slot": 1, "item_id": 123}]
+        }
+        self.window.team_equipment_requested_at.clear()
+        retry_callback = self.window.root.after.call_args.args[1]
+        retry_callback()
+
+        self.window._start_history_upload.assert_called_once_with(
+            "victory-1", "character", silent=True
+        )
+
+    def test_projection_member_does_not_delay_upload(self):
+        projection = {
+            **self.record,
+            "participants": [
+                {
+                    "actor_id": 2,
+                    "user_token": "projection-uid",
+                    "name": "Projection·投影",
+                    "is_ai": False,
+                }
+            ],
+        }
+        self.window.team_equipment_requested_at = {"projection-uid": 1.0}
+
+        self.assertTrue(self.window._queue_automatic_victory_upload(projection))
+        self.window.root.after.call_args.args[1]()
+
+        self.window._start_history_upload.assert_called_once_with(
+            "victory-1", "character", silent=True
+        )
+
     def test_wipe_and_training_dummy_never_upload(self):
         for changes in (
             {"result": "failed", "archive_reason": "party_wipe"},

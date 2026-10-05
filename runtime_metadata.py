@@ -596,6 +596,102 @@ class LiveTeamProfileReader(RuntimeMetadataReader):
                 }
         return None
 
+    def current_encounter_context(self) -> dict[str, object] | None:
+        """Read the current dungeon and Brass Tome state from live Lua tables."""
+
+        if not self.process or self._stopped():
+            return None
+        state = self._discover_profile_lua_state()
+        state_data = read_region(self.process, state, 0x50) if state else None
+        if state_data is None or len(state_data) != 0x50:
+            return None
+        environment = struct.unpack_from("<Q", state_data, 0x48)[0] & LUA_POINTER_MASK
+        root = LUA_TABLE_TAG | environment
+        game = self._lua_table_value(root, "Game")
+        if not game:
+            return None
+
+        dungeon_id = 0
+        map_id = 0
+        in_dungeon = None
+        dungeon_system = self._lua_table_value(game, "DungeonSystem")
+        context = self._lua_table_value(dungeon_system, "currentDungeonContext")
+        context_table = (
+            self._lua_table_nodes(context & LUA_POINTER_MASK)
+            if self._lua_value_tag(context) == -12 else None
+        )
+        if context_table is None:
+            return None
+        context_fields = self._lua_table_fields(context_table, {})
+        in_dungeon_field = context_fields.get("InDungeon")
+        if in_dungeon_field:
+            in_dungeon_tag = self._lua_value_tag(in_dungeon_field[1])
+            if in_dungeon_tag in {-3, -2}:
+                in_dungeon = in_dungeon_tag == -3
+        for field_name, target in (
+            ("DungeonTemplateID", "dungeon_id"),
+            ("LevelMapID", "map_id"),
+        ):
+            field = context_fields.get(field_name)
+            value = self._lua_nonnegative_integer(field[1]) if field else None
+            if value is not None:
+                if target == "dungeon_id":
+                    dungeon_id = int(value)
+                else:
+                    map_id = int(value)
+
+        brass_tome_status = "unknown"
+        challenge_ids: set[int] = set()
+        brass_system = self._lua_table_value(game, "BrassTomeSystem")
+        brass_model = self._lua_table_value(brass_system, "model")
+        brass_table = (
+            self._lua_table_nodes(brass_model & LUA_POINTER_MASK)
+            if self._lua_value_tag(brass_model) == -12 else None
+        )
+        challenge_list = None
+        if brass_table is not None:
+            challenge_list = self._lua_table_fields(brass_table, {}).get(
+                "InGameChallengeItemList"
+            )
+        if challenge_list is not None:
+            raw_list = challenge_list[1]
+            list_tag = self._lua_value_tag(raw_list)
+            if list_tag == -12:
+                brass_tome_status = "enabled"
+                candidate_tables = [raw_list]
+                candidate_tables.extend(
+                    raw_value
+                    for _index, raw_value in self._lua_numeric_table_items(raw_list)[:64]
+                    if self._lua_value_tag(raw_value) == -12
+                )
+                for raw_table in candidate_tables:
+                    table = self._lua_table_nodes(raw_table & LUA_POINTER_MASK)
+                    if table is None:
+                        continue
+                    challenge = self._lua_table_fields(table, {}).get("ChallengeID")
+                    value = (
+                        self._lua_nonnegative_integer(challenge[1], maximum=1_000_000_000)
+                        if challenge else None
+                    )
+                    if value:
+                        challenge_ids.add(int(value))
+            elif list_tag == -1:
+                brass_tome_status = "disabled"
+
+        return {
+            "dungeon_id": dungeon_id,
+            "map_id": map_id,
+            "in_dungeon": in_dungeon,
+            "brass_tome_status": brass_tome_status,
+            "brass_tome_enabled": (
+                True if brass_tome_status == "enabled"
+                else False if brass_tome_status == "disabled"
+                else None
+            ),
+            "brass_tome_challenge_ids": sorted(challenge_ids),
+            "context_source": "live_lua_dungeon_and_brass_tome",
+        }
+
     def _discover_local_score_key(self) -> bool:
         if self.local_score_key_object:
             tagged = LUA_STRING_TAG | self.local_score_key_object

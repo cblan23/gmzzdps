@@ -550,8 +550,17 @@ class NpcapParserAdapter(NetworkPacketParser):
                     updates.append(replacement)
             self.wire_instance_id = instance_id
             self.wire_map_id = map_id
+            try:
+                self.map_id = max(0, int(map_id or 0))
+            except (TypeError, ValueError, OverflowError):
+                self.map_id = 0
             if 'ApplyTemplateID' in props:
                 self.dungeon_id = props['ApplyTemplateID']
+            self.dungeon_context_source = "space_creation_properties"
+            self.dungeon_context_time_100ns = max(
+                int(self.dungeon_context_time_100ns or 0),
+                int(record.get("filetime_100ns", 0) or 0),
+            )
             updates.append(('instance_context', {**self._base_update(record),
                 'instance_id':self.wire_instance_id,'map_id':self.wire_map_id,
                 'dungeon_id':props.get('ApplyTemplateID'),'space_token':token}))

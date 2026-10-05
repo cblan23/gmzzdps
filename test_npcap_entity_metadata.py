@@ -397,8 +397,112 @@ class TeamProfilePollerTests(unittest.TestCase):
         self.assertEqual(poller._startup_token, new_role[0])
         self.assertEqual(poller._startup_actor_id, new_role[1])
 
+    def test_encounter_context_is_published_without_a_group_roster(self):
+        context = {
+            "dungeon_id": 5_100_064,
+            "map_id": 5_200_224,
+            "in_dungeon": True,
+            "brass_tome_status": "disabled",
+            "brass_tome_enabled": False,
+            "brass_tome_challenge_ids": [],
+            "context_source": "live_lua_dungeon_and_brass_tome",
+        }
+
+        class FakeReader:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def current_local_role(self):
+                return None
+
+            def current_dungeon_roster(self):
+                return None
+
+            def current_encounter_context(self):
+                return dict(context)
+
+            def close(self):
+                pass
+
+        with patch("npcap_entity_metadata.LiveTeamProfileReader", FakeReader):
+            poller = PassiveTeamProfilePoller(1234, interval_seconds=1.0)
+            poller.interval_seconds = 0.01
+            poller.start()
+            records = []
+            deadline = time.monotonic() + 1.0
+            try:
+                while not records and time.monotonic() < deadline:
+                    records.extend(poller.poll())
+                    time.sleep(0.01)
+            finally:
+                poller.close()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["method"], "ReadOnlyCurrentEncounterContext")
+        self.assertEqual(records[0]["map_id"], 5_200_224)
+        self.assertEqual(records[0]["brass_tome_status"], "disabled")
+
 
 class LiveTeamProfileReaderTests(unittest.TestCase):
+    def test_current_encounter_context_reads_dungeon_map_and_brass_tome_state(self):
+        state = bytearray(0x50)
+        struct.pack_into("<Q", state, 0x48, 0x200)
+
+        for raw_challenge_list, expected_status, expected_ids in (
+            (106, "enabled", [10_101]),
+            (203, "disabled", []),
+            (None, "unknown", []),
+        ):
+            with self.subTest(status=expected_status):
+                reader = object.__new__(LiveTeamProfileReader)
+                reader.process = object()
+                reader._stopped = lambda: False
+                reader._discover_profile_lua_state = lambda: 0x100
+                table_values = {
+                    "Game": 101,
+                    "DungeonSystem": 102,
+                    "currentDungeonContext": 103,
+                    "BrassTomeSystem": 104,
+                    "model": 105,
+                }
+                reader._lua_table_value = (
+                    lambda _table, key: table_values.get(key, 0)
+                )
+                reader._lua_value_tag = lambda value: (
+                    -12 if value in {101, 102, 103, 104, 105, 106}
+                    else -3 if value == 201
+                    else -1 if value == 203
+                    else None
+                )
+                reader._lua_table_nodes = lambda value: value
+
+                def fields(table, _strings):
+                    if table == 103:
+                        return {
+                            "InDungeon": (0, 201),
+                            "DungeonTemplateID": (0, 5_100_064),
+                            "LevelMapID": (0, 5_200_224),
+                        }
+                    if table == 105 and raw_challenge_list is not None:
+                        return {"InGameChallengeItemList": (0, raw_challenge_list)}
+                    if table == 106:
+                        return {"ChallengeID": (0, 10_101)}
+                    return {}
+
+                reader._lua_table_fields = fields
+                reader._lua_numeric_table_items = lambda _table: []
+                reader._lua_nonnegative_integer = (
+                    lambda value, maximum=None: int(value)
+                )
+
+                with patch("runtime_metadata.read_region", return_value=bytes(state)):
+                    context = reader.current_encounter_context()
+
+                self.assertEqual(context["dungeon_id"], 5_100_064)
+                self.assertEqual(context["map_id"], 5_200_224)
+                self.assertIs(context["in_dungeon"], True)
+                self.assertEqual(context["brass_tome_status"], expected_status)
+                self.assertEqual(context["brass_tome_challenge_ids"], expected_ids)
     def test_current_group_roster_is_valid_when_local_player_is_outside_dungeon(self):
         self_token = "AQAAAOwNKLYHAAAA"
         peer_token = "AQAAAOwN0ga-AAAA"

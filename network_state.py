@@ -328,6 +328,8 @@ NETWORK_ARGUMENT_METHODS = frozenset(
         "OnMsgSetHUDShow",
         "OnMsgReconnectOrEnter",
         "OnMsgDungeonReadinessCheck",
+        "OnMsgBrassInChallengeStart",
+        "OnMsgBrassInChallengeFinish",
         DUNGEON_BOT_DISPLAY_METHOD,
         "OnMsgDungeonStageSettlement",
         PLAYER_DETAIL_STATISTICS_METHOD,
@@ -768,9 +770,14 @@ class NetworkPacketParser:
         self.readiness_tokens: set[str] = set()
         self.server_level = 0
         self.dungeon_id = 0
+        self.map_id = 0
         self.dungeon_stage_id = 0
         self.dungeon_stage_phase = 0
         self.dungeon_context_time_100ns = 0
+        self.in_dungeon: bool | None = None
+        self.brass_tome_status = "unknown"
+        self.brass_tome_challenge_ids: tuple[int, ...] = ()
+        self.dungeon_context_source = ""
         self.reconnect_dungeon_candidates: tuple[int, ...] = ()
         self.stage_combat_seconds_by_actor: dict[tuple[int, str], int] = {}
         self.player_detail_roster: tuple[str, ...] = ()
@@ -1948,6 +1955,8 @@ class NetworkPacketParser:
         """
         return {
             "dungeon_id": int(self.dungeon_id or 0),
+            "map_id": int(self.map_id or 0),
+            "in_dungeon": self.in_dungeon,
             "dungeon_stage_id": int(self.dungeon_stage_id or 0),
             "dungeon_stage_phase": int(self.dungeon_stage_phase or 0),
             "dungeon_context_filetime": int(
@@ -1956,7 +1965,71 @@ class NetworkPacketParser:
             "reconnect_dungeon_candidates": list(
                 self.reconnect_dungeon_candidates
             ),
+            "brass_tome_status": self.brass_tome_status,
+            "brass_tome_enabled": (
+                True if self.brass_tome_status == "enabled"
+                else False if self.brass_tome_status == "disabled"
+                else None
+            ),
+            "brass_tome_challenge_ids": list(self.brass_tome_challenge_ids),
+            "dungeon_context_source": self.dungeon_context_source,
         }
+
+    def apply_read_only_encounter_context(self, record: object) -> bool:
+        """Apply a twice-confirmed live Lua dungeon/Brass Tome snapshot."""
+
+        if (
+            not isinstance(record, dict)
+            or record.get("method") != "ReadOnlyCurrentEncounterContext"
+            or str(record.get("capture_source", "")).casefold()
+            != "npcap_read_only_encounter_context"
+        ):
+            return False
+        try:
+            dungeon_id = max(0, int(record.get("dungeon_id", 0) or 0))
+            map_id = max(0, int(record.get("map_id", 0) or 0))
+            timestamp = max(0, int(record.get("filetime_100ns", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if dungeon_id and not 5_100_000 <= dungeon_id < 5_200_000:
+            dungeon_id = 0
+        if map_id and not 5_200_000 <= map_id < 5_300_000:
+            map_id = 0
+        in_dungeon = record.get("in_dungeon")
+        if not isinstance(in_dungeon, bool):
+            in_dungeon = None
+        status = str(record.get("brass_tome_status", "unknown")).casefold()
+        if status not in {"enabled", "disabled", "unknown"}:
+            status = "unknown"
+        raw_ids = record.get("brass_tome_challenge_ids")
+        challenge_ids = set()
+        if isinstance(raw_ids, (list, tuple)):
+            for raw_id in raw_ids[:64]:
+                try:
+                    challenge_id = int(raw_id)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if 0 < challenge_id <= 1_000_000_000:
+                    challenge_ids.add(challenge_id)
+
+        previous = self.current_dungeon_context()
+        if in_dungeon is False:
+            self.dungeon_id = 0
+        elif dungeon_id:
+            self.dungeon_id = dungeon_id
+        if map_id:
+            self.map_id = map_id
+        self.in_dungeon = in_dungeon
+        self.brass_tome_status = status
+        self.brass_tome_challenge_ids = tuple(sorted(challenge_ids))
+        self.dungeon_context_source = str(
+            record.get("context_source") or "live_lua_dungeon_and_brass_tome"
+        )[:64]
+        if timestamp:
+            self.dungeon_context_time_100ns = max(
+                self.dungeon_context_time_100ns, timestamp
+            )
+        return previous != self.current_dungeon_context()
 
     def current_capture_context(self) -> dict[str, object]:
         """Expose deterministic scene evidence used by the capture gate.
@@ -2053,11 +2126,22 @@ class NetworkPacketParser:
 
         if method == "OnMsgDungeonReadinessCheck" and len(args) > 1:
             try:
-                dungeon_id = max(0, int(args[1] or 0))
+                context_id = max(0, int(args[1] or 0))
             except (TypeError, ValueError, OverflowError):
-                dungeon_id = 0
-            if dungeon_id and dungeon_id != self.dungeon_id:
-                self.dungeon_id = dungeon_id
+                context_id = 0
+            if (
+                5_100_000 <= context_id < 5_200_000
+                and context_id != self.dungeon_id
+            ):
+                self.dungeon_id = context_id
+                self.dungeon_context_source = "dungeon_readiness_check"
+                changed = True
+            elif (
+                5_200_000 <= context_id < 5_300_000
+                and context_id != self.map_id
+            ):
+                self.map_id = context_id
+                self.dungeon_context_source = "dungeon_readiness_check"
                 changed = True
         elif method == "OnMsgDungeonStageSettlement" and args:
             try:
@@ -2103,6 +2187,12 @@ class NetworkPacketParser:
             if next_candidates != self.reconnect_dungeon_candidates:
                 self.reconnect_dungeon_candidates = next_candidates
                 changed = True
+
+        if method == "OnMsgBrassInChallengeStart":
+            if self.brass_tome_status != "enabled":
+                self.brass_tome_status = "enabled"
+                changed = True
+            self.dungeon_context_source = "brass_tome_challenge_start"
 
         if changed and timestamp:
             self.dungeon_context_time_100ns = max(

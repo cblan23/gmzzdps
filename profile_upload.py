@@ -60,26 +60,97 @@ UPLOAD_VICTORY_ARCHIVE_REASONS = frozenset(
 )
 
 MAP_DIFFICULTIES = {
+    5_200_056: "normal",
+    5_200_057: "normal",
+    5_200_064: "normal",
     5_200_079: "hard",
+    5_200_095: "hard",
+    5_200_096: "hard",
+    5_200_097: "hard",
     5_200_102: "hard",
     5_200_138: "normal",
     5_200_139: "hard",
     5_200_142: "normal",
     5_200_143: "normal",
+    5_200_180: "normal",
+    5_200_181: "normal",
+    5_200_182: "normal",
+    5_200_183: "normal",
+    5_200_184: "normal",
+    5_200_185: "normal",
+    5_200_186: "normal",
+    5_200_187: "normal",
+    5_200_188: "normal",
+    5_200_189: "normal",
+    5_200_193: "normal",
+    5_200_194: "normal",
+    5_200_203: "normal",
+    5_200_205: "normal",
+    5_200_206: "normal",
+    5_200_207: "normal",
+    5_200_208: "normal",
+    5_200_216: "normal",
+    5_200_217: "normal",
+    5_200_218: "normal",
+    5_200_219: "normal",
+    5_200_220: "normal",
+    5_200_221: "normal",
     5_200_224: "normal",
     5_200_225: "epic",
     5_200_226: "final_challenge",
+    5_200_227: "normal",
+    5_200_235: "normal",
+    5_200_251: "normal",
+    5_200_255: "hard",
+    5_200_256: "hard",
+    5_200_257: "hard",
+    5_200_258: "hard",
+    5_200_272: "normal",
+    5_200_273: "normal",
+    5_200_274: "normal",
+    5_200_275: "normal",
+    5_200_278: "normal",
 }
 DUNGEON_DIFFICULTIES = {
+    5_100_002: "normal",
+    5_100_003: "normal",
+    5_100_004: "normal",
+    5_100_005: "normal",
+    5_100_006: "normal",
+    5_100_007: "normal",
+    5_100_008: "normal",
+    5_100_009: "normal",
+    5_100_010: "normal",
+    5_100_011: "normal",
+    5_100_012: "normal",
+    5_100_014: "normal",
+    5_100_040: "normal",
+    5_100_041: "normal",
+    5_100_042: "hard",
+    5_100_043: "hard",
+    5_100_044: "hard",
     5_100_045: "hard",
     5_100_047: "hard",
     5_100_052: "normal",
     5_100_053: "hard",
     5_100_054: "normal",
     5_100_055: "normal",
+    5_100_056: "normal",
+    5_100_061: "hard",
     5_100_064: "normal",
     5_100_065: "epic",
+    5_100_066: "normal",
+    5_100_067: "normal",
+    5_100_068: "normal",
+    5_100_069: "normal",
+    5_100_070: "hard",
+    5_100_071: "hard",
+    5_100_072: "hard",
+    5_100_073: "hard",
+    5_100_074: "normal",
     5_100_075: "final_challenge",
+    5_100_098: "normal",
+    5_100_099: "normal",
 }
 
 PUBLIC_PERFORMANCE_BOSSES: dict[str, dict[str, object]] = {
@@ -586,6 +657,33 @@ def _encounter_difficulty(record: Mapping[str, object]) -> tuple[str, str]:
         if marker in context:
             return difficulty, "display_name"
     return "", "unavailable"
+
+
+def _encounter_brass_tome(
+    record: Mapping[str, object],
+) -> tuple[str, bool | None, list[int], str]:
+    status = _safe_text(record.get("brass_tome_status"), 16).casefold()
+    if status not in {"enabled", "disabled", "unknown"}:
+        enabled = record.get("brass_tome_enabled")
+        status = (
+            "enabled" if enabled is True
+            else "disabled" if enabled is False
+            else "unknown"
+        )
+    raw_ids = record.get("brass_tome_challenge_ids")
+    challenge_ids = sorted(
+        {
+            _as_int(value, maximum=1_000_000_000)
+            for value in raw_ids[:64]
+        }
+    ) if isinstance(raw_ids, list) else []
+    challenge_ids = [value for value in challenge_ids if value > 0]
+    return (
+        status,
+        True if status == "enabled" else False if status == "disabled" else None,
+        challenge_ids,
+        _safe_text(record.get("brass_tome_source"), 64),
+    )
 
 
 def _json_text(value: object) -> str:
@@ -1635,6 +1733,12 @@ class ProfileUploadStore:
         dungeon_id = _as_int(encounter.get("dungeon_id"), maximum=2_000_000_000)
         stage_id = _as_int(encounter.get("stage_id"), maximum=2_000_000_000)
         difficulty = _safe_text(encounter.get("difficulty"), 32).casefold()
+        (
+            brass_tome_status,
+            brass_tome_enabled,
+            brass_tome_challenge_ids,
+            brass_tome_source,
+        ) = _encounter_brass_tome(encounter)
         boss_key_source = {
             "templates": template_ids,
             "boss": "" if template_ids else boss_name.casefold(),
@@ -1687,6 +1791,10 @@ class ProfileUploadStore:
             "dungeon_name": _safe_text(encounter.get("dungeon_name"), 96),
             "stage_name": _safe_text(encounter.get("stage_name"), 96),
             "difficulty_source": _safe_text(encounter.get("difficulty_source"), 32),
+            "brass_tome_status": brass_tome_status,
+            "brass_tome_enabled": brass_tome_enabled,
+            "brass_tome_challenge_ids": brass_tome_challenge_ids,
+            "brass_tome_source": brass_tome_source,
             "team_dps": _as_float(encounter.get("team_dps"), maximum=1e18),
             "team_hps": _as_float(encounter.get("team_hps"), maximum=1e18),
             "team_effective_healing": _as_int(encounter.get("team_effective_healing")),
@@ -2283,6 +2391,20 @@ class ProfileUploadStore:
                 stored_payload = {}
             merged_payload = dict(stored_payload)
             for field, value in parsed["payload"].items():
+                if field == "brass_tome_status":
+                    stored_status = str(
+                        stored_payload.get(field, "unknown") or "unknown"
+                    ).casefold()
+                    rank = {"unknown": 0, "disabled": 1, "enabled": 2}
+                    if rank.get(str(value), 0) >= rank.get(stored_status, 0):
+                        merged_payload[field] = value
+                    continue
+                if (
+                    field in {"brass_tome_enabled", "brass_tome_source"}
+                    and merged_payload.get("brass_tome_status")
+                    != parsed["payload"].get("brass_tome_status")
+                ):
+                    continue
                 if field in {
                     "monster",
                     "targets",
@@ -2290,6 +2412,7 @@ class ProfileUploadStore:
                     "boss_hp_damage_samples",
                     "module_coverage",
                     "team_dps_timeline",
+                    "brass_tome_challenge_ids",
                 }:
                     merged_payload[field] = _prefer_richer_detail(
                         stored_payload.get(field), value
@@ -2704,6 +2827,18 @@ class ProfileUploadStore:
             "dungeon_id": int(encounter["dungeon_id"]),
             "stage_id": int(encounter["stage_id"]),
             "difficulty": str(encounter["difficulty"]),
+            "brass_tome_status": (
+                payload.get("brass_tome_status", "unknown")
+                if isinstance(payload, dict) else "unknown"
+            ),
+            "brass_tome_enabled": (
+                payload.get("brass_tome_enabled")
+                if isinstance(payload, dict) else None
+            ),
+            "brass_tome_challenge_ids": (
+                payload.get("brass_tome_challenge_ids", [])
+                if isinstance(payload, dict) else []
+            ),
             "started_at": float(encounter["started_at"]),
             "ended_at": float(encounter["ended_at"]),
             "duration_seconds": float(encounter["duration_seconds"]),
@@ -2804,6 +2939,8 @@ class ProfileUploadStore:
                 'ended_at': float(row['ended_at']), 'duration_seconds': float(row['duration_seconds']),
                 'team_size': int(row['team_size']), 'team_total_damage': int(row['team_total_damage']),
                 'team_dps': payload.get('team_dps'), 'result': payload.get('result', 'undetermined'),
+                'brass_tome_status': payload.get('brass_tome_status', 'unknown'),
+                'brass_tome_enabled': payload.get('brass_tome_enabled'),
                 'completion_confirmed': bool(payload.get('completion_confirmed')),
                 'statistics_status': str(row['statistics_status']), 'ranking_status': str(row['ranking_status']),
                 'qualification_reasons': validation.get('reasons', []), 'game_version': str(row['game_version']),
@@ -3817,6 +3954,12 @@ def build_upload_encounter(
         team_taken = sum(_as_int(row.get("taken")) for row in raw_damage_taken)
 
     difficulty, difficulty_source = _encounter_difficulty(record)
+    (
+        brass_tome_status,
+        brass_tome_enabled,
+        brass_tome_challenge_ids,
+        brass_tome_source,
+    ) = _encounter_brass_tome(record)
     module_coverage = {
         "total_members": len(participants),
         "resolved_members": sum(bool(row.get("character_id")) for row in participants),
@@ -3853,6 +3996,7 @@ def build_upload_encounter(
         "boss_hp_timeline": bool(record.get("boss_hp_damage_samples")),
         "boss_max_hp": _as_int(monster.get("max_hp")) > 0,
         "difficulty": bool(difficulty),
+        "brass_tome": brass_tome_status in {"enabled", "disabled"},
     }
     required_member_modules = (
         "dps_members",
@@ -3870,7 +4014,10 @@ def build_upload_encounter(
         for key in required_member_modules
     ) and all(
         bool(module_coverage[key])
-        for key in ("boss_damage", "boss_hp_timeline", "boss_max_hp", "difficulty")
+        for key in (
+            "boss_damage", "boss_hp_timeline", "boss_max_hp", "difficulty",
+            "brass_tome",
+        )
     )
     return {
         "client_encounter_id": _safe_text(
@@ -3886,6 +4033,10 @@ def build_upload_encounter(
         "stage_name": record.get("stage_name", ""),
         "difficulty": difficulty,
         "difficulty_source": difficulty_source,
+        "brass_tome_status": brass_tome_status,
+        "brass_tome_enabled": brass_tome_enabled,
+        "brass_tome_challenge_ids": brass_tome_challenge_ids,
+        "brass_tome_source": brass_tome_source,
         "boss_name": _safe_text(monster.get("name"), 96),
         "boss_template_ids": sorted(template_ids),
         "target_filter": record.get("target_filter", ""),

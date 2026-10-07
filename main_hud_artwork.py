@@ -1034,12 +1034,15 @@ class MainHudRenderer:
                 caption,
                 (box[0] + box[2]) / 2,
                 tab_center_y,
-                22,
+                28,
                 anchor="center",
                 max_width=box[2] - box[0] - 10,
-                color=(255, 236, 240) if view == "live" else (214, 240, 255),
-                regular=not selected,
-                stroke_radius=2,
+                color=(250, 252, 255) if selected else (226, 236, 246),
+                regular=False,
+                flat=True,
+                padding=3,
+                stroke_radius=1,
+                truncate=False,
             )
             regions[f"action:pvp_{view}"] = box
         if self_only:
@@ -1927,7 +1930,7 @@ class MainHudRenderer:
                 ),
                 (
                     "recent_battle",
-                    "最近战斗记录",
+                    "DPS数据",
                     "pve_recent_battle",
                     TITLE_RAIL_TAB_LEFT
                     + TITLE_RAIL_TAB_WIDTH
@@ -1955,14 +1958,53 @@ class MainHudRenderer:
                     caption,
                     (left + right) / 2,
                     158,
-                    21,
+                    28,
                     anchor="center",
                     max_width=right - left - 10,
-                    color=(214, 240, 255) if view == "team" else (220, 255, 236),
-                    regular=not selected,
-                    stroke_radius=2,
+                    color=(250, 252, 255) if selected else (226, 236, 246),
+                    regular=False,
+                    flat=True,
+                    padding=3,
+                    stroke_radius=1,
+                    truncate=False,
                 )
                 regions[f"action:{action}"] = (left, 135, right, 181)
+
+            database_left, database_right = 690, 850
+            database_hovered = hover_action == "web_database"
+            database_tile = self._pill(
+                database_right - database_left,
+                46,
+                accent=(215, 179, 109),
+                red=False,
+                blue=False,
+            )
+            if not database_hovered:
+                database_tile = database_tile.copy()
+                database_tile.putalpha(
+                    database_tile.getchannel("A").point(lambda value: value * 4 // 5)
+                )
+            paste(database_tile, database_left, 135)
+            label(
+                "网页数据库",
+                (database_left + database_right) / 2,
+                158,
+                25,
+                anchor="center",
+                max_width=database_right - database_left - 10,
+                color=(255, 229, 169) if database_hovered else (239, 217, 174),
+                regular=False,
+                flat=True,
+                padding=3,
+                stroke_radius=1,
+                truncate=False,
+            )
+            regions["action:web_database"] = (
+                database_left,
+                135,
+                database_right,
+                181,
+            )
 
         indicator_color = (
             ADMIN_INDICATOR_ELEVATED
@@ -2156,7 +2198,7 @@ class MainHudRenderer:
                 for tab_name, caption, left in (
                     (
                         "recent_battle",
-                        str(row.get("recent_battle_text") or "最近战斗记录"),
+                        str(row.get("recent_battle_text") or "实时战斗/战斗记录"),
                         tab_left,
                     ),
                     (
@@ -2254,15 +2296,17 @@ class MainHudRenderer:
                 live_team_dps = str(row.get("live_team_dps") or "").strip()
                 if not live_team_dps:
                     label(
-                        str(row.get("section_text") or "最近战斗记录"),
+                        str(row.get("section_text") or "实时战斗/战斗记录"),
                         626 - width_removed / 2,
                         cy,
                         27,
                         anchor="center",
                         max_width=650 - width_removed,
-                        regular=True,
-                        color=(166, 187, 207),
-                        contour=True,
+                        regular=False,
+                        color=(214, 226, 240),
+                        flat=True,
+                        padding=3,
+                        stroke_radius=1,
                         truncate=False,
                     )
                     continue
@@ -2273,15 +2317,17 @@ class MainHudRenderer:
                 badge_left = section_right - badge_width
                 heading_right = badge_left - 14
                 label(
-                    str(row.get("section_text") or "最近战斗记录"),
+                    str(row.get("section_text") or "实时战斗/战斗记录"),
                     (section_left + heading_right) / 2,
                     cy,
                     27,
                     anchor="center",
                     max_width=max(80, heading_right - section_left - 8),
-                    regular=True,
-                    color=(166, 187, 207),
-                    contour=True,
+                    regular=False,
+                    color=(214, 226, 240),
+                    flat=True,
+                    padding=3,
+                    stroke_radius=1,
                     truncate=False,
                 )
 
@@ -2314,8 +2360,9 @@ class MainHudRenderer:
                     24 * font_factor,
                     numeric=True,
                     color=(111, 238, 255),
-                    contour=True,
-                    stroke_radius=2,
+                    flat=True,
+                    padding=3,
+                    stroke_radius=1,
                 )
                 value_left = section_right - 14 - value_tile.width
                 paste_text(value_tile, value_left, cy)
@@ -2323,12 +2370,13 @@ class MainHudRenderer:
                     "实时团队秒伤",
                     badge_left + 43,
                     cy,
-                    22,
+                    26,
                     max_width=max(70, value_left - badge_left - 55),
-                    regular=True,
+                    regular=False,
                     color=(238, 247, 255),
-                    contour=True,
-                    stroke_radius=2,
+                    flat=True,
+                    padding=3,
+                    stroke_radius=1,
                     truncate=False,
                 )
                 continue

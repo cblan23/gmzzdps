@@ -7,6 +7,7 @@ pretending it is the age of a deferred game-memory argument read.
 import math
 from collections import deque
 from npcap_wire_entities import SPACE_CLASSES
+from npcap_protocol import current_combat_rpc_method
 from network_state import (
     NetworkPacketParser, TEAM_SELF_PROPS_METHOD, is_player_skill,
     normalize_network_skill_id, parse_exact_combat_entity_id, is_ai_team_token,
@@ -40,6 +41,16 @@ def normalize_npcap_record(record):
             or record.get('arguments_synchronized') is not True):
         return record
     adapted = dict(record)
+    current_method = (
+        current_combat_rpc_method(
+            int(record.get('npcap_method_id', 0) or 0),
+            record.get('decoded_arguments', []),
+        )
+        if record.get('npcap_method_scope') == 'verified_current_combat'
+        else ''
+    )
+    if current_method:
+        adapted['method'] = current_method
     adapted.setdefault('capture_decode_latency_ms', record.get('decode_delay_ms', 0.0))
     adapted['decode_delay_ms'] = 0.0
     return adapted
@@ -941,6 +952,19 @@ class NpcapParserAdapter(NetworkPacketParser):
         self._prepare_wire_owner(record)
         previously_confirmed = set(self.confirmed_boss_entities)
         updates.extend(super().process(record, include_damage=include_damage))
+        if (
+            record.get('capture_source') == 'npcap'
+            and record.get('method') == 'OnMsgSyncCurrentHp'
+            and self._args(record) == [0]
+        ):
+            entity = parse_exact_combat_entity_id(record.get('network_entity_id'))
+            if (entity in self.confirmed_boss_entities
+                    and int(record.get('script_entity', 0) or 0) == entity):
+                # Preserve the wire zero for history; settlement must validate it.
+                updates.append(('boss_health_observation', {
+                    **self._base_update(record), 'entity_id': entity,
+                    'current_hp': 0, 'end_zero_candidate': True,
+                }))
         self._freeze_settlement_observation(record, updates)
         if record.get('method') not in ('OnMsgEntityDead', 'OnMsgEntityRelive'):
             self._freeze_pvp_observation(record, updates)

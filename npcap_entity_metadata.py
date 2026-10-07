@@ -65,6 +65,7 @@ class PassiveEntityMetadataReader:
         self.next_poll_at = 0.0
         self.scan_targets = set()
         self.unresolved_retry_at = {}
+        self.pending_modes = {}
 
     def validated_damage_target_metadata(self, template_id):
         try:
@@ -83,10 +84,15 @@ class PassiveEntityMetadataReader:
             if key in metadata
         }
 
-    def request(self, entity_id, timestamp):
+    def request(self, entity_id, timestamp, *, discovery="normal"):
         if (isinstance(entity_id, bool) or not isinstance(entity_id, int) or
                 not 0 < entity_id < 2**64):
             return
+        if discovery not in {"normal", "fallback", "preferred"}:
+            raise ValueError(f"Unknown metadata discovery mode: {discovery}")
+        pending_modes = getattr(self, "pending_modes", None)
+        if pending_modes is None:
+            pending_modes = self.pending_modes = {}
         if entity_id in self.resolved:
             now = time.monotonic()
             if now-self.checked_at.get(entity_id, 0) < 1:
@@ -104,12 +110,38 @@ class PassiveEntityMetadataReader:
             self.resolved.discard(entity_id)
             self.components.pop(entity_id, None)
             self.signatures.pop(entity_id, None)
+        if entity_id in self.pending:
+            if discovery == "preferred":
+                pending_modes[entity_id] = "preferred"
+            return
+        if discovery == "fallback" and (self.resolved or self.pending):
+            self.counters['metadata_fallback_suppressed'] += 1
+            return
+        if discovery == "preferred":
+            fallback = {
+                pending_entity
+                for pending_entity, mode in pending_modes.items()
+                if mode == "fallback"
+            }
+            if fallback:
+                for pending_entity in fallback:
+                    self.pending.pop(pending_entity, None)
+                    pending_modes.pop(pending_entity, None)
+                self.counters['metadata_fallback_replaced'] += len(fallback)
+                if self.iterator is not None:
+                    self.iterator = None
+                    self.scan_targets.clear()
+                    self.counters['metadata_scan_restarts_for_preferred'] += 1
+            self.retry_at = 0.0
+            self.next_poll_at = 0.0
+            self.unresolved_retry_at.pop(entity_id, None)
         if entity_id not in self.pending and len(self.pending) >= 256:
             self.counters['metadata_pending_limit'] += 1
             return
         if time.monotonic() < getattr(self, 'unresolved_retry_at', {}).get(entity_id, 0):
             return
-        self.pending.setdefault(entity_id, (int(timestamp), time.monotonic()))
+        self.pending[entity_id] = (int(timestamp), time.monotonic())
+        pending_modes[entity_id] = discovery
 
     def _record(self, entity, component, signature, timestamp):
         record = {'function': 'CommonComponent_TargetIdLookup',
@@ -156,6 +188,7 @@ class PassiveEntityMetadataReader:
         for entity, (_timestamp, requested) in list(self.pending.items()):
             if now-requested > 30:
                 self.pending.pop(entity, None)
+                self.pending_modes.pop(entity, None)
                 self.counters['metadata_timeouts'] += 1
         if not self.pending or now < self.retry_at or now < getattr(self, 'next_poll_at', 0):
             return result
@@ -174,6 +207,7 @@ class PassiveEntityMetadataReader:
                 self.iterator = None
                 for entity in self.scan_targets.intersection(self.pending):
                     self.pending.pop(entity, None)
+                    self.pending_modes.pop(entity, None)
                     self.unresolved_retry_at[entity] = time.monotonic() + 30
                 self.unresolved_retry_at = {key: value for key, value in self.unresolved_retry_at.items()
                                             if value > time.monotonic()}
@@ -189,12 +223,18 @@ class PassiveEntityMetadataReader:
                         second = decode_component(self._read(component, 0x19c), entity, self.base, self.size, self.templates) if first else None
                         if first is not None and first == second:
                             timestamp, _requested = self.pending.pop(entity)
+                            self.pending_modes.pop(entity, None)
                             self.resolved.add(entity)
                             self.components[entity] = component
                             self.signatures[entity] = first
                             self.checked_at[entity] = time.monotonic()
                             result.append(self._record(entity, component, first, timestamp))
                             self.counters['metadata_resolved'] += 1
+                            if not self.pending:
+                                self.iterator = None
+                                self.scan_targets.clear()
+                                self.counters['metadata_scans_stopped_after_resolve'] += 1
+                                break
             if time.perf_counter() >= deadline:
                 break
         return result
@@ -211,6 +251,7 @@ class PassiveEntityMetadataReader:
         self.next_poll_at = 0.0
         self.scan_targets.clear()
         self.unresolved_retry_at.clear()
+        self.pending_modes.clear()
 
     def close(self):
         if self.handle:
@@ -468,6 +509,7 @@ class PassiveTeamProfilePoller:
                         signature = (
                             roster["dungeon_id"], roster["group_id"],
                             roster["local_user_token"],
+                            roster.get("lua_state_address", 0),
                             tuple(sorted(
                                 (member["user_token"], member["name"],
                                  member.get("extraordinary_rating"))
@@ -500,6 +542,7 @@ class PassiveTeamProfilePoller:
                     confirmed = context_reader() if context is not None else None
                     if context is not None and context == confirmed:
                         signature = (
+                            context.get("lua_state_address", 0),
                             context.get("dungeon_id", 0),
                             context.get("map_id", 0),
                             context.get("in_dungeon"),

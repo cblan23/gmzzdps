@@ -675,6 +675,57 @@ class MonitorServerTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(value["error"], "invalid_session")
 
+    def test_upload_keeps_teammate_full_cast_timeline_and_phase_hp_detail(self):
+        first = profile_character_token(8041)
+        second = profile_character_token(8042)
+        token = self.start_card_session("c" * 32)["access_token"]
+        encounter = self.profile_encounter_payload(first, second, first)
+        casts = [
+            {"time_ms": 7000, "skill_id": 86021030, "sequence": 1, "source": "cast_broadcast"},
+            {"time_ms": 41000, "skill_id": 86021031, "sequence": 2, "source": "cast_broadcast"},
+        ]
+        encounter["participants"][1].update({
+            "cast_timeline": casts,
+            "opening_sequence": casts[:1],
+            "opening_sequence_source": "cast_broadcast",
+        })
+        encounter["boss_hp_damage_samples"] = {
+            "version": 2,
+            "columns": ["time_seconds", "observed_boss_hp_loss", "current_hp", "max_hp",
+                        "entity_id", "template_id"],
+            "coverage": "observed_boss_hp_loss",
+            "rows": [[0, 0, 1000, 1000, 99, 7102990],
+                     [30, 500, 500, None, 100, 7102991],
+                     [120, 1000, 0, 1000, 100, 7102991]],
+        }
+        status, receipt = self.request(
+            "/api/v1/dps/encounters/upload", method="POST", token=token,
+            body={"character_id": first, "public_mode": "character", "encounter": encounter},
+        )
+        self.assertEqual(status, 200)
+        encounter_id = receipt["encounter_id"]
+        status, public = self.request(f"/api/v1/dps/public/encounters/{encounter_id}")
+        self.assertEqual(status, 200)
+        detail = public["encounter"]
+        peer = next(row for row in detail["participants"] if row["stats"].get("cast_timeline"))
+        self.assertEqual(peer["stats"]["cast_timeline"], casts)
+        self.assertEqual(peer["stats"]["opening_sequence_source"], "cast_broadcast")
+        self.assertEqual(detail["data"]["boss_hp_damage_samples"]["rows"],
+                         encounter["boss_hp_damage_samples"]["rows"])
+        encounter["participants"][1].pop("cast_timeline")
+        encounter.pop("boss_hp_damage_samples")
+        status, repeat = self.request(
+            "/api/v1/dps/encounters/upload", method="POST", token=token,
+            body={"character_id": first, "public_mode": "character", "encounter": encounter},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(repeat["encounter_id"], encounter_id)
+        _, public = self.request(f"/api/v1/dps/public/encounters/{encounter_id}")
+        peer = next(row for row in public["encounter"]["participants"]
+                    if row["stats"].get("cast_timeline"))
+        self.assertEqual(peer["stats"]["cast_timeline"], casts)
+        self.assertEqual(len(public["encounter"]["data"]["boss_hp_damage_samples"]["rows"]), 3)
+
     def test_unlinked_character_upload_route_uses_captured_names_for_legacy_modes(self):
         first = profile_character_token(8051)
         second = profile_character_token(8052)
@@ -741,7 +792,7 @@ class MonitorServerTests(unittest.TestCase):
         self.assertIsNone(upload_profile_id)
         self.assertEqual(profile_count, 0)
 
-    def test_upload_route_rejects_non_victories_and_training_dummies(self):
+    def test_upload_route_keeps_failures_out_of_statistics_and_rejects_dummies(self):
         first = profile_character_token(8061)
         second = profile_character_token(8062)
         token = self.start_card_session("e" * 32)["access_token"]
@@ -760,8 +811,12 @@ class MonitorServerTests(unittest.TestCase):
                 "encounter": failed,
             },
         )
-        self.assertEqual(status, 400)
-        self.assertEqual(value["error"], "UPLOAD_VICTORY_REQUIRED")
+        self.assertEqual(status, 200)
+        self.assertEqual(value["statistics_status"], "not_eligible")
+        self.assertEqual(value["ranking_status"], "not_eligible")
+        self.assertIn(
+            "ENCOUNTER_NOT_COMPLETED", value["validation_reasons"]
+        )
 
         dummy = self.profile_encounter_payload(first, second, first)
         dummy["boss_name"] = "伤害木桩"
@@ -783,11 +838,11 @@ class MonitorServerTests(unittest.TestCase):
         try:
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0],
-                0,
+                1,
             )
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM encounters").fetchone()[0],
-                0,
+                1,
             )
         finally:
             connection.close()
@@ -931,7 +986,9 @@ class MonitorServerTests(unittest.TestCase):
         status, leaderboard = self.request("/api/v1/dps/public/leaderboards")
         self.assertEqual(status, 200)
         self.assertEqual(len(leaderboard["leaderboards"]), 2)
-        status, history = self.request('/api/v1/dps/public/records?limit=1')
+        status, history = self.request(
+            '/api/v1/dps/public/records?q=%E6%8E%A5%E5%8F%A3%E7%94%B2%E6%96%B0&limit=1'
+        )
         self.assertEqual(status, 200)
         self.assertEqual(history['total'], 1)
         self.assertEqual(history['records'][0]['encounter_id'], encounter_id)
@@ -939,7 +996,9 @@ class MonitorServerTests(unittest.TestCase):
         status, filtered = self.request('/api/v1/dps/public/records?q=%E6%8E%A5%E5%8F%A3%E7%94%B2%E6%96%B0&eligibility=included')
         self.assertEqual(status, 200)
         self.assertEqual(filtered['total'], 1)
-        status, empty = self.request('/api/v1/dps/public/records?offset=99999&limit=invalid')
+        status, empty = self.request(
+            '/api/v1/dps/public/records?q=%E6%8E%A5%E5%8F%A3%E7%94%B2%E6%96%B0&offset=99999&limit=invalid'
+        )
         self.assertEqual(status, 200)
         self.assertEqual(empty['records'], [])
         status, catalog = self.request('/api/v1/dps/public/catalog')
@@ -948,11 +1007,19 @@ class MonitorServerTests(unittest.TestCase):
         status, performance = self.request(
             "/api/v1/dps/public/performance?boss=drill&metric=dps"
             "&rating_basis=extraordinary&min_rating=0&max_rating=200000"
+            "&category=raid&dungeon=emperor-returns&brass_tome=enabled"
         )
         self.assertEqual(status, 200)
         self.assertTrue(performance["ok"])
         self.assertEqual(performance["performance"]["source"], "real_uploads")
         self.assertEqual(performance["performance"]["selection"]["boss"], "drill")
+        self.assertEqual(performance["performance"]["selection"]["category"], "raid")
+        self.assertEqual(
+            performance["performance"]["selection"]["dungeon"], "emperor-returns"
+        )
+        self.assertEqual(
+            performance["performance"]["selection"]["brass_tome"], "enabled"
+        )
 
         connection = sqlite3.connect(monitor.DATABASE_PATH)
         try:

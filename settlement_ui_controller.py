@@ -87,7 +87,11 @@ def parser_observation(parser, record, updates):
     party_session_id=int(getattr(parser,'party_session_id',0) or 0)
     return {'record':deepcopy(record),'timestamp_ns':stamp,'context':{
         'instance_id':getattr(parser,'wire_instance_id',None),
-        'map_id':getattr(parser,'wire_map_id',None),'dungeon_id':getattr(parser,'dungeon_id',None),
+        'map_id':(
+            getattr(parser,'wire_map_id',None)
+            or getattr(parser,'map_id',None)
+            or None
+        ),'dungeon_id':getattr(parser,'dungeon_id',None),
         'stage_id':getattr(parser,'dungeon_stage_id',None) or None,
         'stage_index':getattr(parser,'dungeon_stage_phase',None) or None,
         'self_token':self_token,'roster':roster,
@@ -239,7 +243,11 @@ class SettlementUIController:
             sample_template=int(sample.get('template_id',0) or 0)
         except (TypeError,ValueError,OverflowError):
             return False
-        return bool(encounter_template and encounter_template==sample_template)
+        return bool(
+            encounter_template and sample_template
+            and (boss_template_continues_encounter(encounter_template,sample_template)
+                 or boss_template_continues_encounter(sample_template,encounter_template))
+        )
 
     def _freeze_encounter_boss_health(self, encounter, ended_at_ns):
         """Freeze the last validated Boss HP sample at the encounter boundary."""
@@ -256,8 +264,14 @@ class SettlementUIController:
         for entity,samples in self.boss_health_samples.items():
             for sample in samples:
                 stamp=int(sample.get('timestamp_ns',0) or 0)
+                if sample.get('end_zero_candidate') and (
+                    encounter.result!='VICTORY'
+                    or abs(stamp-boundary)>BOSS_DEATH_CONFIRM_TAIL_NS
+                ):
+                    continue
                 confirmed_death_tail=bool(
-                    sample.get('death_confirmed') is True
+                    (sample.get('death_confirmed') is True
+                     or (sample.get('end_zero_candidate') and encounter.result=='VICTORY'))
                     and sample.get('current_hp')==0
                     and boundary<=stamp
                     and stamp-boundary<=BOSS_DEATH_CONFIRM_TAIL_NS
@@ -346,6 +360,7 @@ class SettlementUIController:
             samples.append(dict(
                 identity,current_hp=current_hp,max_hp=maximum_hp,
                 death_confirmed=update.get('death_confirmed') is True,
+                end_zero_candidate=update.get('end_zero_candidate') is True,
             ))
             if len(samples)>BOSS_HEALTH_SAMPLE_LIMIT:
                 del samples[:-BOSS_HEALTH_SAMPLE_LIMIT]
@@ -358,7 +373,8 @@ class SettlementUIController:
         changed=False
         for encounter in self.tracker.encounters.values():
             death_tail=bool(
-                update.get('death_confirmed') is True
+                (update.get('death_confirmed') is True
+                 or (update.get('end_zero_candidate') and encounter.result=='VICTORY'))
                 and current_hp==0
                 and encounter.ended_at_ns is not None
                 and encounter.ended_at_ns<=stamp
@@ -369,14 +385,83 @@ class SettlementUIController:
                 encounter.ended_at_ns is not None
                 and encounter.started_at_ns<=stamp
                 and (stamp<=encounter.ended_at_ns or death_tail)
+                and self._health_sample_matches(encounter,entity,identity)
             ):
-                changed |= self._freeze_encounter_boss_health(
-                    encounter,encounter.ended_at_ns
-                )
+                if encounter.boss_health_source=='server_statistics':
+                    # Keep the authoritative end snapshot while saving late HP detail.
+                    encounter.revision+=1
+                    changed=True
+                else:
+                    changed |= self._freeze_encounter_boss_health(
+                        encounter,encounter.ended_at_ns
+                    )
         if changed:
             self.repository.save(self.tracker)
             self.generation+=1
         return changed
+
+    def boss_health_history(self, encounter):
+        """Preserve ordered HP observations across the verified Boss phases."""
+        if encounter.ended_at_ns is None:
+            return {}
+        observed=[]
+        for entity,samples in self.boss_health_samples.items():
+            boss=self.boss_entities.get(entity,{})
+            template=int(boss.get('template_id') or 0)
+            compatible=bool(
+                template and encounter.boss_template_id
+                and (boss_template_continues_encounter(template,encounter.boss_template_id)
+                     or boss_template_continues_encounter(encounter.boss_template_id,template))
+            )
+            for sample in samples:
+                stamp=int(sample.get('timestamp_ns') or 0)
+                if sample.get('end_zero_candidate') and (
+                    encounter.result!='VICTORY'
+                    or abs(stamp-encounter.ended_at_ns)>BOSS_DEATH_CONFIRM_TAIL_NS
+                ):
+                    continue
+                confirmed_death_tail=bool(
+                    (sample.get('death_confirmed') is True
+                     or (sample.get('end_zero_candidate') and encounter.result=='VICTORY'))
+                    and sample.get('current_hp')==0
+                    and encounter.ended_at_ns<=stamp
+                    and stamp-encounter.ended_at_ns<=BOSS_DEATH_CONFIRM_TAIL_NS
+                )
+                if (
+                    encounter.started_at_ns<=stamp
+                    and (stamp<=encounter.ended_at_ns or confirmed_death_tail)
+                    and (compatible or self._health_sample_matches(encounter,entity,sample))
+                ):
+                    observed.append((stamp,entity,template,sample))
+        if len(observed)<3:
+            return {}
+        previous={}
+        loss=0.0
+        rows={}
+        for stamp,entity,template,sample in sorted(observed,key=lambda item:item[0]):
+            hp=float(sample['current_hp'])
+            if entity in previous:
+                loss+=max(0.0,previous[entity]-hp)
+            previous[entity]=hp
+            second=(min(stamp,encounter.ended_at_ns)-encounter.started_at_ns)//1_000_000_000
+            maximum=sample.get('max_hp')
+            if maximum is None:
+                maxima=[value for value in self.boss_max_health_samples.get(entity,())
+                        if int(value.get('timestamp_ns') or 0)<=stamp]
+                if maxima:
+                    maximum=max(maxima,key=lambda value:value['timestamp_ns'])['max_hp']
+            rows[second]=[second,int(loss),hp,maximum,int(entity),template]
+        if len(rows)<3:
+            return {}
+        return {
+            'version':2,
+            'columns':['time_seconds','observed_boss_hp_loss','current_hp','max_hp',
+                       'entity_id','template_id'],
+            'coverage':'observed_boss_hp_loss',
+            'interval_seconds':1,
+            'origin_started_at_epoch':encounter.started_at_ns/1_000_000_000,
+            'rows':[rows[second] for second in sorted(rows)],
+        }
 
     def reset_capture_session(self, timestamp_ns=None):
         """Abandon only the interrupted live pull and clear session identity.

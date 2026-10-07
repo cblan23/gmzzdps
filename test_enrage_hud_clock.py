@@ -1,9 +1,11 @@
 """The HUD and enrage countdown must consume the same resolved duration."""
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from boss_enrage import BossEnrageCatalog, BossEnragePredictor, BossEnrageRule
+from boss_enrage import BossEnrageCatalog, BossEnragePredictor, BossEnrageRule, load_boss_enrage_catalog
 from test_combat_model import (
-    CombatModel, DpsWindow, MONSTER_ID, SELF_ID, damage, format_duration,
+    CombatModel, DpsWindow, MONSTER_ID, SELF_ID, damage, format_duration, enrage_marker_ratio,
 )
 
 
@@ -102,6 +104,60 @@ class EnrageHudClockTests(unittest.TestCase):
         self.assertEqual(window._layered_main_region_at(36, 44), 'prediction')
         self.assertEqual(window._layered_main_region_at(100, 20), 'prediction')
         self.assertEqual(window._layered_main_region_at(160, 20), '')
+
+    def test_roselle_transition_and_two_percent_finish_hide_the_hud_forecast(self):
+        window = self.make_window()
+        window.enrage_predictor = BossEnragePredictor(load_boss_enrage_catalog(
+            Path(__file__).with_name('boss_enrage_config.json')
+        ))
+        monster = window.model.monsters[MONSTER_ID]
+        monster.template_id = 7110200
+        monster.current_hp = 520
+        now = window.model.first_damage_time + 240
+        window.model.entity_combat_states[MONSTER_ID] = True
+        with mock.patch('time.monotonic', return_value=240):
+            window._update_enrage_prediction(now)
+        self.assertTrue(window.enrage_prediction_visible)
+        window.model.entity_combat_states[MONSTER_ID] = False
+        with mock.patch('time.monotonic', return_value=246):
+            window._update_enrage_prediction(now + 6)
+        self.assertIsNone(window.enrage_prediction)
+        self.assertFalse(window.enrage_prediction_visible)
+
+        window.model.entity_combat_states[MONSTER_ID] = True
+        monster.template_id = 7110208
+        monster.current_hp = 500
+        with mock.patch('time.monotonic', return_value=300):
+            window._update_enrage_prediction(now + 60)
+        prediction = window.enrage_prediction
+        self.assertTrue(window.enrage_prediction_visible)
+        self.assertAlmostEqual(prediction.elapsed_seconds, 246, places=2)
+        self.assertAlmostEqual(prediction.theoretical_remaining_hp_percent, 59.82, places=2)
+        with mock.patch('time.monotonic', return_value=301):
+            window._update_enrage_prediction(now + 61)
+        self.assertAlmostEqual(window.enrage_prediction.elapsed_seconds, 247, places=2)
+        self.assertAlmostEqual(window.enrage_prediction.countdown_paused_seconds, 54, places=2)
+        monster.current_hp = 20
+        with mock.patch('time.monotonic', return_value=590):
+            window._update_enrage_prediction(now + 350)
+        self.assertIsNone(window.enrage_prediction)
+        self.assertFalse(window.enrage_prediction_visible)
+
+    def test_enrage_marker_stops_at_a_nonzero_finish_line(self):
+        window = self.make_window()
+        window.enrage_predictor = BossEnragePredictor(load_boss_enrage_catalog(
+            Path(__file__).with_name('boss_enrage_config.json')
+        ))
+        monster = window.model.monsters[MONSTER_ID]
+        monster.template_id = 7110208
+        monster.current_hp = 500
+        for elapsed, marker in ((0, 1), (300, 0.51), (600, 0.02)):
+            with self.subTest(elapsed=elapsed):
+                result = window.enrage_predictor.update(
+                    encounter_key='roselle', elapsed_seconds=elapsed,
+                    bosses=[monster], monotonic_seconds=elapsed,
+                )
+                self.assertAlmostEqual(enrage_marker_ratio(result), marker)
 
 
 if __name__ == '__main__':

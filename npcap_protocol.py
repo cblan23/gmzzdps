@@ -91,6 +91,30 @@ METHOD_ID_NAMES: dict[int, str] = {
 }
 
 
+def current_combat_rpc_method(method_id: int, arguments: list) -> str:
+    """Apply the current client descriptors only to their verified payloads.
+
+    Inspected on 2026-10-06: AvatarActor/LocalRole casts moved to 1170/1172.
+    The old 1119/1121 IDs now describe buff removal/lifetime, and 94 is healing.
+    Legacy captures with the earlier shapes continue to use METHOD_ID_NAMES.
+    """
+    if method_id == 1170 and len(arguments) == 9:
+        return 'OnMsgCastSkillNew'
+    if method_id == 1172 and len(arguments) == 3:
+        return 'RetCastSkillSuccessNew'
+    if method_id == 1178 and len(arguments) == 3:
+        return 'OnMsgSkillEnterTeamGCD'
+    if method_id == 1119 and len(arguments) == 3:
+        return 'OnMsgRemoveBuffNew'
+    if method_id == 1121 and len(arguments) == 5:
+        return 'OnMsgBuffTotalLifeChangeNew'
+    if method_id == 94 and len(arguments) == 5:
+        return 'OnMsgHealSyncV2'
+    if method_id == 97 and len(arguments) == 3:
+        return 'OnMsgBeatenSyncV2'
+    return ''
+
+
 @dataclass(frozen=True)
 class DecodedFrame:
     sequence: int
@@ -967,7 +991,11 @@ class NpcapProtocolDecoder:
                     method_id = int(call[1])
                 except (TypeError, ValueError, OverflowError):
                     continue
-                if method_id in LOCAL_ROLE_RPC_METHODS:
+                current_method = current_combat_rpc_method(method_id, arguments)
+                if current_method:
+                    method = current_method
+                    method_scope = 'verified_current_combat'
+                elif method_id in LOCAL_ROLE_RPC_METHODS:
                     method = LOCAL_ROLE_RPC_METHODS[method_id]
                     method_scope = 'player_entity' if method_id in (2244, 2245) else 'local_role'
                 elif method_id in NPC_RPC_METHODS:

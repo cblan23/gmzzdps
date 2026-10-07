@@ -10,6 +10,7 @@ from encounter_tracker import EncounterTracker
 from settlement_presenter import encounter_view
 from test_combat_model import (
     DpsWindow,
+    CombatModel,
     ActorStats,
     MonsterStats,
     TeamDamageState,
@@ -66,7 +67,72 @@ def completed_record():
                               for i in range(1, 7)], healers=[])
 
 
+def make_official_clock_window():
+    window, _ = make_window()
+    window.model = CombatModel(run_id="official-hud-clock")
+    window.model.ingest_server_clock(1_024, 1_000)
+    window._shown_actor_name = window.model.display_name
+    window.live_hud_combat_state = None
+    window.live_hud_boss_state = None
+    window.live_hud_dps_segment = None
+    window._schedule_layered_main_render = lambda: None
+    return window
+
+
+def official_clock_snapshot(window, epoch, damages, *, server_time, seconds=0,
+                            member_clocks=None):
+    timestamp = 116_444_736_000_000_000 + round(epoch * 10_000_000)
+    tokens = [f"clock-member-{actor_id}" for actor_id in damages]
+    for actor_id, damage in damages.items():
+        member_seconds, member_start = (member_clocks or {}).get(
+            actor_id, (seconds, server_time)
+        )
+        window._dispatch_message(
+            "team_stat",
+            {"filetime_100ns": timestamp, "actor_id": actor_id,
+             "user_token": f"clock-member-{actor_id}", "snapshot_tokens": tokens,
+             "absolute_damage": damage, "server_time": member_start,
+             "combat_seconds_total": member_seconds, "full_snapshot": True,
+             "omitted_zero": damage == 0},
+        )
+
+
 class MainHudBehaviorTests(unittest.TestCase):
+    def test_binding_live_history_fills_tracker_context_from_local_model(self):
+        window, _ = make_window()
+        tracker = EncounterTracker()
+        encounter = tracker.begin(
+            instance_id="npcap-bootstrap:300",
+            started_at_ns=100_000_000_000,
+            participants_snapshot=[{"id": "self", "iid": 1, "name": "Self"}],
+            boss_template_id=7_110_200,
+            boss_token="entity:300",
+            self_token="self",
+        )
+        saved = []
+        bound = []
+        window.model.encounter_id = "local-encounter"
+        window.model.encounter_dungeon_id = 5_100_064
+        window.model.encounter_map_id = 5_200_224
+        window.model.encounter_dungeon_stage_id = 5_150_064
+        window.model.encounter_dungeon_stage_phase = 1
+        window.settlement_ui = SimpleNamespace(
+            tracker=tracker,
+            repository=SimpleNamespace(save=lambda current: saved.append(current)),
+        )
+        window.settlement_history_adapter = SimpleNamespace(
+            bind=lambda local_id, tracked_id: bound.append((local_id, tracked_id)) or True
+        )
+
+        self.assertTrue(window._bind_active_settlement_history())
+        self.assertEqual(encounter.dungeon_id, 5_100_064)
+        self.assertEqual(encounter.map_id, 5_200_224)
+        self.assertEqual(encounter.stage_id, 5_150_064)
+        self.assertEqual(encounter.stage_index, 1)
+        self.assertEqual(encounter.revision, 1)
+        self.assertEqual(saved, [tracker])
+        self.assertEqual(bound, [("local-encounter", encounter.local_encounter_id)])
+
     def test_main_combat_mode_switches_without_mutating_pve_state(self):
         window, _ = make_window()
         scheduled = []
@@ -467,7 +533,7 @@ class MainHudBehaviorTests(unittest.TestCase):
                 "is_self": True,
                 "is_live_self": True,
             },
-            {"row_kind": "section", "section_text": "最近战斗记录"},
+            {"row_kind": "section", "section_text": "实时战斗/战斗记录"},
             {
                 "actor_id": 1,
                 "profession_id": 1_200_001,
@@ -506,7 +572,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             if row.get("row_kind") == "section"
         )
 
-        self.assertEqual(current_team_section["section_text"], "最近战斗记录")
+        self.assertEqual(current_team_section["section_text"], "实时战斗/战斗记录")
         self.assertEqual(current_team_section["live_team_dps"], "221/s")
 
         window.show_team_dps = False
@@ -929,7 +995,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             "入队申请  申请甲  非凡评分 63737",
         )
         self.assertIn(
-            "最近战斗记录",
+            "实时战斗/战斗记录",
             [row.get("section_text") for row in rows],
         )
 
@@ -937,7 +1003,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             time.monotonic() - 0.01
         )
         expired = window._settlement_main_rows()
-        self.assertEqual(expired[1]["section_text"], "最近战斗记录")
+        self.assertEqual(expired[1]["section_text"], "实时战斗/战斗记录")
         self.assertEqual(window._team_application_section_rows(), [])
 
     def test_team_application_notices_have_no_row_limit_and_refresh_duplicate(self):
@@ -1319,7 +1385,8 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(
             {
                 member["user_token"]
-                for member in submissions[0]["members"]
+                for submission in submissions
+                for member in submission["members"]
             },
             {"self-token", "peer-token"},
         )
@@ -1330,7 +1397,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         capture_session[0] = 2
         self.assertFalse(window._schedule_team_equipment_profiles())
-        self.assertEqual(len(submissions), 1)
+        self.assertEqual(len(submissions), 2)
 
         window.model.party_user_tokens.add("new-peer-token")
         window.model.actor_character_ids[4] = "new-peer-token"
@@ -1340,10 +1407,93 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(
             [
                 member["user_token"]
-                for member in submissions[1]["members"]
+                for member in submissions[2]["members"]
             ],
             ["new-peer-token"],
         )
+
+    def test_pve_equipment_skips_cached_projection_before_actor_binding(self):
+        window, _ = make_window()
+        window.team_equipment_profiles = {}
+        window.team_equipment_requested_tokens = set()
+        window.team_equipment_context = None
+        window.model.party_active = True
+        window.model.party_session_id = 7
+        window.model.party_member_count = 2
+        window.model.self_character_id = "self-token"
+        window.model.party_user_tokens = {"projection-token"}
+        window.model.actor_character_ids = {1: "self-token"}
+        window.model.actor_is_ai = lambda _actor: False
+        submissions = []
+        window.worker = SimpleNamespace(
+            equipment_session=lambda: (222, 1),
+            team_profile_cache={
+                "projection-token": {"name": "卡西利亚斯·投影"},
+            },
+            schedule_equipment_profiles=lambda payload: (
+                submissions.append(payload) or True
+            ),
+        )
+        window._invalidate_team_rating_preview_rows = lambda **_options: None
+
+        self.assertTrue(window._schedule_team_equipment_profiles())
+        self.assertEqual(
+            [
+                member["user_token"]
+                for submission in submissions
+                for member in submission["members"]
+            ],
+            ["self-token"],
+        )
+        self.assertNotIn(
+            "projection-token", window.team_equipment_requested_tokens
+        )
+
+    def test_late_pve_projection_equipment_response_is_discarded(self):
+        window, _ = make_window()
+        token = "projection-token"
+        window.model.actor_character_ids = {}
+        window.model.actor_is_ai = lambda _actor: False
+        window.worker = SimpleNamespace(
+            equipment_session=lambda: (222, 1),
+            team_profile_cache={token: {"name": "卡西利亚斯·投影"}},
+        )
+        window._team_equipment_local_token = lambda: "self-token"
+        window._team_equipment_party_session_id = lambda: 7
+        window._current_team_equipment_tokens = lambda: {
+            "self-token", token,
+        }
+        window.team_equipment_profiles = {token: {"equipment_count": 1}}
+        window.team_equipment_requested_tokens = {token}
+        window.team_equipment_profile_ratings = {token: None}
+        window.team_equipment_requested_ratings = {token: None}
+        window.team_equipment_requested_at = {token: 1.0}
+        window.team_equipment_attempts = {token: 1}
+        window.team_equipment_attempt_ratings = {token: None}
+        invalidated = []
+        window._invalidate_team_rating_preview_rows = (
+            lambda actor=0, **_options: invalidated.append(actor)
+        )
+        uploads = []
+        window._queue_equipment_snapshot_upload = (
+            lambda payload: uploads.append(payload) or True
+        )
+        payload = {
+            "game_pid": 222,
+            "capture_session_id": 1,
+            "local_user_token": "self-token",
+            "party_session_id": 7,
+            "user_token": token,
+            "name": "卡西利亚斯·投影",
+            "equipment_count": 1,
+        }
+
+        self.assertFalse(window._ingest_team_equipment_profile(payload))
+        self.assertNotIn(token, window.team_equipment_profiles)
+        self.assertNotIn(token, window.team_equipment_requested_tokens)
+        self.assertNotIn(token, window.team_equipment_attempts)
+        self.assertEqual(uploads, [])
+        self.assertEqual(invalidated, [0])
 
     def test_unanswered_equipment_query_is_bounded_until_rating_changes(self):
         window, _ = make_window()
@@ -1416,6 +1566,31 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         self.assertFalse(window._schedule_team_equipment_profiles())
         self.assertIn('self-token', window.team_equipment_profiles)
+
+    def test_restored_roster_rating_keeps_matching_shape_equipment(self):
+        window, _ = make_window()
+        window.model.party_session_id = 7
+        window.model.self_character_id = 'self-token'
+        window.model.party_user_tokens = {'peer-token'}
+        window.model.actor_character_ids = {1: 'self-token', 2: 'peer-token'}
+        window.model.entity_extraordinary_ratings.update({1: 110914, 2: 133215})
+        window.model.actor_is_ai = lambda _actor: False
+        window.team_equipment_profiles = {
+            'self-token': {'extraordinary_rating': 110914, 'equipment_count': 8},
+            'peer-token': {'extraordinary_rating': 133215, 'equipment_count': 8},
+        }
+        # The request used a transient roster rating, while its shape reply
+        # already returned the rating now restored by the next roster update.
+        window.team_equipment_profile_ratings = {'self-token': 110914, 'peer-token': 133106}
+        window.team_equipment_context = (222, 'self-token', 7)
+        window.worker = SimpleNamespace(
+            equipment_session=lambda: (222, 1),
+            schedule_equipment_profiles=lambda _payload: self.fail('matching equipment was queried again'),
+        )
+
+        self.assertFalse(window._schedule_team_equipment_profiles())
+        self.assertEqual(window.team_equipment_profiles['peer-token']['equipment_count'], 8)
+        self.assertEqual(window.team_equipment_profile_ratings['peer-token'], 133215)
 
     def test_entering_team_keeps_current_character_equipment(self):
         window, _ = make_window()
@@ -1605,9 +1780,9 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
 
         self.assertTrue(window._schedule_team_equipment_profiles())
-        self.assertEqual(len(submissions), 3)
+        self.assertEqual(len(submissions), roster_size)
         self.assertTrue(
-            all(1 <= len(batch["members"]) <= 12 for batch in submissions)
+            all(len(batch["members"]) == 1 for batch in submissions)
         )
         submitted = [
             member["user_token"]
@@ -1940,6 +2115,26 @@ class MainHudBehaviorTests(unittest.TestCase):
         window._layered_main_release(event)
         self.assertEqual(settings, [True])
 
+    def test_web_database_action_opens_default_browser_without_arming_drag(self):
+        window, _ = make_window()
+        window.window_locked = False
+        window._layered_main_active = lambda: True
+        window._startup_interaction_blocked = lambda: False
+        window._layered_main_region_at = lambda _x, _y: "action:web_database"
+        event = SimpleNamespace(x=10, y=10, x_root=10, y_root=10)
+        browser = SimpleNamespace(open=mock.Mock(return_value=True))
+
+        window._layered_main_press(event)
+        self.assertFalse(window.layered_main_drag_armed)
+        with mock.patch.dict(
+            DpsWindow._layered_main_release.__globals__, {"webbrowser": browser}
+        ):
+            window._layered_main_release(event)
+
+        browser.open.assert_called_once_with(
+            "https://gmzz.daodaogame.vip/", new=2
+        )
+
     def test_stale_layered_clear_region_cannot_clear_after_combat_starts(self):
         window, _ = make_window()
         window.window_locked = False
@@ -2193,7 +2388,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertFalse(rating)
         self.assertEqual(rows[0]["name"], "莫雪")
         self.assertEqual(rows[1]["row_kind"], "section")
-        self.assertEqual(rows[1]["section_text"], "最近战斗记录")
+        self.assertEqual(rows[1]["section_text"], "实时战斗/战斗记录")
         self.assertTrue(rows[1]["expanded"])
         rating_rows = [row for row in rows[2:] if row.get("metric") == "rating"]
         self.assertEqual(rating_rows, [])
@@ -2235,7 +2430,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[0]["actor_id"], 1)
         self.assertEqual(rows[0]["name"], "莫雪")
         self.assertEqual(rows[1]["row_kind"], "section")
-        self.assertEqual(rows[1]["section_text"], "最近战斗记录")
+        self.assertEqual(rows[1]["section_text"], "实时战斗/战斗记录")
         self.assertTrue(rows[1]["expanded"])
         self.assertNotIn("section_action", rows[1])
         self.assertEqual(rows[2]["row_kind"], "message")
@@ -3683,7 +3878,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         rows = window._settlement_main_rows()
         self.assertEqual(len(rows), 3)
-        self.assertEqual(rows[1]["section_text"], "最近战斗记录")
+        self.assertEqual(rows[1]["section_text"], "实时战斗/战斗记录")
         self.assertEqual(rows[2]["row_kind"], "message")
         self.assertEqual(rows[0]["actor_id"], window.model.self_id)
         self.assertEqual(rows[0]["inline_rating_text"], "80616")
@@ -4334,6 +4529,51 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertIsNone(window.live_hud_boss_state)
         self.assertEqual(renders, [True, True])
 
+    def test_unknown_packet_confirmed_boss_replaces_small_monster_hud(self):
+        window, _ = make_window()
+        window.live_hud_boss_state = None
+        window.live_hud_dps_segment = None
+        window._schedule_layered_main_render = lambda: None
+        window._dispatch_message(
+            "live_hud_combat",
+            {
+                "active": True,
+                "segment_id": 1,
+                "started_at_epoch": 1_000.0,
+            },
+        )
+        window.live_hud_dps_segment["rows"] = [
+            {"actor_id": 1, "total_value": 300_000}
+        ]
+
+        window._dispatch_message(
+            "live_hud_boss",
+            {
+                "active": True,
+                "entity_id": 242_053_620_061_587,
+                "template_id": 7_115_703,
+                "boss_type": 3,
+                "name": "战斗首领",
+                "icon": "",
+                "level": 87,
+                "current_hp": 14_000_000.0,
+                "max_hp": 14_800_926.0,
+                "started_at_epoch": 1_012.0,
+            },
+        )
+
+        self.assertEqual(window.live_hud_dps_segment["kind"], "boss")
+        self.assertEqual(window.live_hud_dps_segment["rows"], [])
+        with mock.patch.object(time, "time", return_value=1_013.0):
+            snapshot = window._layered_main_snapshot()
+        self.assertEqual(snapshot["boss_name"], "战斗首领")
+        self.assertEqual(snapshot["boss_template_id"], 7_115_703)
+        self.assertEqual(snapshot["boss_level"], 87)
+        self.assertTrue(snapshot["live_hud_boss"])
+        self.assertAlmostEqual(
+            snapshot["boss_ratio"], 14_000_000.0 / 14_800_926.0
+        )
+
     def test_same_live_hud_boss_starts_a_new_segment_after_wipe(self):
         window, _ = make_window()
         window.live_hud_boss_state = None
@@ -4608,6 +4848,97 @@ class MainHudBehaviorTests(unittest.TestCase):
             window._main_live_team_dps_text(rows, now=2_010), "5,000/s"
         )
 
+    def test_small_monster_hud_uses_server_clock_with_local_time_24_seconds_slow(self):
+        window = make_official_clock_window()
+        official_clock_snapshot(window, 1_953, {1: 0, 2: 0}, server_time=1_962)
+        window._dispatch_message(
+            "live_hud_combat",
+            {"active": True, "segment_id": 1, "started_at_epoch": 1_953.0},
+        )
+        official_clock_snapshot(
+            window, 2_000, {1: 7_122_784, 2: 5_310_751}, server_time=1_962
+        )
+
+        rows = window._main_targetless_team_rows(2_000)
+        by_actor = {row["actor_id"]: row for row in rows}
+        self.assertEqual(by_actor[1]["total_value"], 7_122_784)
+        self.assertAlmostEqual(by_actor[1]["dps_value"], 7_122_784 / 62)
+        self.assertAlmostEqual(by_actor[2]["dps_value"], 5_310_751 / 62)
+        self.assertEqual(window._main_live_hud_dps_duration(2_000), 62.0)
+        self.assertEqual(window._main_live_hud_dps_duration(2_001), 63.0)
+        self.assertEqual(window._main_targetless_team_rows(2_001), rows)
+
+    def test_daily_boss_hud_keeps_common_damage_and_common_accumulated_clock_together(self):
+        window = make_official_clock_window()
+        window.model._clear_targetless_team_statistics()
+        window._dispatch_message(
+            "live_hud_boss",
+            {"active": True, "entity_id": 220_096_136_477_298,
+             "template_id": 7_115_731, "started_at_epoch": 2_093.0},
+        )
+        official_clock_snapshot(
+            window, 2_114.2, {1: 19_740_787, 2: 13_891_755},
+            server_time=2_117, seconds=154,
+        )
+
+        rows = window._main_targetless_team_rows(2_114.2)
+        by_actor = {row["actor_id"]: row for row in rows}
+        self.assertAlmostEqual(by_actor[1]["dps_value"], 19_740_787 / 175)
+        self.assertAlmostEqual(by_actor[2]["dps_value"], 13_891_755 / 175)
+        self.assertEqual(window.live_hud_dps_segment["snapshot_duration"], 175.0)
+        self.assertAlmostEqual(window._main_live_hud_dps_duration(2_114.2), 21.2)
+
+    def test_twelve_member_raid_common_reset_uses_new_boss_clock_and_full_counter(self):
+        window = make_official_clock_window()
+        damages = {actor_id: 300_000 for actor_id in range(1, 13)}
+        official_clock_snapshot(window, 2_900, damages, server_time=2_824)
+        window._dispatch_message(
+            "live_hud_boss",
+            {"active": True, "entity_id": 220_096_136_477_298,
+             "template_id": 7_115_731, "started_at_epoch": 3_000.0},
+        )
+        damages = {actor_id: actor_id * 120_000 for actor_id in range(1, 13)}
+        official_clock_snapshot(window, 3_010, damages, server_time=3_024)
+
+        rows = window._main_targetless_team_rows(3_010)
+        self.assertEqual(len(rows), 12)
+        for row in rows:
+            self.assertEqual(row["total_value"], damages[row["actor_id"]])
+            self.assertEqual(row["dps_value"], damages[row["actor_id"]] / 10)
+
+    def test_official_hud_clock_handles_member_pauses_and_resumed_raid_phase(self):
+        window = make_official_clock_window()
+        window._dispatch_message(
+            "live_hud_combat",
+            {"active": True, "segment_id": 1, "started_at_epoch": 3_000.0},
+        )
+        damages = {actor_id: 350_000 for actor_id in range(1, 13)}
+        official_clock_snapshot(window, 3_050, damages, server_time=3_069,
+                                seconds=30, member_clocks={12: (28, 0)})
+        rows = {row["actor_id"]: row for row in window._main_targetless_team_rows(3_050)}
+        self.assertEqual(rows[1]["dps_value"], 350_000 / 35)
+        self.assertEqual(rows[12]["dps_value"], 350_000 / 28)
+        self.assertEqual(window._main_live_hud_dps_duration(3_050), 35.0)
+
+        official_clock_snapshot(window, 3_053, damages, server_time=0,
+                                seconds=38, member_clocks={12: (28, 0)})
+        final = {row["actor_id"]: row for row in window._main_targetless_team_rows(3_060)}
+        self.assertEqual(final[1]["dps_value"], 350_000 / 38)
+        self.assertEqual(final[12]["dps_value"], 350_000 / 28)
+        self.assertEqual(window._main_live_hud_dps_duration(3_060), 38.0)
+
+        window._dispatch_message(
+            "live_hud_combat",
+            {"active": True, "segment_id": 1, "started_at_epoch": 3_000.0,
+             "resumed_at_epoch": 3_100.0, "resumed": True},
+        )
+        official_clock_snapshot(window, 3_105, {i: 430_000 for i in damages},
+                                server_time=3_124, seconds=38)
+        resumed = window._main_targetless_team_rows(3_105)
+        self.assertEqual(len(resumed), 12)
+        self.assertTrue(all(row["dps_value"] == 430_000 / 43 for row in resumed))
+        self.assertEqual(window._main_live_hud_dps_duration(3_105), 43.0)
+
     def test_live_small_monster_hud_uses_team_start_and_resumes_same_segment(self):
         window, _ = make_window()
         windows_epoch = 116_444_736_000_000_000
@@ -4670,6 +5001,18 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertAlmostEqual(first_by_actor[1]["dps_value"], 320_000 / 11)
         self.assertEqual(window._main_live_hud_dps_duration(1_001.0), 11.0)
 
+        # A Common team snapshot can pause for longer than the model's stale
+        # threshold while the packet-confirmed small-monster segment is still
+        # active. Keep the last complete rows visible until a boundary or the
+        # next complete snapshot replaces them.
+        window.model.targetless_team_statistics = lambda _now=None: []
+        window.model.targetless_team_duration = lambda _now=None: 0.0
+        self.assertEqual(
+            window._main_targetless_team_rows(1_020.0), first_rows
+        )
+        window.model.targetless_team_statistics = statistics
+        window.model.targetless_team_duration = lambda _now=None: 10.0
+
         window._dispatch_message(
             "live_hud_combat",
             {
@@ -4703,7 +5046,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         self.assertIs(window.live_hud_dps_segment, segment)
         self.assertEqual(window.main_scroll_offset, 1)
-        self.assertEqual(segment["rows"], [])
+        self.assertEqual(segment["rows"], final_rows)
 
         window.model.targetless_team_states = {
             1: state(1, "self", 350_000, 200),

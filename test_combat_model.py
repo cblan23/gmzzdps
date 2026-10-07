@@ -6652,9 +6652,9 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
     def test_release_version_matches_client_build_and_notes(self):
-        self.assertEqual(APP_VERSION, "0.3.5")
+        self.assertEqual(APP_VERSION, "0.3.6")
         self.assertEqual(CLIENT_BUILD.split("+", 1)[0], APP_VERSION)
-        self.assertRegex(CLIENT_BUILD, r"^0\.3\.5\+\d{8}\.\d+$")
+        self.assertRegex(CLIENT_BUILD, r"^0\.3\.6\+\d{8}\.\d+$")
         notes = Path(__file__).with_name(f"release-notes-v{APP_VERSION}.txt")
         self.assertTrue(notes.is_file())
         self.assertIn(APP_VERSION, notes.read_text(encoding="utf-8-sig"))
@@ -10178,6 +10178,12 @@ class CombatModelTests(unittest.TestCase):
         ]
 
         self.assertNotIn('text="保存设置"', build_source)
+        self.assertIn('records = section("数据与记录")', build_source)
+        self.assertIn('"上传战斗记录"', build_source)
+        self.assertIn(
+            'help_text="关闭后战斗记录仍保存在本机，不再自动上传到服务器。"',
+            build_source,
+        )
         self.assertIn(
             'variable.trace_add("write", self._apply_live_ui_settings)',
             build_source,
@@ -12929,6 +12935,85 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(active["level"], 83)
         self.assertEqual(active["max_hp"], 14_095_294.0)
         self.assertEqual(active["started_at_epoch"], started_at / 1_000_000_000)
+
+    def test_live_hud_boss_tracker_accepts_unknown_packet_confirmed_boss(self):
+        tracker = LiveHudBossTracker()
+        entity_id = 242_053_620_061_587
+        created_at = 1_791_343_872_883_337_100
+        tracker.ingest(
+            {
+                "method": "NpcapEntityCreated",
+                "capture_source": "npcap",
+                "capture_timestamp_ns": created_at,
+                "decoded_arguments": [
+                    {
+                        "entity_id": entity_id,
+                        "entity_class": "NpcActor",
+                        "properties": {
+                            "TemplateID": 7_115_703,
+                            "BossType": 3,
+                            "Level": 87,
+                        },
+                    }
+                ],
+            }
+        )
+        started_at = created_at + 1
+
+        active = tracker.ingest(
+            {
+                "method": "OnMsgSyncFightMode",
+                "capture_source": "npcap",
+                "network_entity_id": entity_id,
+                "script_entity": entity_id,
+                "capture_timestamp_ns": started_at,
+                "decoded_arguments": [2],
+            }
+        )
+
+        self.assertEqual(active["template_id"], 7_115_703)
+        self.assertEqual(active["boss_type"], 3)
+        self.assertEqual(active["name"], "战斗首领")
+        self.assertEqual(active["icon"], "")
+        self.assertEqual(active["level"], 87)
+
+    def test_live_hud_boss_tracker_rejects_unknown_non_boss_entities(self):
+        for boss_type in (1, 2):
+            with self.subTest(boss_type=boss_type):
+                tracker = LiveHudBossTracker()
+                entity_id = 900 + boss_type
+                tracker.ingest(
+                    {
+                        "method": "NpcapEntityCreated",
+                        "capture_source": "npcap",
+                        "capture_timestamp_ns": 1_000_000_000,
+                        "decoded_arguments": [
+                            {
+                                "entity_id": entity_id,
+                                "entity_class": "NpcActor",
+                                "properties": {
+                                    "TemplateID": 7_999_000 + boss_type,
+                                    "BossType": boss_type,
+                                    "Level": 87,
+                                },
+                            }
+                        ],
+                    }
+                )
+
+                self.assertFalse(tracker.entities)
+                self.assertIsNone(
+                    tracker.ingest(
+                        {
+                            "method": "OnMsgSyncFightMode",
+                            "capture_source": "npcap",
+                            "network_entity_id": entity_id,
+                            "script_entity": entity_id,
+                            "capture_timestamp_ns": 1_000_000_001,
+                            "decoded_arguments": [2],
+                        }
+                    )
+                )
 
     def test_live_hud_combat_tracker_uses_confirmed_npc_fight_edges(self):
         tracker = LiveHudCombatTracker()
@@ -19227,6 +19312,20 @@ class CombatModelTests(unittest.TestCase):
             [[0, 200], [1, 400], [2, 700]],
         )
 
+    def test_phase_linked_boss_hp_loss_stays_cumulative(self):
+        model = CombatModel(run_id="history-linked-boss-hp-test")
+        first_id = MONSTER_ID
+        second_id = SECOND_MONSTER_ID
+        model.combat_target_id = second_id
+        model.encounter_target_order = [first_id, second_id]
+        model.linked_boss_target_ids = {first_id}
+        model.monsters[first_id] = MonsterStats(entity_id=first_id)
+        model.monsters[first_id].observed_damage_taken = 20_000_000
+        model.monsters[second_id] = MonsterStats(entity_id=second_id)
+        model.monsters[second_id].observed_damage_taken = 3_000_000
+
+        self.assertEqual(model.observed_boss_damage_taken(), 23_000_000)
+
     def test_history_team_trend_ignores_incomplete_cached_timeline(self):
         record = {
             "encounter_id": "old-incomplete-timeline",
@@ -22537,6 +22636,44 @@ class CombatModelTests(unittest.TestCase):
             {"filetime_100ns": BASE_FILETIME + 2 * 10_000_000}
         )
         self.assertEqual(model.targetless_team_started_at, expected)
+
+    def test_common_live_clock_adds_finished_time_to_current_server_segment(self):
+        model = CombatModel(run_id="common-multiwave-clock")
+        model.ingest_server_clock(1_024, 1_000)
+        self.assertEqual(
+            model._live_dps_duration_for_snapshot(
+                event_time=2_114.2,
+                server_time=2_117,
+                combat_seconds_total=154,
+                fallback_duration=21.2,
+            ),
+            175.0,
+        )
+        self.assertEqual(
+            model._live_dps_duration_for_snapshot(
+                event_time=2_203,
+                server_time=0,
+                combat_seconds_total=264,
+                fallback_duration=110,
+            ),
+            264.0,
+        )
+
+    def test_targetless_first_positive_snapshot_uses_corrected_server_clock(self):
+        model = CombatModel(run_id="targetless-midfight-clock")
+        local_epoch = model._event_seconds({"filetime_100ns": BASE_FILETIME})
+        model.ingest_server_clock(local_epoch + 24, local_epoch)
+        server_start = int(local_epoch - 38)
+        targetless_team_snapshot(
+            model, 0, {SELF_ID: 7_122_784, TEAMMATE_ID: 5_310_751},
+            server_time=server_start,
+        )
+
+        self.assertEqual(len(model.targetless_team_statistics(local_epoch)), 2)
+        self.assertEqual(model.targetless_team_duration(local_epoch), 62.0)
+        self.assertAlmostEqual(
+            model.targetless_team_states[SELF_ID].live_dps, 7_122_784 / 62
+        )
 
     def test_targetless_live_dps_updates_only_from_team_snapshots(self):
         model = CombatModel(run_id="targetless-live-dps")

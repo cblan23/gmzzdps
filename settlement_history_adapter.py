@@ -7,9 +7,11 @@ without maintaining a second production UI or inventing unavailable values.
 from __future__ import annotations
 
 from copy import deepcopy
+from collections import deque
 import datetime as dt
 import math
 
+from combat_history import rebase_relative_combat_logs
 from encounter_tracker import EncounterRecord, EncounterTracker
 from history_index import rebuild_team_dps_timeline
 from network_state import boss_template_continues_encounter
@@ -221,8 +223,8 @@ def _server_healing_skills(member: dict, total: int | None) -> list[dict]:
     return rows
 
 
-def _base_participant_rows(base: dict) -> dict[int, dict]:
-    rows = base.get("participants") if isinstance(base, dict) else None
+def _base_actor_rows(base: dict, collection_name: str) -> dict[int, dict]:
+    rows = base.get(collection_name) if isinstance(base, dict) else None
     if not isinstance(rows, list):
         return {}
     return {
@@ -256,7 +258,9 @@ def encounter_history_record(
         # An old explicit binding can point at another Boss's local archive.
         # Do not inherit its entity, HP, targets, or local player damage.
         base = {}
-    existing_participants = _base_participant_rows(base)
+    existing_participants = _base_actor_rows(base, "participants")
+    existing_healers = _base_actor_rows(base, "healers")
+    existing_taken = _base_actor_rows(base, "damage_taken")
     existing_equipment = {}
     for collection_name in ("participants", "healers", "damage_taken"):
         collection = base.get(collection_name)
@@ -275,11 +279,7 @@ def encounter_history_record(
         if isinstance(row, dict) and row.get("id")
     }
     visible_tokens = set(visible_encounter_member_tokens(encounter))
-    total_damage = (
-        sum(int(row.get("damage") or 0) for row in members.values())
-        if settled and members and all(row.get("damage") is not None for row in members.values())
-        else None
-    )
+    total_damage = None
     duration = encounter.encounter_duration_seconds
     if duration is not None and (
         not isinstance(duration, (int, float))
@@ -418,8 +418,12 @@ def encounter_history_record(
         participants.append(row)
 
         bear = _optional_nonnegative(values.get("bear")) if settled else None
+        local_taken = existing_taken.get(actor, {})
+        if not settled and local_taken:
+            bear = _optional_nonnegative(local_taken.get("taken"))
         taken_values.append(bear)
-        taken_rows.append(
+        taken_row = deepcopy(local_taken) if local_taken else {}
+        taken_row.update(
             {
                 "actor_id": actor,
                 "name": row["name"],
@@ -432,14 +436,26 @@ def encounter_history_record(
                 "source": (
                     "server_stage_statistics"
                     if settled and bear is not None
+                    else str(local_taken.get("source") or "verified_local_observation")
+                    if bear is not None
                     else "unavailable"
                 ),
             }
         )
+        taken_rows.append(taken_row)
         heal = _optional_nonnegative(values.get("heal")) if settled else None
+        local_healer = existing_healers.get(actor, {})
+        if not settled and local_healer:
+            heal = _optional_nonnegative(local_healer.get("effective_healing"))
         healing_values.append(heal)
-        if not settled or heal is None or heal > 0:
-            healers.append(
+        include_healer = (
+            bool(local_healer) or not existing_healers
+            if not settled
+            else heal is None or heal > 0
+        )
+        if include_healer:
+            healer_row = deepcopy(local_healer) if local_healer else {}
+            healer_row.update(
                 {
                     "actor_id": actor,
                     "name": row["name"],
@@ -447,20 +463,63 @@ def encounter_history_record(
                     "profession_id": row["profession_id"],
                     "extraordinary_rating": row.get("extraordinary_rating"),
                     "is_ai": row["is_ai"],
-                    "hps": heal / duration if heal is not None and duration else None,
-                    "total_healing": None,
+                    "hps": (
+                        heal / duration
+                        if settled and heal is not None and duration
+                        else _optional_nonnegative_float(local_healer.get("hps"))
+                        if heal is not None
+                        else None
+                    ),
+                    "total_healing": (
+                        None
+                        if settled
+                        else _optional_nonnegative(local_healer.get("total_healing"))
+                    ),
                     "effective_healing": heal,
-                    "overhealing": None,
-                    "overheal_rate": None,
-                    "skills": _server_healing_skills(values, heal) if settled else [],
-                    "targets": [],
+                    "overhealing": (
+                        None
+                        if settled
+                        else _optional_nonnegative(local_healer.get("overhealing"))
+                    ),
+                    "overheal_rate": (
+                        None
+                        if settled
+                        else _optional_nonnegative_float(local_healer.get("overheal_rate"))
+                    ),
+                    "skills": (
+                        _server_healing_skills(values, heal)
+                        if settled
+                        else deepcopy(local_healer.get("skills", []))
+                        if isinstance(local_healer.get("skills"), list)
+                        else []
+                    ),
+                    "targets": (
+                        []
+                        if settled
+                        else deepcopy(local_healer.get("targets", []))
+                        if isinstance(local_healer.get("targets"), list)
+                        else []
+                    ),
                     "coverage": (
                         "server_stage_statistics"
                         if settled and heal is not None
+                        else str(
+                            local_healer.get("coverage")
+                            or "verified_local_observation"
+                        )
+                        if heal is not None
                         else "unavailable"
                     ),
                 }
             )
+            healers.append(healer_row)
+
+    damage_values = [row.get("damage") for row in participants]
+    if damage_values and all(value is not None for value in damage_values):
+        total_damage = sum(int(value) for value in damage_values)
+        if total_damage > 0:
+            for row in participants:
+                row["share"] = int(row["damage"]) / total_damage
 
     team_taken = (
         sum(taken_values)
@@ -476,6 +535,20 @@ def encounter_history_record(
         if healing_values and all(value is not None for value in healing_values)
         else None
     )
+    if not settled:
+        base_team_healing = _optional_nonnegative(
+            base.get("team_effective_healing")
+        )
+        known_healing = [value for value in healing_values if value is not None]
+        if (
+            base_team_healing is not None
+            and sum(known_healing) == base_team_healing
+        ):
+            team_healing = base_team_healing
+        base_team_taken = _optional_nonnegative(base.get("team_taken"))
+        known_taken = [value for value in taken_values if value is not None]
+        if base_team_taken is not None and sum(known_taken) == base_team_taken:
+            team_taken = base_team_taken
     result, archive_reason = _RESULTS.get(
         encounter.result, ("interrupted", "scene_change")
     )
@@ -519,6 +592,40 @@ def encounter_history_record(
         deepcopy(row) for row in encounter.participants_snapshot
         if isinstance(row, dict) and row.get("id") in visible_tokens
     ]
+    base_duration = _optional_nonnegative_float(base.get("duration_seconds"))
+    if duration is None and base_duration:
+        duration = base_duration
+    base_duration_source = str(base.get("duration_source") or "").strip()
+    duration_source = (
+        encounter.duration_source
+        if encounter.encounter_duration_seconds is not None
+        else base_duration_source or encounter.duration_source
+    )
+    stage_id = encounter.stage_id
+    if stage_id is None:
+        stage_id = _optional_nonnegative(
+            base.get("stage_id")
+            if base.get("stage_id") is not None
+            else base.get("dungeon_stage_id")
+        )
+    dungeon_id = encounter.dungeon_id
+    if dungeon_id is None:
+        dungeon_id = _optional_nonnegative(base.get("dungeon_id"))
+    map_id = encounter.map_id
+    if map_id is None:
+        map_id = _optional_nonnegative(base.get("map_id"))
+    damage_accounting = {
+        "source": "server_stage_statistics" if settled else "pending_server_statistics",
+        "snapshot_semantics": "upsert_not_increment",
+        "statistics_scope": "STAGE",
+        "server_battle_id": encounter.server_battle_id,
+        "match_confidence": encounter.match_confidence,
+    }
+    if not settled and total_damage is not None and isinstance(
+        base.get("damage_accounting"), dict
+    ):
+        damage_accounting = deepcopy(base["damage_accounting"])
+
     output.update(
         {
             "encounter_id": encounter.local_encounter_id,
@@ -536,7 +643,7 @@ def encounter_history_record(
             "duration_seconds": duration,
             "dps_duration_seconds": duration,
             "hps_duration_seconds": duration,
-            "duration_source": encounter.duration_source,
+            "duration_source": duration_source,
             "encounter_duration_seconds": duration,
             "total_damage": total_damage,
             "team_dps": total_damage / duration if total_damage is not None and duration else None,
@@ -558,10 +665,10 @@ def encounter_history_record(
                 else None
             ),
             "statistics_scope": "STAGE",
-            "stage_id": encounter.stage_id,
-            "dungeon_id": encounter.dungeon_id,
-            "map_id": encounter.map_id,
-            "dungeon_stage_id": encounter.stage_id,
+            "stage_id": stage_id,
+            "dungeon_id": dungeon_id,
+            "map_id": map_id,
+            "dungeon_stage_id": stage_id,
             "dungeon_stage_phase": encounter.stage_index,
             "boss_token": encounter.boss_token,
             "match_confidence": encounter.match_confidence,
@@ -571,13 +678,7 @@ def encounter_history_record(
             "completion_confirmed": bool(
                 encounter.result == "VICTORY" and settled
             ),
-            "damage_accounting": {
-                "source": "server_stage_statistics" if settled else "pending_server_statistics",
-                "snapshot_semantics": "upsert_not_increment",
-                "statistics_scope": "STAGE",
-                "server_battle_id": encounter.server_battle_id,
-                "match_confidence": encounter.match_confidence,
-            },
+            "damage_accounting": damage_accounting,
         }
     )
     return output
@@ -654,10 +755,344 @@ def match_local_history_record(
 
 
 class SettlementHistoryAdapter:
-    def __init__(self, history_store):
+    def __init__(self, history_store, *, controller=None):
         self.history_store = history_store
+        self.controller = controller
         self.local_bindings: dict[str, str] = {}
         self.live_team_dps_samples: dict[str, list[tuple[int, float]]] = {}
+        self.observed_casts = deque(maxlen=20_000)
+        self.observed_hits = deque(maxlen=50_000)
+        self.observed_heals = deque(maxlen=50_000)
+        self.details_dirty = set()
+
+    def observe_detail(self, kind: str, update: dict) -> None:
+        """Keep detached events even when the local damage model starts late."""
+        if kind == 'skill_cast':
+            self.observed_casts.append(dict(update))
+        elif kind == 'event':
+            self.observed_hits.append(dict(update))
+        elif kind == 'heal':
+            self.observed_heals.append(dict(update))
+        else:
+            return
+        tracker = getattr(self.controller, 'tracker', None)
+        timestamp_ns = (int(update.get('filetime_100ns', 0) or 0)
+                        - 116_444_736_000_000_000) * 100
+        for encounter in getattr(tracker, 'encounters', {}).values():
+            if (encounter.ended_at_ns is not None
+                    and encounter.started_at_ns <= timestamp_ns <= encounter.ended_at_ns):
+                self.details_dirty.add(encounter.local_encounter_id)
+
+    def _attach_observed_healing(
+        self, record: dict, *, started: float, ended: float
+    ) -> dict:
+        """Add exact callback detail without replacing authoritative totals."""
+
+        participant_rows = {
+            _actor_id(row.get('actor_id')): row
+            for row in record.get('participants', ())
+            if isinstance(row, dict) and _actor_id(row.get('actor_id'))
+        }
+        if not participant_rows:
+            return record
+        observed: dict[int, dict] = {}
+        seen = set()
+        for event in self.observed_heals:
+            try:
+                timestamp_100ns = int(event.get('filetime_100ns', 0) or 0)
+                sequence = int(event.get('sequence', 0) or 0)
+                healer_id = _actor_id(event.get('healer_id'))
+                target_id = _actor_id(event.get('target_id'))
+                skill_id = _actor_id(event.get('skill_id'))
+                total = int(event.get('total_healing', 0) or 0)
+                effective = int(event.get('effective_healing', 0) or 0)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            timestamp = (
+                timestamp_100ns - 116_444_736_000_000_000
+            ) / 10_000_000
+            if (
+                healer_id not in participant_rows
+                or target_id not in participant_rows
+                or not started <= timestamp <= ended
+                or skill_id <= 0
+                or total < 0
+                or not 0 <= effective <= total
+            ):
+                continue
+            key = (
+                timestamp_100ns, sequence, healer_id, target_id, skill_id,
+                total, effective,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            actor = observed.setdefault(
+                healer_id,
+                {
+                    'total': 0,
+                    'effective': 0,
+                    'events': 0,
+                    'skills': {},
+                    'targets': {},
+                    'effective_events': [],
+                },
+            )
+            actor['total'] += total
+            actor['effective'] += effective
+            actor['events'] += 1
+            if effective > 0:
+                actor['effective_events'].append((timestamp, effective))
+            for collection, detail_id in (
+                (actor['skills'], skill_id), (actor['targets'], target_id)
+            ):
+                detail = collection.setdefault(
+                    detail_id, {'total': 0, 'effective': 0, 'events': 0}
+                )
+                detail['total'] += total
+                detail['effective'] += effective
+                detail['events'] += 1
+        if not observed:
+            return record
+
+        duration = _optional_nonnegative_float(record.get('hps_duration_seconds'))
+        if duration is None:
+            duration = _optional_nonnegative_float(record.get('duration_seconds'))
+        healer_rows = [
+            row for row in record.get('healers', ()) if isinstance(row, dict)
+        ]
+        healers = {
+            _actor_id(row.get('actor_id')): row
+            for row in healer_rows
+            if _actor_id(row.get('actor_id'))
+        }
+        for actor_id, raw in observed.items():
+            healer = healers.get(actor_id)
+            if healer is None:
+                participant = participant_rows[actor_id]
+                healer = {
+                    key: deepcopy(participant.get(key))
+                    for key in (
+                        'actor_id', 'user_token', 'name', 'is_self',
+                        'profession_id', 'extraordinary_rating', 'is_ai',
+                    )
+                }
+                healer.update({
+                    'effective_healing': int(raw['effective']),
+                    'hps': (
+                        int(raw['effective']) / duration if duration else None
+                    ),
+                    'total_healing': int(raw['total']),
+                    'overhealing': int(raw['total']) - int(raw['effective']),
+                })
+                healer_rows.append(healer)
+                healers[actor_id] = healer
+
+            authoritative_effective = _optional_nonnegative(
+                healer.get('effective_healing')
+            )
+            if authoritative_effective is None:
+                authoritative_effective = int(raw['effective'])
+                healer['effective_healing'] = authoritative_effective
+                healer['hps'] = (
+                    authoritative_effective / duration if duration else None
+                )
+                healer['total_healing'] = int(raw['total'])
+                healer['overhealing'] = (
+                    int(raw['total']) - int(raw['effective'])
+                )
+                authoritative_total = False
+            else:
+                authoritative_total = str(
+                    healer.get('coverage') or ''
+                ).startswith('server_')
+
+            observed_total = int(raw['total'])
+            observed_effective = int(raw['effective'])
+            observed_overhealing = observed_total - observed_effective
+            observed_overheal_rate = (
+                observed_overhealing / observed_total
+                if observed_total > 0 else None
+            )
+            healer.update({
+                'observed_total_healing': observed_total,
+                'observed_effective_healing': observed_effective,
+                'observed_overhealing': observed_overhealing,
+                'observed_overheal_rate': observed_overheal_rate,
+                'events': int(raw['events']),
+                'coverage': (
+                    'server_team_counter_with_observed_callbacks'
+                    if authoritative_total
+                    else 'live_exact_callbacks_unverified'
+                ),
+            })
+            if healer.get('overheal_rate') is None:
+                healer['overheal_rate'] = observed_overheal_rate
+                healer['overheal_rate_partial'] = authoritative_total
+                healer['overheal_rate_source'] = (
+                    'observed_partial' if authoritative_total else 'complete'
+                )
+
+            existing_skills = {
+                _actor_id(row.get('skill_id')): row
+                for row in healer.get('skills', ())
+                if isinstance(row, dict) and _actor_id(row.get('skill_id'))
+            }
+            server_skills = {
+                skill_id: deepcopy(row)
+                for skill_id, row in existing_skills.items()
+                if str(row.get('source') or '').startswith('server_')
+                and row.get('source') != 'server_total_minus_observed_callbacks'
+            }
+            skill_rows = list(server_skills.values())
+            for skill_id, values in sorted(
+                raw['skills'].items(),
+                key=lambda item: int(item[1]['total']),
+                reverse=True,
+            ):
+                skill_total = int(values['total'])
+                skill_effective = int(values['effective'])
+                if skill_id in server_skills:
+                    row = server_skills[skill_id]
+                    row.update({
+                        'observed_total_healing': skill_total,
+                        'observed_effective_healing': skill_effective,
+                        'observed_overhealing': skill_total - skill_effective,
+                        'observed_events': int(values['events']),
+                    })
+                    continue
+                skill_rows.append({
+                    'skill_id': skill_id,
+                    'name': str(
+                        existing_skills.get(skill_id, {}).get('name')
+                        or f'技能 {skill_id}'
+                    ),
+                    'total_healing': skill_total,
+                    'effective_healing': skill_effective,
+                    'overhealing': skill_total - skill_effective,
+                    'share': (
+                        skill_effective / authoritative_effective
+                        if authoritative_effective > 0 else 0.0
+                    ),
+                    'events': int(values['events']),
+                    'source': 'network_exact_unverified_coverage',
+                })
+            unclassified = max(0, authoritative_effective - observed_effective)
+            if authoritative_total and not server_skills and unclassified:
+                skill_rows.append({
+                    'skill_id': 0,
+                    'name': '未归类治疗',
+                    'total_healing': None,
+                    'effective_healing': unclassified,
+                    'overhealing': None,
+                    'share': (
+                        unclassified / authoritative_effective
+                        if authoritative_effective > 0 else 0.0
+                    ),
+                    'events': None,
+                    'source': 'server_total_minus_observed_callbacks',
+                })
+            healer['skills'] = skill_rows
+
+            target_rows = []
+            for target_id, values in sorted(
+                raw['targets'].items(),
+                key=lambda item: int(item[1]['effective']),
+                reverse=True,
+            ):
+                target_total = int(values['total'])
+                target_effective = int(values['effective'])
+                target_rows.append({
+                    'target_id': target_id,
+                    'name': str(
+                        participant_rows.get(target_id, {}).get('name')
+                        or f'玩家 {target_id}'
+                    ),
+                    'total_healing': target_total,
+                    'effective_healing': target_effective,
+                    'overhealing': target_total - target_effective,
+                    'share': (
+                        target_effective / observed_effective
+                        if observed_effective > 0 else 0.0
+                    ),
+                    'events': int(values['events']),
+                    'coverage': 'exact_observed_partial',
+                })
+            healer['targets'] = target_rows
+        record['healers'] = healer_rows
+        return record
+
+    def _attach_observed_details(self, encounter: EncounterRecord, record: dict) -> dict:
+        started = encounter.started_at_ns / 1_000_000_000
+        ended = (encounter.ended_at_ns or encounter.started_at_ns) / 1_000_000_000
+        duration = record.get('duration_seconds')
+        if duration is None:
+            duration = max(0.0, ended - started)
+        record = rebase_relative_combat_logs(
+            record, started_at_epoch=started, duration_seconds=duration,
+        )
+        actors = {_actor_id(row.get('actor_id')) for row in record.get('participants', ())
+                  if isinstance(row, dict)} - {0}
+        targets = {_actor_id((record.get('monster') or {}).get('entity_id'))} - {0}
+        for entity, boss in getattr(self.controller, 'boss_entities', {}).items():
+            template = _actor_id(boss.get('template_id'))
+            if template and (
+                boss_template_continues_encounter(template, encounter.boss_template_id)
+                or boss_template_continues_encounter(encounter.boss_template_id, template)
+            ):
+                targets.add(_actor_id(entity))
+        for name, events, actor_key, columns, coverage in (
+            ('skill_cast_log', self.observed_casts, 'actor_id',
+             ['time_ms', 'actor_id', 'skill_id', 'sequence'], 'observed_team_casts'),
+            ('event_log', self.observed_hits, 'attacker_id',
+             ['time_ms', 'actor_id', 'target_id', 'skill_id', 'damage', 'critical', 'penetrating'],
+             'observed_damage_events'),
+        ):
+            existing = record.get(name, {})
+            rows = {tuple(row) for row in existing.get('rows', ())
+                    if isinstance(row, (list, tuple)) and len(row) == len(columns)}
+            sources = dict(existing.get('actor_sources', {}))
+            for event in events:
+                actor = _actor_id(event.get(actor_key))
+                timestamp = (int(event.get('filetime_100ns', 0) or 0)
+                             - 116_444_736_000_000_000) / 10_000_000
+                if actor not in actors or not started <= timestamp <= ended:
+                    continue
+                relative = max(0, int(round((timestamp - started) * 1000)))
+                if name == 'skill_cast_log':
+                    row = (relative, actor, int(event.get('skill_id', 0)),
+                           int(event.get('sequence', 0) or 0))
+                    sources[str(actor)] = (
+                        'cast_broadcast' if event.get('cast_source') == 'network_cast_broadcast'
+                        else 'successful_cast'
+                    )
+                else:
+                    row = (relative, actor, int(event.get('target_id', 0)),
+                           int(event.get('skill_id', 0)), int(event.get('damage', 0)),
+                           event.get('critical'), event.get('penetrating'))
+                    if row[4] <= 0 or row[2] not in targets:
+                        continue
+                rows.add(row)
+            if rows:
+                record[name] = {
+                    'version': 1, 'columns': columns, 'coverage': coverage,
+                    'origin_started_at_epoch': started,
+                    'rows': [list(row) for row in sorted(rows, key=lambda row: row[0])],
+                }
+                if name == 'skill_cast_log':
+                    record[name]['actor_sources'] = sources
+        health_history = getattr(self.controller, 'boss_health_history', None)
+        if callable(health_history):
+            samples = health_history(encounter)
+            if samples:
+                record['boss_hp_damage_samples'] = samples
+                record.pop('team_dps_timeline', None)
+        timeline = rebuild_team_dps_timeline(record)
+        if timeline:
+            record['team_dps_timeline'] = timeline
+        return self._attach_observed_healing(
+            record, started=started, ended=ended
+        )
 
     def sample_live_team_dps(
         self, tracker: EncounterTracker, timestamp: float, value: object,
@@ -744,8 +1179,42 @@ class SettlementHistoryAdapter:
             return None
         if local_id:
             self.local_bindings[local_id] = encounter.local_encounter_id
+        duration = encounter.encounter_duration_seconds
+        if duration is None:
+            duration = max(0.0, ((encounter.ended_at_ns or encounter.started_at_ns)
+                                 - encounter.started_at_ns) / 1_000_000_000)
+        record = rebase_relative_combat_logs(
+            record, started_at_epoch=encounter.started_at_ns / 1_000_000_000,
+            duration_seconds=duration,
+        )
+        existing = self.history_store.load(encounter.local_encounter_id)
+        if isinstance(existing, dict):
+            record = dict(record)
+            for field in ('event_log', 'skill_cast_log', 'boss_hp_damage_samples',
+                          'team_damage_samples', 'display_team_dps_samples'):
+                stored = existing.get(field)
+                incoming = record.get(field)
+                if not isinstance(stored, dict) or not stored.get('rows'):
+                    continue
+                if not isinstance(incoming, dict) or not incoming.get('rows'):
+                    record[field] = deepcopy(stored)
+                elif (field in ('event_log', 'skill_cast_log')
+                      and stored.get('columns') == incoming.get('columns')):
+                    combined = dict(incoming)
+                    rows = {tuple(row) for log in (stored, incoming) for row in log['rows']}
+                    combined['rows'] = [list(row) for row in sorted(rows, key=lambda row: row[0])]
+                    if field == 'skill_cast_log':
+                        combined['actor_sources'] = {
+                            **stored.get('actor_sources', {}), **incoming.get('actor_sources', {}),
+                        }
+                    record[field] = combined
+                elif (len(stored['rows']) > len(incoming['rows'])
+                      or len(stored.get('columns', ())) > len(incoming.get('columns', ()))):
+                    record[field] = deepcopy(stored)
         projected = self._attach_live_team_dps(
-            encounter, encounter_history_record(encounter, record)
+            encounter, self._attach_observed_details(
+                encounter, encounter_history_record(encounter, record)
+            )
         )
         projected["local_observation_id"] = local_id
         return projected
@@ -770,13 +1239,17 @@ class SettlementHistoryAdapter:
                     encounter.local_encounter_id not in self.live_team_dps_samples
                     or existing.get("display_team_dps_samples")
                 )
+                and encounter.local_encounter_id not in self.details_dirty
             ):
                 self.live_team_dps_samples.pop(encounter.local_encounter_id, None)
                 continue
             projected = self._attach_live_team_dps(
-                encounter, encounter_history_record(encounter, existing)
+                encounter, self._attach_observed_details(
+                    encounter, encounter_history_record(encounter, existing)
+                )
             )
             self.history_store.save(projected)
             self.live_team_dps_samples.pop(encounter.local_encounter_id, None)
             saved.add(encounter.local_encounter_id)
+            self.details_dirty.discard(encounter.local_encounter_id)
         return saved

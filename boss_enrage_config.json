@@ -117,7 +117,9 @@
       "template_ids": [7110200],
       "enrage_seconds": 600,
       "countdown_group": "roselle_will",
-      "countdown_phase": 1
+      "countdown_phase": 1,
+      "schedule_end_hp_percent": 2,
+      "forecast_stop_hp_percent": 51
     },
     {
       "id": "roselle_polluted",
@@ -125,7 +127,9 @@
       "template_ids": [7110208],
       "enrage_seconds": 600,
       "countdown_group": "roselle_will",
-      "countdown_phase": 2
+      "countdown_phase": 2,
+      "schedule_end_hp_percent": 2,
+      "forecast_stop_hp_percent": 2
     }
   ],
   "configuration_note": "仅使用已实测确认的普通难度模板；未配置 Boss 不展示预测。预测只比较当前战斗时间与 Boss 血量进度，不读取或计算团队 DPS。"

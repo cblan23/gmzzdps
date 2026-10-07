@@ -1900,12 +1900,12 @@ class EquipmentQuerySchedulingTests(unittest.TestCase):
         host.team_equipment_next_retry_check_at = 0.0
         return host, submit, actors
 
-    def test_fifty_people_are_submitted_as_five_bounded_batches(self):
+    def test_fifty_people_are_submitted_individually(self):
         tokens = [f"PlayerToken-{index:02d}" for index in range(50)]
         host, submit, _actors = self.window(tokens)
         self.assertTrue(host._schedule_team_equipment_profiles())
         batches = [call.args[0]["members"] for call in submit.call_args_list]
-        self.assertEqual([len(batch) for batch in batches], [12, 12, 12, 12, 2])
+        self.assertEqual([len(batch) for batch in batches], [1] * 50)
         self.assertEqual(
             {row["user_token"] for batch in batches for row in batch},
             set(tokens),
@@ -1952,6 +1952,7 @@ class EquipmentQuerySchedulingTests(unittest.TestCase):
                 "is_ai": False,
             }],
         )
+        host._pvp_equipment_context_active = lambda: True
 
         self.assertTrue(host._schedule_team_equipment_profiles())
         queried = {
@@ -1962,7 +1963,17 @@ class EquipmentQuerySchedulingTests(unittest.TestCase):
         self.assertIn(ENEMY_TOKEN, queried)
 
     def test_human_named_projection_equipment_response_is_accepted(self):
-        host, _submit, _actors = self.window([SELF_TOKEN, ENEMY_TOKEN])
+        host, _submit, _actors = self.window(
+            [SELF_TOKEN],
+            pvp_members=[{
+                "user_token": ENEMY_TOKEN,
+                "actor_id": ENEMY,
+                "name": "Player·投影",
+                "side": "enemy",
+                "is_ai": False,
+            }],
+        )
+        host._pvp_equipment_context_active = lambda: True
         host._queue_equipment_snapshot_upload = Mock()
         host.team_equipment_attempt_ratings = {}
         payload = {
@@ -2025,7 +2036,7 @@ class EquipmentQuerySchedulingTests(unittest.TestCase):
         self.assertIn(SELF_TOKEN, host.team_equipment_profiles)
         self.assertIn(OTHER_TOKEN, host.team_equipment_profiles)
 
-    def test_each_arena_mode_queries_only_its_verified_humans_in_bounded_batches(self):
+    def test_each_arena_mode_queries_its_verified_humans_individually(self):
         from test_combat_model import DpsWindow
 
         for size in (1, 3, 6, 12):
@@ -2096,8 +2107,7 @@ class EquipmentQuerySchedulingTests(unittest.TestCase):
                 self.assertNotIn('AQAAAStalePveMember', queried)
                 self.assertEqual(
                     [len(call.args[0]['members']) for call in submit.call_args_list],
-                    [2] if size == 1 else [6] if size == 3
-                    else [12] if size == 6 else [12, 12],
+                    [1] * (size * 2),
                 )
 
 

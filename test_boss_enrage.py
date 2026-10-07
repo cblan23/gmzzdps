@@ -570,7 +570,7 @@ class BossEnrageTests(unittest.TestCase):
             bosses=[
                 boss(
                     2,
-                    990,
+                    500,
                     1_000,
                     template_id=7_110_208,
                     name="罗塞尔的污染意志",
@@ -586,7 +586,7 @@ class BossEnrageTests(unittest.TestCase):
         self.assertEqual(second_phase.rule_id, "roselle_polluted")
         self.assertEqual(second_phase.time_to_enrage_seconds, 475)
 
-    def test_roselle_countdown_continues_across_the_phase_gap(self):
+    def test_roselle_countdown_pauses_across_the_phase_gap(self):
         catalog = load_boss_enrage_catalog(
             Path(__file__).with_name("boss_enrage_config.json")
         )
@@ -598,7 +598,7 @@ class BossEnrageTests(unittest.TestCase):
             bosses=[
                 boss(
                     1,
-                    1,
+                    510,
                     1_000,
                     template_id=7_110_200,
                     name="罗塞尔的残留意志",
@@ -619,7 +619,7 @@ class BossEnrageTests(unittest.TestCase):
             bosses=[
                 boss(
                     2,
-                    990,
+                    500,
                     1_000,
                     template_id=7_110_208,
                     name="罗塞尔的污染意志",
@@ -628,11 +628,126 @@ class BossEnrageTests(unittest.TestCase):
             monotonic_seconds=298,
         )
 
-        self.assertIsNotNone(first_phase)
+        self.assertIsNone(first_phase)
         self.assertIsNone(phase_gap)
         self.assertIsNotNone(second_phase)
-        self.assertEqual(second_phase.elapsed_seconds, 298)
-        self.assertEqual(second_phase.time_to_enrage_seconds, 302)
+        self.assertEqual(second_phase.elapsed_seconds, 251)
+        self.assertEqual(second_phase.time_to_enrage_seconds, 349)
+        self.assertEqual(second_phase.countdown_paused_seconds, 47)
+        next_tick = forecast.update(
+            encounter_key="roselle-second", elapsed_seconds=6,
+            bosses=[boss(2, 490, template_id=7_110_208)],
+            monotonic_seconds=299,
+        )
+        self.assertEqual(next_tick.elapsed_seconds, 252)
+
+    def test_roselle_first_phase_stops_forecasting_at_its_transition_hp(self):
+        forecast = BossEnragePredictor(load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        ))
+        active = forecast.update(
+            encounter_key="roselle", elapsed_seconds=240,
+            bosses=[boss(1, 520, template_id=7_110_200)],
+            monotonic_seconds=240,
+        )
+        self.assertIsNotNone(active)
+        for elapsed in (246, 270):
+            with self.subTest(elapsed=elapsed):
+                self.assertIsNone(forecast.update(
+                    encounter_key="roselle", elapsed_seconds=elapsed,
+                    bosses=[boss(1, 510, template_id=7_110_200)],
+                    monotonic_seconds=elapsed,
+                ))
+
+    def test_roselle_second_phase_uses_the_two_percent_finish_line(self):
+        forecast = BossEnragePredictor(load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        ))
+        forecast.update(
+            encounter_key="roselle", elapsed_seconds=240,
+            bosses=[boss(1, 520, template_id=7_110_200)],
+            monotonic_seconds=240,
+        )
+        second = forecast.update(
+            encounter_key="roselle", elapsed_seconds=5,
+            bosses=[boss(2, 500, template_id=7_110_208)],
+            monotonic_seconds=300,
+        )
+        self.assertIsNotNone(second)
+        self.assertEqual(second.elapsed_seconds, 300)
+        self.assertAlmostEqual(second.theoretical_remaining_hp_percent, 51)
+        self.assertAlmostEqual(second.actual_stage_remaining_percent, 48 / 98 * 100)
+        self.assertAlmostEqual(second.safety_margin_seconds, (0.5 - 48 / 98) * 600)
+        self.assertIsNotNone(forecast.update(
+            encounter_key="roselle", elapsed_seconds=590,
+            bosses=[boss(2, 21, template_id=7_110_208)],
+            monotonic_seconds=590,
+        ))
+        self.assertIsNone(forecast.update(
+            encounter_key="roselle", elapsed_seconds=591,
+            bosses=[boss(2, 20, template_id=7_110_208)],
+            monotonic_seconds=591,
+        ))
+
+    def test_roselle_out_of_combat_transition_hides_stale_positive_hp(self):
+        forecast = BossEnragePredictor(load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        ))
+        self.assertIsNotNone(forecast.update(
+            encounter_key="roselle", elapsed_seconds=240,
+            bosses=[boss(1, 520, template_id=7_110_200)],
+            monotonic_seconds=240,
+        ))
+        self.assertIsNone(forecast.update(
+            encounter_key="roselle", elapsed_seconds=246,
+            bosses=[boss(1, 520, template_id=7_110_200)],
+            forced_invulnerability=True, monotonic_seconds=246,
+        ))
+        second = forecast.update(
+            encounter_key="roselle", elapsed_seconds=5,
+            bosses=[boss(2, 500, template_id=7_110_208)],
+            monotonic_seconds=300,
+        )
+        self.assertIsNotNone(second)
+        self.assertEqual(second.elapsed_seconds, 251)
+        self.assertEqual(second.countdown_paused_seconds, 49)
+
+    def test_roselle_new_pull_resets_after_the_transition_hp(self):
+        forecast = BossEnragePredictor(load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        ))
+        forecast.update(
+            encounter_key="old-pull", elapsed_seconds=300,
+            bosses=[boss(1, 510, template_id=7_110_200)],
+            monotonic_seconds=300,
+        )
+        restarted = forecast.update(
+            encounter_key="new-pull", elapsed_seconds=2,
+            bosses=[boss(3, 990, template_id=7_110_200)],
+            monotonic_seconds=330,
+        )
+        self.assertIsNotNone(restarted)
+        self.assertEqual(restarted.elapsed_seconds, 2)
+        self.assertEqual(restarted.time_to_enrage_seconds, 598)
+
+    def test_roselle_long_paused_scene_preserves_the_remaining_budget(self):
+        forecast = BossEnragePredictor(load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        ))
+        forecast.update(
+            encounter_key="roselle-first", elapsed_seconds=246,
+            bosses=[boss(1, 510, template_id=7_110_200)],
+            monotonic_seconds=246,
+        )
+        second = forecast.update(
+            encounter_key="roselle-second", elapsed_seconds=5,
+            bosses=[boss(2, 500, template_id=7_110_208)],
+            monotonic_seconds=900,
+        )
+        self.assertIsNotNone(second)
+        self.assertEqual(second.elapsed_seconds, 251)
+        self.assertEqual(second.time_to_enrage_seconds, 349)
+        self.assertEqual(second.countdown_paused_seconds, 649)
 
     def test_production_catalog_does_not_match_unverified_variants_or_dummy(self):
         catalog = load_boss_enrage_catalog(

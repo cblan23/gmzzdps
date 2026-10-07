@@ -48,6 +48,8 @@ def main():
             window.unlock_hotkey_enabled = False
             window.unlock_hotkey = ''
             window.lock_toggle_hotkey_enabled = False
+            window.hud_view_hotkey_enabled = False
+            window.hud_view_hotkey = ''
             window.closing = False
             for key in ('show_deaths', 'show_main_totals', 'show_team_dps', 'highlight_self',
                         'show_combat_time', 'show_pvp_button', 'show_boss_hp_bar', 'boss_enrage_prediction_enabled'):

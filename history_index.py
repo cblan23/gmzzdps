@@ -1265,6 +1265,9 @@ def _rebuild_display_team_dps_timeline(
     compact = {second: value for second, value in parsed}
     if len(compact) < 2:
         return []
+    expected_dps = _as_float(record.get("team_dps"))
+    if expected_dps > 0 and max(compact.values()) < expected_dps * 0.5:
+        return []
     return [
         {
             "time_seconds": second,
@@ -1280,10 +1283,6 @@ def rebuild_team_dps_timeline(record: dict, window_seconds: int = 10) -> list[di
     """Build team sliding DPS from verified totals or observed Boss HP loss."""
 
     values = _rebuild_cumulative_team_dps_timeline(record, window_seconds)
-    if values:
-        return values
-
-    values = _rebuild_display_team_dps_timeline(record, window_seconds)
     if values:
         return values
 
@@ -1308,7 +1307,10 @@ def rebuild_team_dps_timeline(record: dict, window_seconds: int = 10) -> list[di
                 value["source"] = "complete_damage_events"
             if values:
                 return values
-    return _rebuild_observed_boss_hp_dps_timeline(record, window_seconds)
+    values = _rebuild_observed_boss_hp_dps_timeline(record, window_seconds)
+    if values:
+        return values
+    return _rebuild_display_team_dps_timeline(record, window_seconds)
 
 
 class HistoryIndex:

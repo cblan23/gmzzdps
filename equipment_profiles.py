@@ -54,6 +54,7 @@ EXPECTED_ARGUMENT_DESCRIPTORS = (("ListStr", 5), ("int", 1))
 ARGUMENT_DESCRIPTOR_SNAPSHOT_SIZE = 0x80
 ROLE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{10,32}$")
 MAX_TEAM_QUERY_TOKENS = 12
+EQUIPMENT_QUERY_BATCH_SIZE = 1
 EQUIPMENT_QUERY_DEDUP_SECONDS = 20.0
 EQUIPMENT_QUERY_COALESCE_SECONDS = 0.12
 
@@ -2188,6 +2189,7 @@ class EquipmentProfileCoordinator:
         # None means queued/preparing; the response timeout starts only once
         # the game has sent the request, never while another batch is ahead.
         self.requested_keys: dict[tuple[object, ...], float | None] = {}
+        self.responded_keys: set[tuple[object, ...]] = set()
         self.priority_keys: set[tuple[object, ...]] = set()
         self.requests: dict[int, dict[str, object]] = {}
         self.pending_profiles: list[tuple[dict[str, object], EquipmentQuerySession, dict[str, object]]] = []
@@ -2203,6 +2205,7 @@ class EquipmentProfileCoordinator:
             tuple[int, str, int], dict[int, dict[str, object]]
         ] = {}
         self.local_equipment_loading: set[tuple[int, str, int]] = set()
+        self.lua_state_hint: tuple[int, int] = (0, 0)
         self.descriptor_hint: tuple[int, int] = (0, 0)
         self.descriptor_scan_lock = threading.Lock()
         self.request_hook_lock = threading.Lock()
@@ -2240,13 +2243,31 @@ class EquipmentProfileCoordinator:
             ):
                 self.latest_profiles.clear()
                 self.requested_keys.clear()
+                self.responded_keys.clear()
                 self.priority_keys.clear()
             self.latest_session = session
+            current_member_keys = {}
+            for member in session.members:
+                key = self._member_query_key(session, member)
+                current_member_keys[key[:-1]] = key
+            # A new rating replaces that player's previous query lifetime.
+            # Otherwise A -> B -> A can discard the HUD snapshot while the
+            # first A response permanently suppresses its replacement.
+            superseded_keys = {
+                key for key in self.requested_keys
+                if key[:-1] in current_member_keys
+                and key != current_member_keys[key[:-1]]
+            }
+            for key in superseded_keys:
+                self.requested_keys.pop(key, None)
+            self.responded_keys.difference_update(superseded_keys)
+            self.priority_keys.difference_update(superseded_keys)
             now = time.monotonic()
             self.requested_keys = {
                 key: requested_at
                 for key, requested_at in self.requested_keys.items()
                 if requested_at is None
+                or key in self.responded_keys
                 or now - requested_at < EQUIPMENT_QUERY_DEDUP_SECONDS
             }
             self.priority_keys.intersection_update(self.requested_keys)
@@ -2256,6 +2277,7 @@ class EquipmentProfileCoordinator:
                 or (
                     session.priority
                     and self.requested_keys[self._member_query_key(session, member)] is None
+                    and self._member_query_key(session, member) not in self.responded_keys
                     and self._member_query_key(session, member) not in self.priority_keys
                 )
             )
@@ -2270,7 +2292,13 @@ class EquipmentProfileCoordinator:
                 self.requested_keys[key] = None
                 if session.priority:
                     self.priority_keys.add(key)
-        (self.priority_queries if session.priority else self.query_commands).put(session)
+        pending_queue = self.priority_queries if session.priority else self.query_commands
+        for start in range(0, len(session.members), EQUIPMENT_QUERY_BATCH_SIZE):
+            batch = session.members[start : start + EQUIPMENT_QUERY_BATCH_SIZE]
+            pending_queue.put(replace(
+                session, members=batch,
+                tokens=tuple(str(member["user_token"]) for member in batch),
+            ))
         return True
 
     def prepare(self, game_pid: object) -> bool:
@@ -2354,15 +2382,26 @@ class EquipmentProfileCoordinator:
             previous = self.latest_session
             self.latest_session = None
             self.descriptor_hint = (0, 0)
+            self.lua_state_hint = (0, 0)
             self.local_equipment_scores.clear()
             self.latest_profiles.clear()
             self.requested_keys.clear()
+            self.responded_keys.clear()
             self.priority_keys.clear()
         self.archive.append(
             "current_context_invalidated",
             reason=str(reason or "unknown")[:96],
             previous_session=(previous.archive_fields() if previous else None),
         )
+
+    def update_lua_state_hint(self, game_pid: object, lua_state: object) -> None:
+        """Reuse the capture reader's location; the score reader revalidates it."""
+
+        pid, state = _positive_int(game_pid), _positive_int(lua_state)
+        if not pid or not 0 < state < MAX_USER_ADDRESS:
+            return
+        with self.lock:
+            self.lua_state_hint = (pid, state)
 
     def handle_response(self, record: object) -> None:
         if not isinstance(record, Mapping):
@@ -2515,6 +2554,8 @@ class EquipmentProfileCoordinator:
     def _begin_local_equipment_load(self, session: EquipmentQuerySession) -> None:
         """Read the logged-in character's exact item totals in parallel."""
 
+        if session.local_user_token not in session.tokens:
+            return
         key = self._local_equipment_key(session)
         with self.lock:
             cached = self.local_equipment_scores.get(key)
@@ -2526,10 +2567,18 @@ class EquipmentProfileCoordinator:
             started = time.monotonic()
             scores: dict[int, dict[str, object]] = {}
             error: Exception | None = None
+            lua_state = 0
+            with self.lock:
+                hint_pid, hint_address = self.lua_state_hint
+            hint_address = hint_address if hint_pid == session.game_pid else 0
             try:
                 from runtime_metadata import LiveTeamProfileReader
 
-                with LiveTeamProfileReader(session.game_pid) as reader:
+                with LiveTeamProfileReader(
+                    session.game_pid,
+                    stop_event=self.stop_event,
+                    lua_state_hint=hint_address,
+                ) as reader:
                     scores = {
                         int(slot): dict(value)
                         for slot, value in reader.local_equipment_scores(
@@ -2537,17 +2586,25 @@ class EquipmentProfileCoordinator:
                         ).items()
                         if int(slot) > 0 and isinstance(value, Mapping)
                     }
+                    lua_state = reader.profile_lua_state
             except Exception as caught:
                 error = caught
             with self.lock:
                 self.local_equipment_loading.discard(key)
                 if scores:
                     self.local_equipment_scores[key] = scores
+                if (
+                    lua_state
+                    and self.latest_session is not None
+                    and self.latest_session.game_pid == session.game_pid
+                ):
+                    self.lua_state_hint = (session.game_pid, lua_state)
             event = {
                 "game_pid": session.game_pid,
                 "local_user_token": session.local_user_token,
                 "extraordinary_rating": key[2],
                 "item_count": len(scores),
+                "lua_state_hint_used": bool(hint_address and lua_state == hint_address),
                 "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
             }
             if error is None:
@@ -2666,7 +2723,9 @@ class EquipmentProfileCoordinator:
                 raise TimeoutError("no ReqNTP edge arrived before timeout")
             with self.lock:
                 for member in session.members:
-                    self.requested_keys[self._member_query_key(session, member)] = time.monotonic()
+                    key = self._member_query_key(session, member)
+                    if key in self.requested_keys:
+                        self.requested_keys[key] = time.monotonic()
             self.archive.append(
                 "request_call_finished",
                 **context,
@@ -2758,6 +2817,21 @@ class EquipmentProfileCoordinator:
                 )
                 continue
             with self.lock:
+                member = session.member(token)
+                expected_name = str(member.get("name", "") or "").strip()
+                returned_name = str(raw_profile.get("name", "") or "").strip()
+                expected_rating = _positive_int(member.get("extraordinary_rating"))
+                returned_rating = _positive_int(raw_profile.get("extraordinary_rating"))
+                if (
+                    (not expected_name or expected_name == returned_name)
+                    and (not expected_rating or expected_rating == returned_rating)
+                    and self._member_query_key(session, member) in self.requested_keys
+                    and self.latest_session is not None
+                    and self._query_identity(self.latest_session) == self._query_identity(session)
+                ):
+                    # A verified response may still be waiting for local scores
+                    # or metadata. That work must not trigger another game RPC.
+                    self.responded_keys.add(self._member_query_key(session, member))
                 self.latest_profiles[
                     (session.game_pid, session.party_session_id, token)
                 ] = (dict(raw_profile), session, dict(response_context))
@@ -3042,9 +3116,8 @@ class EquipmentProfileCoordinator:
         )
 
     def _coalesce_queries(self, session: EquipmentQuerySession) -> EquipmentQuerySession:
-        # Roster rows often arrive separately while the first request is being
-        # prepared. Combine only unsent newcomers in the same role/team;
-        # never query existing equipment again or combine different sessions.
+        # Combine duplicate queued entries for one player. PVE and PVP must
+        # never combine different players into the same game request.
         members = {str(row["user_token"]): row for row in session.members}
         member_count = session.member_count
         deferred = []
@@ -3060,7 +3133,7 @@ class EquipmentProfileCoordinator:
                     break
                 if (
                     self._query_identity(pending) != self._query_identity(session)
-                    or len(set(members) | set(pending.tokens)) > MAX_TEAM_QUERY_TOKENS
+                    or len(set(members) | set(pending.tokens)) > EQUIPMENT_QUERY_BATCH_SIZE
                 ):
                     deferred.append((pending_queue, pending))
                     continue
@@ -3119,6 +3192,7 @@ class EquipmentProfileCoordinator:
                     member for member in session.members
                     if self._member_query_key(session, member) in self.requested_keys
                     and self.requested_keys[self._member_query_key(session, member)] is None
+                    and self._member_query_key(session, member) not in self.responded_keys
                 )
             if not members:
                 continue

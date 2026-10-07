@@ -1611,9 +1611,16 @@ class MonitorHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query, keep_blank_values=True)
             def value(name, default=''):
                 return query.get(name, [default])[0]
+            character_query = value('q').strip()
+            if not character_query:
+                self._json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"ok": False, "error": "character_query_required"},
+                )
+                return
             with database() as connection:
                 history = profile_upload_store().public_history(
-                    connection, query=value('q'), boss=value('boss'),
+                    connection, query=character_query, boss=value('boss'),
                     profession=value('profession', '0'), difficulty=value('difficulty'),
                     eligibility=value('eligibility', 'all'), started_after=value('after', '0'),
                     ended_before=value('before', '0'), limit=value('limit', '25'),
@@ -1638,7 +1645,10 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 performance = profile_upload_store().public_performance(
                     connection,
                     boss=first_query_value("boss", "drill"),
+                    category=first_query_value("category", "all"),
+                    dungeon=first_query_value("dungeon", "all"),
                     difficulty=first_query_value("difficulty", "all"),
+                    brass_tome=first_query_value("brass_tome", "all"),
                     metric=first_query_value("metric", "dps"),
                     rating_basis=first_query_value(
                         "rating_basis", "extraordinary"

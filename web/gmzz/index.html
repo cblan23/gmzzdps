@@ -6,10 +6,10 @@
   <meta name="description" content="叨叨诡秘战斗历史：查询公开角色、Boss 战报、团队 DPS、治疗、承伤和职业表现。">
   <title>叨叨诡秘 · DPS Logs</title>
   <link rel="icon" href="assets/app_icon.ico">
-  <link rel="stylesheet" href="home.css?v=20261004-home-copy-4">
-  <link rel="stylesheet" href="site.css?v=20261004-details-1">
-  <link rel="stylesheet" href="history.css?v=20261005-equipment-2">
-  <script src="site.js?v=20261005-equipment-2" defer></script>
+  <link rel="stylesheet" href="home.css?v=20261006-detail-timeline-2">
+  <link rel="stylesheet" href="site.css?v=20261007-profession-analysis-1">
+  <link rel="stylesheet" href="history.css?v=20261007-date-range-1">
+  <script src="site.js?v=20261007-profession-analysis-1" defer></script>
 </head>
 <body>
 <div class="scene" id="scene">
@@ -17,13 +17,12 @@
     <div class="header-inner">
       <a class="brand" href="#home" aria-label="叨叨诡秘首页">
         <img src="assets/app_icon.ico" width="34" height="34" alt="">
-        <div class="brand-name">叨叨诡秘<small>DPS LOGS</small></div>
+        <div class="brand-name"><span>叨叨诡秘</span><small>DPS LOGS</small></div>
       </a>
       <nav class="nav" aria-label="主导航">
-        <a href="#home">首页</a>
-        <a href="#history">历史战斗</a>
         <a href="#records">数据排行</a>
         <a href="#insights">职业统计</a>
+        <a class="nav-lab" href="#lab">叨叨实验室<small>预告</small></a>
       </nav>
       <div class="upload-area">
         <button class="upload-status-btn" id="uploadStatusBtn" type="button" aria-expanded="false" aria-controls="uploadPopover">
@@ -35,20 +34,26 @@
           <div class="upload-status-line"><span>最近收录</span><b id="lastUpload">正在读取</b></div>
           <div class="upload-guide">
             <div class="upload-guide-title">怎么上传？</div>
-            <div class="upload-step"><span class="step-no">1</span><div><b>打开叨叨诡秘客户端</b><small>登录后保持客户端正常运行</small></div></div>
-            <div class="upload-step"><span class="step-no">2</span><div><b>一场 BOSS 战斗胜利</b><small>自动上传</small></div></div>
+            <div class="upload-step"><span class="step-no">1</span><div><b>先加 QQ 群下载叨叨 DPS-Log</b><small>QQ群：1094925831 / 165966739</small></div></div>
+            <div class="upload-step"><span class="step-no">2</span><div><b>打开叨叨 DPS-Log</b><small>登录后保持客户端正常运行</small></div></div>
+            <div class="upload-step"><span class="step-no">3</span><div><b>完成一场 BOSS 战斗</b><small>战斗胜利后自动上传</small></div></div>
           </div>
         </div>
       </div>
     </div>
   </header>
   <main class="hero">
-    <div class="kicker">叨叨诡秘dps-logs</div>
-    <div class="subtitle">Boss 战斗数据查询</div>
+    <div class="hero-brand-lockup">
+      <img class="hero-brand-emblem" src="assets/hero-dps-emblem-v1.png" width="112" height="112" alt="">
+      <div class="hero-brand-copy">
+        <div class="hero-brand-title">叨叨诡秘<small>DPS LOGS</small></div>
+      </div>
+    </div>
     <form class="search" role="search">
-      <div class="search-input-wrap"><span class="search-icon" aria-hidden="true"></span><input type="search" maxlength="48" placeholder="输入角色名或公开昵称" aria-label="角色名或公开昵称" autocomplete="off"></div>
+      <div class="search-input-wrap"><span class="search-icon" aria-hidden="true"></span><input type="search" maxlength="48" placeholder="请输入角色名称" aria-label="角色名称" autocomplete="off"></div>
       <button type="submit" aria-label="搜索战斗记录">→</button>
     </form>
+    <div class="recent-searches" id="recentSearches" aria-label="最近搜索" hidden></div>
     <div class="search-note">查询角色的 <b>Boss 战斗记录与 DPS 表现</b></div>
     <div class="home-data" aria-live="polite"><span id="historySummary">正在读取历史战斗场次</span></div>
     <div class="home-help">加QQ群下载叨叨dps-log：1094925831 / 165966739</div>

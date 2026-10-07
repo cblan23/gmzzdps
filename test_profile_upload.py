@@ -129,18 +129,27 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(encounter_upload_rejection_code(local), '')
         parsed = {'result': 'defeated', 'completion_confirmed': False, 'payload': local}
         self.assertEqual(encounter_upload_rejection_code(parsed), '')
+        local['result'] = 'undetermined'
+        self.assertEqual(encounter_upload_rejection_code(local), '')
         local['result'] = 'failed'
-        self.assertEqual(encounter_upload_rejection_code(local), 'UPLOAD_VICTORY_REQUIRED')
+        self.assertEqual(encounter_upload_rejection_code(local), '')
 
-    def test_victory_upload_does_not_automatically_qualify_without_settlement(self):
+    def test_captured_victory_qualifies_without_settlement_detail_packet(self):
         self.create_profile(self.first, '通关记录')
         receipt = self.store.upload_encounter(
             self.connection, self.first,
-            self.encounter(self.first, completion_confirmed=False),
+            self.encounter(
+                self.first, result='undetermined', completion_confirmed=False
+            ),
             public_mode='nickname', app_version='0.2.3',
         )
         self.assertTrue(receipt.get('encounter_id'))
-        self.assertIn('ENCOUNTER_NOT_COMPLETED', receipt['validation_reasons'])
+        self.assertNotIn('ENCOUNTER_NOT_COMPLETED', receipt['validation_reasons'])
+        self.assertEqual(receipt['statistics_status'], 'included')
+        self.assertEqual(receipt['ranking_status'], 'eligible')
+        detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
+        self.assertTrue(detail['data']['completion_confirmed'])
+        self.assertEqual(detail['data']['result'], 'defeated')
 
     def setUp(self) -> None:
         self.connection = sqlite3.connect(":memory:")
@@ -571,21 +580,31 @@ class ProfileUploadTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(upload_profile, profile["profile_id"])
 
-    def test_failed_battle_is_rejected_without_creating_upload_rows(self) -> None:
+    def test_failed_battle_uploads_as_history_but_never_enters_statistics(self) -> None:
         self.create_profile(self.first, "失败记录")
-        with self.assertRaises(ProfileUploadError) as raised:
-            self.store.upload_encounter(
-                self.connection,
-                self.first,
-                self.encounter(
-                    self.first, result="failed", completion_confirmed=False
-                ),
-                public_mode="nickname",
-                app_version="0.2.3",
-            )
-        self.assertEqual(raised.exception.code, "UPLOAD_VICTORY_REQUIRED")
+        payload = self.encounter(
+            self.first, result="failed", completion_confirmed=False
+        )
+        payload["archive_reason"] = "party_wipe"
+        receipt = self.store.upload_encounter(
+            self.connection,
+            self.first,
+            payload,
+            public_mode="nickname",
+            app_version="0.2.3",
+        )
+        self.assertEqual(receipt["statistics_status"], "not_eligible")
+        self.assertEqual(receipt["ranking_status"], "not_eligible")
+        self.assertIn("ENCOUNTER_NOT_COMPLETED", receipt["validation_reasons"])
+        history = self.store.public_history(self.connection, query="失败记录")
+        self.assertEqual(history["total"], 1)
+        self.assertEqual(history["records"][0]["result"], "failed")
+        self.assertEqual(self.store.public_statistics(self.connection)["encounters"], 0)
+        self.assertEqual(self.store.public_leaderboards(self.connection), [])
         self.assertEqual(
-            self.connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0],
+            self.store.public_performance(
+                self.connection, boss="name:测试首领"
+            )["total_samples"],
             0,
         )
 
@@ -777,25 +796,19 @@ class ProfileUploadTests(unittest.TestCase):
         visible = self.store.upload_encounter(
             self.connection, self.first, normal, public_mode='character', app_version='0.3.5')
 
-        hidden_ids = []
-        for index in (1, 2):
-            encounter = copy.deepcopy(normal)
-            encounter['client_encounter_id'] = f'projection-{index}'
-            encounter['started_at_epoch'] += index * 3600
-            encounter['ended_at_epoch'] += index * 3600
-            if index == 1:
-                encounter['participants'][1]['game_character_name'] = '审判者·投影'
-            else:
-                encounter['participants'][1]['character_id'] = character_token(2002, 0x6A)
-            receipt = self.store.upload_encounter(
-                self.connection, self.first, encounter, public_mode='character', app_version='0.3.5')
-            hidden_ids.append(receipt['encounter_id'])
+        projection = copy.deepcopy(normal)
+        projection['client_encounter_id'] = 'projection-1'
+        projection['started_at_epoch'] += 3600
+        projection['ended_at_epoch'] += 3600
+        projection['participants'][1]['game_character_name'] = '审判者·投影'
+        hidden = self.store.upload_encounter(
+            self.connection, self.first, projection, public_mode='character', app_version='0.3.5')
 
         self.assertEqual(self.store.public_history(self.connection)['total'], 1)
         self.assertEqual(self.store.public_history(self.connection, query='夜行者')['total'], 1)
         self.assertEqual(self.store.public_history(self.connection, query='投影')['total'], 0)
         self.assertEqual(self.store.public_history(self.connection)['records'][0]['encounter_id'], visible['encounter_id'])
-        self.assertTrue(all(self.store.public_encounter(self.connection, encounter_id) is None for encounter_id in hidden_ids))
+        self.assertIsNone(self.store.public_encounter(self.connection, hidden['encounter_id']))
         statistics = self.store.public_statistics(self.connection)
         self.assertEqual(statistics['history_encounters'], 1)
         self.assertEqual(statistics['encounters'], 1)
@@ -803,6 +816,54 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(self.store.public_catalog(self.connection)['bosses'][0]['records'], 1)
         self.assertEqual({row['encounter_id'] for row in self.store.public_leaderboards(self.connection)}, {visible['encounter_id']})
         self.assertEqual(self.store.public_performance(self.connection, boss='name:测试首领')['total_encounters'], 1)
+
+    def test_ai_encounters_are_searchable_but_not_competitive(self) -> None:
+        normal = self.encounter(self.first)
+        for participant in normal['participants']:
+            participant['extraordinary_rating'] = 30_000
+        visible = self.store.upload_encounter(
+            self.connection, self.first, normal, public_mode='character', app_version='0.3.5')
+
+        ai_encounter = copy.deepcopy(normal)
+        ai_encounter['client_encounter_id'] = 'ai-team-1'
+        ai_encounter['started_at_epoch'] += 3600
+        ai_encounter['ended_at_epoch'] += 3600
+        ai_encounter['participants'][1]['character_id'] = character_token(2002, 0x6A)
+        ai_encounter['participants'][1]['game_character_name'] = '人机队友'
+        ai = self.store.upload_encounter(
+            self.connection, self.first, ai_encounter,
+            public_mode='character', app_version='0.3.5',
+        )
+
+        self.assertEqual(ai['statistics_status'], 'not_eligible')
+        self.assertEqual(ai['ranking_status'], 'not_eligible')
+        self.assertIsNone(ai['rank'])
+        self.assertIn('AI_PARTICIPANT', ai['validation_reasons'])
+        history = self.store.public_history(self.connection)
+        self.assertEqual(history['total'], 2)
+        self.assertEqual(self.store.public_history(self.connection, query='夜行者')['total'], 2)
+        ai_history = self.store.public_history(self.connection, query='人机队友')
+        self.assertEqual(ai_history['total'], 1)
+        self.assertEqual(ai_history['records'][0]['encounter_id'], ai['encounter_id'])
+        self.assertTrue(ai_history['records'][0]['has_ai'])
+        detail = self.store.public_encounter(self.connection, ai['encounter_id'])
+        self.assertIsNotNone(detail)
+        self.assertTrue(detail['participants'][1]['is_ai'])
+        statistics = self.store.public_statistics(self.connection)
+        self.assertEqual(statistics['history_encounters'], 2)
+        self.assertEqual(statistics['encounters'], 1)
+        self.assertEqual(statistics['uploads'], 1)
+        catalog = self.store.public_catalog(self.connection)
+        self.assertEqual(catalog['bosses'][0]['records'], 2)
+        self.assertEqual(catalog['bosses'][0]['included'], 1)
+        self.assertEqual(
+            {row['encounter_id'] for row in self.store.public_leaderboards(self.connection)},
+            {visible['encounter_id']},
+        )
+        self.assertEqual(
+            self.store.public_performance(self.connection, boss='name:测试首领')['total_encounters'],
+            1,
+        )
 
     def test_public_performance_accepts_actual_boss_names_without_preview_samples(self) -> None:
         self.create_profile(self.first, '真实样本')
@@ -815,6 +876,70 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(performance['source'], 'real_uploads')
         self.assertGreater(performance['total_samples'], 0)
         self.assertEqual(self.store.public_performance(self.connection, boss='name:不存在的首领')['total_samples'], 0)
+
+    def test_public_performance_excludes_incomplete_team_identity(self) -> None:
+        record = self.encounter(self.first)
+        record.update(
+            dungeon_id=5_100_064,
+            stage_id=5_150_113,
+            dungeon_name="罗塞尔单BOSS团本-普通",
+        )
+        for participant in record['participants']:
+            participant['extraordinary_rating'] = 30_000
+        record['participants'][1]['character_id'] = ''
+        receipt = self.store.upload_encounter(
+            self.connection, self.first, record,
+            public_mode='character', app_version='0.3.5',
+        )
+
+        self.assertEqual(receipt['statistics_status'], 'included')
+        self.assertEqual(receipt['ranking_status'], 'not_eligible')
+        self.assertIn(
+            'PARTICIPANT_IDENTITY_INCOMPLETE', receipt['validation_reasons']
+        )
+        self.assertEqual(
+            self.store.public_performance(
+                self.connection, boss='name:测试首领'
+            )['total_samples'],
+            0,
+        )
+        catalog = self.store.public_catalog(self.connection)
+        raid = next(row for row in catalog['dungeon_categories'] if row['key'] == 'raid')
+        dungeon = next(row for row in raid['dungeons'] if row['key'] == 'emperor-returns')
+        boss = next(row for row in dungeon['bosses'] if row['name'] == '测试首领')
+        self.assertEqual(dungeon['included'], 1)
+        self.assertEqual(dungeon['ranking_entries'], 0)
+        self.assertEqual(boss['included'], 1)
+        self.assertEqual(boss['ranking_entries'], 0)
+
+    def test_public_catalog_ranking_count_requires_a_visible_leaderboard_row(self) -> None:
+        record = self.encounter(self.first)
+        record.update(
+            dungeon_id=5_100_064,
+            stage_id=5_150_113,
+            dungeon_name="罗塞尔单BOSS团本-普通",
+        )
+        receipt = self.store.upload_encounter(
+            self.connection,
+            self.first,
+            record,
+            public_mode='character',
+            app_version='0.3.6',
+        )
+        self.connection.execute(
+            "UPDATE uploads SET uploader_character_hash='missing-member' "
+            "WHERE encounter_id=?",
+            (receipt['encounter_id'],),
+        )
+
+        self.assertEqual(self.store.public_leaderboards(self.connection), [])
+        catalog = self.store.public_catalog(self.connection)
+        raid = next(row for row in catalog['dungeon_categories'] if row['key'] == 'raid')
+        dungeon = next(row for row in raid['dungeons'] if row['key'] == 'emperor-returns')
+        boss = next(row for row in dungeon['bosses'] if row['name'] == '测试首领')
+        self.assertEqual(dungeon['included'], 1)
+        self.assertEqual(dungeon['ranking_entries'], 0)
+        self.assertEqual(boss['ranking_entries'], 0)
 
     def test_public_performance_builds_real_profession_percentiles_and_filters(self) -> None:
         profile = self.create_profile(self.first, "洞察测试")
@@ -894,6 +1019,210 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertFalse(unavailable["availability"]["equipment_rating"])
         self.assertEqual(unavailable["total_samples"], 0)
 
+    def test_public_rankings_catalog_and_performance_share_dungeon_context(self) -> None:
+        record = self.encounter(self.first)
+        record.update(
+            dungeon_id=5_100_064,
+            stage_id=5_150_113,
+            dungeon_name="罗塞尔单BOSS团本-普通",
+            brass_tome_status="enabled",
+            brass_tome_enabled=True,
+        )
+        for participant in record["participants"]:
+            participant["extraordinary_rating"] = 88_000
+        self.store.upload_encounter(
+            self.connection,
+            self.first,
+            record,
+            public_mode="character",
+            app_version="0.3.6",
+        )
+        second_record = copy.deepcopy(record)
+        second_record["client_encounter_id"] = "same-boss-other-stage"
+        second_record["stage_id"] = 5_150_095
+        second_record["started_at_epoch"] += 3600
+        second_record["ended_at_epoch"] += 3600
+        self.store.upload_encounter(
+            self.connection,
+            self.first,
+            second_record,
+            public_mode="character",
+            app_version="0.3.6",
+        )
+
+        leaderboard = self.store.public_leaderboards(self.connection)[0]
+        self.assertEqual(leaderboard["category"], "raid")
+        self.assertEqual(leaderboard["dungeon_key"], "emperor-returns")
+        self.assertEqual(leaderboard["dungeon_name"], "大帝重临")
+        self.assertEqual(leaderboard["difficulty"], "normal")
+        self.assertEqual(leaderboard["brass_tome_status"], "enabled")
+
+        catalog = self.store.public_catalog(self.connection)
+        raid = next(row for row in catalog["dungeon_categories"] if row["key"] == "raid")
+        dungeon = next(row for row in raid["dungeons"] if row["key"] == "emperor-returns")
+        self.assertEqual(dungeon["included"], 2)
+        self.assertEqual(dungeon["ranking_entries"], 2)
+        self.assertEqual(len(dungeon["bosses"]), 1)
+        self.assertEqual(dungeon["bosses"][0]["name"], "测试首领")
+        self.assertEqual(dungeon["bosses"][0]["included"], 2)
+        self.assertEqual(dungeon["bosses"][0]["ranking_entries"], 2)
+        self.assertIn("enabled", dungeon["brass_tome_statuses"])
+
+        performance = self.store.public_performance(
+            self.connection,
+            boss="name:测试首领",
+            category="raid",
+            dungeon="emperor-returns",
+            brass_tome="enabled",
+        )
+        self.assertEqual(performance["total_samples"], 4)
+        self.assertEqual(performance["selection"]["dungeon_name"], "大帝重临")
+        self.assertEqual(performance["selection"]["brass_tome"], "enabled")
+        self.assertEqual(
+            self.store.public_performance(
+                self.connection,
+                boss="name:测试首领",
+                dungeon="emperor-returns",
+                brass_tome="disabled",
+            )["total_samples"],
+            0,
+        )
+
+    def test_public_catalog_corrects_boss_groups_and_hides_dirty_entries(self) -> None:
+        cases = (
+            ("garden-child", "子嗣守护", 5_100_054, 5_150_060),
+            ("castle-barney", "巴尼先生", 5_100_055, 5_150_062),
+            ("castle-viscountess", "子爵夫人", 5_100_055, 5_150_055),
+            ("castle-myth", "子爵夫人-神话姿态", 5_100_055, 5_150_063),
+            ("castle-turtle", "厄水巨龟", 5_100_055, 5_150_062),
+            ("castle-ancestor", "先祖铠甲", 5_100_055, 5_150_061),
+            ("garden-baldwin", "伯德温·威瑟尔", 5_100_054, 5_150_058),
+            ("tree-ray", "瑞尔·比伯", 5_100_052, 5_150_075),
+            ("tree-dog", "异化猎犬", 5_100_052, 5_150_073),
+            ("tree-dirty", "亵渎魔女", 5_100_052, 5_150_075),
+            ("night-heart", "斯蒂姆之心", 5_100_003, 5_150_002),
+        )
+        receipts = {}
+        for index, (key, boss_name, dungeon_id, stage_id) in enumerate(cases):
+            record = self.encounter(self.first)
+            record.update(
+                client_encounter_id=key,
+                boss_name=boss_name,
+                boss_template_ids=[7_200_000 + index],
+                dungeon_id=dungeon_id,
+                stage_id=stage_id,
+                started_at_epoch=1_799_990_000.0 + index * 600,
+                ended_at_epoch=1_799_990_120.0 + index * 600,
+            )
+            for participant in record["participants"]:
+                participant["extraordinary_rating"] = 100_000
+            receipts[key] = self.store.upload_encounter(
+                self.connection,
+                self.first,
+                record,
+                public_mode="character",
+                app_version="0.3.6",
+            )
+
+        dirty = receipts["tree-dirty"]
+        self.assertEqual(dirty["statistics_status"], "not_eligible")
+        self.assertEqual(dirty["ranking_status"], "not_eligible")
+        self.assertIn("BOSS_DATA_DIRTY", dirty["validation_reasons"])
+
+        catalog = self.store.public_catalog(self.connection)
+        categories = {row["key"]: row for row in catalog["dungeon_categories"]}
+        self.assertEqual(
+            [row["key"] for row in categories["raid"]["dungeons"]],
+            ["may-manor-garden", "may-manor-castle", "emperor-returns"],
+        )
+        self.assertEqual(
+            [row["key"] for row in categories["daily"]["dungeons"]],
+            ["night-watch", "special-duty"],
+        )
+
+        def dungeon(category: str, key: str) -> dict:
+            return next(
+                row for row in categories[category]["dungeons"] if row["key"] == key
+            )
+
+        self.assertEqual(
+            [row["name"] for row in dungeon("raid", "may-manor-castle")["bosses"]],
+            ["子嗣守护", "安西娅", "子爵夫人"],
+        )
+        self.assertEqual(
+            {row["name"] for row in dungeon("raid", "may-manor-garden")["bosses"]},
+            {"先祖铠甲", "异化猎犬"},
+        )
+        self.assertEqual(
+            {row["name"] for row in dungeon("party", "abundant-tree")["bosses"]},
+            {"厄水巨龟"},
+        )
+        self.assertEqual(
+            {row["name"] for row in dungeon("party", "antigonus-notes")["bosses"]},
+            {"瑞尔比伯"},
+        )
+        self.assertEqual(
+            [row["bosses"][0]["name"] for row in categories["family"]["dungeons"]],
+            ["强尼", "战争巨龙", "邦尼", "钻头"],
+        )
+        self.assertTrue(
+            all(len(row["bosses"]) == 1 for row in categories["family"]["dungeons"])
+        )
+        self.assertNotIn("亵渎魔女", {row["name"] for row in catalog["bosses"]})
+        self.assertNotIn("斯蒂姆之心", {row["name"] for row in catalog["bosses"]})
+        self.assertEqual(
+            dungeon("daily", "night-watch")["bosses"],
+            [],
+        )
+
+        leaderboard_groups = {
+            (row["boss_name"], row["dungeon_key"])
+            for row in self.store.public_leaderboards(self.connection)
+        }
+        self.assertIn(("子嗣守护", "may-manor-castle"), leaderboard_groups)
+        self.assertIn(("安西娅", "may-manor-castle"), leaderboard_groups)
+        self.assertIn(("子爵夫人", "may-manor-castle"), leaderboard_groups)
+        self.assertIn(("先祖铠甲", "may-manor-garden"), leaderboard_groups)
+        self.assertIn(("瑞尔比伯", "antigonus-notes"), leaderboard_groups)
+        self.assertNotIn("亵渎魔女", {row[0] for row in leaderboard_groups})
+        self.assertNotIn("斯蒂姆之心", {row[0] for row in leaderboard_groups})
+
+        performance = self.store.public_performance(
+            self.connection,
+            boss="name:伯德温·威瑟尔",
+            category="raid",
+            dungeon="may-manor-garden",
+        )
+        self.assertEqual(performance["selection"]["boss_name"], "先祖铠甲")
+        self.assertEqual(performance["total_encounters"], 2)
+        self.assertEqual(performance["total_samples"], 4)
+
+        ancestor_history = self.store.public_history(
+            self.connection, boss="先祖铠甲"
+        )
+        self.assertEqual(ancestor_history["total"], 2)
+        self.assertEqual(
+            {row["boss_name"] for row in ancestor_history["records"]}, {"先祖铠甲"}
+        )
+        self.assertEqual(
+            self.store.public_history(
+                self.connection, boss="伯德温·威瑟尔"
+            )["total"],
+            2,
+        )
+        self.assertEqual(
+            self.store.public_encounter(
+                self.connection, receipts["garden-baldwin"]["encounter_id"]
+            )["boss_name"],
+            "先祖铠甲",
+        )
+        self.assertEqual(
+            self.store.public_encounter(
+                self.connection, receipts["castle-myth"]["encounter_id"]
+            )["boss_name"],
+            "子爵夫人",
+        )
+
     def test_client_payload_recovers_stage_tokens_and_marks_only_local_player(self) -> None:
         record = {
             "encounter_id": "source-001",
@@ -954,7 +1283,7 @@ class ProfileUploadTests(unittest.TestCase):
             build_upload_encounter(record, self.second)
 
 
-    def test_client_payload_uses_archived_tokens_and_top_level_completion(self) -> None:
+    def test_client_payload_uses_archived_tokens_and_victory_reason(self) -> None:
         record = {
             "encounter_id": "source-real-shape",
             "started_at_epoch": 100.0,
@@ -963,7 +1292,7 @@ class ProfileUploadTests(unittest.TestCase):
             "team_size": 2,
             "archive_reason": "target_defeated",
             "result": "defeated",
-            "completion_confirmed": True,
+            "completion_confirmed": False,
             "monster": {"name": "Boss", "template_id": 7100208},
             "participants": [
                 {
@@ -990,6 +1319,42 @@ class ProfileUploadTests(unittest.TestCase):
         payload = build_upload_encounter(record, self.first)
 
         self.assertTrue(payload["completion_confirmed"])
+        self.assertEqual(payload["data_completeness"], "complete")
+        self.assertEqual(
+            [item["character_id"] for item in payload["participants"]],
+            [self.first, self.second],
+        )
+
+    def test_client_payload_keeps_tokenized_teammate_without_actor_id(self) -> None:
+        record = {
+            "encounter_id": "zero-actor-teammate",
+            "started_at_epoch": 100.0,
+            "ended_at_epoch": 130.0,
+            "duration_seconds": 30.0,
+            "team_size": 2,
+            "archive_reason": "target_defeated",
+            "completion_confirmed": True,
+            "monster": {"name": "Boss", "template_id": 7100208},
+            "participants": [
+                {
+                    "actor_id": 11,
+                    "name": "本人",
+                    "is_self": True,
+                    "user_token": self.first,
+                    "damage": 200,
+                },
+                {
+                    "actor_id": 0,
+                    "name": "队友",
+                    "user_token": self.second,
+                    "damage": 100,
+                },
+            ],
+        }
+
+        payload = build_upload_encounter(record, self.first)
+
+        self.assertEqual(payload["team_size"], 2)
         self.assertEqual(payload["data_completeness"], "complete")
         self.assertEqual(
             [item["character_id"] for item in payload["participants"]],
@@ -1077,6 +1442,67 @@ class ProfileUploadTests(unittest.TestCase):
         repeated = self.store.public_encounter(self.connection, receipt['encounter_id'])
         self.assertEqual(repeated['participants'][0]['stats']['effective_healing'], 600)
         self.assertEqual(repeated['participants'][0]['stats']['skills'][2]['effective_healing'], 400)
+
+    def test_partial_healer_rows_still_produce_team_healing_totals(self) -> None:
+        record = {
+            'battle_id': 'local-partial-healing',
+            'started_at_epoch': 1_799_999_880.0,
+            'ended_at_epoch': 1_800_000_000.0,
+            'duration_seconds': 120.0,
+            'team_size': 2,
+            'total_damage': 3_000,
+            'archive_reason': 'target_defeated',
+            'monster': {'name': 'Test Boss', 'template_id': 7_100_208},
+            'participants': [
+                {'actor_id': 11, 'name': 'Player One', 'is_self': True,
+                 'user_token': self.first, 'damage': 2_000},
+                {'actor_id': 12, 'name': 'Player Two',
+                 'user_token': self.second, 'damage': 1_000},
+            ],
+            'healers': [
+                {'actor_id': 11, 'effective_healing': 600, 'hps': 5.0},
+                {'actor_id': 12, 'effective_healing': None, 'hps': None},
+            ],
+        }
+
+        payload = build_upload_encounter(record, self.first)
+
+        self.assertEqual(payload['team_effective_healing'], 600)
+        self.assertEqual(payload['team_hps'], 5.0)
+        self.assertEqual(payload['hps_duration_seconds'], 120.0)
+
+    def test_public_detail_recovers_old_healing_and_rejects_bad_display_curve(self) -> None:
+        payload = self.encounter(self.first)
+        payload.update({
+            'team_dps': 250_000,
+            'team_effective_healing': 0,
+            'team_hps': 0,
+            'team_dps_timeline': [
+                {'time': second, 'team_dps': value, 'source': 'live_display_team_dps'}
+                for second, value in ((0, 100), (1, 220), (2, 180), (4, 260))
+            ],
+            'boss_hp_damage_samples': {
+                'version': 1,
+                'columns': ['time_seconds', 'observed_boss_hp_loss'],
+                'coverage': 'observed_boss_hp_loss',
+                'rows': [[0, 0], [1, 100], [2, 300], [3, 600], [4, 1_000]],
+            },
+        })
+        payload['participants'][0].update(effective_healing=600, hps=5.0)
+        receipt = self.store.upload_encounter(
+            self.connection, self.first, payload,
+            public_mode='character', app_version='0.3.5',
+        )
+
+        detail = self.store.public_encounter(self.connection, receipt['encounter_id'])
+
+        self.assertEqual(detail['data']['team_effective_healing'], 600)
+        self.assertEqual(detail['data']['team_hps'], 5.0)
+        self.assertTrue(detail['data']['team_dps_timeline'])
+        self.assertTrue(all(
+            point['source'] == 'observed_boss_hp_loss'
+            for point in detail['data']['team_dps_timeline']
+        ))
 
     def test_complete_client_modules_survive_cleaning_and_older_retry(self) -> None:
         equipment = {

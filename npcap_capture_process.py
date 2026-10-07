@@ -44,6 +44,11 @@ from npcap_receiver import BufferedReceiver, MultiAdapterReceiver, endpoint_dire
 from npcap_tcp_stream import PassiveTcpRc4Reassembler
 from passive_transport import CaptureFrame, PacketReassembler, SequenceUnwrapper
 from npcap_bootstrap import FrozenSessionState, PassiveStateError, bootstrap_copies
+from network_state import (
+    is_player_skill,
+    normalize_network_skill_id,
+    parse_exact_combat_entity_id,
+)
 from runtime_metadata import ROLE_ID_RE, latest_main_player_role
 from windows_raw_receiver import RawSocketUnavailable
 from windows_hybrid_receiver import WindowsHybridReceiver
@@ -1079,6 +1084,57 @@ def live_team_profile_tokens(record: object) -> set[str]:
     }
 
 
+def _request_entity_metadata(metadata_reader, record: object) -> None:
+    """Queue only bounded, combat-relevant target discovery work."""
+
+    if metadata_reader is None or not isinstance(record, dict):
+        return
+    method = str(record.get("method", ""))
+    arguments = record.get("decoded_arguments", [])
+    if not isinstance(arguments, list):
+        arguments = []
+    timestamp = int(record.get("filetime_100ns", 0) or 0)
+
+    if method in {"OnMsgCastSkillNew", "OnMsgDamageSyncV2"}:
+        skill_index = 0 if method == "OnMsgCastSkillNew" else 2
+        if len(arguments) > max(1, skill_index) and is_player_skill(
+            normalize_network_skill_id(arguments[skill_index])
+        ):
+            target_id = parse_exact_combat_entity_id(arguments[1])
+            if target_id:
+                metadata_reader.request(
+                    target_id, timestamp, discovery="preferred"
+                )
+        return
+
+    if method == "OnMsgEndureExitHit":
+        target_id = parse_exact_combat_entity_id(
+            record.get("network_entity_id")
+        )
+        if target_id:
+            metadata_reader.request(
+                target_id, timestamp, discovery="preferred"
+            )
+        return
+
+    if method == "OnMsgHealSyncV2" and len(arguments) > 1:
+        target_id = parse_exact_combat_entity_id(arguments[1])
+        if target_id:
+            metadata_reader.request(
+                target_id, timestamp, discovery="fallback"
+            )
+        return
+
+    if method in ENTITY_METADATA_SIGNAL_METHODS:
+        target_id = parse_exact_combat_entity_id(
+            record.get("network_entity_id")
+        )
+        if target_id:
+            metadata_reader.request(
+                target_id, timestamp, discovery="fallback"
+            )
+
+
 def _latest_team_profile_roster(control_queue) -> set[str] | None:
     """Drain roster commands and return the newest exact token set."""
 
@@ -2068,10 +2124,9 @@ def _session(
                                                         properties.get('TemplateID')
                                                     )
                                                 )
-                                        if record.get('method') in {'OnMsgDamageSyncV2', 'OnMsgHealSyncV2', 'OnMsgBeatenSyncV2'} and len(arguments) > 1:
-                                            metadata_reader.request(arguments[1], record.get('filetime_100ns', 0))
-                                        if record.get('method') in ENTITY_METADATA_SIGNAL_METHODS:
-                                            metadata_reader.request(record.get('network_entity_id'), record.get('filetime_100ns', 0))
+                                        _request_entity_metadata(
+                                            metadata_reader, record
+                                        )
                                     if record.get("method") in SCENE_TRANSITION_METHODS:
                                         # A map transition is still data in the
                                         # current KCP/RC4/Zstd stream. Resetting

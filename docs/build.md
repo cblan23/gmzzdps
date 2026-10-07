@@ -7,7 +7,7 @@
 本仓库不公开开发运行配置和授权服务私钥。公开受保护客户端需要维护者提供有效运行 profile 和签名公钥，并在服务端登记对应构建 ID。
 
 ```powershell
-.\build_exe.ps1 -OutputDirectory "release-v0.3.5-local" `
+.\build_exe.ps1 -OutputDirectory "release-v0.3.6-local" `
   -ProtectedRelease `
   -RuntimeProfileId "<profile-id>" `
   -CapabilitySigningKeyId "<key-id>" `
@@ -25,7 +25,7 @@
 | `CapabilitySigningKeyId` / `CapabilityPublicKey` | 与服务器匹配的签名公钥信息 |
 | `OfficialRelease` / `SigningCertificateThumbprint` | 独立 Authenticode 签名步骤，需要可用证书 |
 
-受保护构建与 Authenticode 签名是独立选项。当前 GitHub `v0.3.5` 候选包为受保护构建，EXE 未进行 Authenticode 签名。
+受保护构建与 Authenticode 签名是独立选项。当前 GitHub `v0.3.6` 候选包为受保护构建，EXE 未进行 Authenticode 签名。
 
 准备正式签名包时，在上述命令中再加 `-OfficialRelease -SigningCertificateThumbprint "<代码签名证书指纹>"`。脚本会在签名后验证 EXE 的签名状态和发布者证书；本机没有可用的代码签名证书时，不能生成已签名包。签名有助于建立发布者身份，但不能保证安全软件一定放行采集驱动。
 
@@ -36,7 +36,7 @@
 ```powershell
 .\.venv-build310\Scripts\python.exe tools\verify_release_package.py `
   --directory "<output-directory>" --source . `
-  --version 0.3.5 --build-id "<build-id>" --backend windows_raw
+  --version 0.3.6 --build-id "<build-id>" --backend windows_raw
 
 .\.venv-build310\Scripts\python.exe -m unittest `
   test_startup_bootstrap test_windows_capture_startup `

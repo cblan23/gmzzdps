@@ -247,7 +247,8 @@ def rebase_relative_combat_logs(
     A shared or game-server clock can move the canonical opening edge earlier
     than the local observer's first packet. Relative history rows therefore
     need the same offset; their damage amounts and all other fields are copied
-    unchanged.
+    unchanged. Event rows outside the corrected encounter window are discarded
+    because clamping them to either boundary would invent a hit at that time.
     """
 
     updated = dict(record)
@@ -284,12 +285,12 @@ def rebase_relative_combat_logs(
                 continue
             row = list(raw_row)
             try:
-                row[0] = min(
-                    maximum_ms,
-                    max(0, int(row[0]) + offset_ms),
-                )
+                shifted_time = int(row[0]) + offset_ms
             except (TypeError, ValueError, OverflowError):
                 continue
+            if not 0 <= shifted_time <= maximum_ms:
+                continue
+            row[0] = shifted_time
             next_rows.append(row)
         next_rows.sort(key=lambda row: int(row[0]))
         next_log["rows"] = next_rows
@@ -316,12 +317,12 @@ def rebase_relative_combat_logs(
                 continue
             row = list(raw_row)
             try:
-                row[0] = min(
-                    maximum_ms,
-                    max(0, int(row[0]) + offset_ms),
-                )
+                shifted_time = int(row[0]) + offset_ms
             except (TypeError, ValueError, OverflowError):
                 continue
+            if not 0 <= shifted_time <= maximum_ms:
+                continue
+            row[0] = shifted_time
             next_rows.append(row)
         next_rows.sort(key=lambda row: int(row[0]))
         next_log["rows"] = next_rows
@@ -356,12 +357,12 @@ def rebase_relative_combat_logs(
                     continue
                 row = list(raw_row)
                 try:
-                    row[0] = min(
-                        maximum_ms,
-                        max(0, int(row[0]) + offset_ms),
-                    )
+                    shifted_time = int(row[0]) + offset_ms
                 except (TypeError, ValueError, OverflowError):
                     continue
+                if not 0 <= shifted_time <= maximum_ms:
+                    continue
+                row[0] = shifted_time
                 next_rows.append(row)
             next_rows.sort(key=lambda row: int(row[0]))
             next_log["rows"] = next_rows
@@ -384,7 +385,7 @@ def rebase_relative_combat_logs(
                 origin = old_record_start
             offset_seconds = int(origin - new_start)
             maximum_second = max(0, int(new_duration))
-            samples: dict[int, int] = {}
+            samples: dict[int, list[object]] = {}
             for raw_row in sample_log.get("rows", []):
                 if not isinstance(raw_row, (list, tuple)) or len(raw_row) < 2:
                     continue
@@ -396,10 +397,11 @@ def rebase_relative_combat_logs(
                     total = max(0, int(raw_row[1]))
                 except (TypeError, ValueError, OverflowError):
                     continue
-                samples[second] = max(samples.get(second, 0), total)
-            next_log["rows"] = [
-                [second, samples[second]] for second in sorted(samples)
-            ]
+                row = list(raw_row)
+                row[0], row[1] = second, total
+                if second not in samples or total >= samples[second][1]:
+                    samples[second] = row
+            next_log["rows"] = [samples[second] for second in sorted(samples)]
             next_log["origin_started_at_epoch"] = new_start
             updated[sample_key] = next_log
 

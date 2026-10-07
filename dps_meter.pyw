@@ -20,6 +20,7 @@ import threading
 import time
 import traceback
 import uuid
+import webbrowser
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -48,7 +49,7 @@ from hud_render_cache import HudRenderCache, hud_render_delay
 from encounter_repository import EncounterRepository
 from equipment_profiles import (
     EquipmentProfileCoordinator,
-    MAX_TEAM_QUERY_TOKENS,
+    EQUIPMENT_QUERY_BATCH_SIZE,
     RESPONSE_METHOD as EQUIPMENT_PROFILE_RESPONSE_METHOD,
     equipment_item_name,
     equipment_slot_name,
@@ -346,10 +347,11 @@ PVP_HISTORY_PATH = DATA_DIR / "pvp_history.sqlite3"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手"
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.5+20261006.1"
+CLIENT_BUILD = "0.3.6+20261007.2"
+WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
     "runtime-profile.dev.json"
@@ -460,6 +462,7 @@ DEFAULT_PROFESSION_DISPLAY_METRICS = {
     for profession_id in KNOWN_PROFESSION_IDS
 }
 UPLOAD_PUBLIC_MODE_CONFIG_KEY = "upload_public_mode"
+AUTO_UPLOAD_COMBAT_RECORDS_CONFIG_KEY = "auto_upload_combat_records"
 UPLOAD_STATE_VERSION = 1
 UPLOAD_STATE_VALUES = frozenset(
     {"pending", "uploading", "failed", "uploaded", "included", "ranked", "ineligible"}
@@ -530,6 +533,8 @@ DEFAULT_TOGGLE_VISIBILITY_HOTKEY = "Home"
 UNLOCK_HOTKEY_CONFIG_KEY = "window_unlock_hotkey"
 UNLOCK_HOTKEY_ENABLED_CONFIG_KEY = "window_unlock_hotkey_enabled"
 LOCK_TOGGLE_HOTKEY_ENABLED_CONFIG_KEY = "window_lock_toggle_hotkey_enabled"
+HUD_VIEW_HOTKEY_CONFIG_KEY = "hud_view_hotkey"
+HUD_VIEW_HOTKEY_ENABLED_CONFIG_KEY = "hud_view_hotkey_enabled"
 HOTKEY_MOD_ALT = 0x0001
 HOTKEY_MOD_CONTROL = 0x0002
 HOTKEY_MOD_SHIFT = 0x0004
@@ -649,6 +654,10 @@ LIVE_HUD_BOSS_ALIASES = {
         "name": "卡尔·埃德加",
         "icon": "karl-edgar.png",
     },
+}
+LIVE_HUD_UNKNOWN_BOSS_ALIAS = {
+    "name": "战斗首领",
+    "icon": "",
 }
 MAX_SIMULTANEOUS_BOSSES = 2
 SIMULTANEOUS_BOSS_HP_WINDOW_SECONDS = 5.0
@@ -2244,6 +2253,8 @@ def normalize_combat_upload_states(value: object) -> dict[str, dict[str, object]
             ),
             "updated_at": updated_at,
         }
+        if isinstance(raw_state.get("detail_signature"), str):
+            result[battle_id]["detail_signature"] = raw_state["detail_signature"][:64]
     return result
 
 
@@ -3155,6 +3166,9 @@ def enrage_marker_ratio(prediction: EnragePrediction | None) -> float:
         start_ratio = float(
             getattr(prediction, "schedule_start_hp_percent", 100.0)
         ) / 100.0
+        end_ratio = float(
+            getattr(prediction, "schedule_end_hp_percent", 0.0)
+        ) / 100.0
     except (AttributeError, TypeError, ValueError, OverflowError):
         return 0.0
     if (
@@ -3162,9 +3176,10 @@ def enrage_marker_ratio(prediction: EnragePrediction | None) -> float:
         or total <= 0.0
         or not math.isfinite(remaining)
         or not math.isfinite(start_ratio)
+        or not math.isfinite(end_ratio)
     ):
         return 0.0
-    return min(1.0, max(0.0, remaining / total * start_ratio))
+    return min(1.0, max(0.0, end_ratio + remaining / total * (start_ratio - end_ratio)))
 
 
 @dataclass
@@ -3194,6 +3209,7 @@ class TargetlessTeamDamageState:
     total_damage: int = 0
     snapshot_time_100ns: int = 0
     server_time: int = 0
+    combat_seconds_total: int = 0
     live_dps: float | None = None
     live_dps_damage: int = 0
 
@@ -4081,7 +4097,7 @@ class CombatModel:
         self.skill_cast_event_keys = keys
 
     def ingest_skill_cast(self, update: dict) -> bool:
-        """Retain one local successful active cast without affecting combat state."""
+        """Retain local success replies and verified teammate cast broadcasts."""
 
         if not isinstance(update, dict):
             return False
@@ -4095,8 +4111,10 @@ class CombatModel:
         if (
             timestamp <= 0
             or skill_id <= 0
-            or update.get("cast_source") != "local_success_response"
-            or update.get("source_method") != "RetCastSkillSuccessNew"
+            or (update.get("cast_source"), update.get("source_method")) not in {
+                ('local_success_response', 'RetCastSkillSuccessNew'),
+                ('network_cast_broadcast', 'OnMsgCastSkillNew'),
+            }
             or self.long_gap_phase_suspended
         ):
             return False
@@ -4105,6 +4123,7 @@ class CombatModel:
             "sequence": sequence,
             "actor_id": actor_id,
             "skill_id": skill_id,
+            "cast_source": update.get("cast_source"),
         }
         key = self._skill_cast_event_key(event)
         if key in self.skill_cast_event_keys:
@@ -7283,6 +7302,12 @@ class CombatModel:
     def observed_boss_damage_taken(self) -> float:
         """Return validated cumulative HP loss for the current Boss pull."""
         target_ids = self._ordered_current_boss_target_ids()
+        target_ids.extend(
+            entity_id
+            for entity_id in self.encounter_target_order
+            if entity_id in self.linked_boss_target_ids
+            and entity_id not in target_ids
+        )
         if not target_ids:
             target_ids = [monster.entity_id for monster in self.current_bosses()]
         return sum(
@@ -7428,16 +7453,21 @@ class CombatModel:
         combat_seconds_total: int,
         fallback_duration: float,
     ) -> float:
-        final_duration = dps_duration_seconds(combat_seconds_total)
-        if 0 < final_duration <= COMBAT_CLOCK_MAX_SECONDS:
-            return final_duration
-
+        accumulated_duration = max(0, int(combat_seconds_total))
         offset = self.server_clock_offset_seconds
         if server_time and offset is not None:
-            server_duration = event_time - (float(server_time) - float(offset))
-            duration = dps_duration_seconds(server_duration)
-            if 0 < server_duration <= COMBAT_CLOCK_MAX_SECONDS and duration:
-                return duration
+            active_duration = event_time - (float(server_time) - float(offset))
+            # Common field 9 contains completed combat segments. Field 10 is
+            # the current segment's start, so a resumed fight needs both.
+            server_duration = accumulated_duration + max(0.0, active_duration)
+            if (
+                -1.0 <= active_duration <= COMBAT_CLOCK_MAX_SECONDS
+                and server_duration <= COMBAT_CLOCK_MAX_SECONDS
+            ):
+                return dps_duration_seconds(max(0.001, server_duration))
+
+        if 0 < accumulated_duration <= COMBAT_CLOCK_MAX_SECONDS:
+            return float(accumulated_duration)
 
         duration = dps_duration_seconds(fallback_duration)
         if duration <= COMBAT_CLOCK_MAX_SECONDS:
@@ -7455,7 +7485,7 @@ class CombatModel:
         fallback_duration: float,
     ) -> bool:
         damage = max(0, int(damage))
-        final_snapshot = combat_seconds_total > 0
+        final_snapshot = combat_seconds_total > 0 and not server_time
         if not final_snapshot and damage <= state.live_dps_damage:
             return False
         duration = self._live_dps_duration_for_snapshot(
@@ -8029,6 +8059,21 @@ class CombatModel:
             round(self.healing_end_time, 3),
             tuple(sorted(self.healing_target_ids)),
         )
+        if damage_context:
+            interval = self.resolve_combat_interval(
+                self.combat_end_time or self.last_damage_time, for_archive=True
+            )
+            cast_start = interval.started_at_epoch
+            cast_end = interval.ended_at_epoch
+        else:
+            cast_start = self.first_healing_time
+            cast_end = self.healing_end_time or self.last_healing_time
+        cast_keys = [
+            self._skill_cast_event_key(event)
+            for event in self.skill_cast_events
+            if cast_start <= self._event_seconds(event) <= cast_end
+            and self._actor_counts_for_encounter(event["actor_id"])
+        ]
         return (
             self.encounter_id,
             "damage" if damage_context else "healing",
@@ -8047,6 +8092,11 @@ class CombatModel:
             actors,
             targets,
             healing,
+            len(self.events),
+            (len(cast_keys), cast_keys[-1:]),
+            (len(self.boss_hp_damage_samples), self.boss_hp_damage_samples[-1:]),
+            (len(self.team_damage_samples), self.team_damage_samples[-1:]),
+            (len(self.display_team_dps_samples), self.display_team_dps_samples[-1:]),
         )
 
     def _history_team_damage_sample_log(
@@ -8305,15 +8355,16 @@ class CombatModel:
     def _history_skill_cast_log(
         self, started_at: float, duration_seconds: float
     ) -> dict[str, object]:
-        """Serialize local successful casts independently from damage hits."""
+        """Serialize observed team casts independently from damage hits."""
 
-        if not self.skill_cast_events or started_at <= 0 or self.self_id is None:
+        if not self.skill_cast_events or started_at <= 0:
             return {}
         maximum_relative_ms = max(
             0, int(math.ceil(max(0.0, duration_seconds) * 1000.0))
         )
         ended_at = started_at + max(0.0, duration_seconds)
         rows: list[list[int]] = []
+        actor_sources = {}
         for event in self.skill_cast_events:
             try:
                 actor_id = int(event.get("actor_id", 0) or self.self_id or 0)
@@ -8323,7 +8374,7 @@ class CombatModel:
             except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
                 continue
             if (
-                actor_id != self.self_id
+                not self._actor_counts_for_encounter(actor_id)
                 or skill_id <= 0
                 or event_time < started_at
                 or event_time > ended_at
@@ -8334,13 +8385,19 @@ class CombatModel:
                 max(0, int(round((event_time - started_at) * 1000.0))),
             )
             rows.append([relative_ms, actor_id, skill_id, sequence])
+            actor_sources[str(actor_id)] = (
+                "cast_broadcast"
+                if event.get("cast_source") == "network_cast_broadcast"
+                else "successful_cast"
+            )
         if not rows:
             return {}
         rows.sort(key=lambda row: (row[0], row[3]))
         return {
             "version": 1,
             "columns": ["time_ms", "actor_id", "skill_id", "sequence"],
-            "coverage": "local_successful_active_casts",
+            "coverage": "observed_team_casts",
+            "actor_sources": actor_sources,
             "origin_started_at_epoch": float(started_at),
             "rows": rows,
         }
@@ -14189,6 +14246,7 @@ class CombatModel:
                 total_damage=carried_damage + absolute_damage,
                 snapshot_time_100ns=timestamp,
                 server_time=server_time,
+                combat_seconds_total=combat_seconds_total,
                 live_dps=previous.live_dps if previous else None,
                 live_dps_damage=(
                     previous.live_dps_damage if previous else 0
@@ -14209,6 +14267,21 @@ class CombatModel:
             float(max_server_duration),
         )
         next_total = sum(state.total_damage for state in next_states.values())
+        if not self.targetless_team_started_at and next_total > 0:
+            official_duration = max(
+                (
+                    self._live_dps_duration_for_snapshot(
+                        event_time=event_time,
+                        server_time=state.server_time,
+                        combat_seconds_total=state.combat_seconds_total,
+                        fallback_duration=0.0,
+                    )
+                    for state in next_states.values()
+                ),
+                default=0.0,
+            )
+            if official_duration > 0:
+                self.targetless_team_started_at = event_time - official_duration
         if (
             not self.targetless_team_started_at
             and next_total == 0
@@ -14384,6 +14457,22 @@ class CombatModel:
         now = time.time() if now is None else float(now)
         if not self.targetless_team_statistics(now):
             return 0.0
+        official_duration = max(
+            (
+                self._live_dps_duration_for_snapshot(
+                    event_time=now,
+                    server_time=state.server_time,
+                    combat_seconds_total=state.combat_seconds_total,
+                    fallback_duration=0.0,
+                )
+                for state in self.targetless_team_states.values()
+            ),
+            default=0.0,
+        )
+        if official_duration > 0:
+            return max(
+                official_duration, self.targetless_team_server_duration_seconds
+            )
         return max(
             1.0,
             self.targetless_team_duration_seconds,
@@ -14445,7 +14534,7 @@ class CombatModel:
                         state,
                         damage=state.accepted_damage,
                         event_time=event_time,
-                        server_time=state.server_time,
+                        server_time=server_time,
                         combat_seconds_total=combat_seconds_total,
                         fallback_duration=self.duration(event_time),
                     )
@@ -14710,7 +14799,10 @@ class CombatModel:
             state,
             damage=state.accepted_damage,
             event_time=event_time,
-            server_time=server_time or state.server_time,
+            server_time=(
+                server_time if full_snapshot or combat_seconds_total
+                else state.server_time
+            ),
             combat_seconds_total=combat_seconds_total,
             fallback_duration=self.duration(event_time),
         )
@@ -19965,6 +20057,7 @@ class LiveHudBossTracker:
             "active": True,
             "entity_id": int(state["entity_id"]),
             "template_id": int(state["template_id"]),
+            "boss_type": int(state.get("boss_type", 0) or 0),
             "name": str(state["name"]),
             "icon": str(state["icon"]),
             "level": int(state.get("level", 0) or 0),
@@ -20018,12 +20111,15 @@ class LiveHudBossTracker:
                 level = int(properties.get("Level", 0) or 0)
             except (TypeError, ValueError, OverflowError):
                 return None
-            alias = LIVE_HUD_BOSS_ALIASES.get(template_id)
-            if not entity_id or boss_type != 3 or alias is None:
+            if not entity_id or template_id <= 0 or boss_type != 3:
                 return None
+            alias = LIVE_HUD_BOSS_ALIASES.get(
+                template_id, LIVE_HUD_UNKNOWN_BOSS_ALIAS
+            )
             self.entities[entity_id] = {
                 "entity_id": entity_id,
                 "template_id": template_id,
+                "boss_type": boss_type,
                 "name": alias["name"],
                 "icon": alias["icon"],
                 "level": level if 1 <= level <= 999 else 0,
@@ -21435,6 +21531,12 @@ class HookWorker(threading.Thread):
                 if summaries:
                     self.emit("settlement_experiment_record", summaries)
         for record in team_profile_records:
+            if record.get("method") in {
+                "ReadOnlyCurrentDungeonRoster", "ReadOnlyCurrentEncounterContext"
+            } and record.get("lua_state_address"):
+                self.equipment_profiles.update_lua_state_hint(
+                    game_pid, record["lua_state_address"]
+                )
             write_capture_record(log_handle, record)
             if record.get("method") == "ReadOnlyCurrentEncounterContext":
                 apply_context = getattr(
@@ -23266,10 +23368,28 @@ class DpsWindow:
         self.unlock_hotkey_capture_active = False
         self.unlock_hotkey_capture_modifiers: set[str] = set()
         self.unlock_hotkey_enabled_syncing = False
+        self.hud_view_hotkey = normalize_toggle_hotkey(
+            self.config.get(HUD_VIEW_HOTKEY_CONFIG_KEY, "")
+        )
+        self.hud_view_hotkey_enabled = bool(
+            self.config.get(HUD_VIEW_HOTKEY_ENABLED_CONFIG_KEY, False)
+            and self.hud_view_hotkey
+        )
+        self.hud_view_hotkey_registered = False
+        self.hud_view_hotkey_error = ""
+        self.hud_view_hotkey_capture_active = False
+        self.hud_view_hotkey_capture_modifiers: set[str] = set()
+        self.hud_view_hotkey_enabled_syncing = False
         self.backend_topmost = bool(
             self.config.get(BACKEND_TOPMOST_CONFIG_KEY, False)
         )
         self.config[BACKEND_TOPMOST_CONFIG_KEY] = self.backend_topmost
+        self.auto_upload_combat_records_enabled = bool(
+            self.config.get(AUTO_UPLOAD_COMBAT_RECORDS_CONFIG_KEY, True)
+        )
+        self.config[AUTO_UPLOAD_COMBAT_RECORDS_CONFIG_KEY] = (
+            self.auto_upload_combat_records_enabled
+        )
         self.target_boss_lookup_enabled = (
             target_boss_lookup_enabled_from_config(self.config)
         )
@@ -23340,7 +23460,9 @@ class DpsWindow:
             daemon=True,
         ).start()
         self.settlement_ui = SettlementUIController(EncounterRepository(HISTORY_DIR))
-        self.settlement_history_adapter = SettlementHistoryAdapter(self.history_store)
+        self.settlement_history_adapter = SettlementHistoryAdapter(
+            self.history_store, controller=self.settlement_ui,
+        )
         self.settlement_history_adapter.sync(self.settlement_ui.tracker)
         (
             self.settlement_experiment_enabled,
@@ -23855,6 +23977,7 @@ class DpsWindow:
         self.settings_show_extraordinary_rating_var: tk.BooleanVar | None = None
         self.settings_team_rating_preview_var: tk.BooleanVar | None = None
         self.settings_boss_enrage_prediction_var: tk.BooleanVar | None = None
+        self.settings_auto_upload_combat_records_var: tk.BooleanVar | None = None
         self.settings_show_deaths_var: tk.BooleanVar | None = None
         self.settings_audience_metric_var: tk.StringVar | None = None
         self.settings_warrior_metric_var: tk.StringVar | None = None
@@ -23887,6 +24010,9 @@ class DpsWindow:
         self.settings_unlock_hotkey_status_label: tk.Label | None = None
         self.settings_unlock_hotkey_enabled_var: tk.BooleanVar | None = None
         self.settings_lock_toggle_hotkey_enabled_var: tk.BooleanVar | None = None
+        self.settings_hud_view_hotkey_value_label: tk.Label | None = None
+        self.settings_hud_view_hotkey_status_label: tk.Label | None = None
+        self.settings_hud_view_hotkey_enabled_var: tk.BooleanVar | None = None
         self.settings_live_apply_ready = False
         self.settings_live_apply_running = False
         self.settings_open_after_id: str | None = None
@@ -24026,6 +24152,9 @@ class DpsWindow:
             self.pvp_history_repository,
             self.licensing.pvp_request,
             lambda: str(self.pvp_recording.account_key or ""),
+            enabled=lambda: bool(
+                getattr(self, "auto_upload_combat_records_enabled", True)
+            ),
         )
         self.pvp_recording.equipment_attach = (
             self.pvp_upload_worker.enqueue_equipment_attachment
@@ -24114,6 +24243,7 @@ class DpsWindow:
                 pass
         self._register_configured_toggle_hotkey()
         self._register_configured_unlock_hotkey()
+        self._register_configured_hud_view_hotkey()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.drain_after_id = self.root.after(50, self._drain_messages)
         self.render_after_id = self.root.after(160, self._render)
@@ -28315,6 +28445,16 @@ class DpsWindow:
                 and recording.get("match_id") != previous_match_id):
             self._set_main_combat_mode("pvp")
 
+    def _toggle_hud_content_view(self) -> None:
+        if getattr(self, "main_combat_mode", "pve") == "pvp":
+            self._set_pvp_hud_view(
+                "live" if getattr(self, "pvp_hud_view", "team") == "team" else "team"
+            )
+        else:
+            self._set_pve_hud_view(
+                "recent_battle" if getattr(self, "pve_hud_view", "team") == "team" else "team"
+            )
+
     def _set_pve_hud_view(self, view: object) -> None:
         """Switch the PVE title-rail content view without resetting combat."""
 
@@ -29207,9 +29347,10 @@ class DpsWindow:
         if live_hud_boss_state is not None:
             from types import SimpleNamespace
 
-            alias = LIVE_HUD_BOSS_ALIASES[
-                int(live_hud_boss_state["template_id"])
-            ]
+            alias = LIVE_HUD_BOSS_ALIASES.get(
+                int(live_hud_boss_state["template_id"]),
+                LIVE_HUD_UNKNOWN_BOSS_ALIAS,
+            )
             monster = SimpleNamespace(
                 entity_id=int(live_hud_boss_state["entity_id"]),
                 template_id=int(live_hud_boss_state["template_id"]),
@@ -29446,7 +29587,7 @@ class DpsWindow:
             if recent_section is None:
                 recent_section = {
                     "row_kind": "section",
-                    "section_text": "最近战斗记录",
+                    "section_text": "实时战斗/战斗记录",
                 }
                 display_rows.insert(0, recent_section)
             recent_section["live_team_dps"] = (
@@ -29766,6 +29907,7 @@ class DpsWindow:
                 "action:pvp_team",
                 "action:pve_recent_battle",
                 "action:pve_team",
+                "action:web_database",
             }
         )
         self.layered_main_scroll_drag_origin = None
@@ -30020,6 +30162,8 @@ class DpsWindow:
             self._set_pve_hud_view("recent_battle")
         elif pressed == "pve_team":
             self._set_pve_hud_view("team")
+        elif pressed == "web_database":
+            webbrowser.open(WEB_DATABASE_URL, new=2)
         elif pressed == "pvp":
             self._set_main_combat_mode("pvp")
         elif pressed == "pve":
@@ -32164,13 +32308,16 @@ class DpsWindow:
     ) -> None:
         if (
             bool(getattr(self, "closing", False))
-            or self._history_upload_state(battle_id).get("state", "pending")
-            != "pending"
+            or not bool(
+                getattr(self, "auto_upload_combat_records_enabled", True)
+            )
         ):
             return
         record = self._history_record_for_upload(battle_id)
         if not isinstance(record, dict):
             record = fallback_record
+        if not self._automatic_upload_needs_update(battle_id, record):
+            return
         enriched = self._attach_pve_equipment_snapshots(
             record,
             capture_deadline_ns=equipment_capture_deadline_ns,
@@ -32213,11 +32360,49 @@ class DpsWindow:
                     pass
         self._start_history_upload(battle_id, "character", silent=True)
 
+    @staticmethod
+    def _history_detail_signature(record: dict) -> str:
+        details = {
+            key: record[key] for key in (
+                'event_log', 'skill_cast_log', 'boss_hp_damage_samples',
+                'team_damage_samples', 'display_team_dps_samples',
+                'participant_damage_samples', 'team_dps_timeline',
+            ) if record.get(key)
+        }
+        for field in ('participants', 'healers'):
+            rows = [
+                {'actor_id': row.get('actor_id'), 'skills': row['skills']}
+                for row in record.get(field, ())
+                if isinstance(row, dict) and row.get('skills')
+            ]
+            if rows:
+                details[field] = rows
+        if not details:
+            return ''
+        return hashlib.sha256(json.dumps(
+            details, sort_keys=True, separators=(',', ':'),
+        ).encode('utf-8')).hexdigest()
+
+    def _automatic_upload_needs_update(self, battle_id: str, record: dict) -> bool:
+        state = self._history_upload_state(battle_id)
+        status = str(state.get('state', 'pending') or 'pending').casefold()
+        if status == 'pending':
+            return True
+        signature = self._history_detail_signature(record)
+        return bool(
+            status in {'uploaded', 'included', 'ranked'}
+            and signature
+            and signature != state.get('detail_signature', '')
+        )
+
     def _queue_automatic_victory_upload(self, record: object) -> bool:
-        """Upload a saved victory once outside combat handling."""
+        """Upload a saved, decided PvE battle once outside combat handling."""
 
         if (
             not isinstance(record, dict)
+            or not bool(
+                getattr(self, "auto_upload_combat_records_enabled", True)
+            )
             or encounter_upload_rejection_code(record)
             or str(record.get("settlement_status", "")).upper() == "PENDING"
             or bool(getattr(self, "closing", False))
@@ -32226,11 +32411,7 @@ class DpsWindow:
         battle_id = str(record.get("encounter_id", "") or "").strip()
         if not battle_id:
             return False
-        state = str(
-            self._history_upload_state(battle_id).get("state", "pending")
-            or "pending"
-        ).casefold()
-        if state != "pending":
+        if not self._automatic_upload_needs_update(battle_id, record):
             return False
         queued = getattr(self, "automatic_upload_queued", None)
         if not isinstance(queued, set):
@@ -32272,6 +32453,18 @@ class DpsWindow:
         """Observe saved history without changing matching or settlement logic."""
 
         self._enrich_settlement_ratings_from_live_profiles(tracker)
+        model = getattr(self, 'model', None)
+        local_id = str(getattr(model, 'encounter_id', '') or '')
+        tracked_id = getattr(adapter, 'local_bindings', {}).get(local_id)
+        encounter = tracker.encounters.get(tracked_id) if hasattr(tracker, 'encounters') else None
+        build_record = getattr(model, 'build_combat_record', None)
+        if encounter is not None and encounter.ended_at_ns is not None and callable(build_record):
+            local_record = build_record('target_defeated' if encounter.result == 'VICTORY' else 'party_wipe')
+            if isinstance(local_record, dict):
+                projected = adapter.project_local_record(tracker, local_record)
+                if projected is not None:
+                    self.history_store.save(projected)
+                    self._queue_automatic_victory_upload(projected)
         saved_ids = adapter.sync(tracker)
         store = getattr(self, "history_store", None)
         load = getattr(store, "load", None)
@@ -32718,6 +32911,13 @@ class DpsWindow:
                 failed.append(record)
         if failed:
             self.model.completed_combats.extend(failed)
+        adapter = getattr(self, "settlement_history_adapter", None)
+        controller = getattr(self, "settlement_ui", None)
+        if adapter is not None and controller is not None and adapter.details_dirty:
+            try:
+                saved += len(self._sync_settlement_history_for_upload(adapter, controller.tracker))
+            except (ValueError, OSError, TypeError) as error:
+                controller.last_error = "战斗明细写入历史失败：" + type(error).__name__
         if (
             saved
             and self.history_window is not None
@@ -35084,6 +35284,7 @@ class DpsWindow:
         previous_page = self.backend_current_page
         if previous_page == "settings" and page != "settings":
             self._cancel_toggle_hotkey_capture()
+            self._cancel_hud_view_hotkey_capture()
         self.backend_current_page = page
         self._sync_history_snapshot_scrollbar_visibility()
         pvp_alliance_page = getattr(self, "pvp_alliance_page", None)
@@ -36059,7 +36260,26 @@ class DpsWindow:
             or not started()
         ):
             return False
-        return bool(adapter.bind(local_id, tracked_id))
+        encounter = controller.tracker.encounters.get(tracked_id)
+        context_changed = False
+        if encounter is not None:
+            for encounter_field, model_field in (
+                ("dungeon_id", "encounter_dungeon_id"),
+                ("map_id", "encounter_map_id"),
+                ("stage_id", "encounter_dungeon_stage_id"),
+                ("stage_index", "encounter_dungeon_stage_phase"),
+            ):
+                try:
+                    value = int(getattr(model, model_field, 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    value = 0
+                if getattr(encounter, encounter_field, None) is None and value > 0:
+                    setattr(encounter, encounter_field, value)
+                    context_changed = True
+            if context_changed:
+                encounter.revision += 1
+                controller.repository.save(controller.tracker)
+        return bool(adapter.bind(local_id, tracked_id) or context_changed)
 
     def _ingest_combat_state(self, payload: object) -> bool:
         if not isinstance(payload, dict):
@@ -37118,7 +37338,7 @@ class DpsWindow:
                 )
         default_section = {
                 "row_kind": "section",
-                "section_text": "最近战斗记录",
+                "section_text": "实时战斗/战斗记录",
                 "expanded": True,
             }
         rows = [live_row, default_section]
@@ -45942,8 +46162,53 @@ class DpsWindow:
         )
         releases = (
             (
+                "v0.3.6",
+                """v0.3.6 更新日志
+
+1. 自动上传完整战斗数据：上传已捕获的全员 DPS、HPS、承伤、死亡、Boss 伤害、技能明细、暴击运气、起手序列、技能命中时间轴、装备快照、团队 DPS 曲线和 Boss 血量曲线。
+2. 保留失败战斗：失败战斗也会自动上传并可按角色查询，但不进入排行和职业统计。
+3. 支持明细补传：结算后补到的起手、命中、技能详情及曲线会更新已上传记录。
+4. 补齐副本信息：上传副本、Boss、难度、黄铜书挑战状态、Boss 最大血量和分阶段真实血量。
+5. 增强采集恢复：采集中断时自动尝试恢复，确认无法恢复后自动提交一次诊断反馈。
+6. 优化装备采集：PVE、PVP 装备改为逐人查询，过滤投影和 AI；修复评分变化或回跳后装备已获取却不显示的问题。
+7. 修复战斗明细：记录队友施法广播和整场施法顺序，避免把增益更新误识别成施法。
+8. 修复多阶段 Boss：保留阶段切换前后的血量曲线，并修正大帝本阶段血量预测和狂暴倒计时。
+9. 新增上传开关：可在设置中关闭“上传战斗记录”；关闭期间 PVE、PVP 战斗仍保存在本机，不再自动上传。
+10. 新增网页数据库入口：HUD 可用默认浏览器打开叨叨诡秘 dps-logs。
+11. 重做网页统计：排行支持队本、团本、家族、日常、副本、Boss、难度、黄铜书和职业筛选；职业统计支持超凡评分区间、职业分位强度图、样本量和悬停详情。
+12. 修复起手时间：战斗起点校正后丢弃窗口外的施法、命中和死亡事件，避免无效事件堆叠为 0 秒。""",
+            ),
+            (
                 "v0.3.5",
                 """v0.3.5更新日志
+
+2026-10-07 HUD 网页数据库入口（0.3.5+20261007.1）
+HUD“DPS数据”右侧新增“网页数据库”按钮，点击后使用系统默认浏览器打开叨叨诡秘 DPS Logs。
+
+2026-10-07 战斗上传完整性修复（0.3.5+20261007.1）
+失败的 Boss 战也会自动上传并保留查询，只标记为不进入排行和职业分析。
+有合法角色令牌的队友即使战斗中的 actor_id 为 0 也会保留，避免完整队伍少一人。
+
+2026-10-06 开怪扫描卡顿修复（0.3.5+20261006.6）
+Boss 元数据扫描改为优先跟随玩家技能目标和实际受击实体；队员血量、战斗状态与治疗目标仅保留单个兜底候选，识别目标后立即停止扫描。
+
+2026-10-06 治疗明细归档修复（0.3.5+20261006.5）
+治疗者自身伤害为零时，Boss 战仍按独立战斗边界保留治疗技能、目标、施放量和过量治疗明细。
+识别治疗回调中的共享效果技能编号；官方团队有效治疗和 HPS 继续作为总量依据，局部回调不做比例补全。
+
+2026-10-06 中断战斗归档修复（0.3.5+20261006.4）
+中断或未结算的 Boss 战保留已确认的全员伤害、治疗、承伤、地图、战斗时长和既有明细覆盖状态。
+补齐只读副本上下文中的地图字段；自动上传仍仅处理已确认胜利的战斗。
+
+2026-10-06 装备查询与 HUD 调整（0.3.5+20261006.3）
+PVE、PVP 装备查询统一逐人排队，保留敌方查询优先级。
+已收到有效装备回复时，后台评分补全不再触发超时重查。
+本地装备评分复用经校验的采集地址，避免重复扫描游戏内存。
+HUD“最近战斗记录”更名为“实时战斗/战斗记录”。
+
+2026-10-06 多阶段 Boss 血量采集修复（0.3.5+20261006.2）
+多阶段 Boss 切换后继续累计已关联前置阶段的真实血量损失，避免血量采样回退而丢弃整场曲线。
+自动上传的数据模块与现有功能、操作方式保持不变。
 
 2026-10-06 实战上传补全（0.3.5+20261006.1）
 兼容本地历史记录的实际角色身份字段与顶层通关标记，自动上传会保留已确认的胜利结果和全员身份。
@@ -46419,6 +46684,10 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             ("settings_show_pvp_button_var", self.show_pvp_button),
             ("settings_show_boss_hp_var", self.show_boss_hp_bar),
             ("settings_boss_enrage_prediction_var", self.boss_enrage_prediction_enabled),
+            (
+                "settings_auto_upload_combat_records_var",
+                bool(getattr(self, "auto_upload_combat_records_enabled", True)),
+            ),
         )
         for attribute, enabled in variables:
             setattr(self, attribute, tk.BooleanVar(master=master, value=enabled))
@@ -46484,6 +46753,17 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self._settings_check_row(boss, "Boss狂暴节奏预测", self.settings_boss_enrage_prediction_var,
                                  disabled=False, row=0, column=1,
                                  help_text="充裕、正常、临界、危险四档；不为未知首领编造时间。")
+        records = section("数据与记录")
+        records.grid_columnconfigure(0, weight=1)
+        self._settings_check_row(
+            records,
+            "上传战斗记录",
+            self.settings_auto_upload_combat_records_var,
+            disabled=False,
+            row=0,
+            column=0,
+            help_text="关闭后战斗记录仍保存在本机，不再自动上传到服务器。",
+        )
         appearance = section("外观与缩放")
         for col in range(2):
             appearance.grid_columnconfigure(col, weight=1, uniform="appearance")
@@ -46535,6 +46815,24 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         )
         self._sync_toggle_hotkey_controls()
 
+        self.settings_hud_view_hotkey_enabled_var = tk.BooleanVar(
+            master=master, value=self.hud_view_hotkey_enabled
+        )
+        (self.settings_hud_view_hotkey_value_label,
+         self.settings_hud_view_hotkey_status_label) = self._build_settings_hotkey_row(
+            shortcuts, "团队/战斗页面快捷键", self.settings_hud_view_hotkey_enabled_var,
+            self._clear_hud_view_hotkey,
+            "切换团队构成与实时战斗/战斗记录。点击按键框录入，支持功能键或 Ctrl、Alt 组合键。",
+        )
+        view_label = self.settings_hud_view_hotkey_value_label
+        view_label.bind("<Button-1>", self._begin_hud_view_hotkey_capture)
+        view_label.bind("<KeyPress>", self._capture_hud_view_hotkey_key)
+        view_label.bind("<KeyRelease>", self._release_hud_view_hotkey_modifier)
+        view_label.bind("<FocusOut>", self._cancel_hud_view_hotkey_capture)
+        self.settings_hud_view_hotkey_enabled_var.trace_add(
+            "write", self._apply_hud_view_hotkey_enabled_setting
+        )
+        self._sync_hud_view_hotkey_controls()
 
         self.settings_unlock_hotkey_enabled_var = tk.BooleanVar(
             master=master, value=self.unlock_hotkey_enabled
@@ -47402,6 +47700,174 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         if getattr(self, "window_locked", False):
             self._apply_window_lock_state()
 
+    def _set_native_hud_view_hotkey(self, hotkey: str) -> bool:
+        tray = getattr(self, "tray_icon", None)
+        if tray is None:
+            return not hotkey
+        parameters = toggle_hotkey_windows_parameters(hotkey) if hotkey else (0, 0)
+        if parameters is None:
+            return False
+        try:
+            return bool(tray.set_hotkey(*parameters, action="hud_view"))
+        except (AttributeError, OSError, RuntimeError):
+            return False
+
+    def _register_configured_hud_view_hotkey(self) -> bool:
+        enabled = bool(getattr(self, "hud_view_hotkey_enabled", False))
+        key = getattr(self, "hud_view_hotkey", "") if enabled else ""
+        registered = self._set_native_hud_view_hotkey(key)
+        self.hud_view_hotkey_registered = bool(enabled and key and registered)
+        self.hud_view_hotkey_error = (
+            "" if registered else "快捷键已被占用或服务不可用"
+        )
+        self._sync_hud_view_hotkey_controls()
+        return registered
+
+    def _set_hud_view_hotkey_enabled(self, enabled: bool) -> bool:
+        key = getattr(self, "hud_view_hotkey", "")
+        if enabled and not key:
+            self.hud_view_hotkey_error = "请先录入页面切换快捷键"
+            self._sync_hud_view_hotkey_controls()
+            return False
+        if not self._set_native_hud_view_hotkey(key if enabled else ""):
+            self.hud_view_hotkey_error = "快捷键已被占用或服务不可用"
+            self._sync_hud_view_hotkey_controls()
+            return False
+        self.hud_view_hotkey_capture_active = False
+        self.hud_view_hotkey_capture_modifiers.clear()
+        self.hud_view_hotkey_enabled = bool(enabled)
+        self.hud_view_hotkey_registered = bool(enabled)
+        self.hud_view_hotkey_error = ""
+        self.config[HUD_VIEW_HOTKEY_CONFIG_KEY] = key
+        self.config[HUD_VIEW_HOTKEY_ENABLED_CONFIG_KEY] = bool(enabled)
+        save_config(self.config)
+        self._sync_hud_view_hotkey_controls()
+        return True
+
+    def _apply_hud_view_hotkey_enabled_setting(self, *_args) -> None:
+        variable = getattr(self, "settings_hud_view_hotkey_enabled_var", None)
+        if variable is None or getattr(self, "hud_view_hotkey_enabled_syncing", False):
+            return
+        self._set_hud_view_hotkey_enabled(bool(variable.get()))
+
+    def _sync_hud_view_hotkey_controls(self) -> None:
+        enabled = bool(getattr(self, "hud_view_hotkey_enabled", False))
+        variable = getattr(self, "settings_hud_view_hotkey_enabled_var", None)
+        if variable is not None:
+            try:
+                self.hud_view_hotkey_enabled_syncing = True
+                variable.set(enabled)
+            except tk.TclError:
+                pass
+            finally:
+                self.hud_view_hotkey_enabled_syncing = False
+        label = getattr(self, "settings_hud_view_hotkey_value_label", None)
+        capturing = bool(getattr(self, "hud_view_hotkey_capture_active", False))
+        if label is not None and label.winfo_exists():
+            label.configure(
+                text=("请按下快捷键…" if capturing
+                      else getattr(self, "hud_view_hotkey", "") or "未设置"),
+                fg=WARN if capturing else ACCENT if enabled else MUTED,
+            )
+        status = getattr(self, "settings_hud_view_hotkey_status_label", None)
+        if status is not None and status.winfo_exists():
+            status.configure(text=getattr(self, "hud_view_hotkey_error", ""))
+
+    def _begin_hud_view_hotkey_capture(self, _event=None) -> str:
+        if self.closing:
+            return "break"
+        if getattr(self, "hud_view_hotkey_registered", False) and not self._set_native_hud_view_hotkey(""):
+            self.hud_view_hotkey_error = "无法暂停当前快捷键，请重试"
+            self._sync_hud_view_hotkey_controls()
+            return "break"
+        self.hud_view_hotkey_registered = False
+        self.hud_view_hotkey_capture_active = True
+        self.hud_view_hotkey_capture_modifiers.clear()
+        self.hud_view_hotkey_error = ""
+        self._sync_hud_view_hotkey_controls()
+        label = getattr(self, "settings_hud_view_hotkey_value_label", None)
+        if label is not None and label.winfo_exists():
+            label.focus_set()
+        return "break"
+
+    def _cancel_hud_view_hotkey_capture(self, _event=None) -> None:
+        if not getattr(self, "hud_view_hotkey_capture_active", False):
+            return
+        self.hud_view_hotkey_capture_active = False
+        self.hud_view_hotkey_capture_modifiers.clear()
+        self._register_configured_hud_view_hotkey()
+
+    def _capture_hud_view_hotkey_key(self, event) -> str | None:
+        if not getattr(self, "hud_view_hotkey_capture_active", False):
+            return None
+        keysym = str(getattr(event, "keysym", "") or "")
+        if keysym.casefold() == "escape":
+            self._cancel_hud_view_hotkey_capture()
+            return "break"
+        modifier = {
+            "control_l": "Ctrl", "control_r": "Ctrl", "alt_l": "Alt",
+            "alt_r": "Alt", "iso_level3_shift": "Alt",
+            "shift_l": "Shift", "shift_r": "Shift",
+        }.get(keysym.casefold())
+        if modifier:
+            self.hud_view_hotkey_capture_modifiers.add(modifier)
+            return "break"
+        try:
+            state = int(getattr(event, "state", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            state = 0
+        for held in self.hud_view_hotkey_capture_modifiers:
+            state |= {"Ctrl": 0x0004, "Alt": 0x0008, "Shift": 0x0001}[held]
+        candidate = toggle_hotkey_from_tk_event(keysym, state)
+        if not candidate:
+            self.hud_view_hotkey_error = "单键请使用 F1-F12 等功能键；字母或数字搭配 Ctrl、Alt"
+            self._sync_hud_view_hotkey_controls()
+            return "break"
+        if not self._set_native_hud_view_hotkey(candidate):
+            self.hud_view_hotkey_error = "快捷键已被占用，请重新录入"
+            self._sync_hud_view_hotkey_controls()
+            return "break"
+        self.hud_view_hotkey = candidate
+        self.hud_view_hotkey_enabled = True
+        self.hud_view_hotkey_registered = True
+        self.hud_view_hotkey_capture_active = False
+        self.hud_view_hotkey_capture_modifiers.clear()
+        self.hud_view_hotkey_error = ""
+        self.config[HUD_VIEW_HOTKEY_CONFIG_KEY] = candidate
+        self.config[HUD_VIEW_HOTKEY_ENABLED_CONFIG_KEY] = True
+        save_config(self.config)
+        self._sync_hud_view_hotkey_controls()
+        return "break"
+
+    def _release_hud_view_hotkey_modifier(self, event) -> str | None:
+        if not getattr(self, "hud_view_hotkey_capture_active", False):
+            return None
+        modifier = {
+            "control_l": "Ctrl", "control_r": "Ctrl", "alt_l": "Alt",
+            "alt_r": "Alt", "iso_level3_shift": "Alt",
+            "shift_l": "Shift", "shift_r": "Shift",
+        }.get(str(getattr(event, "keysym", "") or "").casefold())
+        if modifier:
+            self.hud_view_hotkey_capture_modifiers.discard(modifier)
+            return "break"
+        return None
+
+    def _clear_hud_view_hotkey(self) -> None:
+        if not self._set_native_hud_view_hotkey(""):
+            self.hud_view_hotkey_error = "无法停用当前快捷键，请重试"
+            self._sync_hud_view_hotkey_controls()
+            return
+        self.hud_view_hotkey = ""
+        self.hud_view_hotkey_enabled = False
+        self.hud_view_hotkey_registered = False
+        self.hud_view_hotkey_capture_active = False
+        self.hud_view_hotkey_capture_modifiers.clear()
+        self.hud_view_hotkey_error = ""
+        self.config[HUD_VIEW_HOTKEY_CONFIG_KEY] = ""
+        self.config[HUD_VIEW_HOTKEY_ENABLED_CONFIG_KEY] = False
+        save_config(self.config)
+        self._sync_hud_view_hotkey_controls()
+
     def _build_settings_hotkey_row(self, parent, text, variable, on_clear, help_text):
         row = tk.Frame(parent, bg=PANEL)
         row.pack(fill='x', padx=8, pady=(12, 0))
@@ -47861,6 +48327,26 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 self.enrage_predictor.reset()
                 self.enrage_prediction = None
                 self._set_enrage_prediction_visible(False)
+        auto_upload_variable = getattr(
+            self, "settings_auto_upload_combat_records_var", None
+        )
+        if auto_upload_variable is not None:
+            previous_auto_upload = bool(
+                getattr(self, "auto_upload_combat_records_enabled", True)
+            )
+            self.auto_upload_combat_records_enabled = bool(
+                auto_upload_variable.get()
+            )
+            if not self.auto_upload_combat_records_enabled:
+                queued = getattr(self, "automatic_upload_queued", None)
+                if isinstance(queued, set):
+                    queued.clear()
+            elif not previous_auto_upload:
+                wake = getattr(
+                    getattr(self, "pvp_upload_worker", None), "wake", None
+                )
+                if callable(wake):
+                    wake()
         show_boss_hp_variable = getattr(self, "settings_show_boss_hp_var", None)
         if show_boss_hp_variable is not None:
             self.show_boss_hp_bar = bool(show_boss_hp_variable.get())
@@ -57983,6 +58469,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         entry["state"] = clean_state
         entry["updated_at"] = time.time()
         for field, limit in (
+            ("detail_signature", 64),
             ("encounter_id", 64),
             ("upload_id", 64),
             ("message", 240),
@@ -58268,11 +58755,11 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         mode = str(public_mode or "character").casefold()
         if mode not in {"anonymous", "character"}:
             return
-        if silent and (
-            bool(getattr(self, "closing", False))
-            or self._history_upload_state(clean_battle_id).get("state", "pending")
-            != "pending"
+        if silent and not bool(
+            getattr(self, "auto_upload_combat_records_enabled", True)
         ):
+            return
+        if silent and bool(getattr(self, "closing", False)):
             return
         in_progress = getattr(self, "history_upload_in_progress", None)
         if not isinstance(in_progress, set):
@@ -58284,6 +58771,8 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             _record, encounter, character_name = self._build_history_upload_payload(
                 clean_battle_id
             )
+            if silent and not self._automatic_upload_needs_update(clean_battle_id, _record):
+                return
         except ProfileUploadError as exc:
             if silent:
                 self._set_combat_upload_state(
@@ -58327,6 +58816,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             self.config[UPLOAD_PUBLIC_MODE_CONFIG_KEY] = mode
             save_config(self.config)
             self._close_history_modal()
+        detail_signature = self._history_detail_signature(_record)
         in_progress.add(clean_battle_id)
         self._set_combat_upload_state(
             clean_battle_id,
@@ -58340,6 +58830,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             ranking_status="",
             validation_reasons=(),
             public_mode=mode,
+            detail_signature=detail_signature,
         )
 
         def upload() -> None:
@@ -58368,6 +58859,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                         "character_id": character_id,
                         "public_mode": mode,
                         "silent": silent,
+                        "detail_signature": detail_signature,
                         "result": result,
                     },
                 )
@@ -58397,6 +58889,8 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             return
 
         state = "uploaded" if result.accepted else "failed"
+        signature = payload.get('detail_signature')
+        detail_metadata = {'detail_signature': signature} if isinstance(signature, str) else {}
         self._set_combat_upload_state(
             battle_id,
             state,
@@ -58409,7 +58903,15 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             ranking_status=result.ranking_status,
             validation_reasons=result.validation_reasons,
             public_mode=payload.get("public_mode", "nickname"),
+            **detail_metadata,
         )
+        if result.accepted:
+            queued = getattr(self, 'automatic_upload_queued', None)
+            if isinstance(queued, set):
+                queued.discard(battle_id)
+            latest = self._history_record_for_upload(battle_id)
+            if isinstance(signature, str) and isinstance(latest, dict):
+                self._queue_automatic_victory_upload(latest)
         if not result.accepted:
             requested_character_id = str(payload.get("character_id", "") or "")
             if str(result.error or "").upper() == "PROFILE_NOT_FOUND":
@@ -60264,6 +60766,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             return
         ModernDropdown.close_active_popup(self.history_window)
         self._cancel_toggle_hotkey_capture()
+        self._cancel_hud_view_hotkey_capture()
         self._flush_window_geometry(self.history_window)
         self.config["history_geometry"] = self.history_window.geometry()
         self.history_window.withdraw()
@@ -60301,6 +60804,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         if not destroy:
             ModernDropdown.close_active_popup(window)
             self._cancel_toggle_hotkey_capture()
+            self._cancel_hud_view_hotkey_capture()
             pvp_alliance_page = getattr(self, "pvp_alliance_page", None)
             if pvp_alliance_page is not None:
                 pvp_alliance_page.on_hide()
@@ -60330,6 +60834,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             getattr(self, "history_window", None)
         )
         self._cancel_toggle_hotkey_capture()
+        self._cancel_hud_view_hotkey_capture()
         if self.history_filter_after_id is not None and self.history_window is not None:
             try:
                 self.history_window.after_cancel(self.history_filter_after_id)
@@ -60541,6 +61046,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self.settings_show_extraordinary_rating_var = None
         self.settings_team_rating_preview_var = None
         self.settings_boss_enrage_prediction_var = None
+        self.settings_auto_upload_combat_records_var = None
         self.settings_show_deaths_var = None
         self.settings_show_revives_var = None
         self.settings_show_death_duration_var = None
@@ -60557,6 +61063,9 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self.settings_hotkey_value_label = None
         self.settings_hotkey_status_label = None
         self.settings_hotkey_enabled_var = None
+        self.settings_hud_view_hotkey_value_label = None
+        self.settings_hud_view_hotkey_status_label = None
+        self.settings_hud_view_hotkey_enabled_var = None
         self.tray_history_hidden = False
         save_config(self.config)
         self._restore_main_after_backend_close()
@@ -62316,11 +62825,15 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             )
             if str(token or "").strip()
         }
+        pvp_context = self._pvp_equipment_context_active()
         pvp_members = {
             str(member.get("user_token", "") or "").strip(): dict(member)
             for member in self._pvp_equipment_members()
             if str(member.get("user_token", "") or "").strip()
         }
+        cached_profiles = getattr(worker, "team_profile_cache", {})
+        if not isinstance(cached_profiles, dict):
+            cached_profiles = {}
         members: list[dict[str, object]] = []
         member_tokens = sorted(self._current_team_equipment_tokens())
         recording = getattr(self, "pvp_recording", None)
@@ -62341,6 +62854,9 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             member_tokens.sort(key=lambda token: (token != local_token, token))
         for token in member_tokens:
             pvp_member = pvp_members.get(token, {})
+            cached_profile = cached_profiles.get(token, {})
+            if not isinstance(cached_profile, dict):
+                cached_profile = {}
             actor_id = int(
                 token_actors.get(token, 0)
                 or pvp_member.get("actor_id", 0)
@@ -62353,10 +62869,20 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             )
             if not name:
                 name = str(pvp_member.get("name", "") or "").strip()
+            if not name:
+                name = str(cached_profile.get("name", "") or "").strip()
+            actor_is_ai = getattr(model, "actor_is_ai", None)
             is_ai = (
-                pvp_bot_evidence({**pvp_member, "name": name})
-                if pvp_member else bool(
-                    actor_id and model.actor_is_ai(actor_id)
+                bool(pvp_member.get("is_ai"))
+                or pvp_bot_evidence({**pvp_member, "name": name})
+                or bool(
+                    actor_id
+                    and callable(actor_is_ai)
+                    and actor_is_ai(actor_id)
+                )
+                or (
+                    not pvp_context
+                    and name.endswith(PROJECTION_NAME_SUFFIX)
                 )
             )
             rating = normalize_extraordinary_rating(
@@ -62489,6 +63015,13 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             previous_rating = profile_ratings.get(token)
             if current_rating is None or current_rating == previous_rating:
                 continue
+            if current_rating == normalize_extraordinary_rating(
+                self.team_equipment_profiles[token].get("extraordinary_rating")
+            ):
+                # The shape response can already contain the rating that a
+                # later roster update restores. Keep that matching snapshot.
+                profile_ratings[token] = current_rating
+                continue
             self.team_equipment_profiles.pop(token, None)
             requested_tokens.discard(token)
             profile_ratings.pop(token, None)
@@ -62526,14 +63059,12 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         ]
         if not members_to_query:
             return False
-        # The game hook accepts at most MAX_TEAM_QUERY_TOKENS members per
-        # request.  Keep the HUD roster unbounded while submitting several
-        # bounded batches; only mark a member as requested after its own
-        # batch was accepted by the worker.
+        # PVE and PVP both query one player at a time. Keep the HUD roster
+        # unbounded and mark each member only after the worker accepts it.
         scheduled_any = False
-        for start in range(0, len(members_to_query), MAX_TEAM_QUERY_TOKENS):
+        for start in range(0, len(members_to_query), EQUIPMENT_QUERY_BATCH_SIZE):
             batch = members_to_query[
-                start : start + MAX_TEAM_QUERY_TOKENS
+                start : start + EQUIPMENT_QUERY_BATCH_SIZE
             ]
             try:
                 scheduled = bool(
@@ -62616,6 +63147,72 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             return False
         token = str(payload.get("user_token", "") or "").strip()
         name = str(payload.get("name", "") or "").strip()
+        actor_tokens = getattr(model, "actor_character_ids", {})
+        actor_id = next(
+            (
+                int(actor)
+                for actor, candidate in (
+                    actor_tokens.items()
+                    if isinstance(actor_tokens, dict)
+                    else ()
+                )
+                if str(candidate or "").strip() == token
+            ),
+            0,
+        )
+        pvp_context = self._pvp_equipment_context_active()
+        pvp_members = {
+            str(member.get("user_token", "") or "").strip(): dict(member)
+            for member in self._pvp_equipment_members()
+            if str(member.get("user_token", "") or "").strip()
+        }
+        pvp_member = pvp_members.get(token, {})
+        cached_profiles = getattr(worker, "team_profile_cache", {})
+        cached_profile = (
+            cached_profiles.get(token, {})
+            if isinstance(cached_profiles, dict)
+            else {}
+        )
+        if not isinstance(cached_profile, dict):
+            cached_profile = {}
+        known_name = (
+            name
+            or str(pvp_member.get("name", "") or "").strip()
+            or str(cached_profile.get("name", "") or "").strip()
+        )
+        actor_is_ai = getattr(model, "actor_is_ai", None)
+        is_ai = (
+            bool(pvp_member.get("is_ai"))
+            or pvp_bot_evidence({**pvp_member, "name": known_name})
+            or bool(
+                actor_id
+                and callable(actor_is_ai)
+                and actor_is_ai(actor_id)
+            )
+            or (
+                not pvp_context
+                and known_name.endswith(PROJECTION_NAME_SUFFIX)
+            )
+        )
+        if is_ai:
+            self.team_equipment_profiles.pop(token, None)
+            requested_tokens = getattr(
+                self, "team_equipment_requested_tokens", None
+            )
+            if isinstance(requested_tokens, set):
+                requested_tokens.discard(token)
+            for attribute in (
+                "team_equipment_profile_ratings",
+                "team_equipment_requested_ratings",
+                "team_equipment_requested_at",
+                "team_equipment_attempts",
+                "team_equipment_attempt_ratings",
+            ):
+                values = getattr(self, attribute, None)
+                if isinstance(values, dict):
+                    values.pop(token, None)
+            self._invalidate_team_rating_preview_rows(actor_id)
+            return False
         next_profile = {
             "user_token": token,
             "name": name,
@@ -62646,19 +63243,6 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self._queue_equipment_snapshot_upload(payload)
         previous_profile = self.team_equipment_profiles.get(token)
         self.team_equipment_profiles[token] = next_profile
-        actor_tokens = getattr(model, "actor_character_ids", {})
-        actor_id = next(
-            (
-                int(actor)
-                for actor, candidate in (
-                    actor_tokens.items()
-                    if isinstance(actor_tokens, dict)
-                    else ()
-                )
-                if str(candidate or "").strip() == token
-            ),
-            0,
-        )
         requested_ratings = getattr(
             self, "team_equipment_requested_ratings", None
         )
@@ -63504,6 +64088,28 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             return None
         now = time.time() if now is None else float(now)
         if state.get("kind") == "small_monsters":
+            if state.get("official_team_clock"):
+                snapshot_epoch = (
+                    int(state.get("last_snapshot_time_100ns", 0) or 0)
+                    - 116_444_736_000_000_000
+                ) / 10_000_000
+                endpoint = max(
+                    snapshot_epoch,
+                    now if state.get("active")
+                    else float(state.get("ended_at_epoch", 0.0) or 0.0),
+                )
+                return max(
+                    (
+                        self.model._live_dps_duration_for_snapshot(
+                            event_time=endpoint,
+                            server_time=counter["server_time"],
+                            combat_seconds_total=counter["combat_seconds_total"],
+                            fallback_duration=counter["duration"],
+                        )
+                        for counter in state.get("counter_states", {}).values()
+                    ),
+                    default=float(state.get("snapshot_duration", 0.0) or 0.0),
+                )
             try:
                 elapsed = max(
                     0.0, float(state.get("elapsed_seconds", 0.0) or 0.0)
@@ -63565,10 +64171,9 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 active_at,
             )
             current["ended_at_epoch"] = 0.0
-            # A resumed NPC edge can also be the next pull.  Do not let rows
-            # cached before that edge hide its delayed settlement while the
-            # new team snapshot is still pending.
-            current["rows"] = []
+            # Common counters can pause between small-monster waves. Keep the
+            # last complete team rows visible until the next snapshot replaces
+            # them; confirmed round/scene/Boss boundaries clear their own data.
             return True
 
         model = getattr(self, "model", None)
@@ -63659,12 +64264,12 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         return True
 
     def _ingest_live_hud_team_stat(self, payload: object) -> bool:
-        """Project one complete team snapshot into the live Boss segment only."""
+        """Keep official Common counters and their own clocks together."""
 
         segment = self._main_live_hud_dps_segment_state()
         if (
             not isinstance(segment, dict)
-            or segment.get("kind") != "boss"
+            or segment.get("kind") not in {"boss", "small_monsters"}
             or not isinstance(payload, dict)
             or not payload.get("full_snapshot")
         ):
@@ -63676,6 +64281,9 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 0, int(payload.get("absolute_damage", 0) or 0)
             )
             server_time = max(0, int(payload.get("server_time", 0) or 0))
+            combat_seconds_total = max(
+                0, int(payload.get("combat_seconds_total", 0) or 0)
+            )
         except (TypeError, ValueError, OverflowError):
             return False
         token = str(payload.get("user_token", "") or "").strip()[:128]
@@ -63720,6 +64328,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             absolute_damage,
             server_time,
             bool(payload.get("omitted_zero")),
+            combat_seconds_total,
         )
         if not snapshot_tokens.issubset(pending_rows):
             return False
@@ -63730,7 +64339,41 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         started_at = float(segment.get("started_at_epoch", 0.0) or 0.0)
         if snapshot_epoch < started_at:
             return False
-        duration = dps_duration_seconds(snapshot_epoch - started_at)
+        duration = max(1.0, dps_duration_seconds(snapshot_epoch - started_at))
+        duration_reader = getattr(
+            self.model, "_live_dps_duration_for_snapshot", None
+        )
+        clock_offset = getattr(self.model, "server_clock_offset_seconds", None)
+        official_durations: dict[str, float] = {}
+        if callable(duration_reader):
+            for member_token in snapshot_tokens:
+                _actor, _damage, member_start, _omitted, member_seconds = (
+                    pending_rows[member_token]
+                )
+                if member_start and clock_offset is None:
+                    continue
+                member_duration = duration_reader(
+                    event_time=snapshot_epoch,
+                    server_time=member_start,
+                    combat_seconds_total=member_seconds,
+                    fallback_duration=0.0,
+                )
+                if member_duration > 0:
+                    official_durations[member_token] = member_duration
+        official_clock = bool(
+            official_durations
+            and all(
+                token in official_durations or pending_rows[token][1] == 0
+                for token in snapshot_tokens
+            )
+        )
+        if not official_clock and (
+            segment.get("kind") == "small_monsters"
+            or segment.get("official_team_clock")
+        ):
+            return False
+        if official_clock:
+            duration = max(official_durations.values())
         raw_baselines = segment.get("raw_baseline_states", {})
         if not isinstance(raw_baselines, dict):
             raw_baselines = {}
@@ -63739,9 +64382,9 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             counter_states = {}
 
         projected: list[tuple[int, int, float]] = []
-        next_counter_states: dict[str, dict[str, int]] = {}
+        next_counter_states: dict[str, dict[str, int | float]] = {}
         for member_token in snapshot_tokens:
-            member_actor, raw_damage, member_server_time, omitted_zero = (
+            member_actor, raw_damage, member_server_time, omitted_zero, member_seconds = (
                 pending_rows[member_token]
             )
             previous = counter_states.get(member_token)
@@ -63769,7 +64412,13 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                     or member_server_time == previous_server_time
                 ):
                     raw_damage = previous_absolute
-            if isinstance(previous, dict):
+            member_duration = official_durations.get(member_token, duration)
+            if official_clock:
+                # Daily dungeons can keep trash damage when a Boss starts;
+                # raids can reset it. The server clock describes that same
+                # counter's scope in either case, independently per member.
+                damage = raw_damage
+            elif isinstance(previous, dict):
                 previous_absolute = int(previous.get("last_absolute", 0) or 0)
                 damage = max(0, int(previous.get("damage", 0) or 0))
                 damage += (
@@ -63789,8 +64438,10 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 "last_absolute": int(raw_damage),
                 "server_time": int(member_server_time),
                 "damage": damage,
+                "combat_seconds_total": int(member_seconds),
+                "duration": member_duration,
             }
-            projected.append((int(member_actor), damage, damage / duration))
+            projected.append((int(member_actor), damage, damage / member_duration))
 
         friend_order = [
             int(actor)
@@ -63843,6 +64494,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         segment["last_snapshot_time_100ns"] = timestamp
         segment["snapshot_duration"] = duration
         segment["team_snapshot_projection_started"] = True
+        segment["official_team_clock"] = official_clock
         segment["rows"] = rows
         return True
 
@@ -63884,12 +64536,17 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         try:
             entity_id = int(state.get("entity_id", 0) or 0)
             template_id = int(state.get("template_id", 0) or 0)
+            boss_type = int(state.get("boss_type", 0) or 0)
             started_at = float(state.get("started_at_epoch", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
             return None
         if (
             not entity_id
-            or template_id not in LIVE_HUD_BOSS_ALIASES
+            or template_id <= 0
+            or (
+                boss_type != 3
+                and template_id not in LIVE_HUD_BOSS_ALIASES
+            )
             or not math.isfinite(started_at)
             or started_at <= 0
         ):
@@ -63931,8 +64588,11 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 if isinstance(row, dict)
             ]
             if (
-                segment.get("kind") == "boss"
-                and segment.get("team_snapshot_projection_started")
+                segment.get("team_snapshot_projection_started")
+                and (
+                    segment.get("kind") == "boss"
+                    or segment.get("official_team_clock")
+                )
             ):
                 return cached_rows
             server_duration = 0.0
@@ -64967,7 +65627,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                     canvas,
                     width // 2,
                     top + row_height // 2,
-                    text=str(row.get("section_text") or "最近战斗记录"),
+                    text=str(row.get("section_text") or "实时战斗/战斗记录"),
                     fill="#a6bbcf",
                     outline="#071019",
                     outline_width=max(1, self._main_px(1)),
@@ -66711,12 +67371,27 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 # actually change.
                 self.capture_transport_resyncing = True
         elif kind == "event":
+            adapter = getattr(self, "settlement_history_adapter", None)
+            if adapter is not None:
+                adapter.observe_detail(kind, payload)
             self._ingest_combat_event(payload)
         elif kind == "skill_cast":
+            adapter = getattr(self, "settlement_history_adapter", None)
+            if adapter is not None:
+                adapter.observe_detail(kind, payload)
             self.model.ingest_skill_cast(payload)
         elif kind == "boss_damage_event":
             self.model.ingest_boss_damage(payload)
+        elif kind == "boss_health_observation":
+            controller = getattr(self, "settlement_ui", None)
+            if controller is not None and controller.observe_boss_health(payload):
+                adapter = getattr(self, "settlement_history_adapter", None)
+                if adapter is not None:
+                    self._sync_settlement_history_for_upload(adapter, controller.tracker)
         elif kind == "heal":
+            adapter = getattr(self, "settlement_history_adapter", None)
+            if adapter is not None:
+                adapter.observe_detail(kind, payload)
             if pvp_recording is not None:
                 tracker_before = pvp_recording.display_tracker.generation
                 pvp_recording.ingest_update("heal", payload)
@@ -66961,6 +67636,13 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             self.restore_window_from_tray()
         elif kind == "hotkey_toggle_visibility":
             self.toggle_application_visibility()
+        elif kind == "hotkey_toggle_hud_view":
+            if (
+                getattr(self, "hud_view_hotkey_enabled", False)
+                and getattr(self, "hud_view_hotkey_registered", False)
+                and not getattr(self, "hud_view_hotkey_capture_active", False)
+            ):
+                self._toggle_hud_content_view()
         elif kind == "hotkey_unlock_window":
             tray = getattr(self, "tray_icon", None)
             if (
@@ -68591,6 +69273,9 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self.config[SHOW_PVP_BUTTON_CONFIG_KEY] = bool(
             getattr(self, "show_pvp_button", True)
         )
+        self.config[AUTO_UPLOAD_COMBAT_RECORDS_CONFIG_KEY] = bool(
+            getattr(self, "auto_upload_combat_records_enabled", True)
+        )
         self.config[HISTORY_SHOW_INCOMPLETE_CONFIG_KEY] = bool(
             getattr(self, "history_show_incomplete", False)
         )
@@ -68602,6 +69287,12 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         )
         self.config[LOCK_TOGGLE_HOTKEY_ENABLED_CONFIG_KEY] = bool(
             getattr(self, "lock_toggle_hotkey_enabled", False)
+        )
+        self.config[HUD_VIEW_HOTKEY_CONFIG_KEY] = str(
+            getattr(self, "hud_view_hotkey", "") or ""
+        )
+        self.config[HUD_VIEW_HOTKEY_ENABLED_CONFIG_KEY] = bool(
+            getattr(self, "hud_view_hotkey_enabled", False)
         )
         self.config[BOSS_ENRAGE_PREDICTION_CONFIG_KEY] = bool(
             getattr(self, "boss_enrage_prediction_enabled", True)

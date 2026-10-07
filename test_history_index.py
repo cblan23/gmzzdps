@@ -868,6 +868,39 @@ class HistoryIndexTests(unittest.TestCase):
         )
         self.assertTrue(all(row["source"] == "live_display_team_dps" for row in timeline))
 
+    def test_displayed_team_dps_samples_must_match_final_team_dps_scale(self):
+        record = self.record("battle-invalid-live-display-team-dps")
+        record["team_dps"] = 250_000
+        record["duration_seconds"] = 4
+        record["dps_duration_seconds"] = 4
+        record["display_team_dps_samples"] = {
+            "coverage": "live_display_team_dps",
+            "rows": [[0, 100], [1, 220], [2, 180], [4, 260]],
+        }
+
+        self.assertEqual(rebuild_team_dps_timeline(record), [])
+
+    def test_complete_events_take_priority_over_displayed_team_dps(self):
+        record = self.record("battle-events-before-live-display")
+        record["total_damage"] = 1_200
+        record["team_dps"] = 120
+        record["event_log"] = {
+            "version": 1,
+            "rows": [
+                [0, 1, 99, 10, 100, None, None],
+                [1_000, 2, 99, 20, 900, None, None],
+                [10_000, 1, 99, 10, 200, None, None],
+            ],
+        }
+        record["display_team_dps_samples"] = {
+            "coverage": "live_display_team_dps",
+            "rows": [[0, 120], [1, 130], [10, 100]],
+        }
+
+        timeline = rebuild_team_dps_timeline(record)
+
+        self.assertTrue(all(row["source"] == "complete_damage_events" for row in timeline))
+
     def test_participant_cumulative_samples_rebuild_every_player_timeline(self):
         record = self.record("battle-participant-timelines")
         record["duration_seconds"] = 3

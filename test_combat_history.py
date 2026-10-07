@@ -168,6 +168,73 @@ class CombatHistoryStoreTests(unittest.TestCase):
         )
         self.assertEqual(source["boss_damage"]["event_log"]["rows"][0][0], 1000)
 
+    def test_rebase_discards_casts_outside_the_corrected_combat_window(self):
+        source = {
+            **record("cast-window"),
+            "started_at_epoch": 1000.0,
+            "duration_seconds": 10.0,
+            "skill_cast_log": {
+                "origin_started_at_epoch": 1000.0,
+                "columns": ["time_ms", "actor_id", "skill_id", "sequence"],
+                "rows": [
+                    [500, 20, 86_021_010, 1],
+                    [2500, 20, 86_021_020, 2],
+                    [9500, 20, 86_021_030, 3],
+                ],
+            },
+        }
+
+        rebased = rebase_relative_combat_logs(
+            source,
+            started_at_epoch=1002.0,
+            duration_seconds=6.0,
+        )
+
+        self.assertEqual(
+            rebased["skill_cast_log"]["rows"],
+            [[500, 20, 86_021_020, 2]],
+        )
+        self.assertEqual(source["skill_cast_log"]["rows"][0][0], 500)
+
+    def test_rebase_discards_hits_outside_the_corrected_combat_window(self):
+        source = {
+            **record("hit-window"),
+            "started_at_epoch": 1000.0,
+            "duration_seconds": 10.0,
+            "event_log": {
+                "origin_started_at_epoch": 1000.0,
+                "columns": ["time_ms", "actor_id", "damage"],
+                "rows": [[500, 20, 100], [2500, 20, 200], [9500, 20, 300]],
+            },
+            "boss_damage": {
+                "event_log": {
+                    "origin_started_at_epoch": 1000.0,
+                    "columns": ["time_ms", "source_id", "damage"],
+                    "rows": [[500, 30, 100], [2500, 30, 200], [9500, 30, 300]],
+                },
+                "death_event_log": {
+                    "origin_started_at_epoch": 1000.0,
+                    "columns": ["time_ms", "actor_id"],
+                    "rows": [[500, 20], [2500, 20], [9500, 20]],
+                },
+            },
+        }
+
+        rebased = rebase_relative_combat_logs(
+            source,
+            started_at_epoch=1002.0,
+            duration_seconds=6.0,
+        )
+
+        self.assertEqual(rebased["event_log"]["rows"], [[500, 20, 200]])
+        self.assertEqual(
+            rebased["boss_damage"]["event_log"]["rows"], [[500, 30, 200]]
+        )
+        self.assertEqual(
+            rebased["boss_damage"]["death_event_log"]["rows"], [[500, 20]]
+        )
+        self.assertEqual(source["event_log"]["rows"][0][0], 500)
+
     def test_save_load_favorite_and_delete(self):
         path = self.store.save(record("encounter-1"))
         self.assertTrue(path.is_file())

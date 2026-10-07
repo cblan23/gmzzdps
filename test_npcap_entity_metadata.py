@@ -159,6 +159,91 @@ class EntityMetadataTests(unittest.TestCase):
         self.assertEqual(updates[0]['template_id'], 7114225)
         self.assertEqual(reader.poll(), [])
 
+    def test_fallback_requests_do_not_expand_one_pending_scan(self):
+        reader = object.__new__(PassiveEntityMetadataReader)
+        reader.pending = {}
+        reader.pending_modes = {}
+        reader.resolved = set()
+        reader.components = {}
+        reader.signatures = {}
+        reader.checked_at = {}
+        reader.ready = []
+        reader.iterator = None
+        reader.scan_targets = set()
+        reader.retry_at = 0.0
+        reader.next_poll_at = 0.0
+        reader.unresolved_retry_at = {}
+        reader.counters = Counter()
+
+        reader.request(111, 1, discovery="fallback")
+        reader.request(222, 2, discovery="fallback")
+
+        self.assertEqual(set(reader.pending), {111})
+        self.assertEqual(reader.pending_modes, {111: "fallback"})
+        self.assertEqual(reader.counters["metadata_fallback_suppressed"], 1)
+
+    def test_preferred_request_replaces_fallback_scan(self):
+        reader = object.__new__(PassiveEntityMetadataReader)
+        reader.pending = {111: (1, time.monotonic())}
+        reader.pending_modes = {111: "fallback"}
+        reader.resolved = set()
+        reader.components = {}
+        reader.signatures = {}
+        reader.checked_at = {}
+        reader.ready = []
+        reader.iterator = iter((0x1000,))
+        reader.scan_targets = {111}
+        reader.retry_at = 10.0
+        reader.next_poll_at = 10.0
+        reader.unresolved_retry_at = {222: 20.0}
+        reader.counters = Counter()
+
+        reader.request(222, 2, discovery="preferred")
+
+        self.assertEqual(set(reader.pending), {222})
+        self.assertEqual(reader.pending_modes, {222: "preferred"})
+        self.assertIsNone(reader.iterator)
+        self.assertFalse(reader.scan_targets)
+        self.assertEqual(reader.retry_at, 0.0)
+        self.assertEqual(reader.next_poll_at, 0.0)
+        self.assertNotIn(222, reader.unresolved_retry_at)
+        self.assertEqual(reader.counters["metadata_fallback_replaced"], 1)
+        self.assertEqual(
+            reader.counters["metadata_scan_restarts_for_preferred"], 1
+        )
+
+    def test_scan_stops_as_soon_as_only_target_is_resolved(self):
+        reader = object.__new__(PassiveEntityMetadataReader)
+        reader.base, reader.size = 0x1000, 0x1000
+        reader.templates = {'7114223': {}}
+        reader.pending = {12345: (123456, time.monotonic())}
+        reader.pending_modes = {12345: "preferred"}
+        reader.resolved = set()
+        reader.components = {}
+        reader.signatures = {}
+        reader.checked_at = {}
+        reader.ready = []
+        reader.iterator = iter((0x4000, 0x5000))
+        reader.scan_targets = {12345}
+        reader.retry_at = 0.0
+        reader.next_poll_at = 0.0
+        reader.unresolved_retry_at = {}
+        reader.counters = Counter()
+        raw = self.raw()
+        reader._read = lambda address, _length: raw if address == 0x4000 else None
+
+        updates = reader.poll(budget_seconds=1.0, max_objects=10)
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]['entity_id'], 12345)
+        self.assertIsNone(reader.iterator)
+        self.assertFalse(reader.pending)
+        self.assertFalse(reader.scan_targets)
+        self.assertEqual(reader.counters['metadata_objects_read'], 1)
+        self.assertEqual(
+            reader.counters['metadata_scans_stopped_after_resolve'], 1
+        )
+
 
 class TeamProfilePollerTests(unittest.TestCase):
     def test_default_interval_refreshes_within_one_second(self):
@@ -499,6 +584,7 @@ class LiveTeamProfileReaderTests(unittest.TestCase):
                     context = reader.current_encounter_context()
 
                 self.assertEqual(context["dungeon_id"], 5_100_064)
+                self.assertEqual(context["lua_state_address"], 0x100)
                 self.assertEqual(context["map_id"], 5_200_224)
                 self.assertIs(context["in_dungeon"], True)
                 self.assertEqual(context["brass_tome_status"], expected_status)
@@ -568,6 +654,39 @@ class LiveTeamProfileReaderTests(unittest.TestCase):
             [member["user_token"] for member in roster["members"]],
             [self_token, peer_token],
         )
+        self.assertEqual(roster["lua_state_address"], 0x100)
+
+    def test_reader_seeds_only_bounded_lua_state_hints(self):
+        with patch("runtime_metadata.find_module", return_value=(1, 1, "game.exe")), patch.object(
+            RuntimeMetadataReader, "__init__", return_value=None
+        ):
+            for hint, expected in ((0x1394E0380, 0x1394E0380), (-1, 0), (1 << 48, 0)):
+                with self.subTest(hint=hint):
+                    reader = LiveTeamProfileReader(123, lua_state_hint=hint)
+                    self.assertEqual(reader.profile_lua_state, expected)
+
+    def test_validated_lua_state_hint_skips_heap_discovery(self):
+        reader = object.__new__(LiveTeamProfileReader)
+        reader.profile_lua_state = 0x1394E0380
+        reader._lua_global = Mock(return_value=0x1394E0400)
+        reader._discover_role_key = Mock()
+        reader._scan_range = Mock()
+
+        self.assertEqual(reader._discover_profile_lua_state(), 0x1394E0380)
+        reader._lua_global.assert_called_once_with(0x1394E0380)
+        reader._discover_role_key.assert_not_called()
+        reader._scan_range.assert_not_called()
+
+    def test_invalid_lua_state_hint_falls_back_to_discovery(self):
+        reader = object.__new__(LiveTeamProfileReader)
+        reader.profile_lua_state = 0x100
+        reader._lua_global = Mock(side_effect=lambda state: 0x200 if state == 0xFE410380 else 0)
+        reader._discover_role_key = Mock(return_value=True)
+        reader._scan_range = Mock(return_value=iter((0xFE410389,)))
+
+        self.assertEqual(reader._discover_profile_lua_state(), 0xFE410380)
+        self.assertEqual(reader.profile_lua_state, 0xFE410380)
+        reader._discover_role_key.assert_called_once_with()
 
     def test_profile_lua_state_checks_observed_32bit_band_first(self):
         reader = object.__new__(LiveTeamProfileReader)

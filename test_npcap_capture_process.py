@@ -28,6 +28,7 @@ from npcap_capture_process import (
     _capture_forever,
     _bootstrap_initial_state,
     _locate_hinted_state_readers,
+    _request_entity_metadata,
     _wait_for_new_connection,
     live_team_profile_tokens,
     _protocol_stream_stalled,
@@ -161,6 +162,60 @@ class LiveTeamProfileTokenTests(unittest.TestCase):
 
     def test_current_hp_can_recover_entity_metadata_after_transport_resync(self):
         self.assertIn("OnMsgSyncCurrentHp", ENTITY_METADATA_SIGNAL_METHODS)
+
+    def test_player_cast_target_is_preferred_metadata_candidate(self):
+        reader = Mock()
+
+        _request_entity_metadata(reader, {
+            "method": "OnMsgCastSkillNew",
+            "decoded_arguments": [86_061_010, 57_443_577_120_075],
+            "filetime_100ns": 123,
+        })
+
+        reader.request.assert_called_once_with(
+            57_443_577_120_075, 123, discovery="preferred"
+        )
+
+    def test_boss_cast_and_beaten_target_do_not_seed_metadata_scan(self):
+        reader = Mock()
+
+        _request_entity_metadata(reader, {
+            "method": "OnMsgCastSkillNew",
+            "decoded_arguments": [88_015_101, 57_443_577_120_079],
+            "filetime_100ns": 123,
+        })
+        _request_entity_metadata(reader, {
+            "method": "OnMsgBeatenSyncV2",
+            "decoded_arguments": [57_284_129_032_273, 57_443_577_120_079],
+            "filetime_100ns": 124,
+        })
+
+        reader.request.assert_not_called()
+
+    def test_hp_and_heal_targets_are_single_scan_fallbacks(self):
+        reader = Mock()
+
+        _request_entity_metadata(reader, {
+            "method": "OnMsgSyncCurrentHp",
+            "network_entity_id": 57_443_577_120_075,
+            "decoded_arguments": [149_720_213.0],
+            "filetime_100ns": 123,
+        })
+        _request_entity_metadata(reader, {
+            "method": "OnMsgHealSyncV2",
+            "decoded_arguments": [
+                57_284_129_032_273, 57_443_577_120_079, 800_200_042,
+            ],
+            "filetime_100ns": 124,
+        })
+
+        self.assertEqual(reader.request.call_count, 2)
+        reader.request.assert_any_call(
+            57_443_577_120_075, 123, discovery="fallback"
+        )
+        reader.request.assert_any_call(
+            57_443_577_120_079, 124, discovery="fallback"
+        )
 
 
 class InitialBootstrapRetryTests(unittest.TestCase):

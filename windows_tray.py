@@ -55,6 +55,8 @@ HOTKEY_ID_PRIMARY = 1
 HOTKEY_ID_SECONDARY = 2
 HOTKEY_ID_UNLOCK_PRIMARY = 5
 HOTKEY_ID_UNLOCK_SECONDARY = 6
+HOTKEY_ID_HUD_VIEW_PRIMARY = 7
+HOTKEY_ID_HUD_VIEW_SECONDARY = 8
 MOD_NOREPEAT = 0x4000
 
 
@@ -249,6 +251,8 @@ class WindowsTrayIcon:
         self._hotkey: tuple[int, int] = (0, 0)
         self._unlock_hotkey = (0, 0)
         self._unlock_hotkey_id = 0
+        self._hud_view_hotkey = (0, 0)
+        self._hud_view_hotkey_id = 0
 
     def _emit(self, action: str) -> None:
         try:
@@ -341,6 +345,8 @@ class WindowsTrayIcon:
                 try:
                     if action == 'unlock':
                         applied = self._apply_unlock_hotkey(modifiers, virtual_key)
+                    elif action == 'hud_view':
+                        applied = self._apply_hud_view_hotkey(modifiers, virtual_key)
                     else:
                         applied = self._apply_hotkey(modifiers, virtual_key)
                     result.append(applied)
@@ -348,6 +354,9 @@ class WindowsTrayIcon:
                     completed.set()
 
     def _window_proc(self, hwnd, message, wparam, lparam):
+        if message == WM_HOTKEY and getattr(self, '_hud_view_hotkey_id', 0) and int(wparam) == self._hud_view_hotkey_id:
+            self._emit('hotkey_toggle_hud_view')
+            return 0
         if message == WM_HOTKEY and getattr(self, '_unlock_hotkey_id', 0) and int(wparam) == self._unlock_hotkey_id:
             self._emit('hotkey_unlock_window')
             return 0
@@ -447,6 +456,8 @@ class WindowsTrayIcon:
             self._error = exc
             self._ready.set()
         finally:
+            if getattr(self, '_hud_view_hotkey_id', 0) and self.hwnd:
+                user32.UnregisterHotKey(self.hwnd, self._hud_view_hotkey_id)
             if getattr(self, '_unlock_hotkey_id', 0) and self.hwnd:
                 user32.UnregisterHotKey(self.hwnd, self._unlock_hotkey_id)
             if self._active_hotkey_id and self.hwnd:
@@ -478,7 +489,7 @@ class WindowsTrayIcon:
     def set_hotkey(self, modifiers: int, virtual_key: int, *, action='toggle') -> bool:
         """Register a replacement global hotkey without dropping a valid one."""
 
-        if action not in {'toggle', 'unlock'}:
+        if action not in {'toggle', 'unlock', 'hud_view'}:
             return False
         if not modifiers and not virtual_key and not self.alive:
             return True
@@ -487,6 +498,8 @@ class WindowsTrayIcon:
         if threading.current_thread() is self._thread:
             if action == 'unlock':
                 return self._apply_unlock_hotkey(modifiers, virtual_key)
+            if action == 'hud_view':
+                return self._apply_hud_view_hotkey(modifiers, virtual_key)
             return self._apply_hotkey(modifiers, virtual_key)
         completed = threading.Event()
         result: list[bool] = []
@@ -530,6 +543,30 @@ class WindowsTrayIcon:
         if old:
             user32.UnregisterHotKey(self.hwnd, old)
         self._unlock_hotkey_id, self._unlock_hotkey = candidate, requested
+        return True
+
+    def _apply_hud_view_hotkey(self, modifiers: int, virtual_key: int) -> bool:
+        requested = (int(modifiers), int(virtual_key))
+        if requested == getattr(self, '_hud_view_hotkey', (0, 0)):
+            return True
+        old = getattr(self, '_hud_view_hotkey_id', 0)
+        if not virtual_key:
+            if old:
+                user32.UnregisterHotKey(self.hwnd, old)
+            self._hud_view_hotkey_id, self._hud_view_hotkey = 0, (0, 0)
+            return True
+        candidate = (
+            HOTKEY_ID_HUD_VIEW_SECONDARY
+            if old == HOTKEY_ID_HUD_VIEW_PRIMARY
+            else HOTKEY_ID_HUD_VIEW_PRIMARY
+        )
+        if not user32.RegisterHotKey(
+            self.hwnd, candidate, int(modifiers) | MOD_NOREPEAT, int(virtual_key)
+        ):
+            return False
+        if old:
+            user32.UnregisterHotKey(self.hwnd, old)
+        self._hud_view_hotkey_id, self._hud_view_hotkey = candidate, requested
         return True
 
     def stop(self) -> None:

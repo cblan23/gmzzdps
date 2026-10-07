@@ -1871,6 +1871,30 @@ class PvpRecordingBoundaryTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_disabled_upload_keeps_local_outbox_until_reenabled(self):
+        self.controller.ingest_scene(self.scene(next(iter(RECORDABLE_MAPS)), 1))
+        payload = self.controller.stop(BASE_NS + 3_000_000_000)
+        enabled = [False]
+        request = Mock(
+            return_value={"ok": True, "match_id": payload["match_id"]}
+        )
+        worker = PvpUploadWorker(
+            self.repository,
+            request,
+            lambda: "account-a",
+            enabled=lambda: enabled[0],
+        )
+        worker.bind_request("account-a", request)
+
+        self.assertFalse(worker.attempt_one(0))
+        request.assert_not_called()
+        self.assertIsNotNone(self.repository.due("account-a", 0))
+
+        enabled[0] = True
+        self.assertTrue(worker.attempt_one(0))
+        request.assert_called_once()
+        self.assertIsNone(self.repository.due("account-a", 0))
+
     def test_account_bound_upload_never_uses_new_accounts_session(self):
         self.controller.ingest_scene(self.scene(next(iter(RECORDABLE_MAPS)), 1))
         payload = self.controller.stop(BASE_NS + 3_000_000_000)

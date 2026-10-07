@@ -153,6 +153,171 @@ DUNGEON_DIFFICULTIES = {
     5_100_099: "normal",
 }
 
+# DungeonData.CustomType is the authoritative grouping used by the public
+# ranking filters: 1=party, 2=raid, 3=daily, 5=family.  Keep both normal and
+# alternate-difficulty dungeon/stage IDs under the same visible dungeon.
+PUBLIC_DUNGEON_CATEGORIES: tuple[dict[str, object], ...] = (
+    {
+        "key": "party",
+        "name": "队本",
+        "dungeons": (
+            {
+                "key": "antigonus-notes",
+                "name": "安提哥努斯笔记",
+                "dungeon_ids": (5_100_040, 5_100_044),
+                "stage_ids": (5_150_038, 5_150_039, 5_150_040, 5_150_047, 5_150_048, 5_150_049),
+            },
+            {
+                "key": "abundant-tree",
+                "name": "丰饶之树",
+                "dungeon_ids": (5_100_052, 5_100_053),
+                "stage_ids": (5_150_070, 5_150_071, 5_150_072, 5_150_073, 5_150_074, 5_150_075),
+            },
+        ),
+    },
+    {
+        "key": "raid",
+        "name": "团本",
+        "dungeons": (
+            {
+                "key": "may-manor-garden",
+                "name": "五月庄园·花园",
+                "dungeon_ids": (5_100_045, 5_100_054),
+                "stage_ids": (5_150_050, 5_150_051, 5_150_052, 5_150_058, 5_150_059, 5_150_060),
+            },
+            {
+                "key": "may-manor-castle",
+                "name": "五月庄园·城堡",
+                "dungeon_ids": (5_100_047, 5_100_055),
+                "stage_ids": (5_150_053, 5_150_054, 5_150_055, 5_150_061, 5_150_062, 5_150_063),
+                "boss_order": ("子嗣守护", "安西娅", "子爵夫人"),
+            },
+            {
+                "key": "emperor-returns",
+                "name": "大帝重临",
+                "dungeon_ids": (5_100_064, 5_100_065),
+                "stage_ids": (5_150_095, 5_150_096, 5_150_113, 5_150_114),
+                "aliases": ("罗塞尔单BOSS团本-普通", "罗塞尔单BOSS团本-史诗"),
+            },
+        ),
+    },
+    {
+        "key": "family",
+        "name": "家族",
+        "dungeons": (
+            {
+                "key": "memory-johnny",
+                "name": "记忆的传承·强尼",
+                "dungeon_ids": (5_100_066, 5_100_070),
+                "stage_ids": (5_150_103, 5_150_107),
+                "boss_name": "强尼",
+            },
+            {
+                "key": "memory-fire-dragon",
+                "name": "记忆的传承·火龙",
+                "dungeon_ids": (5_100_067, 5_100_071, 5_100_074),
+                "stage_ids": (5_150_104, 5_150_108, 5_150_111),
+                "boss_name": "战争巨龙",
+            },
+            {
+                "key": "memory-bunny",
+                "name": "记忆的传承·邦尼",
+                "dungeon_ids": (5_100_068, 5_100_072),
+                "stage_ids": (5_150_105, 5_150_109),
+                "boss_name": "邦尼",
+            },
+            {
+                "key": "memory-drill",
+                "name": "记忆的传承·钻头",
+                "dungeon_ids": (5_100_069, 5_100_073),
+                "stage_ids": (5_150_106, 5_150_110),
+                "boss_name": "钻头",
+            },
+        ),
+    },
+    {
+        "key": "daily",
+        "name": "日常",
+        "dungeons": (
+            {
+                "key": "night-watch",
+                "name": "值夜模式",
+                "dungeon_ids": (5_100_003,),
+                "stage_ids": (5_150_002,),
+            },
+            {
+                "key": "special-duty",
+                "name": "特别执勤",
+                "dungeon_ids": (5_100_014,),
+                "stage_ids": (),
+            },
+        ),
+    },
+)
+
+PUBLIC_DUNGEONS_BY_KEY: dict[str, dict[str, object]] = {}
+PUBLIC_DUNGEONS_BY_ID: dict[int, dict[str, object]] = {}
+PUBLIC_DUNGEONS_BY_STAGE: dict[int, dict[str, object]] = {}
+PUBLIC_DUNGEONS_BY_ALIAS: dict[str, dict[str, object]] = {}
+for _category in PUBLIC_DUNGEON_CATEGORIES:
+    for _dungeon in _category["dungeons"]:
+        _entry = {
+            **_dungeon,
+            "category": str(_category["key"]),
+            "category_name": str(_category["name"]),
+        }
+        PUBLIC_DUNGEONS_BY_KEY[str(_dungeon["key"])] = _entry
+        for _dungeon_id in _dungeon["dungeon_ids"]:
+            PUBLIC_DUNGEONS_BY_ID[int(_dungeon_id)] = _entry
+        for _stage_id in _dungeon["stage_ids"]:
+            PUBLIC_DUNGEONS_BY_STAGE[int(_stage_id)] = _entry
+        for _alias in (str(_dungeon["name"]), *_dungeon.get("aliases", ())):
+            PUBLIC_DUNGEONS_BY_ALIAS[_alias.casefold()] = _entry
+
+PUBLIC_BOSS_NAME_GROUPS: dict[str, tuple[str, ...]] = {
+    "先祖铠甲": ("先祖铠甲", "伯德温·威瑟尔", "伯德温"),
+    "安西娅": ("安西娅", "巴尼先生"),
+    "子爵夫人": ("子爵夫人", "子爵夫人-神话姿态"),
+    "瑞尔比伯": ("瑞尔比伯", "瑞尔·比伯", "周本-瑞尔比伯", "英雄周本-瑞尔比伯"),
+    "强尼": ("强尼", '"剥面人" 强尼', "“剥面人” 强尼", "剥面人·强尼"),
+    "钻头": ("钻头", '"钻头"', "“钻头”", "”钻头“"),
+}
+PUBLIC_BOSS_CANONICAL_NAMES = {
+    alias.casefold(): canonical
+    for canonical, aliases in PUBLIC_BOSS_NAME_GROUPS.items()
+    for alias in aliases
+}
+PUBLIC_BOSS_DUNGEON_OVERRIDES = {
+    "子嗣守护": "may-manor-castle",
+    "安西娅": "may-manor-castle",
+    "子爵夫人": "may-manor-castle",
+    "先祖铠甲": "may-manor-garden",
+    "异化猎犬": "may-manor-garden",
+    "厄水巨龟": "abundant-tree",
+    "巨龟": "abundant-tree",
+    "瑞尔比伯": "antigonus-notes",
+}
+PUBLIC_DIRTY_BOSS_NAMES = frozenset({"亵渎魔女"})
+PUBLIC_HIDDEN_BOSS_NAMES = frozenset({"斯蒂姆之心"})
+
+
+def _public_canonical_boss_name(value: object) -> str:
+    name = _safe_text(value, 96).strip()
+    return PUBLIC_BOSS_CANONICAL_NAMES.get(name.casefold(), name)
+
+
+def _public_boss_aliases(value: object) -> tuple[str, ...]:
+    canonical = _public_canonical_boss_name(value)
+    return PUBLIC_BOSS_NAME_GROUPS.get(canonical, (canonical,))
+
+
+def _public_boss_is_dirty(value: object) -> bool:
+    return _public_canonical_boss_name(value) in PUBLIC_DIRTY_BOSS_NAMES
+
+
+def _public_boss_is_hidden(value: object) -> bool:
+    return _public_canonical_boss_name(value) in PUBLIC_HIDDEN_BOSS_NAMES
+
 PUBLIC_PERFORMANCE_BOSSES: dict[str, dict[str, object]] = {
     "drill": {
         "name": "钻头",
@@ -174,8 +339,21 @@ PUBLIC_PERFORMANCE_SORTS = frozenset(
 PUBLIC_NO_PROJECTION_SQL = """NOT EXISTS (
     SELECT 1 FROM encounter_participants projection
     WHERE projection.encounter_id=e.encounter_id
-      AND (projection.is_ai=1 OR projection.public_character_name LIKE '%·投影')
+      AND projection.public_character_name LIKE '%·投影'
 )"""
+PUBLIC_COMPETITIVE_ENCOUNTER_SQL = """NOT EXISTS (
+    SELECT 1 FROM encounter_participants participant
+    WHERE participant.encounter_id=e.encounter_id
+      AND (participant.is_ai=1 OR participant.public_character_name LIKE '%·投影')
+)"""
+PUBLIC_RANKING_ENTRY_COUNT_SQL = f"""CASE WHEN {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}
+    THEN (SELECT COUNT(*) FROM uploads ranked_upload
+        JOIN encounter_participants ranked_participant
+            ON ranked_participant.encounter_id=ranked_upload.encounter_id
+            AND ranked_participant.character_hash=ranked_upload.uploader_character_hash
+        WHERE ranked_upload.encounter_id=e.encounter_id
+            AND ranked_upload.ranking_status='eligible')
+    ELSE 0 END"""
 
 
 PROFILE_ERROR_MESSAGES = {
@@ -194,7 +372,7 @@ PROFILE_ERROR_MESSAGES = {
     "LINK_CODE_USED": "角色关联码已经使用，请重新生成。",
     "BAD_ENCOUNTER": "战斗记录格式不完整，无法上传。",
     "UPLOADER_NOT_IN_ENCOUNTER": "无法确认这场战斗中的本机角色。",
-    "UPLOAD_VICTORY_REQUIRED": "只有战斗胜利的记录才能上传。",
+    "UPLOAD_VICTORY_REQUIRED": "只有已判定胜负的战斗记录才能上传。",
     "UPLOAD_TRAINING_DUMMY_NOT_ALLOWED": "伤害木桩和治疗木桩记录不能上传。",
     "UPLOAD_NOT_ALLOWED": "当前登录状态没有数据上传权限。",
 }
@@ -305,7 +483,7 @@ def encounter_upload_rejection_code(encounter: object) -> str:
                 if isinstance(item, Mapping)
             )
         )
-    if not normalized_result and (
+    if normalized_result in {"", "undetermined"} and (
         completion_confirmed or archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
     ):
         normalized_result = "defeated"
@@ -315,7 +493,7 @@ def encounter_upload_rejection_code(encounter: object) -> str:
     victory = normalized_result == "defeated" and (
         completion_confirmed or archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
     )
-    return "" if victory else "UPLOAD_VICTORY_REQUIRED"
+    return "" if victory or normalized_result == "failed" else "UPLOAD_VICTORY_REQUIRED"
 
 
 @dataclass(frozen=True)
@@ -503,6 +681,8 @@ def initialize_profile_schema(connection: sqlite3.Connection) -> None:
             WHERE public_mode='nickname';
         CREATE INDEX IF NOT EXISTS idx_encounter_participants_profession
             ON encounter_participants(profession_id, encounter_id);
+        CREATE INDEX IF NOT EXISTS idx_encounter_participants_visibility
+            ON encounter_participants(encounter_id, is_ai, public_character_name);
         CREATE TABLE IF NOT EXISTS uploads (
             upload_id TEXT PRIMARY KEY,
             encounter_id TEXT NOT NULL REFERENCES encounters(encounter_id)
@@ -721,6 +901,105 @@ def _linear_percentile(sorted_values: list[float], percentile: float) -> float:
     return float(sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight)
 
 
+def _public_boss_hp_dps_timeline(
+    payload: Mapping[str, object], duration: float, window_seconds: int = 10
+) -> list[dict[str, object]]:
+    sample_log = payload.get("boss_hp_damage_samples")
+    if not isinstance(sample_log, Mapping) or sample_log.get("coverage") != "observed_boss_hp_loss":
+        return []
+    columns = sample_log.get("columns")
+    rows = sample_log.get("rows")
+    if not isinstance(columns, list) or not isinstance(rows, list) or len(rows) < 3:
+        return []
+    try:
+        time_index = columns.index("time_seconds")
+        loss_index = columns.index("observed_boss_hp_loss")
+    except ValueError:
+        return []
+    final_second = max(0, int(duration))
+    samples: dict[int, int] = {}
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) <= max(time_index, loss_index):
+            continue
+        second = max(0, min(final_second, int(_as_float(row[time_index]))))
+        samples[second] = max(0, _as_int(row[loss_index]))
+    seconds = sorted(samples)
+    if len(seconds) < 3 or seconds[-1] - seconds[0] < 2:
+        return []
+    if len(seconds) / (seconds[-1] - seconds[0] + 1) < 0.65:
+        return []
+    if any(
+        samples[current] < samples[previous]
+        for previous, current in zip(seconds, seconds[1:])
+    ):
+        return []
+
+    window = max(1, int(window_seconds))
+    first, last = seconds[0], seconds[-1]
+    previous_total = samples[first]
+    per_second: list[int] = []
+    timeline: list[dict[str, object]] = []
+    for second in range(first + 1, last + 1):
+        total = samples.get(second, previous_total)
+        damage = total - previous_total
+        per_second.append(damage)
+        rolling = sum(per_second[-window:])
+        dps = rolling / min(window, second - first)
+        timeline.append(
+            {
+                "time": second,
+                "dps": dps,
+                "team_dps": dps,
+                "source": "observed_boss_hp_loss",
+            }
+        )
+        previous_total = total
+    return timeline
+
+
+def _public_team_dps_timeline(
+    payload: Mapping[str, object], duration: float
+) -> list[dict[str, object]]:
+    raw_timeline = payload.get("team_dps_timeline")
+    timeline: list[dict[str, object]] = []
+    if isinstance(raw_timeline, list):
+        for item in raw_timeline:
+            if not isinstance(item, Mapping):
+                continue
+            value = _as_float(item.get("team_dps", item.get("dps")), maximum=1e18)
+            second = _as_float(
+                item.get("time", item.get("time_seconds", item.get("second"))),
+                maximum=86_400.0,
+            )
+            if value < 0 or second < 0:
+                continue
+            timeline.append(
+                {
+                    "time": second,
+                    "dps": value,
+                    "team_dps": value,
+                    "source": _safe_text(item.get("source"), 48),
+                }
+            )
+    sources = {str(item.get("source") or "") for item in timeline}
+    if sources.intersection({"live_team_cumulative", "complete_damage_events"}):
+        return timeline
+    if "observed_boss_hp_loss" in sources:
+        return timeline
+    observed = _public_boss_hp_dps_timeline(payload, duration)
+    if observed:
+        return observed
+    if "live_display_team_dps" not in sources:
+        return timeline
+    expected_dps = _as_float(payload.get("team_dps"), maximum=1e18)
+    if expected_dps > 0 and (
+        not timeline
+        or max(float(item["team_dps"]) for item in timeline) < expected_dps * 0.5
+    ):
+        return []
+    return timeline
+
+
 def _public_performance_boss_key(value: object) -> str:
     text = _safe_text(value, 64).casefold()
     if not text:
@@ -748,8 +1027,69 @@ def _public_performance_difficulty(value: object) -> str:
         "困难": "hard",
         "nightmare": "nightmare",
         "噩梦": "nightmare",
+        "epic": "epic",
+        "史诗": "epic",
+        "heroic": "heroic",
+        "英雄": "heroic",
+        "mythic": "mythic",
+        "神话": "mythic",
+        "final_challenge": "final_challenge",
+        "终局挑战": "final_challenge",
+        "unknown": "unknown",
+        "未确认": "unknown",
     }
     return aliases.get(text, "all")
+
+
+def _public_brass_tome_status(value: object) -> str:
+    status = _safe_text(value, 16).casefold()
+    return status if status in {"enabled", "disabled", "unknown"} else "unknown"
+
+
+def _public_dungeon_context(
+    dungeon_id: object,
+    stage_id: object,
+    dungeon_name: object = "",
+    boss_name: object = "",
+) -> dict[str, object]:
+    numeric_dungeon_id = _as_int(dungeon_id, maximum=2_000_000_000)
+    numeric_stage_id = _as_int(stage_id, maximum=2_000_000_000)
+    raw_name = _safe_text(dungeon_name, 96).strip()
+    canonical_boss = _public_canonical_boss_name(boss_name)
+    override_key = PUBLIC_BOSS_DUNGEON_OVERRIDES.get(canonical_boss)
+    config = PUBLIC_DUNGEONS_BY_KEY.get(override_key) if override_key else None
+    source = "boss_name" if config else ""
+    if config is None:
+        config = PUBLIC_DUNGEONS_BY_ID.get(numeric_dungeon_id)
+        source = "dungeon_id" if config else ""
+    if config is None:
+        config = PUBLIC_DUNGEONS_BY_STAGE.get(numeric_stage_id)
+        source = "stage_id" if config else ""
+    if config is None and raw_name:
+        config = PUBLIC_DUNGEONS_BY_ALIAS.get(raw_name.casefold())
+        source = "dungeon_name" if config else ""
+    if config is None:
+        return {
+            "dungeon_key": "",
+            "dungeon_name": raw_name,
+            "category": "",
+            "category_name": "",
+            "context_source": "unavailable",
+        }
+    return {
+        "dungeon_key": str(config["key"]),
+        "dungeon_name": str(config["name"]),
+        "category": str(config["category"]),
+        "category_name": str(config["category_name"]),
+        "context_source": source,
+    }
+
+
+def _public_boss_name_for_context(value: object, context: Mapping[str, object]) -> str:
+    config = PUBLIC_DUNGEONS_BY_KEY.get(str(context.get("dungeon_key", "")))
+    if config and config.get("boss_name"):
+        return str(config["boss_name"])
+    return _public_canonical_boss_name(value)
 
 
 def _new_id(prefix: str) -> str:
@@ -1229,14 +1569,17 @@ class ProfileUploadStore:
         return rows
 
     @staticmethod
-    def _clean_opening_sequence(value: object) -> list[dict[str, object]]:
+    def _clean_opening_sequence(
+        value: object, *, maximum_time_ms: int = OPENING_SEQUENCE_MAX_MS,
+        maximum_events: int = MAX_UPLOAD_OPENING_EVENTS,
+    ) -> list[dict[str, object]]:
         if not isinstance(value, list):
             return []
         rows: list[dict[str, object]] = []
-        for raw in value[:MAX_UPLOAD_OPENING_EVENTS]:
+        for raw in value[:maximum_events]:
             if not isinstance(raw, Mapping):
                 continue
-            time_ms = _as_int(raw.get("time_ms"), maximum=OPENING_SEQUENCE_MAX_MS)
+            time_ms = _as_int(raw.get("time_ms"), maximum=maximum_time_ms)
             skill_id = _as_int(raw.get("skill_id"), maximum=2_000_000_000)
             if skill_id <= 0:
                 continue
@@ -1280,7 +1623,9 @@ class ProfileUploadStore:
                 kind = allowed_columns[column]
                 if kind == "text":
                     row.append(_safe_text(raw_row[index], 96))
-                elif kind == "float":
+                elif kind == "optional_float" and raw_row[index] is None:
+                    row.append(None)
+                elif kind in {"float", "optional_float"}:
                     row.append(_as_float(raw_row[index], maximum=4_102_444_800_000_000_000.0))
                 else:
                     row.append(_as_int(raw_row[index], maximum=4_102_444_800_000_000_000))
@@ -1579,6 +1924,12 @@ class ProfileUploadStore:
         opening_sequence = cls._clean_opening_sequence(raw.get("opening_sequence"))
         if opening_sequence:
             result["opening_sequence"] = opening_sequence
+        cast_timeline = cls._clean_opening_sequence(
+            raw.get('cast_timeline'), maximum_time_ms=86_400_000,
+            maximum_events=MAX_UPLOAD_SKILL_TIMELINE_EVENTS,
+        )
+        if cast_timeline:
+            result['cast_timeline'] = cast_timeline
         if raw.get("opening_sequence_source") is not None:
             result["opening_sequence_source"] = _safe_text(
                 raw.get("opening_sequence_source"), 32
@@ -1777,8 +2128,21 @@ class ProfileUploadStore:
         result = _safe_text(encounter.get("result"), 24).casefold()
         archive_reason = _safe_text(encounter.get("archive_reason"), 48).casefold()
         completion_confirmed = bool(encounter.get("completion_confirmed"))
-        if result not in {"defeated", "failed", "interrupted", "undetermined"}:
-            result = "defeated" if archive_reason in {"target_defeated", "completed"} and completion_confirmed else "undetermined"
+        if result not in {"defeated", "failed", "interrupted", "undetermined"} or (
+            result == "undetermined"
+            and archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
+        ):
+            result = (
+                "defeated"
+                if completion_confirmed
+                or archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
+                else "undetermined"
+            )
+        if (
+            result == "defeated"
+            and archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
+        ):
+            completion_confirmed = True
         completeness = _safe_text(encounter.get("data_completeness"), 32).casefold()
         if completeness not in {"complete", "partial", "incomplete", "mid_encounter"}:
             completeness = "complete" if all_resolved else "partial"
@@ -1796,6 +2160,9 @@ class ProfileUploadStore:
             "brass_tome_challenge_ids": brass_tome_challenge_ids,
             "brass_tome_source": brass_tome_source,
             "team_dps": _as_float(encounter.get("team_dps"), maximum=1e18),
+            "hps_duration_seconds": _as_float(
+                encounter.get("hps_duration_seconds", duration), maximum=86_400.0
+            ),
             "team_hps": _as_float(encounter.get("team_hps"), maximum=1e18),
             "team_effective_healing": _as_int(encounter.get("team_effective_healing")),
             "team_taken": _as_int(encounter.get("team_taken")),
@@ -1816,6 +2183,10 @@ class ProfileUploadStore:
             allowed_columns={
                 "time_seconds": "float",
                 "observed_boss_hp_loss": "int",
+                "current_hp": "optional_float",
+                "max_hp": "optional_float",
+                "entity_id": "int",
+                "template_id": "int",
             },
             required_columns=("time_seconds", "observed_boss_hp_loss"),
             maximum_rows=MAX_UPLOAD_BOSS_HP_SAMPLES,
@@ -1902,6 +2273,8 @@ class ProfileUploadStore:
         )
         if not supported_boss:
             reasons.append("BOSS_UNSUPPORTED")
+        if _public_boss_is_dirty(parsed.get("boss_name")):
+            reasons.append("BOSS_DATA_DIRTY")
         if int(parsed["stage_id"]) <= 0:
             reasons.append("DIFFICULTY_INVALID")
         duration = float(parsed["duration"])
@@ -1921,6 +2294,8 @@ class ProfileUploadStore:
             reasons.append("CAPTURE_INCOMPLETE")
         if not bool(parsed["all_resolved"]) or len(parsed["participants"]) != int(parsed["team_size"]):
             reasons.append("PARTICIPANT_IDENTITY_INCOMPLETE")
+        if any(bool(participant["is_ai"]) for participant in parsed["participants"]):
+            reasons.append("AI_PARTICIPANT")
         participant_total = sum(int(item["damage"]) for item in parsed["participants"])
         team_total = int(parsed["team_total_damage"])
         if team_total <= 0 or participant_total <= 0:
@@ -1929,6 +2304,7 @@ class ProfileUploadStore:
             reasons.append("TEAM_TOTAL_MISMATCH")
         statistics_blockers = {
             "BOSS_UNSUPPORTED",
+            "BOSS_DATA_DIRTY",
             "DIFFICULTY_INVALID",
             "DURATION_INVALID",
             "CLIENT_VERSION_UNSUPPORTED",
@@ -1937,6 +2313,7 @@ class ProfileUploadStore:
             "CAPTURE_INCOMPLETE",
             "KEY_DATA_MISSING",
             "TEAM_TOTAL_MISMATCH",
+            "AI_PARTICIPANT",
         }
         statistics_status = (
             "included"
@@ -2214,7 +2591,7 @@ class ProfileUploadStore:
         for field, value in incoming_stats.items():
             if field in {
                 'equipment_snapshot', 'targets', 'opening_sequence',
-                'skill_timeline',
+                'skill_timeline', 'cast_timeline',
             }:
                 merged_stats[field] = _prefer_richer_detail(
                     stored_stats.get(field), value
@@ -2611,6 +2988,11 @@ class ProfileUploadStore:
                         AND other_encounter.stage_id=?
                         AND other_participant.profession_id=?
                         AND other_participant.dps>?
+                        AND NOT EXISTS (
+                            SELECT 1 FROM encounter_participants other_member
+                            WHERE other_member.encounter_id=other_encounter.encounter_id
+                              AND (other_member.is_ai=1 OR other_member.public_character_name LIKE '%·投影')
+                        )
                     """,
                     (
                         parsed["boss_key"],
@@ -2820,9 +3202,33 @@ class ProfileUploadStore:
             payload = json.loads(str(encounter["payload_json"]))
         except (TypeError, ValueError):
             payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        known_healing = [
+            _as_int(participant["stats"].get("effective_healing"))
+            for participant in participants
+            if participant["stats"].get("effective_healing") is not None
+        ]
+        if known_healing:
+            team_healing = sum(known_healing)
+            healing_duration = _as_float(
+                payload.get("hps_duration_seconds", encounter["duration_seconds"]),
+                maximum=86_400.0,
+            )
+            payload["team_effective_healing"] = team_healing
+            payload["team_hps"] = (
+                team_healing / healing_duration if healing_duration > 0 else 0.0
+            )
+        payload["team_dps_timeline"] = _public_team_dps_timeline(
+            payload, float(encounter["duration_seconds"])
+        )
+        public_boss_name = _public_canonical_boss_name(encounter["boss_name"])
+        stage_name = _safe_text(payload.get("stage_name"), 96).strip()
+        if stage_name and _public_canonical_boss_name(stage_name) == public_boss_name:
+            payload["stage_name"] = public_boss_name
         return {
             "encounter_id": str(encounter["encounter_id"]),
-            "boss_name": str(encounter["boss_name"]),
+            "boss_name": public_boss_name,
             "boss_template_ids": json.loads(str(encounter["boss_template_ids_json"])),
             "dungeon_id": int(encounter["dungeon_id"]),
             "stage_id": int(encounter["stage_id"]),
@@ -2848,7 +3254,7 @@ class ProfileUploadStore:
             "ranking_status": str(encounter["ranking_status"]),
             "game_version": str(encounter["game_version"]),
             "qualification_reasons": json.loads(str(encounter["validation_json"])).get("reasons", []),
-            "data": payload if isinstance(payload, dict) else {},
+            "data": payload,
             "participants": participants,
             **self._death_summary([participant['stats'] for participant in participants], int(encounter['team_size'])),
         }
@@ -2864,10 +3270,12 @@ class ProfileUploadStore:
         conditions = ["EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)",
                       PUBLIC_NO_PROJECTION_SQL]
         params: list[object] = []
-        boss_name = _safe_text(boss, 96)
+        boss_name = _safe_text(boss, 96).strip()
         if boss_name:
-            conditions.append("e.boss_name=?")
-            params.append(boss_name)
+            boss_aliases = _public_boss_aliases(boss_name)
+            placeholders = ",".join("?" for _ in boss_aliases)
+            conditions.append(f"e.boss_name IN ({placeholders})")
+            params.extend(boss_aliases)
         selected_profession = _as_int(profession, maximum=2_000_000_000)
         if selected_profession:
             conditions.append("e.encounter_id IN (SELECT p.encounter_id FROM encounter_participants p WHERE p.profession_id=?)")
@@ -2913,7 +3321,7 @@ class ProfileUploadStore:
             placeholders = ','.join('?' for _ in ids)
             for member in connection.execute(
                 f"""SELECT p.encounter_id, p.slot_number, p.public_mode,
-                    p.public_character_name, p.profile_id, p.profession_id,
+                    p.public_character_name, p.profile_id, p.profession_id, p.is_ai,
                     p.dps, p.damage, p.stats_json, pr.nickname FROM encounter_participants p
                     LEFT JOIN profiles pr ON pr.profile_id=p.profile_id
                     WHERE p.encounter_id IN ({placeholders}) ORDER BY p.slot_number""", ids,
@@ -2934,7 +3342,8 @@ class ProfileUploadStore:
             payload = json.loads(str(row['payload_json']))
             validation = json.loads(str(row['validation_json']))
             record = {
-                'encounter_id': str(row['encounter_id']), 'boss_name': str(row['boss_name']),
+                'encounter_id': str(row['encounter_id']),
+                'boss_name': _public_canonical_boss_name(row['boss_name']),
                 'stage_id': int(row['stage_id']), 'difficulty': str(row['difficulty']),
                 'ended_at': float(row['ended_at']), 'duration_seconds': float(row['duration_seconds']),
                 'team_size': int(row['team_size']), 'team_total_damage': int(row['team_total_damage']),
@@ -2942,6 +3351,7 @@ class ProfileUploadStore:
                 'brass_tome_status': payload.get('brass_tome_status', 'unknown'),
                 'brass_tome_enabled': payload.get('brass_tome_enabled'),
                 'completion_confirmed': bool(payload.get('completion_confirmed')),
+                'has_ai': any(bool(member['is_ai']) for member in members.get(str(row['encounter_id']), [])),
                 'statistics_status': str(row['statistics_status']), 'ranking_status': str(row['ranking_status']),
                 'qualification_reasons': validation.get('reasons', []), 'game_version': str(row['game_version']),
                 **self._death_summary([json.loads(str(member['stats_json'])) for member in members.get(str(row['encounter_id']), [])], int(row['team_size'])),
@@ -2957,15 +3367,182 @@ class ProfileUploadStore:
 
     def public_catalog(self, connection: sqlite3.Connection) -> dict[str, object]:
         rows = connection.execute(f"""SELECT boss_name, COUNT(*) AS records,
-            SUM(statistics_status='included') AS included, MAX(ended_at) AS last_at
+            SUM(statistics_status='included' AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}) AS included,
+            SUM({PUBLIC_RANKING_ENTRY_COUNT_SQL}) AS ranking_entries,
+            MAX(ended_at) AS last_at
             FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
                 AND {PUBLIC_NO_PROJECTION_SQL}
             GROUP BY boss_name ORDER BY included DESC, last_at DESC""").fetchall()
+        catalog_bosses: dict[str, dict[str, object]] = {}
+        for row in rows:
+            if _public_boss_is_dirty(row["boss_name"]) or _public_boss_is_hidden(
+                row["boss_name"]
+            ):
+                continue
+            name = _public_canonical_boss_name(row["boss_name"])
+            boss = catalog_bosses.setdefault(
+                name,
+                {
+                    "name": name,
+                    "records": 0,
+                    "included": 0,
+                    "ranking_entries": 0,
+                    "last_at": 0.0,
+                },
+            )
+            boss["records"] = int(boss["records"]) + int(row["records"])
+            boss["included"] = int(boss["included"]) + int(row["included"])
+            boss["ranking_entries"] = int(boss["ranking_entries"]) + int(
+                row["ranking_entries"] or 0
+            )
+            boss["last_at"] = max(
+                float(boss["last_at"]), float(row["last_at"] or 0)
+            )
+        context_rows = connection.execute(
+            f"""SELECT e.boss_name, e.dungeon_id, e.stage_id, e.difficulty,
+                CASE WHEN json_valid(e.payload_json)
+                    THEN json_extract(e.payload_json, '$.dungeon_name') END AS dungeon_name,
+                CASE WHEN json_valid(e.payload_json)
+                    THEN json_extract(e.payload_json, '$.brass_tome_status') END AS brass_tome_status,
+                e.statistics_status, e.ended_at,
+                CASE WHEN e.statistics_status='included'
+                    AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL} THEN 1 ELSE 0 END AS included,
+                {PUBLIC_RANKING_ENTRY_COUNT_SQL} AS ranking_entries
+            FROM encounters e
+            WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
+                AND {PUBLIC_NO_PROJECTION_SQL}
+            ORDER BY e.ended_at DESC"""
+        ).fetchall()
+
+        dungeon_rows: dict[str, dict[str, object]] = {}
+        for category in PUBLIC_DUNGEON_CATEGORIES:
+            for dungeon in category["dungeons"]:
+                dungeon_rows[str(dungeon["key"])] = {
+                    "key": str(dungeon["key"]),
+                    "name": str(dungeon["name"]),
+                    "category": str(category["key"]),
+                    "category_name": str(category["name"]),
+                    "dungeon_ids": [int(value) for value in dungeon["dungeon_ids"]],
+                    "records": 0,
+                    "included": 0,
+                    "ranking_entries": 0,
+                    "last_at": 0.0,
+                    "difficulties": set(),
+                    "brass_tome_statuses": set(),
+                    "bosses": (
+                        {
+                            str(dungeon["boss_name"]): {
+                                "name": str(dungeon["boss_name"]),
+                                "stage_id": (
+                                    int(dungeon["stage_ids"][0])
+                                    if dungeon["stage_ids"]
+                                    else 0
+                                ),
+                                "records": 0,
+                                "included": 0,
+                                "ranking_entries": 0,
+                                "last_at": 0.0,
+                            }
+                        }
+                        if dungeon.get("boss_name")
+                        else {}
+                    ),
+                }
+        for row in context_rows:
+            if _public_boss_is_dirty(row["boss_name"]) or _public_boss_is_hidden(
+                row["boss_name"]
+            ):
+                continue
+            context = _public_dungeon_context(
+                row["dungeon_id"],
+                row["stage_id"],
+                row["dungeon_name"],
+                row["boss_name"],
+            )
+            dungeon = dungeon_rows.get(str(context["dungeon_key"]))
+            if dungeon is None:
+                continue
+            included = int(row["included"] or 0)
+            ranking_entries = int(row["ranking_entries"] or 0)
+            dungeon["records"] = int(dungeon["records"]) + 1
+            dungeon["included"] = int(dungeon["included"]) + included
+            dungeon["ranking_entries"] = (
+                int(dungeon["ranking_entries"]) + ranking_entries
+            )
+            dungeon["last_at"] = max(float(dungeon["last_at"]), float(row["ended_at"] or 0))
+            difficulty = _safe_text(row["difficulty"], 24).casefold() or "unknown"
+            dungeon["difficulties"].add(difficulty)
+            brass_status = _public_brass_tome_status(row["brass_tome_status"])
+            dungeon["brass_tome_statuses"].add(brass_status)
+            boss_key = _public_boss_name_for_context(row["boss_name"], context)
+            bosses = dungeon["bosses"]
+            boss = bosses.setdefault(
+                boss_key,
+                {
+                    "name": boss_key,
+                    "stage_id": int(row["stage_id"]),
+                    "records": 0,
+                    "included": 0,
+                    "ranking_entries": 0,
+                    "last_at": 0.0,
+                },
+            )
+            boss["records"] = int(boss["records"]) + 1
+            boss["included"] = int(boss["included"]) + included
+            boss["ranking_entries"] = int(boss["ranking_entries"]) + ranking_entries
+            boss["last_at"] = max(float(boss["last_at"]), float(row["ended_at"] or 0))
+
+        categories = []
+        for category in PUBLIC_DUNGEON_CATEGORIES:
+            visible_dungeons = []
+            for config in category["dungeons"]:
+                source = dungeon_rows[str(config["key"])]
+                boss_order = {
+                    str(name): index
+                    for index, name in enumerate(config.get("boss_order", ()))
+                }
+                visible_dungeons.append(
+                    {
+                        **{key: value for key, value in source.items()
+                           if key not in {"difficulties", "brass_tome_statuses", "bosses"}},
+                        "difficulties": sorted(source["difficulties"]),
+                        "brass_tome_statuses": sorted(source["brass_tome_statuses"]),
+                        "bosses": sorted(
+                            source["bosses"].values(),
+                            key=lambda boss: (
+                                boss_order.get(str(boss["name"]), len(boss_order)),
+                                -int(boss["included"]),
+                                -float(boss["last_at"]),
+                                int(boss["stage_id"]),
+                            ),
+                        ),
+                    }
+                )
+            categories.append(
+                {
+                    "key": str(category["key"]),
+                    "name": str(category["name"]),
+                    "records": sum(int(item["records"]) for item in visible_dungeons),
+                    "included": sum(int(item["included"]) for item in visible_dungeons),
+                    "ranking_entries": sum(
+                        int(item["ranking_entries"]) for item in visible_dungeons
+                    ),
+                    "dungeons": visible_dungeons,
+                }
+            )
         return {
-            'bosses': [{'name': str(row['boss_name']), 'records': int(row['records']),
-                        'included': int(row['included']), 'last_at': float(row['last_at'])} for row in rows],
+            'bosses': sorted(
+                catalog_bosses.values(),
+                key=lambda boss: (-int(boss['included']), -float(boss['last_at'])),
+            ),
             'difficulties': [str(row[0]) for row in connection.execute(
                 f"SELECT DISTINCT e.difficulty FROM encounters e WHERE e.difficulty!='' AND {PUBLIC_NO_PROJECTION_SQL} ORDER BY e.difficulty")],
+            'dungeon_categories': categories,
+            'brass_tome_statuses': sorted({
+                status
+                for dungeon in dungeon_rows.values()
+                for status in dungeon['brass_tome_statuses']
+            }),
         }
 
     def public_statistics(self, connection: sqlite3.Connection) -> dict[str, object]:
@@ -2975,13 +3552,13 @@ class ProfileUploadStore:
                 COALESCE(SUM(team_total_damage), 0) AS total_damage,
                 COALESCE(SUM(duration_seconds), 0) AS duration_seconds
             FROM encounters e WHERE e.statistics_status='included'
-                AND {PUBLIC_NO_PROJECTION_SQL}
+                AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}
             """
         ).fetchone()
         uploads = connection.execute(
             f"""SELECT COUNT(*) FROM uploads u
                 JOIN encounters e ON e.encounter_id=u.encounter_id
-                WHERE u.statistics_status='included' AND {PUBLIC_NO_PROJECTION_SQL}"""
+                WHERE u.statistics_status='included' AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}"""
         ).fetchone()[0]
         history = connection.execute(f"""SELECT COUNT(*) AS encounters, MAX(ended_at) AS last_at
             FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
@@ -3004,7 +3581,10 @@ class ProfileUploadStore:
         connection: sqlite3.Connection,
         *,
         boss: object = "drill",
+        category: object = "all",
+        dungeon: object = "all",
         difficulty: object = "all",
+        brass_tome: object = "all",
         metric: object = "dps",
         rating_basis: object = "extraordinary",
         min_rating: object = 0,
@@ -3018,13 +3598,27 @@ class ProfileUploadStore:
 
         requested_boss = _safe_text(boss, 128)
         if requested_boss.startswith('name:'):
-            boss_key = requested_boss
-            boss_config = {'name': requested_boss[5:], 'dungeon_name': '',
-                           'stage_ids': (), 'aliases': (requested_boss[5:],)}
+            canonical_boss = _public_canonical_boss_name(requested_boss[5:])
+            boss_key = f'name:{canonical_boss}'
+            boss_config = {
+                'name': canonical_boss,
+                'dungeon_name': '',
+                'stage_ids': (),
+                'aliases': _public_boss_aliases(canonical_boss),
+            }
         else:
             boss_key = _public_performance_boss_key(boss)
             boss_config = PUBLIC_PERFORMANCE_BOSSES[boss_key]
+        selected_category = _safe_text(category, 24).casefold() or "all"
+        if selected_category not in {"all", "party", "raid", "family", "daily"}:
+            selected_category = "all"
+        selected_dungeon = _safe_text(dungeon, 64).casefold() or "all"
+        if selected_dungeon != "all" and selected_dungeon not in PUBLIC_DUNGEONS_BY_KEY:
+            selected_dungeon = "all"
         selected_difficulty = _public_performance_difficulty(difficulty)
+        selected_brass_tome = _safe_text(brass_tome, 16).casefold() or "all"
+        if selected_brass_tome not in {"all", "enabled", "disabled", "unknown"}:
+            selected_brass_tome = "all"
         selected_metric = _safe_text(metric, 24).casefold()
         if selected_metric not in PUBLIC_PERFORMANCE_METRICS:
             selected_metric = "dps"
@@ -3051,14 +3645,19 @@ class ProfileUploadStore:
         alias_placeholders = ",".join("?" for _ in aliases)
         rows = connection.execute(
             f"""
-            SELECT e.encounter_id, e.boss_name, e.stage_id, e.difficulty,
+            SELECT e.encounter_id, e.boss_name, e.dungeon_id, e.stage_id, e.difficulty,
                 e.ended_at, e.game_version, e.payload_json,
                 ep.profession_id, ep.damage, ep.dps, ep.profile_id,
                 ep.stats_json
             FROM encounters e
             JOIN encounter_participants ep ON ep.encounter_id=e.encounter_id
             WHERE e.statistics_status='included'
-                AND {PUBLIC_NO_PROJECTION_SQL}
+                AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}
+                AND NOT EXISTS (
+                    SELECT 1 FROM encounter_participants unresolved_member
+                    WHERE unresolved_member.encounter_id=e.encounter_id
+                      AND unresolved_member.identity_resolved=0
+                )
                 AND ep.identity_resolved=1
                 AND ep.is_ai=0
                 AND ep.profession_id>0
@@ -3071,6 +3670,9 @@ class ProfileUploadStore:
 
         candidates: list[dict[str, object]] = []
         available_difficulties: set[str] = set()
+        available_brass_tome_statuses: set[str] = set()
+        available_dungeons: set[str] = set()
+        available_categories: set[str] = set()
         available_versions: set[str] = set()
         extraordinary_available = False
         equipment_available = False
@@ -3085,17 +3687,35 @@ class ProfileUploadStore:
                 continue
             if not bool(payload.get("completion_confirmed")):
                 continue
-            raw_difficulty = _safe_text(row["difficulty"], 24).casefold()
-            record_difficulty = (
-                "normal" if not raw_difficulty else _public_performance_difficulty(raw_difficulty)
+            context = _public_dungeon_context(
+                row["dungeon_id"],
+                row["stage_id"],
+                payload.get("dungeon_name"),
+                row["boss_name"],
             )
+            record_category = str(context["category"])
+            record_dungeon = str(context["dungeon_key"])
+            if record_category:
+                available_categories.add(record_category)
+            if record_dungeon:
+                available_dungeons.add(record_dungeon)
+            if selected_category != "all" and record_category != selected_category:
+                continue
+            if selected_dungeon != "all" and record_dungeon != selected_dungeon:
+                continue
+            raw_difficulty = _safe_text(row["difficulty"], 24).casefold()
+            record_difficulty = _public_performance_difficulty(raw_difficulty)
             if record_difficulty == "all":
-                record_difficulty = raw_difficulty or "normal"
+                record_difficulty = raw_difficulty or "unknown"
+            brass_status = _public_brass_tome_status(payload.get("brass_tome_status"))
             raw_version = _safe_text(row["game_version"], 48)
             record_version = raw_version or "unknown"
             available_difficulties.add(record_difficulty)
+            available_brass_tome_statuses.add(brass_status)
             available_versions.add(record_version)
             if selected_difficulty != "all" and record_difficulty != selected_difficulty:
+                continue
+            if selected_brass_tome != "all" and brass_status != selected_brass_tome:
                 continue
             if selected_version != "all" and record_version != selected_version:
                 continue
@@ -3250,8 +3870,15 @@ class ProfileUploadStore:
             "selection": {
                 "boss": boss_key,
                 "boss_name": str(boss_config["name"]),
-                "dungeon_name": str(boss_config["dungeon_name"]),
+                "dungeon_name": (
+                    str(PUBLIC_DUNGEONS_BY_KEY[selected_dungeon]["name"])
+                    if selected_dungeon in PUBLIC_DUNGEONS_BY_KEY
+                    else str(boss_config["dungeon_name"])
+                ),
+                "category": selected_category,
+                "dungeon": selected_dungeon,
                 "difficulty": selected_difficulty,
+                "brass_tome": selected_brass_tome,
                 "metric": selected_metric,
                 "rating_basis": selected_rating_basis,
                 "min_rating": rating_min,
@@ -3262,6 +3889,9 @@ class ProfileUploadStore:
             },
             "availability": {
                 "difficulties": sorted(available_difficulties),
+                "brass_tome_statuses": sorted(available_brass_tome_statuses),
+                "dungeons": sorted(available_dungeons),
+                "categories": sorted(available_categories),
                 "game_versions": sorted(available_versions),
                 "extraordinary_rating": extraordinary_available,
                 "equipment_rating": equipment_available,
@@ -3285,7 +3915,13 @@ class ProfileUploadStore:
         rows = connection.execute(
             f"""
             SELECT u.encounter_id, u.public_mode, u.public_character_name,
-                u.profile_id, pr.nickname, e.boss_name, e.stage_id, e.ended_at,
+                u.profile_id, pr.nickname, e.boss_name, e.dungeon_id,
+                e.stage_id, e.difficulty,
+                CASE WHEN json_valid(e.payload_json)
+                    THEN json_extract(e.payload_json, '$.dungeon_name') END AS dungeon_name,
+                CASE WHEN json_valid(e.payload_json)
+                    THEN json_extract(e.payload_json, '$.brass_tome_status') END AS brass_tome_status,
+                e.ended_at,
                 ep.profession_id, ep.damage, ep.dps,
                 ROW_NUMBER() OVER (
                     PARTITION BY e.boss_key, e.stage_id, ep.profession_id
@@ -3298,8 +3934,8 @@ class ProfileUploadStore:
                 AND ep.character_hash=u.uploader_character_hash
             LEFT JOIN profiles pr ON pr.profile_id=u.profile_id
             WHERE u.ranking_status='eligible'
-                AND {PUBLIC_NO_PROJECTION_SQL}
-            ORDER BY e.ended_at DESC, ep.dps DESC
+                AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}
+            ORDER BY ep.dps DESC, e.ended_at DESC
             LIMIT ?
             """,
             (min(500, max(1, int(limit))),),
@@ -3309,13 +3945,30 @@ class ProfileUploadStore:
             display_name, public_mode, profile_id = self._public_participant_name(row, 0)
             if public_mode == "unrecorded":
                 display_name = "未记录姓名"
+            context = _public_dungeon_context(
+                row["dungeon_id"],
+                row["stage_id"],
+                row["dungeon_name"],
+                row["boss_name"],
+            )
+            if _public_boss_is_dirty(row["boss_name"]) or _public_boss_is_hidden(
+                row["boss_name"]
+            ):
+                continue
+            public_boss_name = _public_boss_name_for_context(row["boss_name"], context)
             result.append({
                 "encounter_id": str(row["encounter_id"]),
                 "profile_id": profile_id,
                 "display_name": display_name,
                 "public_mode": public_mode,
-                "boss_name": str(row["boss_name"]),
+                "boss_name": public_boss_name,
+                "dungeon_id": int(row["dungeon_id"]),
+                **context,
                 "stage_id": int(row["stage_id"]),
+                "difficulty": _safe_text(row["difficulty"], 24).casefold(),
+                "brass_tome_status": _public_brass_tome_status(
+                    row["brass_tome_status"]
+                ),
                 "profession_id": int(row["profession_id"]),
                 "damage": int(row["damage"]),
                 "dps": float(row["dps"]),
@@ -3555,6 +4208,8 @@ def _timeline_rows_by_actor(record: Mapping[str, object]) -> dict[int, list[dict
 def _opening_rows_by_actor(
     record: Mapping[str, object],
     timelines: Mapping[int, list[dict[str, object]]],
+    *, maximum_time_ms: int = OPENING_SEQUENCE_MAX_MS,
+    maximum_events: int = MAX_UPLOAD_OPENING_EVENTS,
 ) -> dict[int, list[dict[str, object]]]:
     result: dict[int, list[dict[str, object]]] = {}
     cast_log = record.get("skill_cast_log")
@@ -3578,15 +4233,17 @@ def _opening_rows_by_actor(
                         )
                     except (IndexError, TypeError, ValueError, OverflowError):
                         continue
-                    if not 0 <= time_ms <= OPENING_SEQUENCE_MAX_MS or actor_id == 0 or skill_id <= 0:
+                    if not 0 <= time_ms <= maximum_time_ms or actor_id == 0 or skill_id <= 0:
                         continue
                     bucket = result.setdefault(actor_id, [])
-                    if len(bucket) < MAX_UPLOAD_OPENING_EVENTS:
+                    if len(bucket) < maximum_events:
                         item: dict[str, object] = {
                             "time_ms": time_ms,
                             "skill_id": skill_id,
                             "sequence": sequence,
-                            "source": "successful_cast",
+                            "source": str((cast_log.get('actor_sources') or {}).get(
+                                str(actor_id), 'successful_cast'
+                            )),
                         }
                         for key in ("target_id", "target_template_id"):
                             if key in positions:
@@ -3649,14 +4306,25 @@ def build_upload_encounter(
     participant_by_actor: dict[int, dict[str, object]] = {}
     order: list[int] = []
     self_actor_ids: list[int] = []
-    for raw in raw_participants:
+    for participant_index, raw in enumerate(raw_participants, start=1):
         if not isinstance(raw, dict):
             continue
         actor_id = _as_int(
             raw.get("actor_id"), minimum=-(1 << 63), maximum=(1 << 63) - 1
         )
         if not actor_id:
-            continue
+            raw_identity = (
+                raw.get("_character_id")
+                or raw.get("character_id")
+                or raw.get("user_token")
+                or raw.get("id")
+            )
+            try:
+                identity = canonical_character_identity(raw_identity, allow_ai=True)
+            except ProfileUploadError:
+                continue
+            actor_id = -(1 << 62) - participant_index
+            identities[actor_id] = identity.canonical
         participant_by_actor[actor_id] = dict(raw)
         order.append(actor_id)
         if bool(raw.get("is_self")):
@@ -3761,6 +4429,10 @@ def build_upload_encounter(
     order = list(dict.fromkeys(order))[:MAX_ENCOUNTER_PARTICIPANTS]
     timelines = _timeline_rows_by_actor(record)
     openings = _opening_rows_by_actor(record, timelines)
+    casts = _opening_rows_by_actor(
+        record, {}, maximum_time_ms=86_400_000,
+        maximum_events=MAX_UPLOAD_SKILL_TIMELINE_EVENTS,
+    )
     raw_event_log = record.get("event_log")
     raw_event_rows = (
         raw_event_log.get("rows") if isinstance(raw_event_log, Mapping) else None
@@ -3825,6 +4497,8 @@ def build_upload_encounter(
             participant["skill_timeline"] = timelines[actor_id]
             participant["skill_timeline_total"] = len(timelines[actor_id])
             participant["skill_timeline_truncated"] = timeline_globally_truncated
+        if actor_id in casts:
+            participant['cast_timeline'] = casts[actor_id]
         if actor_id in openings:
             participant["opening_sequence"] = openings[actor_id]
             participant["opening_sequence_source"] = _safe_text(
@@ -3848,7 +4522,7 @@ def build_upload_encounter(
                       "taken_share", "taken_source", "equipment_snapshot"):
             if not previous.get(field) and participant.get(field):
                 previous[field] = participant[field]
-        for field in ("skills", "targets", "opening_sequence", "skill_timeline"):
+        for field in ("skills", "targets", "opening_sequence", "skill_timeline", "cast_timeline"):
             if len(participant.get(field) or []) > len(previous.get(field) or []):
                 previous[field] = participant[field]
                 if field == "opening_sequence":
@@ -3905,7 +4579,10 @@ def build_upload_encounter(
     }
     result = result_aliases.get(raw_result, "")
     if not result:
-        if archive_reason == "target_defeated" or completion_confirmed:
+        if (
+            archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
+            or completion_confirmed
+        ):
             result = "defeated"
         elif archive_reason in {"party_wipe", "failed"}:
             result = "failed"
@@ -3913,6 +4590,11 @@ def build_upload_encounter(
             result = "interrupted"
         else:
             result = "undetermined"
+    if (
+        result == "defeated"
+        and archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
+    ):
+        completion_confirmed = True
     all_resolved = bool(participants) and all(item["character_id"] for item in participants)
     completeness = "complete" if all_resolved and len(participants) == team_size else "partial"
     team_timeline: list[dict[str, object]] = []
@@ -3943,12 +4625,17 @@ def build_upload_encounter(
                 started_at = parsed_end - parsed_duration
     team_healing = record.get("team_effective_healing", 0)
     team_hps = record.get("team_hps", 0)
-    if isinstance(raw_healers, list) and raw_healers and all(
-        healer.get("effective_healing") is not None for healer in included_healers
-    ):
-        team_healing = sum(_as_int(healer.get("effective_healing")) for healer in included_healers)
-        healing_duration = _as_float(record.get("hps_duration_seconds", duration), maximum=86_400.0)
-        team_hps = team_healing / max(1, int(healing_duration)) if healing_duration > 0 else 0
+    healing_duration = _as_float(
+        record.get("hps_duration_seconds", duration), maximum=86_400.0
+    )
+    known_healing = [
+        _as_int(healer.get("effective_healing"))
+        for healer in included_healers
+        if healer.get("effective_healing") is not None
+    ]
+    if known_healing:
+        team_healing = sum(known_healing)
+        team_hps = team_healing / healing_duration if healing_duration > 0 else 0
     team_taken = record.get("team_taken", 0)
     if (
         isinstance(raw_damage_taken, list)
@@ -3994,8 +4681,13 @@ def build_upload_encounter(
             row.get("opening_sequence_source") == "successful_cast"
             for row in participants
         ),
+        "cast_timeline_members": sum(bool(row.get('cast_timeline')) for row in participants),
         "damage_hit_opening_members": sum(
             row.get("opening_sequence_source") == "damage_hit"
+            for row in participants
+        ),
+        "broadcast_cast_opening_members": sum(
+            row.get('opening_sequence_source') == 'cast_broadcast'
             for row in participants
         ),
         "skill_timeline_truncated": timeline_globally_truncated,
@@ -4033,6 +4725,7 @@ def build_upload_encounter(
         "started_at_epoch": started_at,
         "ended_at_epoch": ended_at,
         "duration_seconds": duration,
+        "hps_duration_seconds": healing_duration,
         "dungeon_id": record.get("dungeon_id", 0),
         "stage_id": record.get("dungeon_stage_id", record.get("stage_id", 0)),
         "map_id": record.get("map_id", 0),

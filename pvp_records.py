@@ -2331,8 +2331,9 @@ class PvpRecordingController:
 
 class PvpUploadWorker:
     """Background outbox persistence and uploads; no Tk or game access."""
-    def __init__(self, repository, request, principal):
+    def __init__(self, repository, request, principal, enabled=None):
         self.repository, self.request, self.principal = repository, request, principal
+        self.enabled = enabled if callable(enabled) else lambda: True
         self.stop_event = threading.Event()
         self.wake_event = threading.Event()
         self.thread = None
@@ -2461,6 +2462,8 @@ class PvpUploadWorker:
 
     def attempt_one(self, now=None):
         self.equipment_queue.join()
+        if not self.enabled():
+            return False
         account_key = self.principal()
         if not account_key:
             return False

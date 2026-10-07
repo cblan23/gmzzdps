@@ -2,6 +2,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from combat_history import CombatHistoryStore
 from combat_statistics import normalize_statistics
@@ -67,6 +68,208 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
         )
         self.assertIsNone(record["team_effective_healing"])
         self.assertIsNone(record["team_taken"])
+
+    def test_unsettled_record_keeps_verified_local_team_metrics_and_context(self):
+        tracker = EncounterTracker()
+        encounter = self.wipe(tracker)
+        encounter.map_id = None
+        encounter.stage_id = None
+        base = {
+            "duration_seconds": 10.0,
+            "duration_source": "local_network_events",
+            "map_id": 5_200_224,
+            "dungeon_stage_id": 5_150_064,
+            "participants": [
+                {"actor_id": 100, "damage": 60, "dps": 6.0, "skills": []},
+                {"actor_id": 200, "damage": 40, "dps": 4.0, "skills": []},
+            ],
+            "healers": [
+                {
+                    "actor_id": 100,
+                    "effective_healing": 30,
+                    "total_healing": 35,
+                    "overhealing": 5,
+                    "overheal_rate": 1 / 7,
+                    "hps": 3.0,
+                    "coverage": "server_effective_with_partial_callbacks",
+                    "skills": [{"skill_id": 86021030, "effective_healing": 30}],
+                },
+                {
+                    "actor_id": 200,
+                    "effective_healing": 0,
+                    "hps": 0.0,
+                    "coverage": "server_team_counter",
+                    "skills": [],
+                },
+            ],
+            "damage_taken": [
+                {"actor_id": 100, "taken": 25, "source": "server_team_counter"},
+                {"actor_id": 200, "taken": 75, "source": "server_team_counter"},
+            ],
+            "damage_accounting": {"source": "live_team_cumulative"},
+        }
+
+        for status in ("PENDING", "ABANDONED"):
+            with self.subTest(status=status):
+                encounter.settlement_status = status
+                record = encounter_history_record(encounter, base)
+                healers = {row["actor_id"]: row for row in record["healers"]}
+                taken = {row["actor_id"]: row for row in record["damage_taken"]}
+
+                self.assertEqual(record["duration_seconds"], 10.0)
+                self.assertEqual(record["duration_source"], "local_network_events")
+                self.assertEqual(record["map_id"], 5_200_224)
+                self.assertEqual(record["stage_id"], 5_150_064)
+                self.assertEqual(record["total_damage"], 100)
+                self.assertEqual(record["team_dps"], 10.0)
+                self.assertEqual(record["team_effective_healing"], 30)
+                self.assertEqual(record["team_hps"], 3.0)
+                self.assertEqual(record["team_taken"], 100)
+                self.assertEqual(
+                    record["damage_accounting"]["source"],
+                    "live_team_cumulative",
+                )
+                self.assertEqual(healers[100]["effective_healing"], 30)
+                self.assertEqual(healers[100]["hps"], 3.0)
+                self.assertEqual(healers[100]["skills"][0]["skill_id"], 86021030)
+                self.assertEqual(taken[200]["taken"], 75)
+                self.assertEqual(taken[200]["share"], 0.75)
+
+    def test_server_settlement_replaces_unsettled_local_team_metrics(self):
+        tracker = EncounterTracker()
+        encounter = self.wipe(tracker)
+        raw = packet()
+        raw["capture_timestamp_ns"] = (START_EPOCH + 100) * NS
+        raw["decoded_arguments"][0][5]["self"].update({7: 11, 17: 21})
+        raw["decoded_arguments"][0][5]["peer"].update({7: 12, 17: 22})
+        tracker.accept(normalize_statistics(
+            raw, instance_id="instance", dungeon_id=10, map_id=20
+        )[0])
+        base = {
+            "participants": [
+                {"actor_id": 100, "damage": 999},
+                {"actor_id": 200, "damage": 999},
+            ],
+            "healers": [
+                {"actor_id": 100, "effective_healing": 999, "hps": 999.0},
+                {"actor_id": 200, "effective_healing": 999, "hps": 999.0},
+            ],
+            "damage_taken": [
+                {"actor_id": 100, "taken": 999},
+                {"actor_id": 200, "taken": 999},
+            ],
+        }
+
+        record = encounter_history_record(encounter, base)
+        participants = {row["actor_id"]: row for row in record["participants"]}
+        healers = {row["actor_id"]: row for row in record["healers"]}
+        taken = {row["actor_id"]: row for row in record["damage_taken"]}
+
+        self.assertEqual(participants[100]["damage"], 100)
+        self.assertEqual(healers[100]["effective_healing"], 21)
+        self.assertEqual(healers[200]["effective_healing"], 22)
+        self.assertEqual(taken[100]["taken"], 11)
+        self.assertEqual(taken[200]["taken"], 12)
+        self.assertEqual(record["team_effective_healing"], 43)
+        self.assertEqual(record["team_taken"], 23)
+
+    def test_unsettled_team_healing_keeps_exact_filtered_healer_total(self):
+        tracker = EncounterTracker()
+        encounter = self.wipe(tracker)
+        base = {
+            "duration_seconds": 10.0,
+            "duration_source": "local_network_events",
+            "team_effective_healing": 30,
+            "healers": [{
+                "actor_id": 100,
+                "effective_healing": 30,
+                "hps": 3.0,
+                "coverage": "server_team_counter",
+            }],
+        }
+
+        record = encounter_history_record(encounter, base)
+
+        self.assertEqual(record["team_effective_healing"], 30)
+        self.assertEqual(record["team_hps"], 3.0)
+        self.assertEqual(len(record["healers"]), 1)
+
+    def test_zero_damage_healer_keeps_callbacks_without_replacing_server_total(self):
+        tracker = EncounterTracker()
+        encounter = self.wipe(tracker)
+        encounter.settlement_status = "ABANDONED"
+        controller = SimpleNamespace(tracker=tracker, boss_entities={})
+        adapter = SettlementHistoryAdapter(self.store, controller=controller)
+        base = {
+            "duration_seconds": 10.0,
+            "hps_duration_seconds": 10.0,
+            "team_effective_healing": 130,
+            "participants": [
+                {"actor_id": 100, "damage": 0, "name": "Self"},
+                {"actor_id": 200, "damage": 100, "name": "Peer"},
+            ],
+            "healers": [
+                {
+                    "actor_id": 100,
+                    "effective_healing": 30,
+                    "hps": 3.0,
+                    "coverage": "server_team_counter",
+                    "skills": [],
+                    "targets": [],
+                },
+                {
+                    "actor_id": 200,
+                    "effective_healing": 100,
+                    "hps": 10.0,
+                    "coverage": "server_team_counter",
+                    "skills": [],
+                    "targets": [],
+                },
+            ],
+        }
+        self.store.save(encounter_history_record(encounter, base))
+        filetime_epoch = 116_444_736_000_000_000
+
+        def observe(second, healer, target, skill, total, effective, sequence):
+            adapter.observe_detail("heal", {
+                "filetime_100ns": (
+                    filetime_epoch + (START_EPOCH + second) * 10_000_000
+                ),
+                "sequence": sequence,
+                "healer_id": healer,
+                "target_id": target,
+                "skill_id": skill,
+                "total_healing": total,
+                "effective_healing": effective,
+            })
+
+        observe(2, 100, 200, 86_021_030, 50, 30, 1)
+        observe(3, 200, 100, 80_020_004, 40, 10, 2)
+        observe(12, 100, 200, 86_021_030, 999, 999, 3)
+
+        self.assertEqual(adapter.sync(tracker), {encounter.local_encounter_id})
+        record = self.store.load(encounter.local_encounter_id)
+        healers = {row["actor_id"]: row for row in record["healers"]}
+        self_healer = healers[100]
+        peer_healer = healers[200]
+
+        self.assertEqual(record["team_effective_healing"], 130)
+        self.assertEqual(record["team_hps"], 13.0)
+        self.assertEqual(self_healer["effective_healing"], 30)
+        self.assertEqual(self_healer["observed_total_healing"], 50)
+        self.assertEqual(self_healer["observed_effective_healing"], 30)
+        self.assertEqual(self_healer["skills"][0]["effective_healing"], 30)
+        self.assertEqual(self_healer["targets"][0]["target_id"], 200)
+        self.assertEqual(peer_healer["effective_healing"], 100)
+        self.assertEqual(peer_healer["observed_effective_healing"], 10)
+        self.assertEqual(
+            [row["effective_healing"] for row in peer_healer["skills"]],
+            [10, 90],
+        )
+        self.assertEqual(
+            peer_healer["skills"][1]["source"],
+            "server_total_minus_observed_callbacks",
+        )
 
     def test_unbound_projection_slots_do_not_count_as_participants(self):
         tracker = EncounterTracker()

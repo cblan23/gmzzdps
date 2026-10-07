@@ -50,7 +50,10 @@ def main() -> None:
     }
     guide_text = guide.read_text(encoding='utf-8').replace(
         '(../使用问题大全.md)', '(https://github.com/cblan23/gmzzdps/blob/main/%E4%BD%BF%E7%94%A8%E9%97%AE%E9%A2%98%E5%A4%A7%E5%85%A8.md)',
-    ).replace('(release-v0.3.5.md)', '(https://github.com/cblan23/gmzzdps/blob/main/docs/release-v0.3.5.md)')
+    ).replace(
+        f'(release-v{version}.md)',
+        f'(https://github.com/cblan23/gmzzdps/blob/main/docs/release-v{version}.md)',
+    )
     notices = (
         '第三方组件\n\n'
         'WinDivert 2.2.2: https://reqrypt.org/windivert.html\n'

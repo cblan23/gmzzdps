@@ -139,6 +139,26 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(old.match_confidence, 'high')
         self.assertFalse(self.controller.tracker.orphans)
 
+    def test_parser_observation_uses_read_only_map_when_wire_map_is_missing(self):
+        parser = NetworkPacketParser()
+        parser.self_id = 100
+        parser.self_token = 'self'
+        parser.party_tokens = {'peer'}
+        parser.token_actors = {'self': 100, 'peer': 200}
+        parser.confirmed_boss_entities = {300}
+        parser.wire_entity_tokens = {300: 'boss'}
+        parser.entity_template_ids = {300: 7100401}
+        parser.wire_instance_id = 'npcap-bootstrap:300'
+        parser.wire_map_id = None
+        parser.map_id = 5_200_224
+
+        observation = parser_observation(parser, {
+            'method': 'OnMsgSyncFightMode', 'network_entity_id': 300,
+            'capture_timestamp_ns': 100 * NS, 'decoded_arguments': [2],
+        }, [])
+
+        self.assertEqual(observation['context']['map_id'], 5_200_224)
+
     def test_live_heartbeat_can_shrink_stale_complete_roster_during_pull(self):
         stale_roster=ROSTER+[
             {'id':f'old-bot-{index}','iid':300+index,'name':f'Bot {index}','is_ai':True}

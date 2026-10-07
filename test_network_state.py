@@ -1249,6 +1249,25 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(healing["healing_source"], "network_exact")
         self.assertEqual(healing["sequence"], 2)
 
+    def test_heal_sync_keeps_shared_healing_effect_skill(self):
+        parser = NetworkPacketParser()
+        parser.self_id = PLAYER_ID
+        parser.self_confirmed = True
+        parser.party_ids.add(PLAYER_ID + 1)
+
+        updates = parser.process(
+            packet(
+                "OnMsgHealSyncV2",
+                [PLAYER_ID, PLAYER_ID + 1, 800_200_042, 1_015, 0],
+                sequence=3,
+            )
+        )
+
+        healing = next(value for kind, value in updates if kind == "heal")
+        self.assertEqual(healing["skill_id"], 80_020_004)
+        self.assertEqual(healing["total_healing"], 1_015)
+        self.assertEqual(healing["effective_healing"], 0)
+
     def test_bound_team_hp_emits_guarded_realtime_health_only(self):
         parser = NetworkPacketParser()
         teammate_id = PLAYER_ID + 1

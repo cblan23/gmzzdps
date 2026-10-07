@@ -628,6 +628,17 @@ def normalize_network_skill_id(value) -> int:
     return skill_id
 
 
+def normalize_network_healing_skill_id(value) -> int:
+    """Strip the HealSync effect-variant digit from a network skill ID."""
+    try:
+        raw_skill_id = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if 100_000_000 <= raw_skill_id <= 999_999_999:
+        return raw_skill_id // 10
+    return normalize_network_skill_id(raw_skill_id)
+
+
 def is_player_skill(skill_id: int) -> bool:
     return PLAYER_SKILL_MIN <= skill_id <= PLAYER_SKILL_MAX
 
@@ -8572,7 +8583,7 @@ class NetworkPacketParser:
                 )
                 if len(args) >= 5:
                     target_id = parse_exact_combat_entity_id(args[1])
-                    skill_id = normalize_network_skill_id(args[2])
+                    skill_id = normalize_network_healing_skill_id(args[2])
                     try:
                         attempted_healing = int(args[3])
                         effective_healing = int(args[4])
@@ -8628,7 +8639,7 @@ class NetworkPacketParser:
                             updates.append(profile)
                     if (
                         target_id
-                        and is_player_skill(skill_id)
+                        and 80_000_000 <= skill_id <= 89_999_999
                         and attempted_healing >= 0
                         and 0 <= effective_healing <= attempted_healing
                     ):
@@ -8670,6 +8681,20 @@ class NetworkPacketParser:
                 updates.extend(
                     self._record_entity_hit(target_id, actor_id, args[0], record)
                 )
+                skill_id = normalize_network_skill_id(args[0])
+                if (
+                    actor_id != self.self_id
+                    and is_player_skill(skill_id)
+                    and not self._is_confirmed_non_player_actor(actor_id)
+                    and self._is_known_player_actor(actor_id, int(record.get('filetime_100ns', 0) or 0))
+                ):
+                    updates.append(('skill_cast', {
+                        **self._base_update(record),
+                        'sequence': int(record.get('sequence', 0) or 0),
+                        'actor_id': actor_id,
+                        'skill_id': skill_id,
+                        'cast_source': 'network_cast_broadcast',
+                    }))
 
         if method == "OnMsgDamageSyncV2":
             updates.extend(

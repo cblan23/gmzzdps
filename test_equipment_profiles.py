@@ -605,22 +605,116 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
                 self.assertEqual(locate_registered_method(123, 456), (789, (789,)))
                 scan.assert_called_once()
 
-    def test_unsent_newcomers_are_combined_without_crossing_teams(self):
+    def test_local_equipment_reuses_only_same_process_lua_state_hint(self):
+        for hint_pid, expected_hint in ((111, 456), (222, 0)):
+            with self.subTest(hint_pid=hint_pid):
+                coordinator = self.coordinator()
+                session = EquipmentQuerySession.from_value(self.session_value(1))
+                coordinator.latest_session = session
+                coordinator.update_lua_state_hint(hint_pid, 456)
+                with patch("runtime_metadata.LiveTeamProfileReader") as factory, patch(
+                    "equipment_profiles.threading.Thread"
+                ) as thread:
+                    reader = factory.return_value.__enter__.return_value
+                    reader.profile_lua_state = 789
+                    reader.local_equipment_scores.return_value = {1: {"item_id": 3_060_643}}
+                    thread.return_value.start.side_effect = (
+                        lambda: thread.call_args.kwargs["target"]()
+                    )
+                    coordinator._begin_local_equipment_load(session)
+
+                factory.assert_called_once_with(
+                    111, stop_event=coordinator.stop_event, lua_state_hint=expected_hint
+                )
+                reader.local_equipment_scores.assert_called_once_with(session.local_user_token)
+                self.assertEqual(coordinator.lua_state_hint, (111, 789))
+                self.assertEqual(
+                    coordinator.local_equipment_scores[coordinator._local_equipment_key(session)],
+                    {1: {"item_id": 3_060_643}},
+                )
+
+    def test_invalidated_context_clears_lua_state_hint_and_response_keys(self):
+        coordinator = self.coordinator()
+        coordinator.update_lua_state_hint(111, 456)
+        coordinator.update_lua_state_hint(111, -1)
+        self.assertEqual(coordinator.lua_state_hint, (111, 456))
+        coordinator.responded_keys.add(("old",))
+
+        coordinator.invalidate("identity_session_reset")
+
+        self.assertEqual(coordinator.lua_state_hint, (0, 0))
+        self.assertEqual(coordinator.responded_keys, set())
+
+    def test_rating_return_can_refresh_previously_received_equipment(self):
+        coordinator = self.coordinator()
+        teammate = self.session_value(3)
+        self.assertTrue(coordinator.schedule(teammate))
+        unchanged = coordinator.query_commands.get_nowait()
+        unchanged_key = coordinator._member_query_key(unchanged, unchanged.members[0])
+        coordinator.requested_keys[unchanged_key] = 100
+        coordinator.responded_keys.add(unchanged_key)
+
+        with patch('equipment_profiles.time.monotonic', return_value=100):
+            for rating in (133215, 133106, 133215):
+                value = self.session_value(2)
+                value['members'][0]['extraordinary_rating'] = rating
+                self.assertTrue(coordinator.schedule(value), f'rating {rating} stayed deduplicated')
+                session = coordinator.query_commands.get_nowait()
+                key = coordinator._member_query_key(session, session.members[0])
+                coordinator.requested_keys[key] = 100
+                coordinator.responded_keys.add(key)
+                self.assertFalse(coordinator.schedule(value))
+                self.assertFalse(coordinator.schedule(teammate))
+
+        self.assertIn(unchanged_key, coordinator.responded_keys)
+        self.assertEqual(coordinator.query_commands.qsize(), 0)
+
+    def test_teammate_query_does_not_start_a_local_equipment_scan(self):
+        coordinator = self.coordinator()
+        session = EquipmentQuerySession.from_value(self.session_value(2))
+        with patch('equipment_profiles.threading.Thread') as thread:
+            coordinator._begin_local_equipment_load(session)
+        thread.assert_not_called()
+        self.assertEqual(coordinator.local_equipment_loading, set())
+
+    def test_superseded_rating_response_does_not_restore_its_dedup_key(self):
+        coordinator = self.coordinator()
+        value = self.session_value(2)
+        value['members'][0]['extraordinary_rating'] = 133215
+        self.assertTrue(coordinator.schedule(value))
+        session = coordinator.query_commands.get_nowait()
+        old_key = coordinator._member_query_key(session, session.members[0])
+        coordinator.requests[123456] = {'session': session, 'context': {}}
+
+        changed = self.session_value(2)
+        changed['members'][0]['extraordinary_rating'] = 133106
+        self.assertTrue(coordinator.schedule(changed))
+        coordinator._process_response({'decoded_arguments': [
+            {_token(1, 2): {0: 'Player', 11: {}, 19: 133215}}, 123456,
+        ]})
+
+        self.assertNotIn(old_key, coordinator.requested_keys)
+        self.assertNotIn(old_key, coordinator.responded_keys)
+
+    def test_unsent_newcomers_stay_in_individual_requests(self):
         coordinator = self.coordinator()
         self.assertTrue(coordinator.schedule(self.session_value(2)))
         self.assertTrue(coordinator.schedule(self.session_value(3)))
         self.assertTrue(coordinator.schedule(self.session_value(4, party=8)))
         first = coordinator.query_commands.get_nowait()
         merged = coordinator._coalesce_queries(first)
-        self.assertEqual(set(merged.tokens), {_token(1, 2), _token(1, 3)})
+        self.assertEqual(merged.tokens, (_token(1, 2),))
         self.assertEqual(merged.party_session_id, 7)
         self.assertEqual(merged.member_count, 6)
+        next_member = coordinator.query_commands.get_nowait()
+        self.assertEqual(next_member.party_session_id, 7)
+        self.assertEqual(next_member.tokens, (_token(1, 3),))
         separate = coordinator.query_commands.get_nowait()
         self.assertEqual(separate.party_session_id, 8)
         self.assertEqual(separate.tokens, (_token(1, 4),))
         self.assertTrue(coordinator.query_commands.empty())
 
-    def test_query_worker_coalesces_member_arriving_during_short_wait(self):
+    def test_query_worker_does_not_merge_member_arriving_during_short_wait(self):
         coordinator = self.coordinator()
         coordinator.schedule(self.session_value(2))
         executed = []
@@ -638,7 +732,8 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
                 coordinator._run_queries()
 
         self.assertEqual(len(executed), 1)
-        self.assertEqual(set(executed[0].tokens), {_token(1, 2), _token(1, 3)})
+        self.assertEqual(executed[0].tokens, (_token(1, 2),))
+        self.assertEqual(coordinator.query_commands.get_nowait().tokens, (_token(1, 3),))
 
     def test_new_opponent_query_precedes_queued_full_team_batch(self):
         coordinator = self.coordinator()
@@ -664,7 +759,12 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
 
         self.assertEqual(executed[0].tokens, (_token(1, 14),))
         self.assertTrue(executed[0].priority)
-        self.assertEqual(len(coordinator.query_commands.get_nowait().tokens), 12)
+        remaining = [coordinator.query_commands.get_nowait() for _ in range(12)]
+        self.assertTrue(all(len(session.tokens) == 1 for session in remaining))
+        self.assertEqual(
+            {session.tokens[0] for session in remaining},
+            {_token(1, index) for index in range(2, 14)},
+        )
 
     def test_enemy_priority_change_bypasses_deduplication(self):
         coordinator = self.coordinator()
@@ -694,7 +794,43 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
                 self.assertFalse(coordinator.schedule(value))
             overlap = dict(values[0], members=values[0]['members'][:6] + values[1]['members'][:6])
             self.assertFalse(coordinator.schedule(overlap))
-        self.assertEqual(coordinator.query_commands.qsize(), 7)
+        self.assertEqual(coordinator.query_commands.qsize(), 80)
+        self.assertTrue(all(len(session.tokens) == 1 for session in coordinator.query_commands.queue))
+
+    def test_verified_response_waiting_for_metadata_does_not_retry_game_query(self):
+        coordinator = self.coordinator()
+        value = self.session_value(2)
+        with patch('equipment_profiles.time.monotonic', return_value=100):
+            self.assertTrue(coordinator.schedule(value))
+        session = coordinator.query_commands.get_nowait()
+        key = coordinator._member_query_key(session, session.members[0])
+        coordinator.requested_keys[key] = 100
+        coordinator.requests[123456] = {'session': session, 'context': {}}
+        coordinator._process_response({'decoded_arguments': [
+            {_token(1, 2): {0: 'Player', 11: {}}}, 123456,
+        ]})
+        self.assertEqual(len(coordinator.pending_profiles), 1)
+        with patch('equipment_profiles.time.monotonic', return_value=180):
+            self.assertFalse(coordinator.schedule(dict(value, capture_session_id=2)))
+            self.assertTrue(coordinator.schedule(dict(value, members=[
+                dict(value['members'][0], extraordinary_rating=12345),
+            ])))
+        self.assertEqual(coordinator.query_commands.qsize(), 1)
+
+    def test_rejected_response_does_not_suppress_retry(self):
+        coordinator = self.coordinator()
+        value = self.session_value(2)
+        with patch('equipment_profiles.time.monotonic', return_value=100):
+            self.assertTrue(coordinator.schedule(value))
+        session = coordinator.query_commands.get_nowait()
+        key = coordinator._member_query_key(session, session.members[0])
+        coordinator.requested_keys[key] = 100
+        coordinator.requests[123456] = {'session': session, 'context': {}}
+        coordinator._process_response({'decoded_arguments': [
+            {_token(1, 2): {0: 'Different Player', 11: {}}}, 123456,
+        ]})
+        with patch('equipment_profiles.time.monotonic', return_value=180):
+            self.assertTrue(coordinator.schedule(value))
 
     def test_sent_request_timeout_starts_after_queue_wait_and_failed_send_can_retry(self):
         coordinator = self.coordinator()

@@ -781,6 +781,29 @@ class HookWorkerBatchTests(unittest.TestCase):
             str(Path(__file__).with_name("dps_meter.pyw"))
         )
 
+    def test_parent_reuses_capture_lua_state_before_applying_context(self):
+        worker = self.module["HookWorker"](
+            self.module["queue"].Queue(), self.module["threading"].Event()
+        )
+        observed = []
+        parser = SimpleNamespace(
+            apply_read_only_encounter_context=lambda _record: observed.append(
+                worker.equipment_profiles.lua_state_hint
+            )
+        )
+        record = {
+            "method": "ReadOnlyCurrentEncounterContext",
+            "lua_state_address": 0x1394E0380,
+        }
+        with patch.object(worker, "_republish_live_team_ratings"), patch.object(
+            worker, "_sync_parser_runtime_state", return_value=False
+        ):
+            worker._process_capture_batch(
+                parser, {"team_profile_records": [record]}, io.StringIO(), 1234
+            )
+
+        self.assertEqual(observed, [(1234, 0x1394E0380)])
+
     def test_parent_keeps_native_then_network_processing_contract(self):
         worker = self.module["HookWorker"](
             self.module["queue"].Queue(), self.module["threading"].Event()

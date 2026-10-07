@@ -467,6 +467,7 @@ class LiveTeamProfileReader(RuntimeMetadataReader):
         *,
         module_name: str = "C7-Win64-Shipping.exe",
         stop_event=None,
+        lua_state_hint: int = 0,
     ):
         module_base, _module_size, module_path = find_module(pid, module_name)
         super().__init__(
@@ -478,7 +479,8 @@ class LiveTeamProfileReader(RuntimeMetadataReader):
         self.profile_locators: dict[str, dict[str, object]] = {}
         self.last_live_profile_scan = 0.0
         self.live_profile_scan_tokens: set[str] = set()
-        self.profile_lua_state = 0
+        hint = int(lua_state_hint or 0)
+        self.profile_lua_state = hint if 0 < hint < MAX_USER_ADDRESS else 0
         self.local_score_key_object = 0
 
     def current_dungeon_roster(self) -> dict[str, object] | None:
@@ -590,6 +592,7 @@ class LiveTeamProfileReader(RuntimeMetadataReader):
             ):
                 return {
                     "local_user_token": local_token,
+                    "lua_state_address": state,
                     "dungeon_id": dungeon_id,
                     "group_id": int(group_id),
                     "members": members,
@@ -679,6 +682,7 @@ class LiveTeamProfileReader(RuntimeMetadataReader):
                 brass_tome_status = "disabled"
 
         return {
+            "lua_state_address": state,
             "dungeon_id": dungeon_id,
             "map_id": map_id,
             "in_dungeon": in_dungeon,

@@ -443,6 +443,17 @@ class MainHudRendererTests(unittest.TestCase):
         self.assertIn("88801", captions)
         self.assertNotIn("平均击杀战力：", captions)
 
+    def test_pve_title_rail_has_web_database_action_right_of_dps_tab(self):
+        for deaths in (False, True):
+            state = snapshot(deaths=deaths)
+            state["pve_hud_view"] = "recent_battle"
+            result = self.renderer.render(state)
+
+            recent = result.hit_regions["action:pve_recent_battle"]
+            database = result.hit_regions["action:web_database"]
+            self.assertGreater(database[0], recent[2])
+            self.assertLessEqual(database[2], result.image.width)
+
     def test_pvp_team_view_renders_pve_style_equipment_and_scrolls_all_members(self):
         state = dict(
             combat_mode="pvp",

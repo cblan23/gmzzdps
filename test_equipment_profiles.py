@@ -1,4 +1,5 @@
 import base64
+import ctypes
 import json
 import os
 import struct
@@ -17,14 +18,17 @@ from equipment_profiles import (
     EquipmentProfileCoordinator,
     EquipmentQueryArchive,
     EquipmentQuerySession,
+    DESCRIPTOR_PATTERN,
     EXPECTED_ARGUMENT_DESCRIPTORS,
     REQUEST_STUB_STATE_PREFIX,
     STATE_ARM,
     STATE_MAGIC,
     TRAMPOLINE_OFFSET,
     _absolute_patch,
+    _build_request_stub,
     _owned_idle_request_hook,
     _restore_owned_idle_request_hook,
+    _scan_descriptor_range,
     _suspend_threads,
     equipment_item_name,
     equipment_slot_name,
@@ -592,6 +596,29 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
             'members': [{'user_token': _token(1, fill), 'actor_id': fill, 'name': 'Player'}],
         }
 
+    def test_descriptor_scan_stops_after_first_fully_verified_match(self):
+        regions = [(0x10000, 64), (0x20000, 64)]
+        block = b'\0' * 16 + DESCRIPTOR_PATTERN
+        with patch('equipment_profiles._iter_readable_private_regions', return_value=regions), patch(
+            'equipment_profiles.read_region', return_value=block
+        ) as read, patch(
+            'equipment_profiles._descriptor_schema', return_value=EXPECTED_ARGUMENT_DESCRIPTORS
+        ) as schema:
+            self.assertEqual(_scan_descriptor_range(123, 0x10000, 0x30000), [0x10000])
+        read.assert_called_once_with(123, 0x10000, 64)
+        schema.assert_called_once_with(123, 0x10000)
+
+    def test_descriptor_scan_continues_past_wrong_argument_schema(self):
+        regions = [(0x10000, 64), (0x20000, 64)]
+        block = b'\0' * 16 + DESCRIPTOR_PATTERN
+        with patch('equipment_profiles._iter_readable_private_regions', return_value=regions), patch(
+            'equipment_profiles.read_region', return_value=block
+        ) as read, patch(
+            'equipment_profiles._descriptor_schema', side_effect=[(), EXPECTED_ARGUMENT_DESCRIPTORS]
+        ):
+            self.assertEqual(_scan_descriptor_range(123, 0x10000, 0x30000), [0x20000])
+        self.assertEqual(read.call_count, 2)
+
     def test_verified_descriptor_location_does_not_rescan_process(self):
         with patch('equipment_profiles._descriptor_schema', return_value=EXPECTED_ARGUMENT_DESCRIPTORS) as schema:
             with patch('equipment_profiles._scan_descriptor_range') as scan:
@@ -604,6 +631,58 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
             with patch('equipment_profiles._scan_descriptor_range', return_value=[789]) as scan:
                 self.assertEqual(locate_registered_method(123, 456), (789, (789,)))
                 scan.assert_called_once()
+
+    def test_restarted_coordinator_reuses_locations_but_reads_fresh_local_scores(self):
+        coordinator = self.coordinator()
+        session = EquipmentQuerySession.from_value(self.session_value(1))
+        coordinator.latest_session = session
+        coordinator.descriptor_hint = (111, 456)
+        coordinator.lua_state_hint = (111, 789)
+        coordinator.local_equipment_scores[coordinator._local_equipment_key(session)] = {
+            1: {'item_id': 3_060_643, 'total_score': 1},
+        }
+        coordinator._save_location_hints(session.local_user_token)
+
+        restarted = EquipmentProfileCoordinator(
+            data_dir=coordinator.item_name_cache_path.parent, emit=lambda *_args: None,
+            stop_event=threading.Event(), runtime_profile_provider=lambda: None,
+        )
+        restarted.latest_session = session
+        self.assertEqual(restarted.local_equipment_scores, {})
+        self.assertEqual(restarted.latest_profiles, {})
+        self.assertEqual(restarted._saved_location_hint(111, 'descriptor_address'), 456)
+        self.assertEqual(restarted._saved_location_hint(222, 'descriptor_address'), 0)
+        with patch('equipment_profiles._descriptor_schema', return_value=EXPECTED_ARGUMENT_DESCRIPTORS), patch(
+            'equipment_profiles._scan_descriptor_range'
+        ) as scan:
+            self.assertEqual(locate_registered_method(123, restarted._saved_location_hint(111, 'descriptor_address')),
+                             (456, (456,)))
+        scan.assert_not_called()
+
+        fresh_scores = {1: {'item_id': 3_060_643, 'total_score': 90_000}}
+        with patch('runtime_metadata.LiveTeamProfileReader') as factory, patch(
+            'equipment_profiles.threading.Thread'
+        ) as thread:
+            reader = factory.return_value.__enter__.return_value
+            reader.profile_lua_state = 789
+            reader.local_equipment_scores.return_value = fresh_scores
+            thread.return_value.start.side_effect = lambda: thread.call_args.kwargs['target']()
+            restarted._begin_local_equipment_load(session)
+        factory.assert_called_once_with(111, stop_event=restarted.stop_event, lua_state_hint=789)
+        reader.local_equipment_scores.assert_called_once_with(session.local_user_token)
+        self.assertEqual(restarted.local_equipment_scores[restarted._local_equipment_key(session)], fresh_scores)
+
+    def test_saved_lua_location_is_ignored_for_another_process_or_character(self):
+        coordinator = self.coordinator()
+        coordinator.saved_location_hints = {
+            'game_pid': 111, 'descriptor_address': 456,
+            'local_user_token': _token(1, 1), 'lua_state_address': 789,
+        }
+        self.assertEqual(coordinator._saved_location_hint(222, 'lua_state_address', _token(1, 1)), 0)
+        self.assertEqual(coordinator._saved_location_hint(111, 'lua_state_address', _token(1, 2)), 0)
+        self.assertEqual(coordinator._saved_location_hint(111, 'lua_state_address', _token(1, 1)), 789)
+        coordinator.invalidate('identity_session_reset')
+        self.assertEqual(coordinator._saved_location_hint(111, 'lua_state_address', _token(1, 1)), 0)
 
     def test_local_equipment_reuses_only_same_process_lua_state_hint(self):
         for hint_pid, expected_hint in ((111, 456), (222, 0)):
@@ -635,6 +714,7 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
 
     def test_invalidated_context_clears_lua_state_hint_and_response_keys(self):
         coordinator = self.coordinator()
+        coordinator.request_context_hint = ((111, 'player', 7), (456, 789))
         coordinator.update_lua_state_hint(111, 456)
         coordinator.update_lua_state_hint(111, -1)
         self.assertEqual(coordinator.lua_state_hint, (111, 456))
@@ -644,6 +724,29 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
 
         self.assertEqual(coordinator.lua_state_hint, (0, 0))
         self.assertEqual(coordinator.responded_keys, set())
+        self.assertIsNone(coordinator.request_context_hint)
+
+    def test_verified_request_context_is_reused_only_in_the_same_player_session(self):
+        coordinator = self.coordinator()
+        coordinator.schedule(self.session_value(2))
+        session = coordinator.query_commands.get_nowait()
+        request = MagicMock(descriptor=456)
+        request.status.return_value = (ARM_DONE, 1, 1)
+        request.live_context.return_value = (456, 789)
+        coordinator.archive = MagicMock()
+        with patch.object(coordinator, '_begin_local_equipment_load'), patch.object(
+            coordinator, '_begin_catalog_load'
+        ), patch.object(coordinator, '_runtime_profile', return_value={}), patch(
+            'equipment_profiles.OneShotEquipmentRequest', return_value=request
+        ) as factory:
+            coordinator._execute_query(session)
+            self.assertEqual(factory.call_args.kwargs['context_hint'], (0, 0))
+            coordinator.schedule(self.session_value(3))
+            coordinator._execute_query(coordinator.query_commands.get_nowait())
+            self.assertEqual(factory.call_args.kwargs['context_hint'], (456, 789))
+            coordinator.schedule(self.session_value(4, party=8))
+            coordinator._execute_query(coordinator.query_commands.get_nowait())
+            self.assertEqual(factory.call_args.kwargs['context_hint'], (0, 0))
 
     def test_rating_return_can_refresh_previously_received_equipment(self):
         coordinator = self.coordinator()
@@ -838,7 +941,7 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
         with patch('equipment_profiles.time.monotonic', return_value=100):
             self.assertTrue(coordinator.schedule(value))
         session = coordinator.query_commands.get_nowait()
-        request = MagicMock()
+        request = MagicMock(descriptor=456)
         request.status.return_value = (ARM_DONE, 1, 1)
         coordinator.archive = MagicMock()
         with patch.object(coordinator, '_begin_local_equipment_load'), patch.object(
@@ -947,6 +1050,111 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
                 coordinator.close()
         self.assertFalse(coordinator.thread.is_alive())
         self.assertFalse(coordinator.query_thread.is_alive())
+
+    def test_next_player_waits_for_the_matching_response_then_starts(self):
+        coordinator = self.coordinator()
+        coordinator.catalog = EquipmentMetadataCatalog('fixture', 'sha', {}, {})
+        first_started = threading.Event()
+        second_started = threading.Event()
+        completed = threading.Event()
+
+        def execute(session):
+            if session.tokens == (_token(1, 2),):
+                coordinator.requests[123456] = {'session': session, 'context': {}, 'completed': completed}
+                first_started.set()
+                return completed
+            second_started.set()
+
+        with patch.object(coordinator, '_execute_query', side_effect=execute):
+            coordinator.start()
+            try:
+                coordinator.schedule(self.session_value(2))
+                coordinator.schedule(self.session_value(3))
+                self.assertTrue(first_started.wait(2))
+                self.assertFalse(second_started.wait(0.3), 'next player started before the response')
+                coordinator.handle_response({'decoded_arguments': [
+                    {_token(1, 2): {0: 'Player', 11: {}}}, 987654,
+                ]})
+                self.assertFalse(second_started.wait(0.2), 'unrelated response released the next query')
+                coordinator.handle_response({'decoded_arguments': [
+                    {_token(1, 2): {0: 'Player', 11: {}}}, 123456,
+                ]})
+                self.assertTrue(second_started.wait(1), 'matching response did not release the next query')
+            finally:
+                completed.set()
+                coordinator.close()
+
+
+@unittest.skipUnless(os.name == 'nt', 'Windows x64 request stub')
+class EquipmentRequestDispatchTests(unittest.TestCase):
+    def test_native_stub_reuses_only_the_confirmed_role_and_lua_context(self):
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong, ctypes.c_ulong]
+        kernel.VirtualAlloc.restype = ctypes.c_void_p
+        kernel.VirtualFree.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong]
+        kernel.VirtualFree.restype = ctypes.c_int
+        code = kernel.VirtualAlloc(None, 0x3000, 0x3000, 0x40)
+        self.assertTrue(code)
+        self.addCleanup(kernel.VirtualFree, code, 0, 0x8000)
+        state = ctypes.create_string_buffer(0x800)
+        lua = ctypes.create_string_buffer(0x80)
+        stack = ctypes.create_string_buffer(0x200)
+        variadic = ctypes.create_string_buffer(0x40)
+        context = ctypes.create_string_buffer(0x80)
+        method = ctypes.create_string_buffer(0x20)
+        token = ctypes.create_string_buffer(b'player-token')
+        struct.pack_into('<Q', variadic, 0, ctypes.addressof(lua))
+        functions = {
+            'lua_createtable': b'\x48\x83\x41\x28\x08\xc3',
+            'lua_pushlstring': b'\x48\x83\x41\x28\x08\xc3',
+            'lua_pushnumber': b'\x48\x83\x41\x28\x08\xc3',
+            'lua_rawseti': b'\x48\x83\x69\x28\x08\xc3',
+            'lua_settop': b'\x48\x8b\x41\x20\x48\x8d\x04\xd0\x48\x89\x41\x28\xc3',
+        }
+        addresses = {}
+        for index, (name, instructions) in enumerate(functions.items()):
+            address = code + 0x1800 + index * 0x40
+            ctypes.memmove(address, instructions, len(instructions))
+            addresses[name] = address
+        prologue = b'\x90' * 14
+        trampoline = code + 0x1000
+        target = code + 0x1100
+        for address in (trampoline, target + len(prologue)):
+            ctypes.memmove(address, b'\xb8\x01\x00\x00\x00\xc3', 6)
+        stub = _build_request_stub(
+            state=ctypes.addressof(state), trampoline=trampoline, target=target,
+            prologue=prologue, registered_storage=ctypes.addressof(context),
+            method_object=ctypes.addressof(method),
+            token_cells=[(ctypes.addressof(token), 12)], correlation=123456,
+            **addresses,
+        )
+        ctypes.memmove(code, stub, len(stub))
+        invoke = ctypes.WINFUNCTYPE(ctypes.c_uint64, *([ctypes.c_uint64] * 8))(code)
+        entity = 0x12340000
+        for name, expected_entity, expected_lua, should_send in (
+            (b'ReqNTP', 0, 0, True),
+            (b'ReqCastSkill', 0, 0, False),
+            (b'ReqCastSkill', entity, ctypes.addressof(lua), True),
+            (b'ReqCastSkill', entity + 8, ctypes.addressof(lua), False),
+            (b'ReqCastSkill', entity, ctypes.addressof(lua) + 8, False),
+        ):
+            with self.subTest(method=name, expected_entity=expected_entity, expected_lua=expected_lua):
+                ctypes.memset(ctypes.addressof(state), 0, len(state))
+                struct.pack_into('<Q', state, STATE_ARM, ARM_READY)
+                struct.pack_into('<QQ', state, 0x40, expected_entity, expected_lua)
+                struct.pack_into('<QQQ', lua, 0x20, ctypes.addressof(stack), ctypes.addressof(stack) + 0x20,
+                                 ctypes.addressof(stack) + len(stack))
+                ctypes.memset(ctypes.addressof(method), 0, len(method))
+                ctypes.memmove(ctypes.addressof(method), name, len(name))
+                struct.pack_into('<QQ', method, 0x10, len(name), 15)
+                args = (entity, ctypes.addressof(context), ctypes.addressof(method), ctypes.addressof(variadic), 0, 0, 0, 0)
+                self.assertEqual(invoke(*args), 1)
+                self.assertEqual(struct.unpack_from('<Q', state, 0x10)[0], int(should_send))
+                self.assertEqual(struct.unpack_from('<Q', lua, 0x28)[0], ctypes.addressof(stack) + 0x20)
+                if should_send:
+                    self.assertEqual(struct.unpack_from('<Q', state, STATE_ARM)[0], ARM_DONE)
+                    self.assertEqual(invoke(*args), 1)
+                    self.assertEqual(struct.unpack_from('<Q', state, 0x10)[0], 1)
 
 
 class EquipmentRequestHookRecoveryTests(unittest.TestCase):

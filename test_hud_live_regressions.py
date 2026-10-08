@@ -1,6 +1,7 @@
 """Regression cases for live roster, tab scrolling, and post-combat clocks."""
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from encounter_tracker import EncounterTracker
 from settlement_presenter import encounter_view
@@ -90,6 +91,103 @@ class HudLiveRegressions(unittest.TestCase):
         ], now=1_000.0)
 
         self.assertEqual(value, '100,000/s')
+
+    def dummy_window(self):
+        window = self.window()
+        window.pve_hud_view = 'recent_battle'
+        window.model.combat_in_progress = lambda _now=None: True
+        window.model._is_dummy_encounter = lambda: True
+        window.model.duration = lambda _now=None: 31
+        window.model.display_duration = lambda _now=None: 31
+        window.model.current_stats()[0].damage = 562_179
+        window.model.current_bosses = lambda: [SimpleNamespace(
+            entity_id=90, name='伤害木桩', current_hp=8_749_410_821,
+            max_hp=10_000_000_000, template_id=7_100_634,
+            observed_damage_taken=1_250_589_179,
+        )]
+        window.model.current_monster = lambda: window.model.current_bosses()[0]
+        return window
+
+    def test_dummy_live_dps_uses_self_damage_instead_of_hp_or_teammates(self):
+        window = self.dummy_window()
+
+        value = window._main_live_team_dps_text([
+            {'actor_id': 1, 'metric': 'dps', 'dps_value': 12_345.0},
+            {'actor_id': 2, 'metric': 'dps', 'dps_value': 23_456.0},
+        ], now=1_000.0)
+
+        self.assertEqual(value, '18,135/s')
+        with mock.patch.object(
+            window, '_main_live_boss_hp_team_dps',
+            side_effect=AssertionError('dummy DPS must not use HP loss'),
+        ):
+            self.assertEqual(
+                window._main_live_team_dps_text([], now=1_000.0), '18,135/s'
+            )
+
+    def test_dummy_without_self_identity_does_not_use_hp_damage(self):
+        window = self.dummy_window()
+        window.model.self_id = None
+
+        self.assertIsNone(window._main_live_team_dps_text([], now=1_000.0))
+
+    def test_dummy_local_hits_update_live_dps_before_the_next_snapshot(self):
+        window = self.window()
+        model = window.model = CombatModel(run_id='dummy-live-hit-regression')
+        model.ingest_identity({'entity_id': 1})
+        model.ingest_profile({
+            'entity_id': 90, 'template_id': 7_100_634, 'name': '伤害木桩',
+            'entity_type': 'Boss', 'boss_type': 3, 'boss_rank': 3,
+        })
+        model.ingest_server_clock(1_024, 1_000)
+        window._shown_actor_name = model.display_name
+        window._bind_active_settlement_history = lambda: None
+        scheduled = []
+        window._schedule_layered_main_render = lambda: scheduled.append(True)
+        timestamp = 116_444_736_000_000_000 + 1_000 * 10_000_000
+        event = {
+            'filetime_100ns': timestamp, 'attacker_id': 1, 'target_id': 90,
+            'skill_id': 86_021_070, 'damage': 812, 'player_attacker': True,
+        }
+        window._ingest_combat_event(event)
+        model.ingest_team_stat({
+            'filetime_100ns': timestamp + 2_000_000, 'actor_id': 1,
+            'absolute_damage': 812, 'server_time': 1_024,
+        })
+        self.assertEqual(
+            window._main_live_team_dps_text([], now=1_000.2), '812/s'
+        )
+
+        window._ingest_combat_event(dict(
+            event, filetime_100ns=timestamp + 10_000_000, damage=1_183,
+        ))
+        model.ingest_team_stat({
+            'filetime_100ns': timestamp + 11_000_000, 'actor_id': 1,
+            'absolute_damage': 812, 'server_time': 1_024,
+        })
+
+        self.assertEqual(scheduled, [True, True])
+        self.assertEqual(model.dummy_round_official_total, 812)
+        self.assertEqual(
+            window._main_live_team_dps_text([], now=1_001.1), '1,995/s'
+        )
+
+    def test_live_dps_caption_changes_only_for_the_dummy(self):
+        window = self.dummy_window()
+        snapshot = window._layered_main_snapshot()
+        section = next(
+            row for row in snapshot['rows'] if row.get('row_kind') == 'section'
+        )
+        self.assertEqual(section['live_dps_caption'], '实时玩家秒伤')
+        self.assertEqual(section['live_team_dps'], '18,135/s')
+
+        window.model._is_dummy_encounter = lambda: False
+        snapshot = window._layered_main_snapshot()
+        section = next(
+            row for row in snapshot['rows'] if row.get('row_kind') == 'section'
+        )
+        self.assertEqual(section['live_dps_caption'], '实时团队秒伤')
+        self.assertNotEqual(section['live_team_dps'], '18,135/s')
 
     def test_live_teammate_counters_replace_boss_hp_fallback(self):
         window = self.window()
@@ -347,6 +445,24 @@ class LiveRosterRegressions(unittest.TestCase):
         roster = next(value for kind, value in updates if kind == 'party')
         self.assertEqual(set(roster['user_tokens']), set(tokens))
         self.assertEqual(roster['member_count'], 8)
+
+    def test_six_player_roster_survives_long_quiet_property_window(self):
+        with mock.patch('network_state.time.monotonic', return_value=100.0):
+            parser = self.parser()
+            tokens = [SELF_TOKEN, TEAMMATE_TOKEN,
+                      *[f'AQAAAOwN0gc{i}AAAA' for i in range(4)]]
+            self.roster(parser, tokens)
+            parser.process(packet('OnUpdateTeamGroupMemberProps', [
+                TEAMMATE_TOKEN, {'$map': [[5, 100], [11, 90_000]]},
+            ]))
+
+        updates = parser.flush_live_party_roster(now=160.0)
+        roster = next(value for kind, value in updates if kind == 'party')
+        self.assertEqual(set(roster['user_tokens']), set(tokens))
+        self.assertEqual(roster['member_count'], 6)
+        self.assertEqual(parser.live_team_property_ratings[TEAMMATE_TOKEN], 90_000)
+        self.assertEqual(parser.flush_live_party_roster(now=700.0), [])
+        self.assertEqual(parser.current_team_profile_tokens(), set(tokens))
 
     def test_explicit_leave_is_not_undone_by_queued_heartbeat(self):
         parser = self.parser()

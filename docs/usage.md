@@ -1,8 +1,8 @@
-# 使用指南 · v0.3.6
+# 使用指南 · v0.3.6b
 
 ## 启动
 
-Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0.3.6) 中的便携 ZIP。先解压，再运行 EXE；无需安装 Python 或 Npcap。程序会请求管理员权限，IPv6 或兼容回退可能加载随包提供的 WinDivert 驱动。
+Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0.3.6b) 中的便携 ZIP。先解压，再运行 EXE；无需安装 Python 或 Npcap。程序会请求管理员权限，IPv6 或兼容回退可能加载随包提供的 WinDivert 驱动。
 
 建议在进入副本前启动，避免漏掉本场早期身份、血量和统计数据。首次登录输入服务器签发的有效卡号；成功登录后，卡号按 Windows 当前用户加密保存，下次启动自动带出。
 
@@ -10,6 +10,7 @@ Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0
 
 - PVE 主窗口可在「团队构成」和「实时战斗/战斗记录」之间切换。开战后自动进入战斗页。
 - 「DPS数据」区域显示当前战斗或最近一场记录的汇总。
+- 战斗中固定显示本人实时数据；队友实时数据尚未到达时继续保留上一场记录。打木桩时汇总改为本人的「实时玩家秒伤」。
 - 当前只有小怪时，界面明确标注；小怪战斗不会作为 Boss 记录保存。
 - 底栏提供 PVP、设置、锁定、置顶。左键托盘图标可以恢复窗口，右键托盘菜单可以退出。
 - 先解锁再拖动窗口右下角调整高度；支持的玩家行数以当前版本界面为准。
@@ -23,11 +24,13 @@ Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0
 | --- | --- |
 | 常用显示 | 玩家名称、评分预览、死亡次数、对应总量、全队秒伤、本人高亮、战斗时间、PVP 按钮 |
 | 职业指标 | 观众 HPS / DPS、战士 DPS / DT；其他职业显示 DPS，队伍按 DPS 排序 |
-| 首领信息 | Boss 血条、已有首领资料支持的狂暴节奏预测 |
+| 首领信息 | Boss 实时血量、已有首领资料支持的狂暴节奏预测；两者可同时显示 |
 | 外观与缩放 | 字体 12–18 px、主窗口缩放 80–140%、玩家行遮罩 0–100% |
 | 快捷操作 | 显示 / 隐藏、锁定后仅快捷键解锁、同一快捷键锁定 / 解锁、团队构成与战斗页切换 |
 
 主窗口整体透明度固定为 100%，保留 Alpha 透明背景。增加玩家行遮罩会加深玩家行背景。
+
+观众职业本人有实时治疗时显示 HPS；只有本人实时 DPS 严格超过 5000 时才切换为 DPS。本人超凡评分真实变化后自动刷新装备且不显示刷新按钮，队友评分变化仍由玩家点击刷新。
 
 显示 / 隐藏默认是 `Home`。点击快捷键框录入；单键可使用 Home、End、Insert、Delete、PageUp、PageDown、Pause、F1–F12，字母等按键需搭配 Ctrl 或 Alt。关闭开关保留按键，清除按钮删除按键。开启仅快捷键解锁前应先录入解锁键。
 
@@ -47,4 +50,4 @@ Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0
 
 记录版本、游戏场景、复现步骤和出现时间。程序内反馈可附诊断摘要；公开 [Issues](https://github.com/cblan23/gmzzdps/issues) 请去掉卡号、密钥和私人原始数据。
 
-更多问答见 [使用问题大全](../使用问题大全.md)，验收状态见 [发布记录](release-v0.3.6.md)。
+更多问答见 [使用问题大全](../使用问题大全.md)，验收状态见 [发布记录](release-v0.3.6b.md)。

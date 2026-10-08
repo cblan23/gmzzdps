@@ -330,7 +330,7 @@ def encounter_history_record(
                 "name": values.get("name") or identity.get("name") or row.get("name") or "",
                 "is_self": is_self,
                 "profession_id": values.get("profession_id") or identity.get("profession_id") or row.get("profession_id") or 0,
-                "extraordinary_rating": identity.get("extraordinary_rating", row.get("extraordinary_rating")),
+                "extraordinary_rating": identity.get("extraordinary_rating") or row.get("extraordinary_rating"),
                 "is_ai": bool(identity.get("is_ai", row.get("is_ai", False))),
                 "damage": damage,
                 "dps": dps,

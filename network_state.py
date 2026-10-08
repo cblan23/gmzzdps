@@ -256,7 +256,6 @@ TEAM_OTHER_MEMBER_TOKEN_METHODS = {
 PENDING_TEAM_RATING_TTL_100NS = 60 * 10_000_000
 MAX_PENDING_TEAM_RATINGS = MAX_PARTY_MEMBERS * 2
 LIVE_PARTY_ROSTER_REFRESH_SECONDS = 2.0
-LIVE_PARTY_ROSTER_INACTIVE_SECONDS = 45.0
 TEAM_MEMBER_LEAVE_MARKERS = (
     "otherleaveteam",
     "otherquitteam",
@@ -926,12 +925,8 @@ class NetworkPacketParser:
         self.live_party_roster_tokens: set[str] = set()
         self.live_party_roster_record: dict[str, object] = {}
         self.live_party_roster_last_monotonic = time.monotonic()
-        self.live_party_roster_activity_monotonic = time.monotonic()
-        # Once a live member heartbeat has established a roster window, an
-        # empty window is meaningful: it is the server's authoritative signal
-        # that the player has left or the team has been replaced.  Keep this
-        # separate from the token set so an idle window can clear stale UI
-        # members instead of returning early forever.
+        # Flush only observed property updates. An idle window says nothing
+        # about whether a quiet teammate still belongs to the party.
         self.live_party_roster_window_armed = False
         self.live_party_roster_heartbeat_seen = False
         # A scene boundary starts one projection cleanup window. Member
@@ -1672,9 +1667,6 @@ class NetworkPacketParser:
         # A complete sweep can take several seconds. Measure the quiet period
         # from the latest member instead of the first member in the batch.
         self.live_party_roster_last_monotonic = time.monotonic()
-        self.live_party_roster_activity_monotonic = (
-            self.live_party_roster_last_monotonic
-        )
         self.live_party_roster_window_armed = True
         self.live_party_roster_heartbeat_seen = True
         if token and token != self.self_token:
@@ -1719,26 +1711,6 @@ class NetworkPacketParser:
             | set(self.authoritative_party_tokens)
         )
         current_other.discard(self.self_token or "")
-        inactive_roster = bool(
-            current_other
-            and self.party_session_id
-            and current - self.live_party_roster_activity_monotonic
-            >= LIVE_PARTY_ROSTER_INACTIVE_SECONDS
-        )
-        if inactive_roster:
-            unix_ns = time.time_ns()
-            self.live_party_roster_tokens.clear()
-            self.live_party_roster_record = {
-                "method": "InactiveLivePartyRoster",
-                "capture_timestamp_ns": unix_ns,
-                "filetime_100ns": unix_ns // 100 + 116444736000000000,
-            }
-            self.live_party_roster_window_armed = True
-            self.live_party_roster_heartbeat_seen = True
-            self.live_party_roster_replace_armed = True
-            self.live_party_roster_last_monotonic = (
-                current - LIVE_PARTY_ROSTER_REFRESH_SECONDS
-            )
         if (
             not self.live_party_roster_window_armed
             or not self.live_party_roster_heartbeat_seen
@@ -1774,7 +1746,7 @@ class NetworkPacketParser:
         )
         if not replace_roster:
             desired.update(current_other - self.departed_party_tokens)
-        elif not inactive_roster and not complete_rebuild:
+        elif not complete_rebuild:
             # A scene transition often publishes HP/property deltas for only a
             # few nearby members. Until the sweep reaches the known party size,
             # preserve confirmed humans and discard only stale projections.
@@ -1807,7 +1779,7 @@ class NetworkPacketParser:
             if stale_actor is not None:
                 self.party_ids.discard(stale_actor)
                 self.entity_profiles.pop(stale_actor, None)
-            if replace_roster and not inactive_roster:
+            if replace_roster:
                 self.departed_party_tokens.add(stale_token)
 
         updates: list[tuple[str, dict]] = []
@@ -5395,9 +5367,6 @@ class NetworkPacketParser:
         self.live_party_roster_tokens.clear()
         self.live_party_roster_record.clear()
         self.live_party_roster_last_monotonic = time.monotonic()
-        self.live_party_roster_activity_monotonic = (
-            self.live_party_roster_last_monotonic
-        )
         self.live_party_roster_window_armed = False
         self.live_party_roster_heartbeat_seen = False
         self.live_party_roster_replace_armed = False
@@ -7025,18 +6994,6 @@ class NetworkPacketParser:
         method = str(record.get("method", ""))
         folded = method.casefold()
         updates: list[tuple[str, dict]] = []
-        if (
-            method in CURRENT_TEAM_ACTIVITY_METHODS
-            or method in TEAM_OTHER_MEMBER_TOKEN_METHODS
-            or method in TEAM_JOIN_SUCCESS_METHODS
-            or method in TEAM_ROSTER_SYNC_METHODS
-            or method
-            in {TEAM_MEMBER_JOIN_METHOD, TEAM_MEMBERS_JOIN_METHOD}
-            | TEAM_GROUP_MERGE_METHODS
-            or any(marker in folded for marker in TEAM_MEMBER_LEAVE_MARKERS)
-        ):
-            self.live_party_roster_activity_monotonic = time.monotonic()
-
         if method == TEAM_GROUP_DISBANDED_METHOD:
             try:
                 recipient = int(record.get("network_entity_id", 0) or 0)

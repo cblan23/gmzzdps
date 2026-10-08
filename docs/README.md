@@ -5,8 +5,9 @@
 - [使用指南](usage.md)
 - [常见问题](../使用问题大全.md)
 - [Windows 构建与发布](build.md)
+- [v0.3.6b 发布验收](release-v0.3.6b.md)
+- [v0.3.6b 更新日志](../release-notes-v0.3.6b.txt)
 - [v0.3.6 发布验收](release-v0.3.6.md)
-- [v0.3.6 更新日志](../release-notes-v0.3.6.txt)
 
 ## 技术与历史记录
 

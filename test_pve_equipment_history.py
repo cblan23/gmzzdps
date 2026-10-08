@@ -68,6 +68,74 @@ class PveEquipmentHistoryTests(unittest.TestCase):
         record = {"participants": [{"actor_id": 1}]}
         self.assertIs(window._attach_pve_equipment_snapshots(record), record)
 
+    def test_new_snapshot_supplies_missing_rating_in_each_history_collection(self):
+        window = self.window()
+        window.team_equipment_profiles["teammate-uid"]["equipment_snapshot"]["extraordinary_rating"] = 123866
+        record = {
+            "ended_at_epoch": 100,
+            **{collection: [{"actor_id": 2, "user_token": "teammate-uid", "extraordinary_rating": None}]
+               for collection in ("participants", "healers", "damage_taken")},
+        }
+
+        captured = window._attach_pve_equipment_snapshots(record)
+
+        for collection in ("participants", "healers", "damage_taken"):
+            self.assertEqual(captured[collection][0]["extraordinary_rating"], 123866)
+            self.assertIsNone(record[collection][0]["extraordinary_rating"])
+
+    def test_saved_snapshot_supplies_missing_rating_without_live_profiles(self):
+        window = self.window()
+        window.team_equipment_profiles = {}
+        window.model.actor_character_ids = {}
+        snapshot = {
+            "captured_at_ns": 95_000_000_000,
+            "extraordinary_rating": 123866,
+            "equipment": [{"slot": 1, "item_id": 456}],
+        }
+        record = {
+            "ended_at_epoch": 100,
+            "participant_identities": [{"actor_id": 2, "character_id": "teammate-uid"}],
+            "participants": [{"actor_id": 2, "extraordinary_rating": None,
+                              "equipment_snapshot": snapshot}],
+        }
+        original = deepcopy(record)
+
+        captured = window._attach_pve_equipment_snapshots(record)
+
+        self.assertEqual(captured["participants"][0]["extraordinary_rating"], 123866)
+        self.assertEqual(captured["participants"][0]["equipment_snapshot"], snapshot)
+        self.assertEqual(captured["participants"][0]["user_token"], "teammate-uid")
+        self.assertEqual(record, original)
+        self.assertIs(window._attach_pve_equipment_snapshots(captured), captured)
+
+    def test_saved_snapshot_never_overwrites_rating_or_uses_future_or_wrong_uid(self):
+        window = self.window()
+        window.team_equipment_profiles = {}
+        for rating, captured_at, snapshot_token in (
+            (117730, 95_000_000_000, "teammate-uid"),
+            (None, 101_000_000_000, "teammate-uid"),
+            (None, 0, "teammate-uid"),
+            (None, 95_000_000_000, "other-uid"),
+        ):
+            with self.subTest(rating=rating, captured_at=captured_at, snapshot_token=snapshot_token):
+                record = {
+                    "ended_at_epoch": 100,
+                    "settlement_received_at": 120,
+                    "participants": [{
+                        "actor_id": 2, "user_token": "teammate-uid",
+                        "extraordinary_rating": rating,
+                        "equipment_snapshot": {
+                            "captured_at_ns": captured_at,
+                            "user_token": snapshot_token,
+                            "extraordinary_rating": 123866,
+                            "equipment": [{"slot": 1, "item_id": 456}],
+                        },
+                    }],
+                }
+
+                self.assertIs(window._attach_pve_equipment_snapshots(record), record)
+                self.assertEqual(record["participants"][0]["extraordinary_rating"], rating)
+
     def test_delayed_settlement_uses_the_encounter_identity_snapshot(self):
         window = self.window()
         window.model.actor_character_ids = {}

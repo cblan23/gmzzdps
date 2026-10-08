@@ -2012,7 +2012,7 @@ class EquipmentQuerySchedulingTests(unittest.TestCase):
         first_batch = submit.call_args_list[0].args[0]["members"]
         self.assertEqual(first_batch[0]["user_token"], enemy_token)
 
-    def test_rating_change_requeries_only_that_player(self):
+    def test_rating_change_queries_only_that_player_after_manual_refresh(self):
         tokens = [SELF_TOKEN, ENEMY_TOKEN, OTHER_TOKEN]
         ratings = {1: 80_000, 2: 90_001, 3: 90_002}
         host, submit, actors = self.window(tokens, ratings=ratings)
@@ -2024,7 +2024,10 @@ class EquipmentQuerySchedulingTests(unittest.TestCase):
             token: ratings[actor] for actor, token in actors.items()
         }
         host._equipment_test_ratings[2] = 91_001
-        self.assertTrue(host._schedule_team_equipment_profiles())
+        self.assertFalse(host._schedule_team_equipment_profiles())
+        submit.assert_not_called()
+        self.assertIn(ENEMY_TOKEN, host.team_equipment_profiles)
+        self.assertTrue(host._schedule_team_equipment_profiles(refresh_token=ENEMY_TOKEN))
         self.assertEqual(submit.call_count, 1)
         self.assertEqual(
             [

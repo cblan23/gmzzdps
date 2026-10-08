@@ -6,7 +6,7 @@ from unittest import mock
 
 from main_hud import MainHudRenderer, clamp_visible_rows
 from test_main_hud import snapshot, ROOT, COLORS
-from test_main_hud_behavior import make_window
+from test_main_hud_behavior import make_window, make_equipment_window
 from test_combat_model import DpsWindow, migrate_main_display_config
 
 
@@ -140,6 +140,71 @@ class HudViewportTests(unittest.TestCase):
         self.assertEqual(migrated['geometry'], old['geometry'])
         self.assertEqual(migrated['toggle_hotkey'], old['toggle_hotkey'])
         self.assertNotIn('main_visible_rows', old)
+
+    def test_pvp_starts_compact_and_resizing_preserves_pve_height(self):
+        window = self.make_interactive_window()
+        window.main_combat_mode = 'pvp'
+        window.main_visible_rows = 16
+        window.layered_main_visible_rows = 12
+        window._pvp_hud_map_active = lambda: False
+        self.assertEqual(window._layered_main_snapshot()['visible_rows'], 12)
+        press = SimpleNamespace(x=298, y=288, x_root=500, y_root=700)
+        window._layered_main_press(press)
+        window._layered_main_drag(SimpleNamespace(x_root=500, y_root=748))
+        self.assertEqual(window.pvp_visible_rows, 14)
+        self.assertEqual(window.main_visible_rows, 16)
+        with mock.patch.dict(DpsWindow._layered_main_release.__globals__, save_config=mock.Mock()) as values:
+            window._layered_main_release(press)
+            values['save_config'].assert_not_called()
+        self.assertEqual(window._layered_main_snapshot()['visible_rows'], 14)
+
+    def test_pve_return_button_accepts_clicks_with_long_pvp_roster(self):
+        window = self.make_interactive_window()
+        window.main_combat_mode = 'pvp'
+        window.main_visible_rows = 16
+        state = dict(
+            combat_mode='pvp', pvp_hud_view='team', visible_rows=16,
+            pvp_team_rows=[dict(actor_id=i, name=f'玩家{i}') for i in range(1, 31)],
+        )
+        result = self.renderer.render(state)
+        window.layered_main_hit_regions = result.hit_regions
+        left, top, right, bottom = result.hit_regions['action:pve']
+        x, y = (left + right) // 2, (top + bottom) // 2
+        self.assertEqual(window._layered_main_region_at(x, y), 'action:pve')
+        event = SimpleNamespace(x=x, y=y, x_root=500, y_root=700)
+        window._layered_main_press(event)
+        window._layered_main_drag(SimpleNamespace(x_root=510, y_root=700))
+        window._layered_main_release(event)
+        self.assertEqual(window.main_combat_mode, 'pve')
+        window._drag_start.assert_not_called()
+        window._drag_move.assert_not_called()
+        self.assertEqual(window.main_visible_rows, 16)
+
+    def test_equipment_refresh_click_over_pvp_scroll_area_queries_only_clicked_member(self):
+        window, submissions = make_equipment_window('pvp')
+        window.model.entity_extraordinary_ratings[2] += 1
+        window._layered_main_active = lambda: True
+        window.window_locked = False
+        window.root = SimpleNamespace(configure=lambda **values: None)
+        window._drag_start = mock.Mock()
+        result = self.renderer.render(window._layered_main_snapshot())
+        window.layered_main_hit_regions = result.hit_regions
+        left, top, right, bottom = result.hit_regions['action:refresh_equipment:peer-token']
+        event = SimpleNamespace(x=(left+right)//2, y=(top+bottom)//2, x_root=500, y_root=700)
+        window._layered_main_press(event)
+        self.assertFalse(window.layered_main_drag_armed)
+        window._layered_main_release(event)
+        self.assertEqual(len(submissions), 1)
+        self.assertEqual(submissions[0]['members'][0]['user_token'], 'peer-token')
+        window._drag_start.assert_not_called()
+        result = self.renderer.render(window._layered_main_snapshot())
+        self.assertNotIn('action:refresh_equipment:peer-token', result.hit_regions)
+        self.assertIn('equipment_refresh_pending:peer-token', result.hit_regions)
+        window.layered_main_hit_regions = result.hit_regions
+        window._layered_main_press(event)
+        self.assertFalse(window.layered_main_drag_armed)
+        window._layered_main_release(event)
+        self.assertEqual(len(submissions), 1)
 
 
 if __name__ == '__main__':

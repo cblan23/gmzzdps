@@ -404,6 +404,24 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
             "equipment": [{"slot": 1, "item_id": 456}],
         })
 
+    def test_late_settlement_missing_identity_rating_keeps_saved_teammate_rating(self):
+        tracker = EncounterTracker()
+        encounter = self.wipe(tracker)
+        identity = next(row for row in encounter.participants_snapshot if row["id"] == "peer")
+        identity["extraordinary_rating"] = None
+        self.adapter.sync(tracker)
+        record = self.store.load(encounter.local_encounter_id)
+        teammate = next(row for row in record["participants"] if row["user_token"] == "peer")
+        teammate["extraordinary_rating"] = 123866
+        self.store.save(record)
+
+        tracker.accept(self.settlement())
+        self.adapter.sync(tracker)
+
+        settled = self.store.load(encounter.local_encounter_id)
+        teammate = next(row for row in settled["participants"] if row["user_token"] == "peer")
+        self.assertEqual(teammate["extraordinary_rating"], 123866)
+
     def test_settlement_keeps_only_exact_local_target_distributions(self):
         tracker = EncounterTracker()
         encounter = self.wipe(tracker)

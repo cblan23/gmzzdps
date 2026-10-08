@@ -67,6 +67,67 @@ def completed_record():
                               for i in range(1, 7)], healers=[])
 
 
+def make_equipment_window(mode="pve"):
+    window, members = make_window()
+    members.intersection_update({1, 2})
+    window.main_combat_mode = mode
+    window.model.party_session_id = 7
+    window.model.party_member_count = 2
+    window.model.self_character_id = "self-token"
+    window.model.party_user_tokens = {"peer-token"}
+    window.model.actor_character_ids = {1: "self-token", 2: "peer-token"}
+    window.model.entity_extraordinary_ratings.update({1: 100_000, 2: 90_000})
+    window.model.actor_is_ai = lambda _actor: False
+    window.team_equipment_profiles = {
+        token: {"user_token": token, "equipment_count": 8,
+                "extraordinary_rating": rating, "equipment_snapshot": {"old": True}}
+        for token, rating in (("self-token", 100_000), ("peer-token", 90_000))
+    }
+    window.team_equipment_profile_ratings = {"self-token": 100_000, "peer-token": 90_000}
+    window.team_equipment_requested_tokens = {"self-token", "peer-token"}
+    window.team_equipment_requested_ratings = {}
+    window.team_equipment_requested_at = {}
+    submissions = []
+    window.worker = SimpleNamespace(
+        equipment_session=lambda: (222, 1),
+        schedule_equipment_profiles=lambda payload: submissions.append(payload) or True,
+    )
+    window._invalidate_team_rating_preview_rows = mock.Mock()
+    window._schedule_layered_main_render = mock.Mock()
+    if mode == "pvp":
+        def roster(**options):
+            if options.get("side") == "enemy":
+                return []
+            return [
+                dict(user_token=token, actor_id=actor, is_self=actor == 1,
+                     name=f"玩家{actor}", profession_id=1_200_001,
+                     extraordinary_rating=window.model.entity_extraordinary_ratings[actor])
+                for actor, token in ((1, "self-token"), (2, "peer-token"))
+                if actor != 1 or options.get("include_self")
+            ]
+        tracker = SimpleNamespace(
+            self_token="self-token", map_id=5208003, generation=1,
+            pvp_allies={"peer-token": {}}, pvp_team_members=roster,
+        )
+        window.pvp_recording = SimpleNamespace(
+            active=True, map_id=5208003, display_tracker=tracker,
+            recording={"map_id": 5208003, "match_id": "manual-equipment-refresh"},
+            snapshot=lambda: {"session_id": "manual-equipment-refresh", "allies": roster(include_self=True)},
+        )
+    window.team_equipment_context = (222, "self-token", window._team_equipment_party_session_id())
+    return window, submissions
+
+
+def equipment_reply(window, token="peer-token", rating=90_001):
+    return dict(
+        game_pid=222, capture_session_id=1, local_user_token="self-token",
+        party_session_id=window._team_equipment_party_session_id(),
+        user_token=token, extraordinary_rating=rating, equipment_count=8,
+        pvp_equipment_count=4, active_word_count=3, total_word_count=10,
+        batch_id="manual-refresh", equipment_snapshot={"new": True},
+    )
+
+
 def make_official_clock_window():
     window, _ = make_window()
     window.model = CombatModel(run_id="official-hud-clock")
@@ -1691,62 +1752,165 @@ class MainHudBehaviorTests(unittest.TestCase):
             ["new-peer-token"],
         )
 
-    def test_rating_change_refreshes_only_that_member_in_pve_and_pvp(self):
+    def test_rating_change_waits_for_manual_refresh_in_pve_and_pvp(self):
         for mode in ("pve", "pvp"):
             with self.subTest(mode=mode):
-                window, _ = make_window()
-                window.main_combat_mode = mode
-                window.model.party_active = True
-                window.model.party_session_id = 7
-                window.model.party_member_count = 2
-                window.model.self_character_id = "self-token"
-                window.model.party_user_tokens = {"peer-token"}
-                window.model.actor_character_ids = {
-                    1: "self-token",
-                    2: "peer-token",
-                }
-                window.model.entity_names.update({1: "本人", 2: "莫雪"})
-                window.model.entity_extraordinary_ratings.update(
-                    {1: 80_616, 2: 88_894}
-                )
-                window.model.actor_is_ai = lambda _actor_id: False
-                window.team_equipment_profiles = {
-                    "self-token": {"equipment_count": 8},
-                    "peer-token": {"equipment_count": 8},
-                }
-                window.team_equipment_requested_tokens = {
-                    "self-token",
-                    "peer-token",
-                }
-                window.team_equipment_profile_ratings = {
-                    "self-token": 80_616,
-                    "peer-token": 88_893,
-                }
-                window.team_equipment_requested_ratings = {}
-                window.team_equipment_context = (222, "self-token", 7)
-                submissions = []
-                window.worker = SimpleNamespace(
-                    equipment_session=lambda: (222, 1),
-                    schedule_equipment_profiles=lambda payload: (
-                        submissions.append(payload) or True
-                    ),
-                )
-                invalidated = []
-                window._invalidate_team_rating_preview_rows = (
-                    lambda *actors, **_options: invalidated.extend(actors)
-                )
+                window, submissions = make_equipment_window(mode)
+                old_profiles = copy.deepcopy(window.team_equipment_profiles)
+                window.model.entity_extraordinary_ratings[2] += 1
+                for _ in range(3):
+                    self.assertFalse(window._schedule_team_equipment_profiles())
+                self.assertEqual(submissions, [])
+                self.assertEqual(window.team_equipment_profiles, old_profiles)
+                self.assertEqual(window._equipment_refresh_fields(1), {})
+                self.assertEqual(window._equipment_refresh_fields(2)["equipment_refresh_token"], "peer-token")
+                if mode == "pvp":
+                    rows = window._pvp_layered_main_snapshot()["pvp_team_rows"]
+                else:
+                    rows = window._layered_main_snapshot()["rows"]
+                peer = next(row for row in rows if row.get("actor_id") == 2)
+                self.assertEqual(peer["equipment_refresh_token"], "peer-token")
 
+                self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+                self.assertEqual([row["user_token"] for row in submissions[0]["members"]], ["peer-token"])
+                self.assertTrue(window._equipment_refresh_fields(2)["equipment_refresh_pending"])
+                self.assertFalse(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+                self.assertEqual(len(submissions), 1)
+                self.assertTrue(window._ingest_team_equipment_profile(equipment_reply(window)))
+                self.assertEqual(window._equipment_refresh_fields(2), {})
+                self.assertEqual(window.team_equipment_profiles["peer-token"]["equipment_snapshot"], {"new": True})
+                self.assertEqual(window.team_equipment_profiles["self-token"], old_profiles["self-token"])
+                self.assertFalse(window._schedule_team_equipment_profiles())
+
+    def test_self_rating_change_refreshes_automatically_without_button(self):
+        for mode in ("pve", "pvp"):
+            with self.subTest(mode=mode):
+                window, submissions = make_equipment_window(mode)
+                window.model.entity_extraordinary_ratings[1] += 1
+
+                self.assertEqual(window._equipment_refresh_fields(1), {})
                 self.assertTrue(window._schedule_team_equipment_profiles())
                 self.assertEqual(
-                    [
-                        member["user_token"]
-                        for member in submissions[0]["members"]
-                    ],
-                    ["peer-token"],
+                    [row["user_token"] for row in submissions[0]["members"]],
+                    ["self-token"],
                 )
-                self.assertIn("self-token", window.team_equipment_profiles)
-                self.assertNotIn("peer-token", window.team_equipment_profiles)
-                self.assertEqual(invalidated, [2])
+                self.assertEqual(window._equipment_refresh_fields(1), {})
+                self.assertFalse(window._schedule_team_equipment_profiles())
+
+    def test_manual_equipment_timeout_preserves_snapshot_and_never_retries_automatically(self):
+        for mode in ("pve", "pvp"):
+            with self.subTest(mode=mode):
+                window, submissions = make_equipment_window(mode)
+                old_profile = copy.deepcopy(window.team_equipment_profiles["peer-token"])
+                window.model.entity_extraordinary_ratings[2] += 1
+                self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+                window.team_equipment_requested_at["peer-token"] = time.monotonic() - 21
+                self.assertFalse(window._schedule_team_equipment_profiles())
+                self.assertEqual(len(submissions), 1)
+                self.assertEqual(window.team_equipment_profiles["peer-token"], old_profile)
+                self.assertFalse(window._equipment_refresh_fields(2)["equipment_refresh_pending"])
+                self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+                self.assertEqual(len(submissions), 2)
+
+    def test_failed_manual_equipment_submission_can_be_clicked_again(self):
+        window, submissions = make_equipment_window()
+        window.model.entity_extraordinary_ratings[2] += 1
+        window.worker.schedule_equipment_profiles = mock.Mock(return_value=False)
+        self.assertFalse(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+        self.assertFalse(window._equipment_refresh_fields(2)["equipment_refresh_pending"])
+        window.worker.schedule_equipment_profiles.return_value = True
+        self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+        self.assertEqual(window.worker.schedule_equipment_profiles.call_count, 2)
+
+    def test_rating_changes_during_manual_query_require_another_click(self):
+        window, submissions = make_equipment_window("pvp")
+        window.model.entity_extraordinary_ratings[2] = 90_001
+        self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+        window.model.entity_extraordinary_ratings[2] = 90_002
+        self.assertFalse(window._schedule_team_equipment_profiles())
+        self.assertTrue(window._equipment_refresh_fields(2)["equipment_refresh_pending"])
+        self.assertEqual(window.team_equipment_requested_ratings["peer-token"], 90_001)
+        self.assertTrue(window._ingest_team_equipment_profile(equipment_reply(window)))
+        self.assertFalse(window._equipment_refresh_fields(2)["equipment_refresh_pending"])
+        self.assertFalse(window._schedule_team_equipment_profiles())
+        self.assertEqual(len(submissions), 1)
+        self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+
+    def test_map_context_change_rebaselines_successful_equipment_rating(self):
+        for mode in ("pve", "pvp"):
+            with self.subTest(mode=mode):
+                window, submissions = make_equipment_window(mode)
+                window.model.entity_extraordinary_ratings[2] = 90_001
+                window.team_equipment_context = (222, "self-token", 8)
+                self.assertFalse(window._schedule_team_equipment_profiles())
+                self.assertEqual(window.team_equipment_profile_ratings["peer-token"], 90_001)
+                self.assertEqual(window._equipment_refresh_fields(2), {})
+                window.model.entity_extraordinary_ratings[2] = 90_002
+                self.assertIn("equipment_refresh_token", window._equipment_refresh_fields(2))
+                window.model.entity_extraordinary_ratings[2] = 90_001
+                self.assertEqual(window._equipment_refresh_fields(2), {})
+                self.assertFalse(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+                self.assertFalse(window._schedule_team_equipment_profiles(refresh_token="departed-token"))
+                self.assertEqual(submissions, [])
+
+    def test_capture_session_change_waits_for_new_map_rating_before_refresh(self):
+        for mode in ("pve", "pvp"):
+            with self.subTest(mode=mode):
+                window, submissions = make_equipment_window(mode)
+                window.team_equipment_profile_capture_sessions = {
+                    "self-token": 1,
+                    "peer-token": 1,
+                }
+                window.active_capture_session_id = 2
+                window.model.entity_extraordinary_ratings[1] = 100_224
+
+                self.assertEqual(window._equipment_refresh_fields(1), {})
+                self.assertFalse(
+                    window._rebaseline_team_equipment_rating_after_capture_change(
+                        {
+                            "entity_id": 1,
+                            "extraordinary_rating": 100_224,
+                            "source_method": "PeriodicLiveTeamRatingSnapshot",
+                        }
+                    )
+                )
+                self.assertTrue(
+                    window._rebaseline_team_equipment_rating_after_capture_change(
+                        {
+                            "entity_id": 1,
+                            "extraordinary_rating": 100_224,
+                            "source_method": "OnJoinGroupSuccess",
+                        }
+                    )
+                )
+                self.assertEqual(
+                    window.team_equipment_profile_ratings["self-token"],
+                    100_224,
+                )
+                self.assertEqual(window._equipment_refresh_fields(1), {})
+                self.assertEqual(submissions, [])
+
+                window.model.entity_extraordinary_ratings[1] = 100_225
+                self.assertEqual(window._equipment_refresh_fields(1), {})
+                self.assertTrue(window._schedule_team_equipment_profiles())
+                self.assertEqual(
+                    [row["user_token"] for row in submissions[0]["members"]],
+                    ["self-token"],
+                )
+
+    def test_pvp_manual_refresh_uses_stable_token_before_actor_binding(self):
+        window, submissions = make_equipment_window("pvp")
+        window.model.actor_character_ids.pop(2)
+        window.model.entity_extraordinary_ratings[2] = 90_001
+        window.pvp_recording.display_tracker.pvp_team_members = lambda **options: [] if options.get("side") == "enemy" else [
+            {"user_token": "self-token", "actor_id": 1, "is_self": True, "extraordinary_rating": 100_000},
+            {"user_token": "peer-token", "actor_id": 0, "extraordinary_rating": 90_001},
+        ]
+        self.assertFalse(window._schedule_team_equipment_profiles())
+        row = next(row for row in window._pvp_layered_main_snapshot()["pvp_team_rows"] if row["user_token"] == "peer-token")
+        self.assertEqual(row["equipment_refresh_token"], "peer-token")
+        self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
+        self.assertEqual(submissions[0]["members"][0]["actor_id"], 0)
 
     def test_large_roster_equipment_queries_are_batched_without_dropping_members(self):
         window, _members = make_window()
@@ -1926,6 +2090,14 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         self.assertEqual(window.pvp_team_offset, 1)
         self.assertEqual(renders, [True])
+        window.layered_main_hit_regions = {"scroll:pvp_team": (0, 0, 20, 100)}
+        for region in ("action:refresh_equipment:peer-token", "equipment_refresh_pending:peer-token"):
+            window._layered_main_region_at = lambda _x, _y, selected=region: selected
+            window._scroll_main(SimpleNamespace(delta=-120, num=0, x=1, y=1))
+        self.assertEqual(window.pvp_team_offset, 3)
+        window.main_visible_rows = 16
+        window._scroll_main(SimpleNamespace(delta=-3600, num=0, x=1, y=1))
+        self.assertEqual(window.pvp_team_offset, 20)
 
     def test_victory_upload_is_queued_with_character_without_manual_button(self):
         window, _ = make_window()
@@ -3038,7 +3210,9 @@ class MainHudBehaviorTests(unittest.TestCase):
             }
         ]
         live_rows, _ = window._main_display_rows(now=205)
-        self.assertEqual([row["actor_id"] for row in live_rows], [91])
+        self.assertTrue(live_rows[0]["is_live_self"])
+        self.assertEqual(live_rows[1]["row_kind"], "section")
+        self.assertEqual([row["actor_id"] for row in live_rows[2:]], [91])
         self.assertIs(window._main_recent_settlement_record(), previous)
 
         window.live_hud_combat_state = None
@@ -3478,6 +3652,69 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertIn(
             "recent_boss",
             {row.get("row_kind") for row in window._settlement_main_rows(now=205)},
+        )
+
+    def test_finished_boss_without_server_table_shows_bound_local_team_rows(self):
+        window, _ = make_window()
+        window.model.encounter_id = "local-first-boss"
+        window.model.actor_character_ids = {
+            actor_id: f"member-{actor_id}" for actor_id in range(1, 7)
+        }
+        window.model.self_character_id = "member-1"
+        window.model.combat_in_progress = lambda _now=None: False
+        window.model.resolve_combat_interval = lambda _now=None: SimpleNamespace(
+            final=True
+        )
+        roster = [
+            {
+                "id": f"member-{actor_id}",
+                "iid": actor_id,
+                "name": f"队员{actor_id}",
+                "profession_id": 1200001,
+            }
+            for actor_id in range(1, 7)
+        ]
+        tracker = EncounterTracker()
+        current = tracker.begin(
+            instance_id="instance",
+            started_at_ns=200_000_000_000,
+            participants_snapshot=roster,
+            boss_template_id=7_150_042,
+            boss_token="first-boss",
+            self_token="member-1",
+        )
+        current.boss_name = "厄水巨龟"
+        window.settlement_ui = SimpleNamespace(
+            tracker=tracker,
+            session_encounter_ids={current.local_encounter_id},
+        )
+        window.settlement_history_adapter = SimpleNamespace(
+            local_bindings={
+                "local-first-boss": current.local_encounter_id,
+            }
+        )
+
+        rows, rating_preview = window._main_display_rows(now=205)
+        history = [row for row in rows if row.get("is_recent_battle")]
+
+        self.assertFalse(rating_preview)
+        self.assertTrue(rows[0]["is_live_self"])
+        self.assertEqual(rows[2]["row_kind"], "recent_boss")
+        self.assertEqual(rows[2]["boss_name"], "厄水巨龟")
+        self.assertEqual([row["actor_id"] for row in history], list(range(1, 7)))
+        self.assertEqual(history[0]["total_value"], 630_000)
+        self.assertEqual(history[0]["stat_value"], 21_000)
+        self.assertTrue(
+            all("等待服务器结算" in row["settlement_status_text"] for row in history)
+        )
+        self.assertEqual(window._main_recent_battle_team_dps_text(), "91,000/s")
+
+        window.settlement_history_adapter.local_bindings[
+            "local-first-boss"
+        ] = "another-encounter"
+        stale_rows = window._settlement_main_rows(now=205)
+        self.assertNotIn(
+            "recent_boss", {row.get("row_kind") for row in stale_rows}
         )
 
     def test_bootstrap_boss_rebind_keeps_previous_settlement_visible(self):
@@ -4007,6 +4244,56 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(snapshot['boss_percent'], '0%')
         self.assertTrue(snapshot['boss_hp'].startswith('0 /'))
 
+    def test_packet_terminal_zero_overrides_stale_model_health_before_settlement(self):
+        window, _ = make_window()
+        boss = SimpleNamespace(
+            entity_id=90,
+            name='Boss',
+            template_id=7_109_821,
+            current_hp=68_739,
+            max_hp=31_941_215,
+            last_hp_update_100ns=0,
+        )
+        window.model.current_monster = lambda: boss
+        window.model.current_bosses = lambda: [boss]
+        window.model.entity_combat_states = {90: False}
+        window.model.combat_end_reason = ''
+        window.model.pending_active_boss_id = None
+        window.live_hud_boss_state = {
+            'active': False,
+            'terminal_zero': True,
+            'entity_id': 90,
+            'template_id': 7_109_821,
+            'current_hp': 0.0,
+            'ended_at_epoch': 1_000.0,
+        }
+        window.live_hud_combat_state = None
+        window.live_hud_dps_segment = None
+        window.main_last_battle_result = None
+        window.main_manual_clear_state = None
+        window.main_cleared_encounter_ids = []
+        window.pve_hud_view = 'recent_battle'
+        window.main_time_text = '02:51'
+        window.team_dps_text = '0'
+        window.main_scroll_offset = 0
+        window.main_visible_rows = 10
+        window.main_ui_scale = 1.0
+        window.window_dpi = 96
+        window.show_combat_time = True
+        window.show_boss_hp_bar = True
+        window.show_main_totals = True
+        window.show_deaths = True
+        window.show_team_dps = True
+        window.show_pvp_button = True
+        window.highlight_self = True
+        window.main_row_mask_opacity = 0
+        window.window_locked = False
+
+        snapshot = window._layered_main_snapshot()
+
+        self.assertEqual(snapshot['boss_percent'], '0%')
+        self.assertTrue(snapshot['boss_hp'].startswith('0 /'))
+
     def test_recent_victory_zeroes_archived_positive_health_sample(self):
         window, _ = make_window()
         tracker = EncounterTracker()
@@ -4264,11 +4551,55 @@ class MainHudBehaviorTests(unittest.TestCase):
         rows, rating_preview = window._main_display_rows(now=205)
 
         self.assertFalse(rating_preview)
-        self.assertEqual([row["actor_id"] for row in rows], list(range(1, 7)))
-        self.assertTrue(all(row.get("row_kind") is None for row in rows))
+        self.assertTrue(rows[0]["is_live_self"])
+        self.assertEqual(rows[0]["actor_id"], 1)
+        self.assertEqual(rows[1]["row_kind"], "section")
+        self.assertEqual(
+            [row["actor_id"] for row in rows[2:]], list(range(1, 7))
+        )
+        self.assertEqual(rows[2]["total_value"], 630_000)
+        self.assertEqual(rows[2]["stat_value"], 63_000)
+        self.assertEqual(rows[2]["dps_value"], 63_000)
+
+    def test_live_team_snapshot_without_self_keeps_live_self_pinned(self):
+        window, _ = make_window()
+        window.settlement_ui = SimpleNamespace(tracker=EncounterTracker())
+        window.model.team_damage_states = {
+            2: TeamDamageState(
+                actor_id=2,
+                has_snapshot=True,
+                authoritative_snapshot=True,
+                accepted_damage=560_000,
+                snapshot_time_100ns=200_000_000_000,
+                live_dps=56_000,
+                live_dps_damage=560_000,
+            )
+        }
+
+        rows, rating_preview = window._main_display_rows(now=205)
+
+        self.assertFalse(rating_preview)
+        self.assertTrue(rows[0]["is_live_self"])
+        self.assertEqual(rows[0]["actor_id"], 1)
         self.assertEqual(rows[0]["total_value"], 630_000)
-        self.assertEqual(rows[0]["stat_value"], 63_000)
-        self.assertEqual(rows[0]["dps_value"], 63_000)
+        self.assertEqual(rows[1]["row_kind"], "section")
+        self.assertEqual([row["actor_id"] for row in rows[2:]], [2])
+
+    def test_empty_live_team_snapshot_keeps_self_and_previous_result(self):
+        window, _ = make_window()
+        expected = [
+            {"actor_id": 1, "is_live_self": True},
+            {"row_kind": "section"},
+            {"row_kind": "recent_boss", "boss_name": "上一只Boss"},
+            {"actor_id": 2, "is_recent_battle": True},
+        ]
+        window._main_authoritative_live_team_rows = lambda _now=None: []
+        window._settlement_main_rows = lambda _now=None: expected
+
+        rows, rating_preview = window._main_display_rows(now=205)
+
+        self.assertFalse(rating_preview)
+        self.assertIs(rows, expected)
 
     def test_targetless_team_snapshot_prioritizes_live_rows_and_no_boss_header(self):
         window, _ = make_window()
@@ -4294,9 +4625,9 @@ class MainHudBehaviorTests(unittest.TestCase):
         snapshot = window._layered_main_snapshot()
 
         self.assertFalse(rating_preview)
-        self.assertEqual(
-            [row["actor_id"] for row in rows], [1, 2]
-        )
+        self.assertTrue(rows[0]["is_live_self"])
+        self.assertEqual(rows[1]["row_kind"], "section")
+        self.assertEqual([row["actor_id"] for row in rows[2:]], [1, 2])
         self.assertEqual(rows[0]["stat_value"], 40_000)
         self.assertEqual(rows[0]["dps_value"], 40_000)
         self.assertEqual(rows[0]["total_value"], 320_000)
@@ -4448,7 +4779,7 @@ class MainHudBehaviorTests(unittest.TestCase):
                 row["actor_id"] for row in snapshot["rows"]
                 if row.get("actor_id") is not None
             ],
-            list(range(1, 7)),
+            [1, *range(1, 7)],
         )
         section = next(
             row for row in snapshot["rows"] if row.get("row_kind") == "section"
@@ -4508,6 +4839,51 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(section["live_team_dps"], "60,000/s")
         self.assertIs(window.main_last_battle_result, retained)
+
+    def test_live_hud_boss_keeps_model_enrage_prediction_visible(self):
+        window, _ = make_window()
+        boss = SimpleNamespace(
+            entity_id=57_450_019_565_812,
+            template_id=7_110_200,
+            name="Boss",
+            current_hp=109_003_818,
+            max_hp=148_759_025,
+        )
+        window.model.current_monster = lambda: boss
+        window.model.current_bosses = lambda: [boss]
+        window.model.entity_combat_states = {boss.entity_id: True}
+        window.live_hud_boss_state = {
+            "active": True,
+            "entity_id": boss.entity_id,
+            "template_id": boss.template_id,
+            "boss_type": 3,
+            "name": boss.name,
+            "current_hp": boss.current_hp,
+            "max_hp": boss.max_hp,
+            "started_at_epoch": 1_000.0,
+        }
+        window.boss_enrage_prediction_enabled = True
+        window.enrage_prediction_visible = True
+        window.enrage_prediction = SimpleNamespace(
+            state="danger",
+            message="危险 · -7:16",
+            calculating=False,
+            enrage_seconds=600.0,
+            time_to_enrage_seconds=476.0,
+            schedule_start_hp_percent=100.0,
+            schedule_end_hp_percent=2.0,
+        )
+
+        snapshot = window._layered_main_snapshot()
+
+        self.assertEqual(
+            snapshot["prediction"],
+            {
+                "state": "danger",
+                "message": "危险 · -7:16",
+                "marker": 0.02 + 476.0 / 600.0 * 0.98,
+            },
+        )
 
     def test_live_hud_boss_message_stays_out_of_combat_model(self):
         window = object.__new__(DpsWindow)

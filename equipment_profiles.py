@@ -89,6 +89,9 @@ STATE_RESULT = 0x18
 STATE_ORIGINAL_TOP = 0x28
 STATE_ORIGINAL_BASE = 0x30
 STATE_ACTIVE_LUA = 0x38
+STATE_EXPECTED_SCRIPT_ENTITY = 0x40
+STATE_EXPECTED_LUA = 0x48
+STATE_ACTIVE_SCRIPT_ENTITY = 0x50
 STATE_CONTEXT = 0x80
 STATE_VARIADIC = 0x100
 STATE_TOKEN_DATA = 0x200
@@ -148,8 +151,6 @@ DESCRIPTOR_PATTERN = bytes.fromhex(
     "00 01 00 01 00 00 00 00 "
     "39 01 00 00 00 00 00 00"
 )
-PREFERRED_DESCRIPTOR_START = 0x0000_0005_0000_0000
-PREFERRED_DESCRIPTOR_END = 0x0000_0006_0000_0000
 PVP_ITEM_TAG = 2
 ACTIVE_WORD_CLASS_TYPE = 1
 EQUIPMENT_QUALITY_NAMES = {
@@ -1567,7 +1568,6 @@ def _iter_readable_private_regions(process: int, start: int, end: int):
 
 
 def _scan_descriptor_range(process: int, start: int, end: int) -> list[int]:
-    results: list[int] = []
     overlap = len(DESCRIPTOR_PATTERN) - 1
     for region, size in _iter_readable_private_regions(process, start, end):
         position = region
@@ -1590,15 +1590,17 @@ def _scan_descriptor_range(process: int, start: int, end: int) -> list[int]:
                 candidate = origin + found - 0x10
                 if (
                     candidate > 0
-                    and candidate not in results
                     and _descriptor_schema(process, candidate)
                     == EXPECTED_ARGUMENT_DESCRIPTORS
                 ):
-                    results.append(candidate)
+                    # Regions and matches are visited in address order. The
+                    # caller uses the first verified descriptor, so scanning
+                    # the rest of the game heap only delays the first query.
+                    return [candidate]
                 found += 1
             tail = data[-overlap:]
             position += amount
-    return results
+    return []
 
 
 def locate_registered_method(
@@ -1614,12 +1616,8 @@ def locate_registered_method(
     ):
         return descriptor_hint, (descriptor_hint,)
     candidates = _scan_descriptor_range(
-        process,
-        PREFERRED_DESCRIPTOR_START,
-        PREFERRED_DESCRIPTOR_END,
+        process, 0x10000, MAX_USER_ADDRESS,
     )
-    if not candidates:
-        candidates = _scan_descriptor_range(process, 0x10000, MAX_USER_ADDRESS)
     if not candidates:
         raise RuntimeError("ReqOtherRoleShapeData descriptor was not found")
     candidates.sort()
@@ -1856,8 +1854,21 @@ def _build_request_stub(
     code += b"\x49\x83\x7f\x08\x01"
     skip_jumps = [_near_jump(code, b"\x0f\x85")]
 
-    # Borrow one natural ReqNTP call so execution stays on the game's Lua/RPC
-    # thread and uses its current session serializer.
+    # The first call identifies the local role through ReqNTP. Later queries
+    # can borrow an earlier live RPC on that exact role and Lua state.
+    code += b"\x4c\x8b\x74\x24" + bytes([SAVED_R9])
+    code += b"\x4d\x85\xf6"
+    skip_jumps.append(_near_jump(code, b"\x0f\x84"))
+    code += b"\x4d\x8b\x2e\x4d\x85\xed"
+    skip_jumps.append(_near_jump(code, b"\x0f\x84"))
+    code += b"\x48\x8b\x44\x24" + bytes([SAVED_RCX])
+    code += b"\x49\x3b\x47" + bytes([STATE_EXPECTED_SCRIPT_ENTITY])
+    require_ntp = [_near_jump(code, b"\x0f\x85")]
+    code += b"\x4d\x3b\x6f" + bytes([STATE_EXPECTED_LUA])
+    require_ntp.append(_near_jump(code, b"\x0f\x85"))
+    confirmed_context = _near_jump(code, b"\xe9")
+    for jump in require_ntp:
+        _patch_jump(code, jump, len(code))
     code += b"\x4c\x8b\x44\x24" + bytes([SAVED_R8])
     code += b"\x4d\x85\xc0"
     skip_jumps.append(_near_jump(code, b"\x0f\x84"))
@@ -1875,17 +1886,13 @@ def _build_request_stub(
     code += b"\x66\x81\x78\x04" + struct.pack("<H", 0x5054)
     skip_jumps.append(_near_jump(code, b"\x0f\x85"))
 
-    code += b"\x4c\x8b\x74\x24" + bytes([SAVED_R9])
-    code += b"\x4d\x85\xf6"
-    skip_jumps.append(_near_jump(code, b"\x0f\x84"))
-    code += b"\x4d\x8b\x2e"
-    code += b"\x4d\x85\xed"
-    skip_jumps.append(_near_jump(code, b"\x0f\x84"))
-
+    _patch_jump(code, confirmed_context, len(code))
     code += b"\xb8\x01\x00\x00\x00\xba\x02\x00\x00\x00"
     code += b"\xf0\x49\x0f\xb1\x57\x08"
     skip_jumps.append(_near_jump(code, b"\x0f\x85"))
     code += b"\x4d\x89\x6f\x38\xfc"
+    code += b"\x48\x8b\x44\x24" + bytes([SAVED_RCX])
+    code += b"\x49\x89\x47" + bytes([STATE_ACTIVE_SCRIPT_ENTITY])
 
     code += b"\x48\x8b\x74\x24" + bytes([SAVED_RDX])
     code += b"\x48\x85\xf6"
@@ -1979,6 +1986,7 @@ class OneShotEquipmentRequest:
         correlation: int,
         runtime_profile: Mapping[str, object],
         descriptor_hint: int = 0,
+        context_hint: tuple[int, int] = (0, 0),
     ) -> None:
         hook = runtime_profile_hook(runtime_profile, "team_stats")
         self.pid = int(pid)
@@ -1997,6 +2005,7 @@ class OneShotEquipmentRequest:
         self.descriptor = 0
         self.descriptor_candidates: tuple[int, ...] = ()
         self.descriptor_hint = int(descriptor_hint or 0)
+        self.context_hint = context_hint
         self.installed = False
         self.recovered_abandoned_hook = False
 
@@ -2056,6 +2065,7 @@ class OneShotEquipmentRequest:
             raise winerror("VirtualAllocEx(equipment query)")
         state = bytearray(STATE_SIZE)
         state[:8] = STATE_MAGIC
+        struct.pack_into("<QQ", state, STATE_EXPECTED_SCRIPT_ENTITY, *self.context_hint)
         token_cells: list[tuple[int, int]] = []
         cursor = STATE_TOKEN_DATA
         for token in self.tokens:
@@ -2116,6 +2126,13 @@ class OneShotEquipmentRequest:
             raise RuntimeError("equipment request state is unreadable")
         return struct.unpack("<3Q", raw)
 
+    def live_context(self) -> tuple[int, int]:
+        raw = read_region(self.process, self.state + STATE_ACTIVE_LUA, 0x20)
+        if raw is None or len(raw) != 0x20:
+            return (0, 0)
+        lua, _expected_entity, _expected_lua, entity = struct.unpack("<4Q", raw)
+        return int(entity), int(lua)
+
     def close(self) -> None:
         if self.process and self.state:
             try:
@@ -2164,6 +2181,12 @@ class EquipmentProfileCoordinator:
     ) -> None:
         self.archive = EquipmentQueryArchive(data_dir)
         self.item_name_cache_path = Path(data_dir) / "equipment_item_names.json"
+        self.location_hints_path = Path(data_dir) / "equipment_lookup_hints.json"
+        try:
+            saved = json.loads(self.location_hints_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        self.saved_location_hints = saved if isinstance(saved, dict) else {}
         self.emit = emit
         self.stop_event = stop_event
         self.closing = threading.Event()
@@ -2207,9 +2230,49 @@ class EquipmentProfileCoordinator:
         self.local_equipment_loading: set[tuple[int, str, int]] = set()
         self.lua_state_hint: tuple[int, int] = (0, 0)
         self.descriptor_hint: tuple[int, int] = (0, 0)
+        self.request_context_hint: tuple[tuple[object, ...], tuple[int, int]] | None = None
         self.descriptor_scan_lock = threading.Lock()
         self.request_hook_lock = threading.Lock()
         self.descriptor_preparing_pids: set[int] = set()
+
+    def _saved_location_hint(
+        self, game_pid: int, key: str, local_user_token: str = ""
+    ) -> int:
+        saved = self.saved_location_hints
+        if _positive_int(saved.get("game_pid")) != game_pid:
+            return 0
+        if key == "lua_state_address" and (
+            not local_user_token or saved.get("local_user_token") != local_user_token
+        ):
+            return 0
+        address = _positive_int(saved.get(key))
+        return address if address < MAX_USER_ADDRESS else 0
+
+    def _save_location_hints(self, local_user_token: str = "") -> None:
+        # Persist locations only. Every use revalidates live memory, and every
+        # equipment score/profile still comes from the current game session.
+        with self.lock:
+            pid, descriptor = self.descriptor_hint
+            if not pid or not descriptor:
+                return
+            value = {"game_pid": pid, "descriptor_address": descriptor}
+            if _positive_int(self.saved_location_hints.get("game_pid")) == pid:
+                for key in ("local_user_token", "lua_state_address"):
+                    if key in self.saved_location_hints:
+                        value[key] = self.saved_location_hints[key]
+            lua_pid, lua_state = self.lua_state_hint
+            if local_user_token and lua_pid == pid and lua_state:
+                value.update(local_user_token=local_user_token, lua_state_address=lua_state)
+            temporary = self.location_hints_path.with_name(
+                f".{self.location_hints_path.name}.{os.getpid()}.tmp"
+            )
+            try:
+                temporary.parent.mkdir(parents=True, exist_ok=True)
+                temporary.write_text(json.dumps(value) + "\n", encoding="utf-8")
+                os.replace(temporary, self.location_hints_path)
+            except OSError:
+                return
+            self.saved_location_hints = value
 
     def start(self) -> None:
         with self.lock:
@@ -2245,6 +2308,7 @@ class EquipmentProfileCoordinator:
                 self.requested_keys.clear()
                 self.responded_keys.clear()
                 self.priority_keys.clear()
+                self.request_context_hint = None
             self.latest_session = session
             current_member_keys = {}
             for member in session.members:
@@ -2341,9 +2405,12 @@ class EquipmentProfileCoordinator:
                 if read_region(process, base + rva, len(signature)) != signature:
                     raise RuntimeError("call_server entry is not clean")
                 with self.descriptor_scan_lock:
-                    descriptor, candidates = locate_registered_method(process)
+                    descriptor, candidates = locate_registered_method(
+                        process, self._saved_location_hint(pid, "descriptor_address")
+                    )
                 with self.lock:
                     self.descriptor_hint = (pid, descriptor)
+                self._save_location_hints()
                 self.archive.append(
                     "descriptor_prepared",
                     game_pid=pid,
@@ -2383,6 +2450,8 @@ class EquipmentProfileCoordinator:
             self.latest_session = None
             self.descriptor_hint = (0, 0)
             self.lua_state_hint = (0, 0)
+            self.request_context_hint = None
+            self.saved_location_hints = {}
             self.local_equipment_scores.clear()
             self.latest_profiles.clear()
             self.requested_keys.clear()
@@ -2571,6 +2640,10 @@ class EquipmentProfileCoordinator:
             with self.lock:
                 hint_pid, hint_address = self.lua_state_hint
             hint_address = hint_address if hint_pid == session.game_pid else 0
+            if not hint_address:
+                hint_address = self._saved_location_hint(
+                    session.game_pid, "lua_state_address", session.local_user_token
+                )
             try:
                 from runtime_metadata import LiveTeamProfileReader
 
@@ -2599,6 +2672,8 @@ class EquipmentProfileCoordinator:
                     and self.latest_session.game_pid == session.game_pid
                 ):
                     self.lua_state_hint = (session.game_pid, lua_state)
+            if scores and lua_state:
+                self._save_location_hints(session.local_user_token)
             event = {
                 "game_pid": session.game_pid,
                 "local_user_token": session.local_user_token,
@@ -2648,8 +2723,9 @@ class EquipmentProfileCoordinator:
         with self.lock:
             return self._local_equipment_key(session) in self.local_equipment_loading
 
-    def _execute_query(self, session: EquipmentQuerySession) -> None:
+    def _execute_query(self, session: EquipmentQuerySession) -> threading.Event | None:
         self._begin_local_equipment_load(session)
+        completed = threading.Event()
         batch_id = uuid.uuid4().hex
         correlation = int(time.time_ns() // 1_000_000)
         context = {
@@ -2665,6 +2741,7 @@ class EquipmentProfileCoordinator:
             self.requests[correlation] = {
                 "session": session,
                 "context": context,
+                "completed": completed,
             }
             hint_pid, hint_address = self.descriptor_hint
         self.archive.append("request_started", **context)
@@ -2680,6 +2757,8 @@ class EquipmentProfileCoordinator:
             with self.descriptor_scan_lock:
                 with self.lock:
                     hint_pid, hint_address = self.descriptor_hint
+                    hint = self.request_context_hint
+                    context_hint = hint[1] if hint and hint[0] == self._query_identity(session) else (0, 0)
                 request = OneShotEquipmentRequest(
                     pid=session.game_pid,
                     tokens=session.tokens,
@@ -2688,12 +2767,14 @@ class EquipmentProfileCoordinator:
                     descriptor_hint=(
                         hint_address if hint_pid == session.game_pid else 0
                     ),
+                    context_hint=context_hint,
                 )
                 request.install()
                 with self.lock:
                     latest = self.latest_session
                     if latest is not None and latest.game_pid == session.game_pid:
                         self.descriptor_hint = (session.game_pid, request.descriptor)
+            self._save_location_hints()
             self._begin_catalog_load(request.module_path, session.game_pid)
             self.archive.append(
                 "request_hook_installed",
@@ -2705,6 +2786,7 @@ class EquipmentProfileCoordinator:
                 descriptor_candidates=list(request.descriptor_candidates),
                 descriptor_schema=list(EXPECTED_ARGUMENT_DESCRIPTORS),
                 recovered_abandoned_hook=request.recovered_abandoned_hook,
+                confirmed_context_available=bool(context_hint[0] and context_hint[1]),
             )
             request.arm()
             deadline = time.monotonic() + 12.0
@@ -2720,8 +2802,17 @@ class EquipmentProfileCoordinator:
                 time.sleep(0.01)
             sent = bool(count)
             if not sent:
-                raise TimeoutError("no ReqNTP edge arrived before timeout")
+                raise TimeoutError("no eligible local-role RPC arrived before timeout")
+            live_context = request.live_context()
             with self.lock:
+                if (
+                    call_result == 1
+                    and len(live_context) == 2
+                    and all(isinstance(value, int) and 0 < value < MAX_USER_ADDRESS for value in live_context)
+                    and self.latest_session is not None
+                    and self._query_identity(self.latest_session) == self._query_identity(session)
+                ):
+                    self.request_context_hint = (self._query_identity(session), live_context)
                 for member in session.members:
                     key = self._member_query_key(session, member)
                     if key in self.requested_keys:
@@ -2765,6 +2856,7 @@ class EquipmentProfileCoordinator:
                     self.request_hook_resume(session.game_pid)
             finally:
                 self.request_hook_lock.release()
+        return completed if sent else None
 
     def _process_response(self, record: Mapping[str, object]) -> None:
         self._archive_response(record)
@@ -2849,6 +2941,9 @@ class EquipmentProfileCoordinator:
                 session,
                 response_context,
             )
+        completed = request.get("completed")
+        if isinstance(completed, threading.Event):
+            completed.set()
 
     def _publish_profile(
         self,
@@ -3158,7 +3253,7 @@ class EquipmentProfileCoordinator:
 
     def _run_queries(self) -> None:
         # Only this worker can install a one-shot request, so hooks/sends stay
-        # serial. The response worker remains free during scans/NTP waits.
+        # serial. The response worker remains free during request preparation.
         while not self.stop_event.is_set() and not self.closing.is_set():
             try:
                 session = self.priority_queries.get_nowait()
@@ -3200,7 +3295,19 @@ class EquipmentProfileCoordinator:
                 session, members=members,
                 tokens=tuple(sorted(str(member["user_token"]) for member in members)),
             )
-            self._execute_query(session)
+            completed = self._execute_query(session)
+            if completed is not None:
+                deadline = time.monotonic() + EQUIPMENT_QUERY_DEDUP_SECONDS
+                while not completed.wait(0.05):
+                    if self.stop_event.is_set() or self.closing.is_set():
+                        return
+                    with self.lock:
+                        latest = self.latest_session
+                    if latest is None or self._query_identity(latest) != self._query_identity(session):
+                        break
+                    if time.monotonic() >= deadline:
+                        self.archive.append("response_timeout", **session.archive_fields())
+                        break
 
     def _run(self) -> None:
         # Drain responses queued before close's stop marker so moving archival

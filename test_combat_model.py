@@ -6652,8 +6652,11 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
     def test_release_version_matches_client_build_and_notes(self):
-        self.assertEqual(APP_VERSION, "0.3.6")
-        self.assertEqual(CLIENT_BUILD.split("+", 1)[0], APP_VERSION)
+        self.assertEqual(APP_VERSION, "0.3.6b")
+        numeric_version = (
+            APP_VERSION[:-1] if APP_VERSION[-1:].isalpha() else APP_VERSION
+        )
+        self.assertEqual(CLIENT_BUILD.split("+", 1)[0], numeric_version)
         self.assertRegex(CLIENT_BUILD, r"^0\.3\.6\+\d{8}\.\d+$")
         notes = Path(__file__).with_name(f"release-notes-v{APP_VERSION}.txt")
         self.assertTrue(notes.is_file())
@@ -7886,6 +7889,51 @@ class CombatModelTests(unittest.TestCase):
         )
         self.assertEqual(
             model.healing_summary(duration=10.0)["team_effective_healing"], 500
+        )
+
+    def test_live_heal_callbacks_replace_a_stale_zero_team_counter(self):
+        model = CombatModel(run_id="hps-stale-zero-counter-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_party({"entity_ids": [TEAMMATE_ID]})
+        model.ingest_profile(
+            {
+                "entity_id": SELF_ID,
+                "entity_type": "Player",
+                "profession_id": 1_200_002,
+            }
+        )
+        model.ingest_profile(
+            {"entity_id": MONSTER_ID, "entity_type": "Boss", "boss_rank": 3}
+        )
+        model.ingest_team_stat(
+            {
+                "actor_id": SELF_ID,
+                "absolute_effective_healing": 0,
+                "filetime_100ns": BASE_FILETIME,
+                "full_snapshot": True,
+                "healing_omitted_zero": True,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 1_000))
+        self.assertTrue(
+            model.ingest_heal(
+                healing(
+                    BASE_FILETIME + 20_000,
+                    SELF_ID,
+                    TEAMMATE_ID,
+                    total=1_200,
+                    effective=900,
+                )
+            )
+        )
+
+        healer = model.healing_summary(duration=10.0)["healers"][0]
+
+        self.assertTrue(model.team_healing_states[SELF_ID].exact_for_encounter)
+        self.assertEqual(healer["effective_healing"], 900)
+        self.assertEqual(healer["hps"], 90)
+        self.assertEqual(
+            healer["coverage"], "live_exact_callbacks_ahead_of_server_counter"
         )
 
     def test_first_full_zero_is_exact_for_member_missing_from_prepull_snapshot(self):
@@ -12829,6 +12877,71 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(active["level"], 83)
         self.assertEqual(active["max_hp"], 14_095_294.0)
         self.assertEqual(active["started_at_epoch"], started_at / 1_000_000_000)
+
+    def test_live_hud_boss_tracker_publishes_zero_after_fight_exit(self):
+        tracker = LiveHudBossTracker()
+        entity_id = 233_115_793_081_227
+        started_at = 1_790_827_455_280_044_400
+        tracker.ingest(
+            {
+                "method": "NpcapEntityCreated",
+                "capture_source": "npcap",
+                "capture_timestamp_ns": started_at - 1_000_000_000,
+                "decoded_arguments": [
+                    {
+                        "entity_id": entity_id,
+                        "entity_class": "NpcActor",
+                        "properties": {
+                            "TemplateID": 7_100_401,
+                            "BossType": 3,
+                            "Level": 76,
+                        },
+                    }
+                ],
+            }
+        )
+        base = {
+            "capture_source": "npcap",
+            "network_entity_id": entity_id,
+            "script_entity": entity_id,
+        }
+        tracker.ingest(
+            {
+                **base,
+                "method": "OnMsgSyncFightMode",
+                "capture_timestamp_ns": started_at,
+                "decoded_arguments": [2],
+            }
+        )
+        tracker.ingest(
+            {
+                **base,
+                "method": "OnMsgSyncCurrentHp",
+                "capture_timestamp_ns": started_at + 1_000_000_000,
+                "decoded_arguments": [68_739.0],
+            }
+        )
+        ended = tracker.ingest(
+            {
+                **base,
+                "method": "OnMsgSyncFightMode",
+                "capture_timestamp_ns": started_at + 2_000_000_000,
+                "decoded_arguments": [0],
+            }
+        )
+        terminal = tracker.ingest(
+            {
+                **base,
+                "method": "OnMsgSyncCurrentHp",
+                "capture_timestamp_ns": started_at + 2_367_000_000,
+                "decoded_arguments": [0.0],
+            }
+        )
+
+        self.assertFalse(ended["active"])
+        self.assertFalse(terminal["active"])
+        self.assertTrue(terminal["terminal_zero"])
+        self.assertEqual(terminal["current_hp"], 0.0)
 
     def test_live_hud_boss_tracker_projects_packet_confirmed_abaddon(self):
         tracker = LiveHudBossTracker()

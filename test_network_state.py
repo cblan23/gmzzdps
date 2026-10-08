@@ -5,12 +5,12 @@ from __future__ import annotations
 import base64
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from monster_metadata import load_monster_metadata
 from network_state import (
     DAMAGE_TARGET_TEMPLATE_IDS,
     HEALING_TARGET_TEMPLATE_IDS,
-    LIVE_PARTY_ROSTER_INACTIVE_SECONDS,
     NetworkPacketParser,
     TRAINING_DUMMY_TEMPLATE_IDS,
     is_training_dummy_template_id,
@@ -8198,8 +8198,9 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertNotIn(TEAMMATE_TOKEN, parser.current_team_profile_tokens())
         self.assertNotIn(TEAMMATE_TOKEN, parser.live_team_property_ratings)
 
-    def test_inactive_roster_prunes_stale_member_and_allows_live_rejoin(self):
-        parser = NetworkPacketParser()
+    def test_quiet_roster_keeps_member_and_rating_until_explicit_leave(self):
+        with mock.patch("network_state.time.monotonic", return_value=100.0):
+            parser = NetworkPacketParser()
         parser.self_id = PLAYER_ID
         parser.self_confirmed = True
         parser.self_token = SELF_TOKEN
@@ -8215,27 +8216,42 @@ class NetworkPacketParserTests(unittest.TestCase):
         parser.party_session_id = 1
         parser.team_group_active = True
         parser.party_member_count = 2
-        parser.live_party_roster_activity_monotonic = 100.0
+        parser.entity_profiles[teammate_actor] = {"name": "Quiet teammate"}
+        parser.live_team_property_ratings[TEAMMATE_TOKEN] = 99_999
 
-        self.assertEqual(
-            parser.flush_live_party_roster(
-                now=100.0 + LIVE_PARTY_ROSTER_INACTIVE_SECONDS - 0.01
-            ),
-            [],
-        )
-        updates = parser.flush_live_party_roster(
-            now=100.0 + LIVE_PARTY_ROSTER_INACTIVE_SECONDS
+        for elapsed in (44.99, 45.0, 120.0, 600.0):
+            with self.subTest(elapsed=elapsed):
+                self.assertEqual(parser.flush_live_party_roster(now=100.0 + elapsed), [])
+                self.assertEqual(
+                    parser.current_team_profile_tokens(), {SELF_TOKEN, TEAMMATE_TOKEN}
+                )
+                self.assertEqual(parser.party_member_count, 2)
+                self.assertEqual(parser.party_session_id, 1)
+                self.assertEqual(parser.token_actors[TEAMMATE_TOKEN], teammate_actor)
+                self.assertEqual(parser.live_team_property_ratings[TEAMMATE_TOKEN], 99_999)
+
+        snapshot = parser.live_team_rating_snapshot_updates()
+        teammate = next(value for kind, value in snapshot
+                        if kind == "profile" and value["entity_id"] == teammate_actor)
+        self.assertEqual(teammate["extraordinary_rating"], 99_999)
+
+        updates = parser.process(
+            packet("OnMsgOtherQuitTeam", [TEAMMATE_TOKEN], sequence=44)
         )
 
         party = next(value for kind, value in updates if kind == "party")
         self.assertTrue(party["roster_replace"])
         self.assertEqual(party["user_tokens"], [SELF_TOKEN])
-        self.assertNotIn(TEAMMATE_TOKEN, parser.departed_party_tokens)
+        self.assertNotIn(TEAMMATE_TOKEN, parser.current_team_profile_tokens())
+        self.assertNotIn(TEAMMATE_TOKEN, parser.live_team_property_ratings)
 
         rejoin = parser.process(
             packet(
-                "OnUpdateTeamGroupMemberProps",
-                [TEAMMATE_TOKEN, {4: False, 5: 12_345.0, 6: 12_345.0}],
+                "OnMsgOtherJoinTeamGroup",
+                [0, teammate_actor, {"$map": [
+                    [2, TEAMMATE_TOKEN], [5, "Quiet teammate"],
+                    [6, TEAMMATE_ROLE_NUMBER],
+                ]}],
                 sequence=45,
             )
         )

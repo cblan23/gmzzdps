@@ -347,10 +347,10 @@ PVP_HISTORY_PATH = DATA_DIR / "pvp_history.sqlite3"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手"
-APP_VERSION = "0.3.6"
+APP_VERSION = "0.3.6b"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.6+20261007.2"
+CLIENT_BUILD = "0.3.6+20261008.1"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -4820,8 +4820,16 @@ class CombatModel:
             )
             if snapshot is None:
                 if exact_counter is not None:
-                    coverage = "server_team_counter_with_observed_callbacks"
-                    effective = int(exact_counter.accepted_effective_healing)
+                    counter_effective = int(
+                        exact_counter.accepted_effective_healing
+                    )
+                    observed_effective = int(raw["effective"])
+                    effective = max(counter_effective, observed_effective)
+                    coverage = (
+                        "live_exact_callbacks_ahead_of_server_counter"
+                        if observed_effective > counter_effective
+                        else "server_team_counter_with_observed_callbacks"
+                    )
                 else:
                     coverage = "live_exact_callbacks_unverified"
                     effective = int(raw["effective"])
@@ -20149,6 +20157,7 @@ class LiveHudBossTracker:
                 if not state.get("active"):
                     state["started_at_epoch"] = event_epoch
                     state["observed_damage_taken"] = 0.0
+                state["ended_at_epoch"] = 0.0
                 state["active"] = True
                 state["updated_at_epoch"] = event_epoch
                 self.active_entity_id = entity_id
@@ -20156,6 +20165,7 @@ class LiveHudBossTracker:
             if fight_mode == 0 and state.get("active"):
                 state["active"] = False
                 state["updated_at_epoch"] = event_epoch
+                state["ended_at_epoch"] = event_epoch
                 if self.active_entity_id == entity_id:
                     self.active_entity_id = 0
                     return {
@@ -20203,7 +20213,29 @@ class LiveHudBossTracker:
             return None
 
         state["updated_at_epoch"] = event_epoch
-        return self._snapshot(state) if state.get("active") else None
+        if state.get("active"):
+            return self._snapshot(state)
+        try:
+            ended_at = float(state.get("ended_at_epoch", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            ended_at = 0.0
+        if (
+            method == "OnMsgSyncCurrentHp"
+            and current_hp == 0
+            and ended_at > 0
+            and 0 <= event_epoch - ended_at <= 5.0
+        ):
+            # Keep parser settlement safety unchanged, but publish the exact
+            # post-fight zero to the HUD immediately.  A later repull replaces
+            # this presentation state on its next FightMode=2 edge.
+            terminal = self._snapshot(state)
+            terminal.update(
+                active=False,
+                terminal_zero=True,
+                ended_at_epoch=ended_at,
+            )
+            return terminal
+        return None
 
 
 class LiveHudCombatTracker:
@@ -24042,6 +24074,7 @@ class DpsWindow:
         self.hunter_team_refresh_after_id = None
         self.hunter_team_signature = None
         self.pvp_hud_view = "team"
+        self.pvp_visible_rows = HUD_DEFAULT_VISIBLE_ROWS
         # PVP collection writes only confirmed fields into this presentation
         # state. In particular, assists remain unknown until a reliable event
         # or settlement source is available.
@@ -24066,6 +24099,7 @@ class DpsWindow:
         self.team_equipment_profile_ratings: dict[str, int | None] = {}
         self.team_equipment_requested_ratings: dict[str, int | None] = {}
         self.team_equipment_requested_at: dict[str, float] = {}
+        self.team_equipment_profile_capture_sessions: dict[str, int] = {}
         self.team_equipment_next_retry_check_at = 0.0
         # Equipment belongs to one game/role/team lifetime, not to a network
         # transport.  Entering a scene rotates the passive capture session and
@@ -28877,6 +28911,10 @@ class DpsWindow:
                 normalized = None
             row["is_ai"] = is_ai
             row["rating"] = "人机" if is_ai else "--" if normalized is None else str(normalized)
+            if not is_ai:
+                row.update(self._equipment_refresh_fields(
+                    int(row.get("actor_id", 0) or 0), token, normalized,
+                ))
             return row
 
         outgoing = [
@@ -28986,6 +29024,9 @@ class DpsWindow:
                         profile.get("extraordinary_rating"),
                         profile.get("equipment_count"),
                         profile.get("pvp_equipment_count"),
+                        profile.get("active_word_count"),
+                        profile.get("total_word_count"),
+                        profile.get("batch_id"),
                     )
                     for token, profile in profiles.items()
                     if isinstance(profile, dict)
@@ -29015,7 +29056,17 @@ class DpsWindow:
                 self.pvp_team_composition_cache_key = composition_key
                 self.pvp_team_composition_cache_rows = list(composition_rows)
         self.pvp_team_row_count = len(composition_rows)
-        team_rows = composition_rows if pvp_hud_view == "team" else []
+        team_rows = []
+        if pvp_hud_view == "team":
+            team_rows = [
+                dict(row) if row.get("is_ai") else {
+                    **row, **self._equipment_refresh_fields(
+                        int(row.get("actor_id", 0) or 0),
+                        row.get("user_token", ""), row.get("rating_value"),
+                    ),
+                }
+                for row in composition_rows
+            ]
         league_roster = getattr(tracker, "pvp_league_roster", {}) or {}
         rated_team = [
             int(row.get("rating_value"))
@@ -29042,6 +29093,9 @@ class DpsWindow:
             "time": str(state.get("time") or "00:00"),
             "pvp_player_name": player_name or "等待识别",
             "pvp_rating": "" if rating is None else str(rating),
+            "pvp_self_equipment": self._equipment_refresh_fields(
+                self_id, self._team_equipment_local_token(), rating,
+            ),
             "pvp_profession_id": profession_id,
             "pvp_map_name": str(
                 state.get("map_name") or state.get("module_name") or ""
@@ -29083,7 +29137,7 @@ class DpsWindow:
             "pvp_league_roster": dict(getattr(tracker, "pvp_league_roster", {}) or {}),
             "pvp_league_selected_raid": int(getattr(self, "pvp_league_selected_raid", 0) or 0),
             "visible_rows": clamp_visible_rows(
-                getattr(self, "main_visible_rows", HUD_DEFAULT_VISIBLE_ROWS)
+                getattr(self, "pvp_visible_rows", HUD_DEFAULT_VISIBLE_ROWS)
             ),
             "pvp_team_average_rating": (
                 "" if team_average_rating is None else str(team_average_rating)
@@ -29133,7 +29187,7 @@ class DpsWindow:
                 "pvp_active": False,
                 "time": "00:00",
                 "visible_rows": clamp_visible_rows(
-                    getattr(self, "main_visible_rows", HUD_DEFAULT_VISIBLE_ROWS)
+                    getattr(self, "pvp_visible_rows", HUD_DEFAULT_VISIBLE_ROWS)
                 ),
                 "topmost": bool(self._preferred_main_topmost()),
                 "locked": bool(getattr(self, "window_locked", False)),
@@ -29143,6 +29197,13 @@ class DpsWindow:
             }
         targetless_team_data = self._main_targetless_team_data()
         live_hud_projection_active = self._main_live_hud_projection_active()
+        raw_live_hud_boss_state = getattr(self, "live_hud_boss_state", None)
+        terminal_boss_state = (
+            raw_live_hud_boss_state
+            if isinstance(raw_live_hud_boss_state, dict)
+            and raw_live_hud_boss_state.get("terminal_zero")
+            else None
+        )
         live_hud_boss_state = (
             self._main_live_hud_boss_state()
             if live_hud_projection_active
@@ -29424,6 +29485,17 @@ class DpsWindow:
             and not current_boss_in_fight_mode
             and not pending_boss_id
         )
+        terminal_zero_matches_live = bool(
+            terminal_boss_state is not None
+            and current_boss_id > 0
+            and int(terminal_boss_state.get("entity_id", 0) or 0)
+            == current_boss_id
+            and float(terminal_boss_state.get("current_hp", 0.0) or 0.0)
+            == 0.0
+        )
+        if terminal_zero_matches_live:
+            model_terminal_victory = True
+            model_has_current_boss = False
         recent_victory_matches_live = bool(
             recent_settlement is not None
             and not current_settlement_id
@@ -29548,9 +29620,7 @@ class DpsWindow:
         prediction = getattr(self, "enrage_prediction", None)
         if (
             not live_no_boss
-            and live_hud_boss_state is None
-            and
-            bool(getattr(self, "boss_enrage_prediction_enabled", True))
+            and bool(getattr(self, "boss_enrage_prediction_enabled", True))
             and bool(getattr(self, "enrage_prediction_visible", False))
             and prediction is not None
             and not bool(getattr(prediction, "calculating", False))
@@ -29593,6 +29663,9 @@ class DpsWindow:
             recent_section["live_team_dps"] = (
                 self._main_live_team_dps_text(display_rows) or "--"
             )
+            recent_section["live_dps_caption"] = (
+                "实时玩家秒伤" if is_dummy else "实时团队秒伤"
+            )
         if recent_section is not None:
             # Retain the user's chosen list capacity, with room for the pinned
             # self row, heading, optional Boss card and one result/message row.
@@ -29623,6 +29696,14 @@ class DpsWindow:
             team_dps_summary_text = (
                 self._main_recent_battle_team_dps_text() or "--"
             )
+        display_rows = [
+            row if row.get("row_kind") or row.get("is_ai") else {
+                **row, **self._equipment_refresh_fields(
+                    int(row.get("actor_id", 0) or 0), row.get("user_token", ""),
+                ),
+            }
+            for row in display_rows
+        ]
         return {
             "time": self._main_display_time_text(
                 recent_settlement if show_recent_settlement_header else None,
@@ -29834,7 +29915,14 @@ class DpsWindow:
             self.layered_main_rendering = False
 
     def _layered_main_region_at(self, x: int, y: int) -> str:
-        for key, rect in getattr(self, "layered_main_hit_regions", {}).items():
+        regions = getattr(self, "layered_main_hit_regions", {})
+        for key, rect in regions.items():
+            if not key.startswith(("action:", "equipment_refresh_pending:")):
+                continue
+            left, top, right, bottom = rect
+            if left <= x <= right and top <= y <= bottom:
+                return key
+        for key, rect in regions.items():
             left, top, right, bottom = rect
             if left <= x <= right and top <= y <= bottom:
                 return "prediction" if key == "prediction_marker" else key
@@ -29902,7 +29990,11 @@ class DpsWindow:
             and region not in {"scrollbar:rows", "resize:height"}
             and not region.startswith("scroll:pvp_")
             and not region.startswith("scrollbar:pvp_")
+            and not region.startswith("action:refresh_equipment:")
+            and not region.startswith("equipment_refresh_pending:")
             and region not in {
+                "action:pve",
+                "action:pvp",
                 "action:pvp_live",
                 "action:pvp_team",
                 "action:pve_recent_battle",
@@ -30040,6 +30132,10 @@ class DpsWindow:
             capacity = clamp_visible_rows(rows + int(round((int(event.y_root) - y) / max(1, row_height))))
             if getattr(self, "main_combat_mode", "pve") == "pvp":
                 capacity = max(12, capacity)
+                if capacity != getattr(self, "pvp_visible_rows", HUD_DEFAULT_VISIBLE_ROWS):
+                    self.pvp_visible_rows = capacity
+                    self._schedule_layered_main_render()
+                return
             if capacity != getattr(
                 self, "main_visible_rows", HUD_DEFAULT_VISIBLE_ROWS
             ):
@@ -30117,10 +30213,11 @@ class DpsWindow:
             return
         if getattr(self, "layered_main_resize_origin", None) is not None:
             self.layered_main_resize_origin = None
-            self.config[MAIN_VISIBLE_ROWS_CONFIG_KEY] = clamp_visible_rows(
-                getattr(self, "main_visible_rows", HUD_DEFAULT_VISIBLE_ROWS)
-            )
-            save_config(self.config)
+            if getattr(self, "main_combat_mode", "pve") != "pvp":
+                self.config[MAIN_VISIBLE_ROWS_CONFIG_KEY] = clamp_visible_rows(
+                    getattr(self, "main_visible_rows", HUD_DEFAULT_VISIBLE_ROWS)
+                )
+                save_config(self.config)
             self._schedule_layered_main_render()
             return
         if drag_armed:
@@ -30135,7 +30232,12 @@ class DpsWindow:
             released != f"action:{pressed}" and not footer_action
         ):
             return
-        if pressed == "pvp_live":
+        if pressed.startswith("refresh_equipment:"):
+            self._schedule_team_equipment_profiles(
+                refresh_token=pressed.removeprefix("refresh_equipment:")
+            )
+            self._schedule_layered_main_render()
+        elif pressed == "pvp_live":
             self._set_pvp_hud_view("live")
         elif pressed == "pvp_team":
             self._set_pvp_hud_view("team")
@@ -32369,11 +32471,14 @@ class DpsWindow:
                 'participant_damage_samples', 'team_dps_timeline',
             ) if record.get(key)
         }
-        for field in ('participants', 'healers'):
+        participant_details = ('skills', 'extraordinary_rating', 'equipment_snapshot')
+        for field in ('participants', 'healers', 'damage_taken'):
             rows = [
-                {'actor_id': row.get('actor_id'), 'skills': row['skills']}
+                {'actor_id': row.get('actor_id'), **{
+                    key: row[key] for key in participant_details if row.get(key)
+                }}
                 for row in record.get(field, ())
-                if isinstance(row, dict) and row.get('skills')
+                if isinstance(row, dict) and any(row.get(key) for key in participant_details)
             ]
             if rows:
                 details[field] = rows
@@ -32565,8 +32670,13 @@ class DpsWindow:
         except (TypeError, ValueError, OverflowError):
             automatic_upload_cutoff_ns = 0
 
-        def valid_snapshot(value: object, expected_rating: object) -> dict | None:
+        def valid_snapshot(value: object, expected_rating: object, token: str) -> dict | None:
             if not isinstance(value, dict):
+                return None
+            snapshot_token = str(
+                value.get("user_token") or value.get("character_id") or ""
+            ).strip()
+            if snapshot_token and snapshot_token != token:
                 return None
             try:
                 captured_ns = int(value.get("captured_at_ns") or 0)
@@ -32628,10 +32738,8 @@ class DpsWindow:
         )
         recording = getattr(self, "pvp_recording", None)
         account_key = str(getattr(recording, "account_key", "") or "").strip()
-        if not profiles and (not callable(archive_lookup) or not account_key):
-            return record
         self_character_id = str(record.get("self_character_id") or "").strip()
-        resolved_snapshots: dict[str, dict | None] = {}
+        resolved_snapshots: dict[tuple[str, int | None], dict | None] = {}
         changed = False
         result = dict(record)
         for collection in ("participants", "healers", "damage_taken"):
@@ -32640,7 +32748,7 @@ class DpsWindow:
                 continue
             updated = []
             for row in rows:
-                if not isinstance(row, dict) or row.get("equipment_snapshot"):
+                if not isinstance(row, dict):
                     updated.append(row)
                     continue
                 token = str(
@@ -32653,8 +32761,20 @@ class DpsWindow:
                 if not token:
                     updated.append(row)
                     continue
-                if token not in resolved_snapshots:
-                    expected_rating = row.get("extraordinary_rating")
+                expected_rating = row.get("extraordinary_rating")
+                if row.get("equipment_snapshot"):
+                    snapshot = valid_snapshot(row["equipment_snapshot"], expected_rating, token)
+                    rating = normalize_extraordinary_rating(
+                        snapshot.get("extraordinary_rating") if snapshot else None
+                    )
+                    if normalize_extraordinary_rating(expected_rating) is None and rating is not None:
+                        updated.append({**row, "user_token": token, "extraordinary_rating": rating})
+                        changed = True
+                    else:
+                        updated.append(row)
+                    continue
+                snapshot_key = (token, normalize_extraordinary_rating(expected_rating))
+                if snapshot_key not in resolved_snapshots:
                     profile = profiles.get(token)
                     snapshot = valid_snapshot(
                         (
@@ -32663,6 +32783,7 @@ class DpsWindow:
                             else None
                         ),
                         expected_rating,
+                        token,
                     )
                     if (
                         not isinstance(snapshot, dict)
@@ -32687,11 +32808,11 @@ class DpsWindow:
                             )
                         except (OSError, TypeError, ValueError):
                             snapshot = None
-                        snapshot = valid_snapshot(snapshot, expected_rating)
-                    resolved_snapshots[token] = (
+                        snapshot = valid_snapshot(snapshot, expected_rating, token)
+                    resolved_snapshots[snapshot_key] = (
                         snapshot if isinstance(snapshot, dict) else None
                     )
-                snapshot = resolved_snapshots.get(token)
+                snapshot = resolved_snapshots.get(snapshot_key)
                 if not isinstance(snapshot, dict):
                     updated.append(row)
                     continue
@@ -32701,6 +32822,9 @@ class DpsWindow:
                 }
                 if not str(row.get("user_token") or "").strip():
                     enriched_row["user_token"] = token
+                rating = normalize_extraordinary_rating(snapshot.get("extraordinary_rating"))
+                if normalize_extraordinary_rating(expected_rating) is None and rating is not None:
+                    enriched_row["extraordinary_rating"] = rating
                 updated.append(enriched_row)
                 changed = True
             result[collection] = updated
@@ -36669,6 +36793,71 @@ class DpsWindow:
             )
         return rows
 
+    def _main_finished_current_local_rows(
+        self, record, now: float | None = None
+    ) -> list[dict[str, object]] | None:
+        """Show the bound local result after combat stops but before settlement."""
+
+        if (
+            record is None
+            or record.result != "IN_PROGRESS"
+            or record.settlement_status != "LIVE"
+        ):
+            return None
+        model = getattr(self, "model", None)
+        adapter = getattr(self, "settlement_history_adapter", None)
+        bindings = getattr(adapter, "local_bindings", None)
+        local_id = str(getattr(model, "encounter_id", "") or "").strip()
+        if (
+            not local_id
+            or not isinstance(bindings, dict)
+            or str(bindings.get(local_id) or "") != record.local_encounter_id
+        ):
+            return None
+        combat_reader = getattr(model, "combat_in_progress", None)
+        if callable(combat_reader):
+            try:
+                active = bool(combat_reader(now))
+            except TypeError:
+                active = bool(combat_reader())
+            if active:
+                return None
+        interval_reader = getattr(model, "resolve_combat_interval", None)
+        if not callable(interval_reader):
+            return None
+        try:
+            interval = interval_reader(now)
+        except TypeError:
+            interval = interval_reader()
+        if not bool(getattr(interval, "final", False)):
+            return None
+
+        duration_reader = getattr(model, "duration", None)
+        try:
+            raw_duration = duration_reader(now) if callable(duration_reader) else 0
+        except TypeError:
+            raw_duration = duration_reader() if callable(duration_reader) else 0
+        duration = dps_duration_seconds(raw_duration)
+        rows = self._main_combat_display_rows(now)
+        if not any(
+            row.get("total_value") is not None or row.get("stat_value") is not None
+            for row in rows
+        ):
+            return None
+        for row in rows:
+            damage = int(row.get("damage_sort", 0) or 0)
+            if duration:
+                row["dps_value"] = damage / duration
+                if row.get("metric") == "dps":
+                    row["stat_value"] = row["dps_value"]
+            row.update(
+                interactive=False,
+                highlight_self_row=False,
+                is_recent_battle=True,
+                settlement_status_text="本地战斗数据，等待服务器结算",
+            )
+        return rows
+
     def _current_party_recent_rows(self, record) -> list[dict[str, object]] | None:
         """Return the settled roster without applying later party changes.
 
@@ -36923,6 +37112,22 @@ class DpsWindow:
 
         if self._main_display_is_cleared() or self._main_context_display_is_stale():
             return None
+        controller = getattr(self, "settlement_ui", None)
+        tracker = getattr(controller, "tracker", None)
+        current = (
+            tracker.encounters.get(tracker.current_id)
+            if tracker is not None
+            else None
+        )
+        local_rows = self._main_finished_current_local_rows(current)
+        if local_rows:
+            rates = [
+                float(row["dps_value"])
+                for row in local_rows
+                if row.get("dps_value") is not None
+            ]
+            if rates:
+                return format_main_rate(sum(rates))
         record = self._main_recent_settlement_record(settled_only=True)
         if record is not None:
             view = encounter_view(
@@ -37012,7 +37217,7 @@ class DpsWindow:
         rows: list[dict[str, object]],
         now: float | None = None,
     ) -> str | None:
-        """Prefer live team counters, then derive the total from Boss HP loss."""
+        """Use local dummy DPS; otherwise prefer team counters over Boss HP."""
 
         combat_reader = getattr(self.model, "combat_in_progress", None)
         try:
@@ -37030,8 +37235,16 @@ class DpsWindow:
         if not active:
             return None
 
-        rates: list[float] = []
-        rate_actor_ids: set[int] = set()
+        dummy_reader = getattr(self.model, "_is_dummy_encounter", None)
+        if callable(dummy_reader) and dummy_reader():
+            # A shared dummy's HP loss cannot measure this player's damage.
+            # Reuse the self row's exact hits, Common total and round clock.
+            row = self._main_live_self_dps_row(now)
+            rate = row.get("dps_value") if row is not None else None
+            return format_main_rate(rate) if rate is not None else None
+
+        rates_by_actor: dict[int, float] = {}
+        anonymous_rates: list[float] = []
         self_id = int(getattr(self.model, "self_id", 0) or 0)
         has_teammate_rate = False
         for row in rows:
@@ -37050,19 +37263,24 @@ class DpsWindow:
             except (TypeError, ValueError, OverflowError):
                 continue
             if math.isfinite(rate) and rate >= 0:
-                rates.append(rate)
                 try:
                     actor_id = int(row.get("actor_id", 0) or 0)
                 except (TypeError, ValueError, OverflowError):
                     actor_id = 0
                 if actor_id:
-                    rate_actor_ids.add(actor_id)
+                    # The local player is pinned above the complete live-team
+                    # table.  Use the later team row for the same actor once,
+                    # rather than counting the pinned copy twice.
+                    rates_by_actor[actor_id] = rate
+                else:
+                    anonymous_rates.append(rate)
                 if (
                     (self_id and actor_id and actor_id != self_id)
                     or (not self_id and row.get("is_self") is False)
                 ):
                     has_teammate_rate = True
-        if rates and (has_teammate_rate or len(rate_actor_ids) > 1):
+        rates = [*rates_by_actor.values(), *anonymous_rates]
+        if rates and (has_teammate_rate or len(rates_by_actor) > 1):
             return format_main_rate(sum(rates))
 
         hp_rate = self._main_live_boss_hp_team_dps(now)
@@ -37307,6 +37525,7 @@ class DpsWindow:
         # records remain available in Settings, but a restart or account
         # switch starts the compact main window without the previous record.
         previous = self._main_recent_settlement_record()
+        local_finished_rows = self._main_finished_current_local_rows(current, now)
         if current is not None and current.result == "IN_PROGRESS":
             # Once the next pull starts, its immediate predecessor owns the
             # lower table even while the server result is still pending.
@@ -37315,7 +37534,9 @@ class DpsWindow:
             )
         team_dps_record = self._main_displayable_team_dps_record()
         recent_record = team_dps_record
-        if recent_record is None and not self._main_display_is_cleared():
+        if local_finished_rows is not None:
+            recent_record = current
+        elif recent_record is None and not self._main_display_is_cleared():
             dummy_reader = getattr(self.model, "_is_dummy_encounter", None)
             if not callable(dummy_reader) or not dummy_reader():
                 recent_record = previous
@@ -37346,7 +37567,11 @@ class DpsWindow:
             recent_boss = self._main_recent_boss_row(recent_record)
             if recent_boss is not None:
                 rows.append(recent_boss)
-            party_rows = self._current_party_recent_rows(recent_record)
+            party_rows = (
+                local_finished_rows
+                if local_finished_rows is not None and recent_record is current
+                else self._current_party_recent_rows(recent_record)
+            )
             if party_rows is not None:
                 if party_rows:
                     # The top row is the local player's live DPS, while this
@@ -46161,6 +46386,21 @@ class DpsWindow:
             0, 0, window=content, anchor="nw"
         )
         releases = (
+            (
+                "v0.3.6b",
+                """v0.3.6b 更新日志（相对 v0.3.6）
+
+1. 修复木桩实时秒伤：打木桩时“实时团队秒伤”改为“实时玩家秒伤”，只按本人实际伤害计算，不再根据木桩血量；仅木桩生效。
+2. 修复实时战斗显示：始终保留本人实时数据；队友实时数据未到时继续显示上一场；第一只 Boss 官方结算延迟时保留本地结果，避免短暂显示后空白；胜利后 Boss 血量归零。
+3. 修复观众职业指标：本人有实时治疗时显示真实 HPS；本人 DPS 严格超过 5000 时才切换显示 DPS。
+4. 优化装备查询：首次定位后复用同一游戏进程和角色会话内已验证地址；每完成一人立即查询下一人；过图后不因旧评分误刷新。
+5. 调整装备刷新：本人评分真实变化时自动更新且不显示刷新按钮；队友评分变化保留手动刷新；查询超时仍保留旧装备。
+6. 修复队伍与历史评分：安静期不再误删队友；用同场有效装备快照补齐最近战斗评分，避免部分队友评分缺失。
+7. 修复 PVP HUD：长名单支持滚动，刷新按钮不遮挡数据，任何列表长度都可切回 PVE，并保持 PVE 窗口高度。
+8. 提升 HUD 页签选中态和本人超凡评分可读性，修正“团队构成”等选中状态的文字显示。
+9. 装备或评分在首次上传后补到时，只补传一次完整记录。
+10. 修复当前副本 Boss 预警：实时 Boss 血量投影启用时，不再隐藏已有资料的狂暴节奏预警。""",
+            ),
             (
                 "v0.3.6",
                 """v0.3.6 更新日志
@@ -62527,6 +62767,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             "team_equipment_requested_at",
             "team_equipment_attempts",
             "team_equipment_attempt_ratings",
+            "team_equipment_profile_capture_sessions",
         ):
             values = getattr(self, attribute, None)
             if isinstance(values, dict):
@@ -62712,6 +62953,25 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             "",
         )
 
+    def _current_team_equipment_capture_session_id(self) -> int:
+        try:
+            session_id = int(
+                getattr(self, "active_capture_session_id", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            session_id = 0
+        if session_id > 0:
+            return session_id
+        worker = getattr(self, "worker", None)
+        session_reader = getattr(worker, "equipment_session", None)
+        if not callable(session_reader):
+            return 0
+        try:
+            _game_pid, session_id = session_reader()
+            return max(0, int(session_id or 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     def _team_equipment_party_session_id(self) -> int:
         """Return one stable live-team identity for either PVE or PVP."""
 
@@ -62794,6 +63054,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self,
         *,
         extra_attempt_tokens: set[str] | None = None,
+        refresh_token: str = "",
     ) -> bool:
         model = getattr(self, "model", None)
         worker = getattr(self, "worker", None)
@@ -62806,6 +63067,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             for token in (extra_attempt_tokens or set())
             if str(token or "").strip()
         }
+        refresh_token = str(refresh_token or "").strip()
         game_pid, capture_session_id = session_reader()
         party_session_id = self._team_equipment_party_session_id()
         local_token = self._team_equipment_local_token()
@@ -62914,6 +63176,14 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         if not isinstance(profile_ratings, dict):
             profile_ratings = {}
             self.team_equipment_profile_ratings = profile_ratings
+        profile_capture_sessions = getattr(
+            self, "team_equipment_profile_capture_sessions", None
+        )
+        if not isinstance(profile_capture_sessions, dict):
+            profile_capture_sessions = {}
+            self.team_equipment_profile_capture_sessions = profile_capture_sessions
+        for token in self.team_equipment_profiles:
+            profile_capture_sessions.setdefault(token, int(capture_session_id))
         requested_ratings = getattr(
             self, "team_equipment_requested_ratings", None
         )
@@ -62933,12 +63203,11 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             attempt_ratings = {}
             self.team_equipment_attempt_ratings = attempt_ratings
         current_tokens = {str(member["user_token"]) for member in members}
-        current_ratings = {
+        current_member_ratings = {
             str(member["user_token"]): normalize_extraordinary_rating(
                 member.get("extraordinary_rating")
             )
             for member in members
-            if not bool(member["is_ai"])
         }
         context = (int(game_pid), local_token, party_session_id)
         previous_context = getattr(self, "team_equipment_context", None)
@@ -62953,13 +63222,15 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 for token, profile in self.team_equipment_profiles.items()
                 if same_character
                 and token in current_tokens
-                and token in profile_ratings
-                and profile_ratings.get(token) == current_ratings.get(token)
             }
-            retained_ratings = {
-                token: profile_ratings[token]
-                for token in retained_profiles
-            }
+            retained_ratings = {}
+            for token in retained_profiles:
+                current_rating = current_member_ratings.get(token)
+                retained_ratings[token] = (
+                    current_rating
+                    if current_rating is not None
+                    else profile_ratings.get(token)
+                )
             self.team_equipment_profiles.clear()
             self.team_equipment_profiles.update(retained_profiles)
             requested_tokens.clear()
@@ -62976,14 +63247,13 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         requested_tokens.intersection_update(current_tokens)
         for mapping in (
             profile_ratings, requested_ratings, requested_at,
-            attempts, attempt_ratings,
+            attempts, attempt_ratings, profile_capture_sessions,
         ):
             for stale in set(mapping) - current_tokens:
                 mapping.pop(stale, None)
 
-        # Equipment is stable while the corresponding extraordinary rating is
-        # stable. A changed rating invalidates only that member's snapshot;
-        # unchanged members remain cached and are not queried again.
+        # Teammate snapshots wait for a manual refresh after their rating
+        # changes. The local player's snapshot refreshes automatically.
         for member in members:
             if bool(member["is_ai"]):
                 continue
@@ -63000,6 +63270,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 attempt_ratings.pop(token, None)
             if (
                 token in requested_tokens
+                and token not in self.team_equipment_profiles
                 and token in requested_ratings
                 and current_rating is not None
                 and current_rating != requested_ratings.get(token)
@@ -63022,41 +63293,52 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 # later roster update restores. Keep that matching snapshot.
                 profile_ratings[token] = current_rating
                 continue
-            self.team_equipment_profiles.pop(token, None)
-            requested_tokens.discard(token)
-            profile_ratings.pop(token, None)
-            requested_ratings.pop(token, None)
-            requested_at.pop(token, None)
-            self._invalidate_team_rating_preview_rows(
-                member.get("actor_id", 0)
-            )
         now = time.monotonic()
         for token in tuple(requested_tokens):
             requested_time = float(requested_at.get(token, 0.0) or 0.0)
             if (
-                token not in self.team_equipment_profiles
-                and requested_time > 0
+                requested_time > 0
                 and now - requested_time >= TEAM_EQUIPMENT_REQUEST_TIMEOUT_SECONDS
             ):
                 requested_tokens.discard(token)
                 requested_ratings.pop(token, None)
                 requested_at.pop(token, None)
-        members_to_query = [
-            member
-            for member in members
-            if not bool(member["is_ai"])
-            and str(member["user_token"])
-            not in self.team_equipment_profiles
-            and str(member["user_token"])
-            not in requested_tokens
-            and attempts.get(str(member["user_token"]), 0)
-            < TEAM_EQUIPMENT_MAX_ATTEMPTS_PER_RATING
-            + (
-                1
-                if str(member["user_token"]) in extra_attempt_tokens
-                else 0
-            )
-        ]
+        if refresh_token:
+            members_to_query = [
+                member for member in members
+                if str(member["user_token"]) == refresh_token
+                and not bool(member["is_ai"])
+                and refresh_token not in requested_at
+                and self._equipment_refresh_fields(
+                    int(member["actor_id"]), refresh_token,
+                    member.get("extraordinary_rating"),
+                )
+            ]
+        else:
+            members_to_query = []
+            for member in members:
+                if bool(member["is_ai"]):
+                    continue
+                token = str(member["user_token"])
+                attempt_limit = TEAM_EQUIPMENT_MAX_ATTEMPTS_PER_RATING + (
+                    1 if token in extra_attempt_tokens else 0
+                )
+                if attempts.get(token, 0) >= attempt_limit:
+                    continue
+                if token not in self.team_equipment_profiles:
+                    if token not in requested_tokens:
+                        members_to_query.append(member)
+                    continue
+                if (
+                    token == local_token
+                    and token not in requested_at
+                    and self._equipment_profile_refresh_token(
+                        int(member["actor_id"]),
+                        token,
+                        member.get("extraordinary_rating"),
+                    ) == token
+                ):
+                    members_to_query.append(member)
         if not members_to_query:
             return False
         # PVE and PVP both query one player at a time. Keep the HUD roster
@@ -63090,9 +63372,8 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             if not scheduled:
                 continue
             scheduled_any = True
-            # Repeated profile/scene messages do not poll. Only a new member
-            # or a changed extraordinary rating can put a token back into a
-            # later batch.
+            # Teammates use an explicit click; the local player reaches this
+            # path automatically after a verified rating change.
             for member in batch:
                 token = str(member["user_token"])
                 requested_tokens.add(token)
@@ -63207,6 +63488,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 "team_equipment_requested_at",
                 "team_equipment_attempts",
                 "team_equipment_attempt_ratings",
+                "team_equipment_profile_capture_sessions",
             ):
                 values = getattr(self, attribute, None)
                 if isinstance(values, dict):
@@ -63243,6 +63525,13 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self._queue_equipment_snapshot_upload(payload)
         previous_profile = self.team_equipment_profiles.get(token)
         self.team_equipment_profiles[token] = next_profile
+        profile_capture_sessions = getattr(
+            self, "team_equipment_profile_capture_sessions", None
+        )
+        if not isinstance(profile_capture_sessions, dict):
+            profile_capture_sessions = {}
+            self.team_equipment_profile_capture_sessions = profile_capture_sessions
+        profile_capture_sessions[token] = int(capture_session_id)
         requested_ratings = getattr(
             self, "team_equipment_requested_ratings", None
         )
@@ -63277,6 +63566,61 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self._invalidate_team_rating_preview_rows(actor_id)
         return previous_profile != next_profile
 
+    def _rebaseline_team_equipment_rating_after_capture_change(
+        self, payload: object
+    ) -> bool:
+        if not isinstance(payload, dict) or payload.get("source_method") == (
+            "PeriodicLiveTeamRatingSnapshot"
+        ):
+            return False
+        rating = normalize_extraordinary_rating(payload.get("extraordinary_rating"))
+        if rating is None:
+            return False
+        try:
+            actor_id = int(payload.get("entity_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            actor_id = 0
+        token = str(payload.get("user_token", "") or "").strip()
+        actor_tokens = getattr(self.model, "actor_character_ids", {})
+        if not token and actor_id > 0 and isinstance(actor_tokens, dict):
+            token = str(actor_tokens.get(actor_id, "") or "").strip()
+        profiles = getattr(self, "team_equipment_profiles", {})
+        if not token or token not in profiles:
+            return False
+        capture_session_id = self._current_team_equipment_capture_session_id()
+        profile_capture_sessions = getattr(
+            self, "team_equipment_profile_capture_sessions", None
+        )
+        if not isinstance(profile_capture_sessions, dict):
+            profile_capture_sessions = {}
+            self.team_equipment_profile_capture_sessions = profile_capture_sessions
+        previous_session_id = int(profile_capture_sessions.get(token, 0) or 0)
+        if (
+            capture_session_id <= 0
+            or previous_session_id <= 0
+            or capture_session_id == previous_session_id
+        ):
+            return False
+        profile_ratings = getattr(self, "team_equipment_profile_ratings", None)
+        if not isinstance(profile_ratings, dict):
+            profile_ratings = {}
+            self.team_equipment_profile_ratings = profile_ratings
+        profile_ratings[token] = rating
+        profile_capture_sessions[token] = capture_session_id
+        requested_tokens = getattr(self, "team_equipment_requested_tokens", None)
+        if isinstance(requested_tokens, set):
+            requested_tokens.discard(token)
+        for attribute in (
+            "team_equipment_requested_ratings",
+            "team_equipment_requested_at",
+            "team_equipment_attempts",
+            "team_equipment_attempt_ratings",
+        ):
+            values = getattr(self, attribute, None)
+            if isinstance(values, dict):
+                values.pop(token, None)
+        return True
+
     def _equipment_summary_for_actor(
         self, actor_id: int, user_token: object = ""
     ) -> dict[str, object]:
@@ -63293,6 +63637,68 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             ).strip()
         profile = getattr(self, "team_equipment_profiles", {}).get(token)
         return dict(profile) if isinstance(profile, dict) else {}
+
+    def _equipment_profile_refresh_token(
+        self, actor_id: int, user_token: object = "", rating: object = None,
+    ) -> str:
+        profile = self._equipment_summary_for_actor(actor_id, user_token)
+        token = str(profile.get("user_token") or user_token or "").strip()
+        if not token:
+            token = str(getattr(self.model, "actor_character_ids", {}).get(actor_id, "") or "").strip()
+        if not token and actor_id == int(getattr(self.model, "self_id", 0) or 0):
+            token = str(getattr(self.model, "self_character_id", "") or "").strip()
+        if not profile or not token:
+            return ""
+        profile_capture_session_id = int(
+            getattr(self, "team_equipment_profile_capture_sessions", {}).get(
+                token, 0
+            )
+            or 0
+        )
+        current_capture_session_id = (
+            self._current_team_equipment_capture_session_id()
+        )
+        if (
+            profile_capture_session_id > 0
+            and current_capture_session_id > 0
+            and profile_capture_session_id != current_capture_session_id
+        ):
+            # A scene edge rotates passive capture before the new map's live
+            # roster score arrives. Keep the equipment visible while waiting
+            # for that direct score instead of showing a false refresh.
+            return ""
+        if rating is None:
+            rating = getattr(self.model, "entity_extraordinary_ratings", {}).get(actor_id)
+        current = normalize_extraordinary_rating(rating)
+        previous = normalize_extraordinary_rating(
+            getattr(self, "team_equipment_profile_ratings", {}).get(token)
+        )
+        if previous is None:
+            previous = normalize_extraordinary_rating(profile.get("extraordinary_rating"))
+        if (current is None or previous is None or current == previous
+                or current == normalize_extraordinary_rating(profile.get("extraordinary_rating"))):
+            return ""
+        return token
+
+    def _equipment_refresh_fields(
+        self, actor_id: int, user_token: object = "", rating: object = None,
+    ) -> dict[str, object]:
+        token = self._equipment_profile_refresh_token(
+            actor_id, user_token, rating
+        )
+        if not token:
+            return {}
+        self_id = int(getattr(self.model, "self_id", 0) or 0)
+        if actor_id == self_id or token == self._team_equipment_local_token():
+            return {}
+        requested_at = float(getattr(self, "team_equipment_requested_at", {}).get(token, 0.0) or 0.0)
+        return {
+            "equipment_refresh_token": token,
+            "equipment_refresh_pending": bool(
+                requested_at > 0
+                and time.monotonic() - requested_at < TEAM_EQUIPMENT_REQUEST_TIMEOUT_SECONDS
+            ),
+        }
 
     def _team_rating_preview_profile_signature(
         self, actor_id: int
@@ -64930,8 +65336,52 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self, now: float | None = None
     ) -> tuple[list[dict[str, object]], bool]:
         live_team_rows = self._main_authoritative_live_team_rows(now)
-        if live_team_rows is not None:
-            return live_team_rows, False
+        if live_team_rows:
+            live_self = self._main_live_self_dps_row(now)
+            try:
+                self_id = int(getattr(self.model, "self_id", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                self_id = 0
+            team_self = next(
+                (
+                    row
+                    for row in live_team_rows
+                    if row.get("is_self")
+                    or (self_id and int(row.get("actor_id", 0) or 0) == self_id)
+                ),
+                None,
+            )
+            if live_self is None and team_self is not None:
+                live_self = dict(team_self, is_self=True, is_live_self=True)
+            elif (
+                live_self is not None
+                and team_self is not None
+                and live_self.get("metric") == "dps"
+                and live_self.get("stat_value") is None
+                and live_self.get("total_value") is None
+            ):
+                for key in (
+                    "stat_value",
+                    "total_value",
+                    "dps_value",
+                    "damage_sort",
+                    "deaths",
+                    "hide_deaths",
+                ):
+                    if key in team_self:
+                        live_self[key] = team_self[key]
+            rows: list[dict[str, object]] = []
+            if live_self is not None:
+                rows.append(live_self)
+            rows.append(
+                {
+                    "row_kind": "section",
+                    "section_text": "实时战斗/战斗记录",
+                    "expanded": True,
+                }
+            )
+            rows.extend(live_team_rows)
+            return rows, False
         settlement_rows = self._settlement_main_rows(now)
         if settlement_rows is not None:
             return settlement_rows, False
@@ -65126,6 +65576,12 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             region = self._layered_main_region_at(
                 int(getattr(event, "x", -1)), int(getattr(event, "y", -1))
             )
+            if region.startswith(("action:refresh_equipment:", "equipment_refresh_pending:")):
+                x, y = int(getattr(event, "x", -1)), int(getattr(event, "y", -1))
+                for key, (left, top, right, bottom) in getattr(self, "layered_main_hit_regions", {}).items():
+                    if key.startswith("scroll:pvp_") and left <= x <= right and top <= y <= bottom:
+                        region = key
+                        break
             direction_name = (
                 region.removeprefix("scrollbar:pvp_")
                 if region.startswith("scrollbar:pvp_")
@@ -65160,7 +65616,7 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                     page = min(pages - 1, max(0, offset // PVP_TEAM_PAGE_SIZE))
                     page_start = page * PVP_TEAM_PAGE_SIZE
                     page_count = min(PVP_TEAM_PAGE_SIZE, max(0, count - page_start))
-                    visible = max(1, max(12, int(getattr(self, "main_visible_rows", 12))) - 2)
+                    visible = max(1, max(12, int(getattr(self, "pvp_visible_rows", 12))) - 2)
                     local = max(0, offset - page_start)
                     local = min(max(0, page_count - visible), local)
                     next_local = min(
@@ -67271,12 +67727,17 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             return
         if kind == "live_hud_boss":
             previous_state = getattr(self, "live_hud_boss_state", None)
+            terminal_state = (
+                dict(payload)
+                if isinstance(payload, dict) and payload.get("terminal_zero")
+                else None
+            )
             next_state = (
                 dict(payload)
                 if isinstance(payload, dict) and payload.get("active")
                 else None
             )
-            self.live_hud_boss_state = next_state
+            self.live_hud_boss_state = next_state or terminal_state
             if next_state is not None:
                 previous_key = (
                     int(previous_state.get("entity_id", 0) or 0),
@@ -67515,12 +67976,17 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 self._schedule_layered_main_render()
         elif kind == "profile":
             profile_changed = self.model.ingest_profile(payload)
+            rating_rebaselined = (
+                self._rebaseline_team_equipment_rating_after_capture_change(
+                    payload
+                )
+            )
             periodic_rating_refresh = bool(
                 isinstance(payload, dict)
                 and payload.get("source_method")
                 == "PeriodicLiveTeamRatingSnapshot"
             )
-            if profile_changed or periodic_rating_refresh:
+            if profile_changed or periodic_rating_refresh or rating_rebaselined:
                 self._invalidate_team_rating_preview_rows(
                     payload.get("entity_id", 0)
                 )

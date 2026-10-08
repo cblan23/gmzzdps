@@ -263,6 +263,27 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         })
         self.window.root.after.assert_called_once()
 
+    def test_rating_or_equipment_arriving_after_upload_is_sent_once(self):
+        for collection, detail in (
+            ("participants", {"extraordinary_rating": 123866}),
+            ("healers", {"extraordinary_rating": 123866}),
+            ("damage_taken", {"equipment_snapshot": {"captured_at_ns": 100, "equipment": [{"item_id": 456}]}}),
+        ):
+            with self.subTest(collection=collection, detail=detail):
+                self.window.root.after.reset_mock()
+                self.window.automatic_upload_queued.clear()
+                initial = {**self.record, collection: [{"actor_id": 2}]}
+                latest = {**initial, collection: [{"actor_id": 2, **detail}]}
+                self.window.combat_upload_states["victory-1"] = {
+                    "state": "uploaded",
+                    "detail_signature": self.window._history_detail_signature(initial),
+                }
+
+                self.assertTrue(self.window._queue_automatic_victory_upload(latest))
+                self.window.root.after.assert_called_once()
+                self.window.combat_upload_states["victory-1"]["detail_signature"] = self.window._history_detail_signature(latest)
+                self.assertFalse(self.window._automatic_upload_needs_update("victory-1", latest))
+
     def test_silent_network_failure_is_recorded_without_popup(self):
         self.prepare_sender()
         self.window._handle_encounter_upload_result({

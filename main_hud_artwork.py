@@ -741,13 +741,41 @@ class MainHudRenderer:
         self._professions[profession_id] = image
         return image
 
+    def _equipment_refresh_button(self, row, font_factor, hover):
+        token = str(row.get("equipment_refresh_token") or "").strip()
+        if not token or row.get("is_ai") or row.get("is_self"):
+            return None
+        pending = bool(row.get("equipment_refresh_pending"))
+        action = "refresh_equipment:" + token
+        tile = Image.new("RGBA", (90, 42))
+        draw = ImageDraw.Draw(tile)
+        draw.rounded_rectangle(
+            (1, 1, 88, 40), radius=9,
+            fill=(37, 58, 76, 225) if pending else (21, 145, 201, 250)
+            if hover == action else (18, 103, 156, 245),
+            outline=(106, 135, 159, 220) if pending else (104, 219, 255, 255),
+            width=2,
+        )
+        text = self._fitted_label(
+            "刷新中" if pending else "刷新", 78, 25 * font_factor,
+            color=(157, 182, 201) if pending else (241, 253, 255),
+            regular=True, stroke_radius=0, padding=4,
+        )
+        ink = text.info.get("hud_ink_bounds", (0, 0, text.width, text.height))
+        tile.alpha_composite(text, (
+            round((90 - (ink[2] - ink[0])) / 2 - ink[0]),
+            round(text_top_for_center(text, 21)),
+        ))
+        region = ("equipment_refresh_pending:" + token) if pending else ("action:" + action)
+        return tile, region
+
     def _render_pvp(self, snapshot: Mapping[str, object], *, pixel_scale=1.0, font_size=14):
         """Render PVP data with the established PVE artwork and spacing."""
 
         pixel_scale = max(0.75, min(4.0, float(pixel_scale)))
         font_factor = max(0.8, min(1.4, float(font_size) / 14))
-        # Share PVE's maximum viewport geometry rather than a separate 11-row
-        # canvas. Keep all four opponents in each PVP section visible.
+        # Use the same compact row spacing at every viewport height. Stretching
+        # the spacing as well as the row count puts the list over the footer.
         try:
             pvp_visible_rows = max(
                 12, min(HUD_MAX_VISIBLE_ROWS, int(snapshot.get("visible_rows", PVP_HUD_VISIBLE_ROWS) or PVP_HUD_VISIBLE_ROWS))
@@ -756,7 +784,7 @@ class MainHudRenderer:
             pvp_visible_rows = PVP_HUD_VISIBLE_ROWS
         footer_shift = round((pvp_visible_rows - 10) * 75.4) + BOSS_BAR_EXTRA_HEIGHT
         row_centers = tuple(
-            ROW_CENTERS[0] + index * 75.4 * (pvp_visible_rows - 1) / 10
+            ROW_CENTERS[0] + index * 75.4
             for index in range(pvp_visible_rows - 1)
         )
         source_width = REFERENCE_WIDTH
@@ -836,6 +864,9 @@ class MainHudRenderer:
             paste_text(value_tile, left + caption_tile.width + gap, 237)
 
         def draw_identity(row, center_y, *, max_name_width=205):
+            refresh = self._equipment_refresh_button(row, font_factor, hover) if pvp_view == "live" else None
+            if refresh and refresh[1] in regions:
+                refresh = None
             try:
                 profession_id = int(row.get("profession_id", 0) or 0)
             except (TypeError, ValueError, OverflowError):
@@ -851,14 +882,18 @@ class MainHudRenderer:
                 paste(self._profession(profession_id), profession_left, center_y - 47)
             else:
                 name_left = result_x(182)
+            if refresh:
+                max_name_width = min(max_name_width, max(36, 558 - name_left - 120 - INLINE_RATING_GAP - 102))
             name_tile = self._fitted_label(
                 str(row.get("name") or "未知玩家"),
                 max_name_width,
-                34 * font_factor,
+                min(34 * font_factor, 28) if refresh else 34 * font_factor,
                 contour=True,
-                padding=13,
+                padding=6 if refresh else 13,
             )
             paste_text(name_tile, name_left, center_y)
+            name_ink = name_tile.info.get("hud_ink_bounds", (0, 0, name_tile.width, name_tile.height))
+            identity_right = name_left + name_ink[2]
             rating = (
                 "人机" if bool(row.get("is_ai"))
                 else str(row.get("rating") or "--").strip()
@@ -868,7 +903,7 @@ class MainHudRenderer:
             if rating:
                 rating_tile = self._fitted_label(
                     f"（{rating}）",
-                    150,
+                    120 if refresh else 150,
                     27 * font_factor,
                     truncate=False,
                     color=(
@@ -891,6 +926,12 @@ class MainHudRenderer:
                     name_left + name_ink[2] + INLINE_RATING_GAP - rating_ink[0]
                 )
                 paste_text(rating_tile, rating_left, center_y)
+                identity_right = rating_left + rating_ink[2]
+            if refresh:
+                button, region = refresh
+                left = identity_right + 8
+                paste(button, left, center_y - 21)
+                regions[region] = (left, center_y - 21, left + button.width, center_y + 21)
 
         def section_heading(title, center_y, accent, columns):
             label(
@@ -1105,18 +1146,21 @@ class MainHudRenderer:
             self_name_left = 280
         else:
             self_name_left = 207
+        self_refresh = None
         self_name = self._fitted_label(
             str(snapshot.get("pvp_player_name") or "等待识别"),
-            205,
-            35 * font_factor,
-            padding=13,
+            min(205, max(36, 558 - self_name_left - 120 - INLINE_RATING_GAP - 102)) if self_refresh else 205,
+            min(35 * font_factor, 28) if self_refresh else 35 * font_factor,
+            padding=6 if self_refresh else 13,
         )
         paste_text(self_name, self_name_left, self_y)
+        self_name_ink = self_name.info.get("hud_ink_bounds", (0, 0, self_name.width, self_name.height))
+        self_identity_right = self_name_left + self_name_ink[2]
         self_rating = visible_value(snapshot.get("pvp_rating"), fallback="")
         if self_rating:
             self_rating_tile = self._fitted_label(
                 f"（{self_rating}）",
-                145,
+                120 if self_refresh else 145,
                 27 * font_factor,
                 truncate=False,
                 color=(255, 218, 115),
@@ -1137,6 +1181,12 @@ class MainHudRenderer:
                 - self_rating_ink[0],
                 self_y,
             )
+            self_identity_right = self_name_left + self_name_ink[2] + INLINE_RATING_GAP + self_rating_ink[2] - self_rating_ink[0]
+        if self_refresh:
+            button, region = self_refresh
+            left = self_identity_right + 8
+            paste(button, left, self_y - 21)
+            regions[region] = (left, self_y - 21, left + button.width, self_y + 21)
 
         def summary_value(caption, value, center_x, value_color):
             caption_tile = self._label(
@@ -1513,6 +1563,7 @@ class MainHudRenderer:
                     continue
                 row = shown_team[index]
                 is_ai = bool(row.get("is_ai"))
+                refresh = self._equipment_refresh_button(row, font_factor, hover)
                 if index % 2:
                     draw.rectangle(
                         local_box((191, center_y - 37, 1093, center_y + 37)),
@@ -1529,7 +1580,7 @@ class MainHudRenderer:
                 paste(self._profession(profession_id), 191, center_y - 47)
                 name_tile = self._fitted_label(
                     str(row.get("name") or "玩家识别中"),
-                    274,
+                    208 if refresh else 274,
                     36 * font_factor,
                     contour=not is_self,
                     padding=13,
@@ -1538,7 +1589,7 @@ class MainHudRenderer:
                 rating_text = "人机" if is_ai else visible_value(row.get("rating"))
                 rating_tile = self._fitted_label(
                     f"（{rating_text}）",
-                    170,
+                    130 if refresh else 170,
                     30 * font_factor,
                     truncate=False,
                     color=(
@@ -1562,6 +1613,11 @@ class MainHudRenderer:
                     280 + name_ink[2] + INLINE_RATING_GAP - rating_ink[0],
                     center_y,
                 )
+                if refresh:
+                    button, region = refresh
+                    left = 280 + name_ink[2] + INLINE_RATING_GAP + rating_ink[2] - rating_ink[0] + 8
+                    paste(button, left, center_y - 21)
+                    regions[region] = (left, center_y - 21, left + button.width, center_y + 21)
 
                 if bool(row.get("equipment_profile_ready", False)) and not is_ai:
                     equipment_text, _equipment_is_pve_warning = pvp_equipment_type_badge(
@@ -1948,7 +2004,16 @@ class MainHudRenderer:
                     red=False,
                     blue=view == "team" and selected,
                 )
-                if not selected and not hovered:
+                if selected:
+                    tile = tile.copy()
+                    ImageDraw.Draw(tile).rounded_rectangle(
+                        (1, 1, tile.width - 2, tile.height - 2),
+                        radius=22,
+                        fill=accent + (255,),
+                        outline=(235, 250, 255, 255),
+                        width=3,
+                    )
+                elif not hovered:
                     tile = tile.copy()
                     tile.putalpha(
                         tile.getchannel("A").point(lambda value: value * 3 // 5)
@@ -1965,7 +2030,7 @@ class MainHudRenderer:
                     regular=False,
                     flat=True,
                     padding=3,
-                    stroke_radius=1,
+                    stroke_radius=2 if selected else 1,
                     truncate=False,
                 )
                 regions[f"action:{action}"] = (left, 135, right, 181)
@@ -2367,7 +2432,7 @@ class MainHudRenderer:
                 value_left = section_right - 14 - value_tile.width
                 paste_text(value_tile, value_left, cy)
                 label(
-                    "实时团队秒伤",
+                    str(row.get("live_dps_caption") or "实时团队秒伤"),
                     badge_left + 43,
                     cy,
                     26,
@@ -2506,6 +2571,11 @@ class MainHudRenderer:
             paste(self._profession(row.get("profession_id", 0)), 191, cy - 47)
             row_rating = rating or row.get("metric") == "rating"
             is_ai = bool(row.get("is_ai", False))
+            refresh = self._equipment_refresh_button(
+                row, font_factor, str(snapshot.get("hover_action", "") or ""),
+            )
+            if refresh and refresh[1] in regions:
+                refresh = None
             inline_rating = str(row.get("inline_rating_text", "") or "").strip()
             if row_rating:
                 inline_rating = (
@@ -2516,34 +2586,42 @@ class MainHudRenderer:
             rating_color = (
                 (116, 210, 235)
                 if is_ai
+                else (255, 226, 92)
+                if self_row and inline_rating and inline_rating != "--"
                 else (247, 207, 109)
                 if inline_rating and inline_rating != "--"
                 else (180, 192, 205)
             )
             rating_tile = None
+            rating_width = 180 if self_row else 150 if refresh else 170
             if inline_rating:
                 rating_tile = self._fitted_label(
                     f"（{inline_rating}）",
-                    170,
-                    30 * font_factor,
+                    rating_width,
+                    (34 if self_row else 30) * font_factor,
                     truncate=False,
                     color=rating_color,
                     contour=not self_row,
-                    padding=13,
+                    padding=6 if self_row else 13,
                 )
             # The name and parenthesized rating together still fit before the
             # statistic column; keep the original full name budget so adding a
             # score does not turn ordinary two-to-four-character names into an
             # ellipsis.
             name_budget = 274
+            if refresh:
+                identity_limit = 740 - width_removed if row_rating else stat_right - (223 if totals else 381) - 10
+                name_budget = max(36, identity_limit - 280 - (rating_width + INLINE_RATING_GAP if rating_tile else 0) - 102)
             name_tile = self._fitted_label(
                 row.get("name", "玩家"),
                 name_budget,
-                36 * font_factor,
+                min(36 * font_factor, 28) if refresh and name_budget < 150 else 36 * font_factor,
                 contour=not self_row,
-                padding=13,
+                padding=6 if refresh else 13,
             )
             paste_text(name_tile, 280, cy)
+            name_ink = name_tile.info.get("hud_ink_bounds", (0, 0, name_tile.width, name_tile.height))
+            identity_right = 280 + name_ink[2]
             if rating_tile is not None:
                 name_ink = name_tile.info.get(
                     "hud_ink_bounds", (0, 0, name_tile.width, name_tile.height)
@@ -2555,6 +2633,12 @@ class MainHudRenderer:
                     280 + name_ink[2] + INLINE_RATING_GAP - rating_ink[0]
                 )
                 paste_text(rating_tile, rating_left, cy)
+                identity_right = rating_left + rating_ink[2]
+            if refresh:
+                button, region = refresh
+                left = identity_right + 8
+                paste(button, left, cy - 21)
+                regions[region] = (left, cy - 21, left + button.width, cy + 21)
             if row_rating and bool(row.get("equipment_profile_ready", False)):
                 pvp_count = max(0, int(row.get("pvp_equipment_count", 0) or 0))
                 active_words = max(0, int(row.get("active_word_count", 0) or 0))

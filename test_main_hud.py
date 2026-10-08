@@ -662,6 +662,70 @@ class MainHudRendererTests(unittest.TestCase):
         self.assertIn('scrollbar:pvp_outgoing', result.hit_regions)
         self.assertIn('scrollbar:pvp_incoming', result.hit_regions)
 
+    def test_pvp_rows_never_cover_footer_at_any_supported_height(self):
+        for visible in range(12, 17):
+            for view in ('team', 'live'):
+                with self.subTest(visible=visible, view=view):
+                    result = self.renderer.render(dict(
+                        combat_mode='pvp', pvp_hud_view=view, visible_rows=visible,
+                        pvp_team_rows=[dict(actor_id=i, name=f'玩家{i}') for i in range(1, 31)],
+                        pvp_incoming=[dict(actor_id=i, name=f'敌人{i}') for i in range(1, 7)],
+                    ))
+                    footer_top = min(result.hit_regions[key][1] for key in ('action:pve', 'action:settings', 'action:lock', 'action:pin'))
+                    for key, bounds in result.hit_regions.items():
+                        if key.startswith(('scroll:pvp_', 'scrollbar:pvp_')):
+                            self.assertLess(bounds[3], footer_top)
+                    for bounds, _actor in result.actor_regions:
+                        self.assertLess(bounds[3], footer_top)
+
+    def test_equipment_refresh_buttons_fit_rating_and_statistic_rows(self):
+        for mode in ('pve', 'pvp'):
+            for view in ('team', 'live'):
+                for font in (12, 20):
+                    for deaths in (True, False):
+                        with self.subTest(mode=mode, view=view, font=font, deaths=deaths):
+                            state = snapshot(deaths=deaths)
+                            row = state['rows'][0]
+                            row.update(name='一个比较长的角色名', inline_rating_text='123456',
+                                       rating_text='123456', rating='123456',
+                                       is_self=False,
+                                       equipment_refresh_token='stale-player',
+                                       equipment_profile_ready=True, equipment_count=8,
+                                       pvp_equipment_count=4, active_word_count=3, total_word_count=10)
+                            state.update(rating_preview=view == 'team')
+                            if mode == 'pvp':
+                                state.update(combat_mode='pvp', pvp_hud_view=view,
+                                             pvp_team_battle=True, pvp_allies=[row], pvp_team_rows=[row])
+                            result = self.renderer.render(state, font_size=font)
+                            bounds = result.hit_regions['action:refresh_equipment:stale-player']
+                            limit = (740 - (0 if deaths or mode == 'pvp' else 138)) if view == 'team' else 595 if mode == 'pve' else 558
+                            self.assertLessEqual(bounds[2], round((limit - REFERENCE_BOUNDS[0]) * REFERENCE_SCALE))
+                            self.assertGreater(bounds[2] - bounds[0], 20)
+        state = snapshot()
+        state['rows'][0].update(
+            is_self=False,
+            equipment_refresh_token='stale-player',
+            equipment_refresh_pending=True,
+        )
+        result = self.renderer.render(state)
+        self.assertNotIn('action:refresh_equipment:stale-player', result.hit_regions)
+        self.assertIn('equipment_refresh_pending:stale-player', result.hit_regions)
+        state['rows'][0]['is_ai'] = True
+        result = self.renderer.render(state)
+        self.assertNotIn('equipment_refresh_pending:stale-player', result.hit_regions)
+
+    def test_pvp_self_never_shows_refresh_button(self):
+        fields = dict(equipment_refresh_token='self-token')
+        result = self.renderer.render(dict(
+            combat_mode='pvp', pvp_hud_view='live', pvp_team_battle=True,
+            pvp_player_name='莫雪', pvp_rating='100001', pvp_profession_id=1_200_001,
+            pvp_self_equipment=fields,
+            pvp_allies=[dict(fields, actor_id=1, name='莫雪', rating='100001', is_self=True)],
+        ))
+        self.assertNotIn(
+            'action:refresh_equipment:self-token', result.hit_regions
+        )
+
     def test_blue_return_emblem_crops_export_noise_and_fills_button(self):
         source = Image.new('RGBA', (400, 400), (0, 0, 0, 1))
         source.paste((255, 255, 255, 255), (170, 170, 230, 230))
@@ -784,6 +848,26 @@ class MainHudRendererTests(unittest.TestCase):
         self.assertIn("实时团队秒伤", texts)
         self.assertIn("286,420/s", texts)
         self.assertNotIn("按血量", texts)
+
+    def test_dummy_live_dps_draws_player_caption(self):
+        state = snapshot()
+        state["rows"].append({
+            "row_kind": "section",
+            "section_text": "实时战斗/战斗记录",
+            "live_team_dps": "18,135/s",
+            "live_dps_caption": "实时玩家秒伤",
+        })
+        state["visible_rows"] = 2
+
+        with mock.patch.object(
+            self.renderer, "_label", wraps=self.renderer._label
+        ) as labels:
+            self.renderer.render(state)
+
+        texts = [str(call.args[0]) for call in labels.call_args_list]
+        self.assertIn("实时玩家秒伤", texts)
+        self.assertIn("18,135/s", texts)
+        self.assertNotIn("实时团队秒伤", texts)
 
     def test_team_application_uses_dedicated_green_overlay_row(self):
         state = snapshot(row_count=2)
@@ -1254,6 +1338,9 @@ class MainHudRendererTests(unittest.TestCase):
         self.assertNotIn('888888', values)
         for value in ('（75900）', '（123456）', '（人机）'):
             self.assertIn(value, values)
+        self.assertEqual(values['（75900）'].args[1], 180)
+        self.assertEqual(values['（75900）'].kwargs['padding'], 6)
+        for value in ('（123456）', '（人机）'):
             self.assertEqual(values[value].args[1], 170)
             self.assertEqual(values[value].kwargs['padding'], 13)
         self.assertNotIn('非凡评分：', values)
@@ -1268,7 +1355,7 @@ class MainHudRendererTests(unittest.TestCase):
         ) as fitted:
             self.renderer.render(state)
         values = {str(call.args[0]): call for call in fitted.call_args_list}
-        self.assertEqual(values['（75900）'].kwargs['color'], (247, 207, 109))
+        self.assertEqual(values['（75900）'].kwargs['color'], (255, 226, 92))
         self.assertEqual(values['（人机）'].kwargs['color'], (116, 210, 235))
 
     def test_six_participants_are_not_padded_to_the_maximum(self):
@@ -1486,6 +1573,29 @@ class MainHudRendererTests(unittest.TestCase):
         self.assertEqual(damage['stat_value'], 15_638)
         self.assertEqual(damage['total_value'], 312_760)
         self.assertEqual(actor.damage, 312_760)
+
+    def test_pinned_audience_row_keeps_hps_when_healing_is_zero(self):
+        from test_combat_model import DpsWindow, ActorStats, normalize_profession_display_metrics
+        actor = ActorStats(actor_id=71)
+        actor.damage = 80_000
+        window = object.__new__(DpsWindow)
+        window.model = SimpleNamespace(
+            current_stats=lambda: [actor], self_id=71,
+            actor_profession_id=lambda _actor: 1200002,
+            duration=lambda _now=None: 20, member_death_counts={},
+            entity_extraordinary_ratings={}, entity_ai_states={},
+        )
+        window._shown_actor_name = lambda _actor: '本人'
+        window.latest_healing_summary = {
+            'healers': [dict(actor_id=71, effective_healing=0)]
+        }
+        window.profession_display_metrics = normalize_profession_display_metrics({})
+
+        row = window._main_live_self_dps_row(now=20)
+
+        self.assertEqual(row['metric'], 'hps')
+        self.assertEqual(row['stat_value'], 0)
+        self.assertEqual(row['total_value'], 0)
 
     def test_premultiplied_alpha_has_no_colorkey_contamination(self):
         source = Image.new('RGBA', (1, 1), (200, 100, 50, 128))

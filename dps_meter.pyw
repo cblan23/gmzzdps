@@ -350,7 +350,7 @@ APP_NAME = "叨叨诡秘助手"
 APP_VERSION = "0.3.6b"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.6+20261008.2"
+CLIENT_BUILD = "0.3.6+20261008.3"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -36440,7 +36440,9 @@ class DpsWindow:
                     )
         return changed or history_changed
 
-    def _main_live_self_dps_row(self, now=None, *, profession_id=None):
+    def _main_live_self_dps_row(
+        self, now=None, *, profession_id=None, metric_dps=None
+    ):
         """Project only the local player's verified live values for the HUD."""
         model = self.model
         self_id = getattr(model, "self_id", None)
@@ -36482,7 +36484,9 @@ class DpsWindow:
             (profession_reader(self_id) if callable(profession_reader) else 0)
             or profession_id or 0
         )
-        metric = self._main_player_display_metric(profession_id, rate)
+        metric = self._main_player_display_metric(
+            profession_id, rate if metric_dps is None else metric_dps
+        )
         shown_total, shown_rate = total, rate
         if metric == "hps":
             healing_reader = getattr(model, "healing_summary", None)
@@ -36534,6 +36538,102 @@ class DpsWindow:
             "inline_rating_text": str(rating) if rating is not None else "",
             "is_ai": self._main_actor_is_ai(self_id),
         }
+
+    def _main_current_live_self_dps_row(
+        self, now=None, *, profession_id=None, metric_dps=None
+    ):
+        """Return the local live row only when it belongs to the current fight."""
+
+        segment = self._main_live_hud_dps_segment_state(now)
+        if isinstance(segment, dict):
+            if not segment.get("active"):
+                return None
+            try:
+                started_at = float(segment.get("started_at_epoch", 0.0) or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                return None
+        else:
+            return None
+
+        row = self._main_live_self_dps_row(
+            now, profession_id=profession_id, metric_dps=metric_dps
+        )
+        if row is None or row.get("total_value") is None:
+            return None
+        if started_at <= 0:
+            return row
+
+        metric = row.get("metric")
+        if metric == "dps":
+            if not hasattr(self.model, "last_damage_time"):
+                return row
+            event_at = getattr(self.model, "last_damage_time", 0.0)
+        elif metric == "hps":
+            if not hasattr(self.model, "last_healing_time"):
+                return row
+            event_at = getattr(self.model, "last_healing_time", 0.0)
+        else:
+            if not hasattr(self.model, "last_damage_time") and not hasattr(
+                self.model, "last_healing_time"
+            ):
+                return row
+            event_at = max(
+                getattr(self.model, "last_damage_time", 0.0) or 0.0,
+                getattr(self.model, "last_healing_time", 0.0) or 0.0,
+            )
+        try:
+            event_at = float(event_at or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return row if math.isfinite(event_at) and event_at >= started_at else None
+
+    def _main_small_monster_self_hps(self, now, team_self):
+        """Return the local HPS carried by the current small-monster counter."""
+
+        segment = self._main_live_hud_dps_segment_state(now)
+        if not isinstance(segment, dict) or segment.get("kind") != "small_monsters":
+            return None
+        try:
+            actor_id = int(team_self.get("actor_id", 0) or 0)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return 0, 0.0
+        states = getattr(self.model, "team_healing_states", {})
+        healing_state = states.get(actor_id) if isinstance(states, dict) else None
+        counters = segment.get("counter_states", {})
+        counter = next(
+            (
+                state
+                for state in counters.values()
+                if isinstance(state, dict)
+                and int(state.get("actor_id", 0) or 0) == actor_id
+            ),
+            None,
+        ) if isinstance(counters, dict) else None
+
+        total = 0
+        if healing_state is not None:
+            healing_epoch = int(getattr(healing_state, "server_time", 0) or 0)
+            counter_epoch = int(counter.get("server_time", 0) or 0) if counter else 0
+            if counter_epoch and healing_epoch == counter_epoch:
+                total = max(0, int(getattr(healing_state, "last_absolute", 0) or 0))
+            elif bool(getattr(healing_state, "exact_for_encounter", False)):
+                total = max(
+                    0,
+                    int(
+                        getattr(
+                            healing_state, "accepted_effective_healing", 0
+                        )
+                        or 0
+                    ),
+                )
+        try:
+            duration = float(counter.get("duration", 0.0) or 0.0) if counter else 0.0
+            if duration <= 0:
+                duration = float(segment.get("snapshot_duration", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            duration = 0.0
+        duration = dps_duration_seconds(duration)
+        return total, total / duration if duration else 0.0
 
     def _main_settlement_metric_values(self, member, duration, profession_id=None):
         """Select display values from one settlement, without changing its data."""
@@ -37465,9 +37565,15 @@ class DpsWindow:
             ),
             {},
         )
-        live_row = self._main_live_self_dps_row(
-            now, profession_id=identity.get("profession_id")
-        )
+        live_segment = self._main_live_hud_dps_segment_state(now)
+        if isinstance(live_segment, dict) and live_segment.get("active"):
+            live_row = self._main_current_live_self_dps_row(
+                now, profession_id=identity.get("profession_id")
+            )
+        else:
+            live_row = self._main_live_self_dps_row(
+                now, profession_id=identity.get("profession_id")
+            )
         if live_row is None:
             actor_id = int(identity.get("iid") or 0)
             shown_name = (
@@ -65339,8 +65445,29 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
         self, now: float | None = None
     ) -> tuple[list[dict[str, object]], bool]:
         live_team_rows = self._main_authoritative_live_team_rows(now)
+        current_live_self = self._main_current_live_self_dps_row(now)
+
+        def with_current_live_self(rows):
+            if current_live_self is None:
+                return rows
+            body = rows
+            if (
+                len(rows) >= 2
+                and rows[0].get("is_self")
+                and rows[1].get("row_kind") == "section"
+            ):
+                body = rows[2:]
+            return [
+                current_live_self,
+                {
+                    "row_kind": "section",
+                    "section_text": "实时战斗/战斗记录",
+                    "expanded": True,
+                },
+                *body,
+            ]
+
         if live_team_rows:
-            live_self = self._main_live_self_dps_row(now)
             try:
                 self_id = int(getattr(self.model, "self_id", 0) or 0)
             except (TypeError, ValueError, OverflowError):
@@ -65354,44 +65481,91 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 ),
                 None,
             )
-            if live_self is None and team_self is not None:
-                live_self = dict(team_self, is_self=True, is_live_self=True)
-            missing_live_dps = bool(
-                live_self is not None
-                and team_self is not None
-                and live_self.get("metric") == "dps"
-                and live_self.get("stat_value") is None
-                and live_self.get("total_value") is None
+            team_metric_dps = (
+                team_self.get("dps_value") if team_self is not None else None
             )
-            segment = self._main_live_hud_dps_segment_state(now)
-            small_monster_self_dps = bool(
-                live_self is not None
-                and team_self is not None
-                and team_self.get("targetless_team_live")
-                and isinstance(segment, dict)
-                and segment.get("kind") == "small_monsters"
-                and self._main_player_display_metric(
-                    live_self.get("profession_id"), team_self.get("dps_value")
+            selected_metric = (
+                self._main_player_display_metric(
+                    team_self.get("profession_id"), team_metric_dps
                 )
-                == "dps"
+                if team_self is not None
+                else None
             )
-            if missing_live_dps or small_monster_self_dps:
-                # Local hit events intentionally exclude ordinary monsters.
-                # The complete Common team snapshot is therefore the local
-                # player's live source here, including the audience >5000 DPS
-                # override.  Boss projection keeps its existing path.
-                if small_monster_self_dps:
-                    live_self["metric"] = "dps"
-                for key in (
-                    "stat_value",
-                    "total_value",
-                    "dps_value",
-                    "damage_sort",
-                    "deaths",
-                    "hide_deaths",
-                ):
-                    if key in team_self:
-                        live_self[key] = team_self[key]
+            small_monster_hps = (
+                self._main_small_monster_self_hps(now, team_self)
+                if team_self is not None and selected_metric == "hps"
+                else None
+            )
+            if small_monster_hps is not None:
+                healing_total, healing_rate = small_monster_hps
+                live_self = dict(
+                    team_self,
+                    metric="hps",
+                    stat_value=healing_rate,
+                    total_value=healing_total,
+                    is_self=True,
+                    is_live_self=True,
+                )
+            else:
+                live_self = (
+                    self._main_current_live_self_dps_row(
+                        now,
+                        profession_id=team_self.get("profession_id"),
+                        metric_dps=team_metric_dps,
+                    )
+                    if team_self is not None
+                    else current_live_self
+                )
+            if (
+                live_self is None
+                and self._main_live_hud_dps_segment_state(now) is None
+            ):
+                live_self = self._main_live_self_dps_row(
+                    now,
+                    profession_id=(
+                        team_self.get("profession_id")
+                        if team_self is not None
+                        else None
+                    ),
+                    metric_dps=team_metric_dps,
+                )
+            if live_self is None and team_self is not None:
+                live_self = dict(
+                    team_self,
+                    metric=selected_metric,
+                    stat_value=(
+                        team_self.get("stat_value")
+                        if selected_metric == "dps"
+                        else None
+                    ),
+                    total_value=(
+                        team_self.get("total_value")
+                        if selected_metric == "dps"
+                        else None
+                    ),
+                    is_self=True,
+                    is_live_self=True,
+                )
+            if live_self is not None and team_self is not None:
+                if live_self.get("metric") == "dps":
+                    # The complete team snapshot is authoritative for DPS.
+                    # This also keeps the pinned and roster copies identical.
+                    for key in (
+                        "stat_value",
+                        "total_value",
+                        "dps_value",
+                        "damage_sort",
+                        "deaths",
+                        "hide_deaths",
+                    ):
+                        if key in team_self:
+                            live_self[key] = team_self[key]
+                else:
+                    # HPS/DT is local live data. Mirror the same metric into
+                    # the roster copy while retaining its DPS value for the
+                    # team-DPS total and its position in the damage ordering.
+                    for key in ("metric", "stat_value", "total_value"):
+                        team_self[key] = live_self.get(key)
             rows: list[dict[str, object]] = []
             if live_self is not None:
                 rows.append(live_self)
@@ -65406,24 +65580,27 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             return rows, False
         settlement_rows = self._settlement_main_rows(now)
         if settlement_rows is not None:
-            return settlement_rows, False
+            return with_current_live_self(settlement_rows), False
         rating_preview = self._team_rating_preview_active()
         if not rating_preview:
             if self._main_retained_battle_active():
                 retained_rows = self._main_retained_battle_rows()
                 if getattr(self, 'settlement_ui', None) is not None:
                     retained_rows = [row for row in retained_rows if row.get('is_self')]
-                return retained_rows, False
+                return with_current_live_self(retained_rows), False
             cached_targetless_rows = self._main_targetless_team_rows(now)
             if cached_targetless_rows:
-                return cached_targetless_rows, False
+                return with_current_live_self(cached_targetless_rows), False
             rows = self._main_combat_display_rows(now)
             if getattr(self, 'settlement_ui', None) is not None:
                 rows = [row for row in rows if row.get('is_self')]
             if self._main_display_is_cleared():
                 rows = [dict(row, stat_value=None, total_value=None, sort_damage=0, deaths=0) for row in rows]
-            return rows, False
-        return self._main_rating_display_rows(), True
+            return with_current_live_self(rows), False
+        rows = self._main_rating_display_rows()
+        if current_live_self is not None:
+            return with_current_live_self(rows), False
+        return rows, True
 
     def _main_rating_display_rows(self) -> list[dict[str, object]]:
         if not TEAM_RATING_PREVIEW_AVAILABLE or not bool(

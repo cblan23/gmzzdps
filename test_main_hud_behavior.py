@@ -3195,13 +3195,18 @@ class MainHudBehaviorTests(unittest.TestCase):
             "elapsed_seconds": 5.0,
             "rows": [],
         }
+        window.model.last_damage_time = 199.0
+        window.model.last_healing_time = 0.0
         waiting_rows, _ = window._main_display_rows(now=205)
         waiting_snapshot = window._layered_main_snapshot()
 
+        self.assertIsNone(waiting_rows[0]["total_value"])
+        self.assertIsNone(waiting_rows[0]["stat_value"])
         self.assertEqual(waiting_rows[2]["row_kind"], "recent_boss")
         self.assertEqual(waiting_rows[3]["total_value"], 11_228)
         self.assertFalse(waiting_snapshot.get("live_no_boss", False))
 
+        window.model.last_damage_time = 204.0
         window.live_hud_dps_segment["rows"] = [
             {
                 "actor_id": 91,
@@ -4587,19 +4592,236 @@ class MainHudBehaviorTests(unittest.TestCase):
 
     def test_empty_live_team_snapshot_keeps_self_and_previous_result(self):
         window, _ = make_window()
-        expected = [
-            {"actor_id": 1, "is_live_self": True},
-            {"row_kind": "section"},
+        previous = [
             {"row_kind": "recent_boss", "boss_name": "上一只Boss"},
             {"actor_id": 2, "is_recent_battle": True},
         ]
+        window.live_hud_dps_segment = {
+            "kind": "small_monsters",
+            "active": True,
+            "started_at_epoch": 200.0,
+            "ended_at_epoch": 0.0,
+            "rows": [],
+        }
+        window.model.last_damage_time = 204.0
         window._main_authoritative_live_team_rows = lambda _now=None: []
-        window._settlement_main_rows = lambda _now=None: expected
+        window._settlement_main_rows = lambda _now=None: previous
 
         rows, rating_preview = window._main_display_rows(now=205)
 
         self.assertFalse(rating_preview)
-        self.assertIs(rows, expected)
+        self.assertTrue(rows[0]["is_live_self"])
+        self.assertEqual(rows[0]["actor_id"], 1)
+        self.assertEqual(rows[0]["total_value"], 630_000)
+        self.assertEqual(rows[1]["row_kind"], "section")
+        self.assertEqual(rows[2:], previous)
+
+    def test_new_live_segment_does_not_pin_previous_self_values(self):
+        window, _ = make_window()
+        previous = [
+            {"row_kind": "recent_boss", "boss_name": "上一只Boss"},
+            {"actor_id": 2, "is_recent_battle": True},
+        ]
+        window.live_hud_dps_segment = {
+            "kind": "boss",
+            "active": True,
+            "started_at_epoch": 200.0,
+            "ended_at_epoch": 0.0,
+            "rows": [],
+        }
+        window.model.last_damage_time = 199.0
+        window._main_authoritative_live_team_rows = lambda _now=None: []
+        window._settlement_main_rows = lambda _now=None: previous
+
+        rows, rating_preview = window._main_display_rows(now=205)
+
+        self.assertFalse(rating_preview)
+        self.assertIs(rows, previous)
+
+    def test_empty_live_team_snapshot_keeps_current_self_hps(self):
+        window, _ = make_window()
+        window.model.current_stats()[0].damage = 120_000
+        window.model.entity_professions[1] = 1_200_002
+        window.model.healing_summary = lambda _duration: {
+            "healers": [{"actor_id": 1, "effective_healing": 60_000}]
+        }
+        window.model.last_healing_time = 204.0
+        window.live_hud_dps_segment = {
+            "kind": "boss",
+            "active": True,
+            "started_at_epoch": 200.0,
+            "ended_at_epoch": 0.0,
+            "rows": [],
+        }
+        previous = [{"row_kind": "recent_boss", "boss_name": "上一只Boss"}]
+        window._main_authoritative_live_team_rows = lambda _now=None: []
+        window._settlement_main_rows = lambda _now=None: previous
+
+        rows, rating_preview = window._main_display_rows(now=205)
+
+        self.assertFalse(rating_preview)
+        self.assertEqual(rows[0]["metric"], "hps")
+        self.assertEqual(rows[0]["stat_value"], 2_000)
+        self.assertEqual(rows[0]["total_value"], 60_000)
+        self.assertEqual(rows[2:], previous)
+
+    def test_audience_under_5000_dps_uses_same_hps_in_both_self_rows(self):
+        window, _ = make_window()
+        window.model.current_stats()[0].damage = 120_000
+        window.model.entity_professions[1] = 1_200_002
+        window.model.healing_summary = lambda _duration: {
+            "healers": [{"actor_id": 1, "effective_healing": 60_000}]
+        }
+        window.model.last_healing_time = 204.0
+        window.live_hud_dps_segment = {
+            "kind": "boss",
+            "active": True,
+            "started_at_epoch": 200.0,
+            "ended_at_epoch": 0.0,
+            "rows": [],
+        }
+        live_team_rows = [
+            {
+                "actor_id": 1,
+                "profession_id": 1_200_002,
+                "metric": "dps",
+                "stat_value": 691.0,
+                "total_value": 20_730,
+                "dps_value": 691.0,
+                "damage_sort": 20_730,
+                "is_self": True,
+            },
+            {
+                "actor_id": 2,
+                "profession_id": 1_200_001,
+                "metric": "dps",
+                "stat_value": 20_000.0,
+                "total_value": 600_000,
+                "dps_value": 20_000.0,
+                "damage_sort": 600_000,
+            },
+        ]
+        window._main_authoritative_live_team_rows = lambda _now=None: live_team_rows
+
+        rows, rating_preview = window._main_display_rows(now=205)
+
+        self.assertFalse(rating_preview)
+        roster_self = next(row for row in rows[2:] if row.get("is_self"))
+        self.assertEqual(rows[0]["metric"], "hps")
+        self.assertEqual(rows[0]["stat_value"], 2_000)
+        self.assertEqual(roster_self["metric"], "hps")
+        self.assertEqual(roster_self["stat_value"], 2_000)
+        self.assertEqual(roster_self["total_value"], 60_000)
+        self.assertEqual(roster_self["dps_value"], 691.0)
+
+    def test_small_monster_audience_under_5000_keeps_official_self_hps(self):
+        window, _ = make_window()
+        window.model.entity_professions[1] = 1_200_002
+        window.model.last_healing_time = 0.0
+        window.model.team_healing_states = {
+            1: SimpleNamespace(
+                last_absolute=87_611,
+                accepted_effective_healing=0,
+                server_time=1_791_472_083,
+                exact_for_encounter=False,
+            )
+        }
+        window.live_hud_dps_segment = {
+            "kind": "small_monsters",
+            "active": True,
+            "started_at_epoch": 200.0,
+            "ended_at_epoch": 0.0,
+            "snapshot_duration": 66.0,
+            "counter_states": {
+                "self": {
+                    "actor_id": 1,
+                    "server_time": 1_791_472_083,
+                    "duration": 66.0,
+                }
+            },
+            "rows": [],
+        }
+        live_team_rows = [
+            {
+                "actor_id": 1,
+                "profession_id": 1_200_002,
+                "metric": "dps",
+                "stat_value": 691.0,
+                "total_value": 45_606,
+                "dps_value": 691.0,
+                "damage_sort": 45_606,
+                "is_self": True,
+                "targetless_team_live": True,
+            },
+            {
+                "actor_id": 2,
+                "profession_id": 1_200_001,
+                "metric": "dps",
+                "stat_value": 20_000.0,
+                "total_value": 1_320_000,
+                "dps_value": 20_000.0,
+                "damage_sort": 1_320_000,
+                "targetless_team_live": True,
+            },
+        ]
+        window._main_authoritative_live_team_rows = lambda _now=None: live_team_rows
+
+        rows, rating_preview = window._main_display_rows(now=205)
+
+        self.assertFalse(rating_preview)
+        roster_self = next(row for row in rows[2:] if row.get("is_self"))
+        self.assertEqual(rows[0]["metric"], "hps")
+        self.assertAlmostEqual(rows[0]["stat_value"], 87_611 / 66)
+        self.assertEqual(rows[0]["total_value"], 87_611)
+        self.assertEqual(roster_self["metric"], "hps")
+        self.assertAlmostEqual(roster_self["stat_value"], 87_611 / 66)
+        self.assertEqual(roster_self["total_value"], 87_611)
+        self.assertEqual(roster_self["dps_value"], 691.0)
+
+    def test_audience_over_5000_dps_uses_team_dps_in_both_self_rows(self):
+        window, _ = make_window()
+        window.model.current_stats()[0].damage = 120_000
+        window.model.entity_professions[1] = 1_200_002
+        window.model.last_damage_time = 204.0
+        window.live_hud_dps_segment = {
+            "kind": "boss",
+            "active": True,
+            "started_at_epoch": 200.0,
+            "ended_at_epoch": 0.0,
+            "rows": [],
+        }
+        live_team_rows = [
+            {
+                "actor_id": 1,
+                "profession_id": 1_200_002,
+                "metric": "dps",
+                "stat_value": 6_001.0,
+                "total_value": 180_030,
+                "dps_value": 6_001.0,
+                "damage_sort": 180_030,
+                "is_self": True,
+            },
+            {
+                "actor_id": 2,
+                "profession_id": 1_200_001,
+                "metric": "dps",
+                "stat_value": 20_000.0,
+                "total_value": 600_000,
+                "dps_value": 20_000.0,
+                "damage_sort": 600_000,
+            },
+        ]
+        window._main_authoritative_live_team_rows = lambda _now=None: live_team_rows
+
+        rows, rating_preview = window._main_display_rows(now=205)
+
+        self.assertFalse(rating_preview)
+        roster_self = next(row for row in rows[2:] if row.get("is_self"))
+        self.assertEqual(rows[0]["metric"], "dps")
+        self.assertEqual(rows[0]["stat_value"], 6_001.0)
+        self.assertEqual(roster_self["metric"], "dps")
+        self.assertEqual(roster_self["stat_value"], 6_001.0)
+        self.assertEqual(rows[0]["total_value"], 180_030)
 
     def test_targetless_team_snapshot_prioritizes_live_rows_and_no_boss_header(self):
         window, _ = make_window()

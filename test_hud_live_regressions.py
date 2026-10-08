@@ -310,7 +310,7 @@ class HudLiveRegressions(unittest.TestCase):
 
         snapshot = window._layered_main_snapshot()
 
-        self.assertEqual(snapshot['boss_name'], '战斗首领')
+        self.assertEqual(snapshot['boss_name'], 'Boss')
         self.assertEqual(snapshot['boss_percent'], '0%')
 
     def test_new_live_pull_does_not_use_previous_settlement_clock(self):

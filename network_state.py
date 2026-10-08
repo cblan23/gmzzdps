@@ -429,6 +429,7 @@ BOSS_PLACEHOLDER_NAMES = frozenset(
     normalize_boss_name(value)
     for value in (
         "Boss",
+        "战斗首领",
         "首领",
         "未命名Boss",
         "未命名Boss/精英",

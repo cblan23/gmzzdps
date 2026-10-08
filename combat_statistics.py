@@ -241,6 +241,11 @@ def normalize_statistics(record: dict, *, instance_id: str | None = None,
     current = stage(args[1])
     result = [current]
     for group_id, members in fields(args[0]).items():
+        if not pairs(members):
+            # Settlement bundles can include an empty auxiliary stage.  It has
+            # no statistics to retain; the authoritative current stage above
+            # remains subject to the normal non-empty roster validation.
+            continue
         normalized = normalize_members(members)
         if group_id == current.stage_id:
             # The second argument has battleID and is the Boss-level source of truth.

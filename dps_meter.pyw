@@ -350,7 +350,7 @@ APP_NAME = "叨叨诡秘助手"
 APP_VERSION = "0.3.6b"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.6+20261008.1"
+CLIENT_BUILD = "0.3.6+20261008.2"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -638,6 +638,10 @@ TARGETLESS_TEAM_SNAPSHOT_STALE_SECONDS = 8.0
 # Live HUD aliases for Boss templates confirmed from the current packet stream.
 # The formal catalog separately controls combat history eligibility.
 LIVE_HUD_BOSS_ALIASES = {
+    7_115_703: {
+        "name": "朗伯·绞索",
+        "icon": "lambert-noose.png",
+    },
     7_115_733: {
         "name": "亚巴顿",
         "icon": "head-enemy-04.png",
@@ -29412,10 +29416,13 @@ class DpsWindow:
                 int(live_hud_boss_state["template_id"]),
                 LIVE_HUD_UNKNOWN_BOSS_ALIAS,
             )
+            live_boss_name = str(live_hud_boss_state.get("name") or "").strip()
+            if not live_boss_name or boss_name_is_placeholder(live_boss_name):
+                live_boss_name = str(alias["name"])
             monster = SimpleNamespace(
                 entity_id=int(live_hud_boss_state["entity_id"]),
                 template_id=int(live_hud_boss_state["template_id"]),
-                name=str(live_hud_boss_state.get("name") or alias["name"]),
+                name=live_boss_name,
                 icon=str(live_hud_boss_state.get("icon") or alias["icon"]),
                 level=int(live_hud_boss_state.get("level", 0) or 0),
                 current_hp=max(
@@ -46390,16 +46397,11 @@ class DpsWindow:
                 "v0.3.6b",
                 """v0.3.6b 更新日志（相对 v0.3.6）
 
-1. 修复木桩实时秒伤：打木桩时“实时团队秒伤”改为“实时玩家秒伤”，只按本人实际伤害计算，不再根据木桩血量；仅木桩生效。
-2. 修复实时战斗显示：始终保留本人实时数据；队友实时数据未到时继续显示上一场；第一只 Boss 官方结算延迟时保留本地结果，避免短暂显示后空白；胜利后 Boss 血量归零。
-3. 修复观众职业指标：本人有实时治疗时显示真实 HPS；本人 DPS 严格超过 5000 时才切换显示 DPS。
-4. 优化装备查询：首次定位后复用同一游戏进程和角色会话内已验证地址；每完成一人立即查询下一人；过图后不因旧评分误刷新。
-5. 调整装备刷新：本人评分真实变化时自动更新且不显示刷新按钮；队友评分变化保留手动刷新；查询超时仍保留旧装备。
-6. 修复队伍与历史评分：安静期不再误删队友；用同场有效装备快照补齐最近战斗评分，避免部分队友评分缺失。
-7. 修复 PVP HUD：长名单支持滚动，刷新按钮不遮挡数据，任何列表长度都可切回 PVE，并保持 PVE 窗口高度。
-8. 提升 HUD 页签选中态和本人超凡评分可读性，修正“团队构成”等选中状态的文字显示。
-9. 装备或评分在首次上传后补到时，只补传一次完整记录。
-10. 修复当前副本 Boss 预警：实时 Boss 血量投影启用时，不再隐藏已有资料的狂暴节奏预警。""",
+1. 优化装备查询等待时间。
+2. 增强“团队构成 / DPS统计”选中状态和文字可读性。
+3. 增加采集中断自动恢复，减少实时数据长时间不再更新的情况。
+4. 优化装备评分获取流程：队员逐个查询，完成一个再处理下一个；队友评分变化时显示刷新按钮，玩家本人自动刷新。
+5. 适配明天新黄铜书。""",
             ),
             (
                 "v0.3.6",
@@ -64773,10 +64775,11 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 for token in snapshot_tokens
             )
         )
-        if not official_clock and (
-            segment.get("kind") == "small_monsters"
-            or segment.get("official_team_clock")
-        ):
+        if not official_clock and segment.get("official_team_clock"):
+            # Once rows use the server clock, never replace them with a weaker
+            # fallback snapshot.  A small-monster segment that has no server
+            # clock yet can still use its packet-confirmed FightMode start;
+            # otherwise valid Common counters disappear from the live HUD.
             return False
         if official_clock:
             duration = max(official_durations.values())
@@ -65353,13 +65356,32 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             )
             if live_self is None and team_self is not None:
                 live_self = dict(team_self, is_self=True, is_live_self=True)
-            elif (
+            missing_live_dps = bool(
                 live_self is not None
                 and team_self is not None
                 and live_self.get("metric") == "dps"
                 and live_self.get("stat_value") is None
                 and live_self.get("total_value") is None
-            ):
+            )
+            segment = self._main_live_hud_dps_segment_state(now)
+            small_monster_self_dps = bool(
+                live_self is not None
+                and team_self is not None
+                and team_self.get("targetless_team_live")
+                and isinstance(segment, dict)
+                and segment.get("kind") == "small_monsters"
+                and self._main_player_display_metric(
+                    live_self.get("profession_id"), team_self.get("dps_value")
+                )
+                == "dps"
+            )
+            if missing_live_dps or small_monster_self_dps:
+                # Local hit events intentionally exclude ordinary monsters.
+                # The complete Common team snapshot is therefore the local
+                # player's live source here, including the audience >5000 DPS
+                # override.  Boss projection keeps its existing path.
+                if small_monster_self_dps:
+                    live_self["metric"] = "dps"
                 for key in (
                     "stat_value",
                     "total_value",

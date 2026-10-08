@@ -34,6 +34,7 @@ from npcap_capture_process import (
     _protocol_stream_stalled,
     _rc4_anchor_changed,
     _can_recover_stream_gap,
+    _should_retry_same_connection_state,
     STABLE_GAP_RECOVERY_SECONDS,
     _alternate_udp_state_candidate,
     GAMEPLAY_STREAM_METHODS,
@@ -51,6 +52,28 @@ class StreamGapRecoveryPolicyTests(unittest.TestCase):
             ready_at, ready_at + STABLE_GAP_RECOVERY_SECONDS, True
         ))
         self.assertFalse(_can_recover_stream_gap(0, 1000, False))
+
+    def test_live_stream_gap_uses_throttled_same_connection_retry(self):
+        self.assertTrue(
+            _should_retry_same_connection_state(
+                False,
+                "Passive stream gap; expected 10, received 12",
+                True,
+            )
+        )
+        self.assertTrue(
+            _should_retry_same_connection_state(True, "startup", False)
+        )
+        self.assertFalse(
+            _should_retry_same_connection_state(False, "decoder failed", True)
+        )
+        self.assertFalse(
+            _should_retry_same_connection_state(
+                False,
+                "Passive stream gap; expected 10, received 12",
+                False,
+            )
+        )
 
     def test_background_stream_keeps_alternate_gameplay_candidate(self):
         from npcap_bootstrap import FrozenSessionState

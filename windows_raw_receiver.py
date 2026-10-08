@@ -29,6 +29,7 @@ DLT_RAW = 101
 MAX_IPV4_PACKET = 65535
 DEFAULT_RECEIVE_BUFFER = 16 * 1024 * 1024
 MAX_RAW_INTERFACES = 60  # Stay below Winsock select()'s default fd_set capacity.
+MAX_DRAIN_PACKETS_PER_SOCKET = 256
 RECEIVE_CLOCK_RESOLUTION_NS = max(1, round(time.get_clock_info("time").resolution * 1_000_000_000))
 
 # CPython exposes these constants on Windows.  Numeric fallbacks keep frozen
@@ -167,7 +168,10 @@ def relevant_local_ipv4(
             wildcard = True
         elif not address.is_multicast:
             concrete.add(str(address))
-    if wildcard:
+    # A concrete address from another owned connection identifies the usable
+    # local interfaces. Do not let wildcard UDP listeners expand that set to
+    # every inactive VPN/virtual adapter on the machine.
+    if wildcard and not concrete:
         for raw in address_provider():
             try:
                 address = ipaddress.ip_address(str(raw))
@@ -457,40 +461,41 @@ class WindowsRawSocketReceiver:
             if item is None:
                 continue
             name, handle = item
-            try:
-                data, _peer = receiver.recvfrom(MAX_IPV4_PACKET)
-            except BlockingIOError:
-                continue
-            except OSError as exc:
-                self.errors[name] = f"{type(exc).__name__}: {exc}"
-                self.counters["capture_adapter_errors"] += 1
-                self._disable(handle)
-                self.handles.pop(name, None)
-                self.local_addresses.discard(name)
-                continue
-            if (len(data) >= 20 and data[0] >> 4 == 4
-                    and struct.unpack_from("!H", data, 2)[0] > len(data)):
-                self.counters["raw_socket_truncated_packets"] += 1
-                continue
-            parsed = _transport_header(data)
-            if parsed is None:
-                self.counters["raw_socket_non_game_packets"] += 1
-                continue
-            if not self._matches(parsed):
-                self.counters["raw_socket_filtered_packets"] += 1
-                continue
-            packet = parsed[-1]
-            self.cursor = (sockets.index(receiver) + 1) % len(sockets)
-            self.counters["raw_socket_frames_received"] += 1
-            self.counters["raw_socket_bytes_received"] += len(packet)
-            return CaptureFrame(
-                packet,
-                self.clock_ns(),
-                name,
-                DLT_RAW,
-                len(packet),
-                RECEIVE_CLOCK_RESOLUTION_NS,
-            )
+            for _index in range(MAX_DRAIN_PACKETS_PER_SOCKET):
+                try:
+                    data, _peer = receiver.recvfrom(MAX_IPV4_PACKET)
+                except BlockingIOError:
+                    break
+                except OSError as exc:
+                    self.errors[name] = f"{type(exc).__name__}: {exc}"
+                    self.counters["capture_adapter_errors"] += 1
+                    self._disable(handle)
+                    self.handles.pop(name, None)
+                    self.local_addresses.discard(name)
+                    break
+                if (len(data) >= 20 and data[0] >> 4 == 4
+                        and struct.unpack_from("!H", data, 2)[0] > len(data)):
+                    self.counters["raw_socket_truncated_packets"] += 1
+                    continue
+                parsed = _transport_header(data)
+                if parsed is None:
+                    self.counters["raw_socket_non_game_packets"] += 1
+                    continue
+                if not self._matches(parsed):
+                    self.counters["raw_socket_filtered_packets"] += 1
+                    continue
+                packet = parsed[-1]
+                self.cursor = (sockets.index(receiver) + 1) % len(sockets)
+                self.counters["raw_socket_frames_received"] += 1
+                self.counters["raw_socket_bytes_received"] += len(packet)
+                return CaptureFrame(
+                    packet,
+                    self.clock_ns(),
+                    name,
+                    DLT_RAW,
+                    len(packet),
+                    RECEIVE_CLOCK_RESOLUTION_NS,
+                )
         if not self.handles:
             details = "; ".join(self.errors.values())
             raise RawSocketUnavailable(

@@ -13049,7 +13049,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(active["max_hp"], 14_095_294.0)
         self.assertEqual(active["started_at_epoch"], started_at / 1_000_000_000)
 
-    def test_live_hud_boss_tracker_accepts_unknown_packet_confirmed_boss(self):
+    def test_live_hud_boss_tracker_projects_packet_confirmed_lambert(self):
         tracker = LiveHudBossTracker()
         entity_id = 242_053_620_061_587
         created_at = 1_791_343_872_883_337_100
@@ -13086,9 +13086,47 @@ class CombatModelTests(unittest.TestCase):
 
         self.assertEqual(active["template_id"], 7_115_703)
         self.assertEqual(active["boss_type"], 3)
+        self.assertEqual(active["name"], "朗伯·绞索")
+        self.assertEqual(active["icon"], "lambert-noose.png")
+        self.assertEqual(active["level"], 87)
+
+    def test_live_hud_boss_tracker_accepts_unknown_packet_confirmed_boss(self):
+        tracker = LiveHudBossTracker()
+        entity_id = 242_053_620_061_588
+        created_at = 1_791_343_872_883_337_100
+        tracker.ingest(
+            {
+                "method": "NpcapEntityCreated",
+                "capture_source": "npcap",
+                "capture_timestamp_ns": created_at,
+                "decoded_arguments": [
+                    {
+                        "entity_id": entity_id,
+                        "entity_class": "NpcActor",
+                        "properties": {
+                            "TemplateID": 7_999_003,
+                            "BossType": 3,
+                            "Level": 87,
+                        },
+                    }
+                ],
+            }
+        )
+
+        active = tracker.ingest(
+            {
+                "method": "OnMsgSyncFightMode",
+                "capture_source": "npcap",
+                "network_entity_id": entity_id,
+                "script_entity": entity_id,
+                "capture_timestamp_ns": created_at + 1,
+                "decoded_arguments": [2],
+            }
+        )
+
+        self.assertEqual(active["template_id"], 7_999_003)
         self.assertEqual(active["name"], "战斗首领")
         self.assertEqual(active["icon"], "")
-        self.assertEqual(active["level"], 87)
 
     def test_live_hud_boss_tracker_rejects_unknown_non_boss_entities(self):
         for boss_type in (1, 2):

@@ -73,9 +73,10 @@ INITIAL_STATE_RECOVERY_SECONDS = 20.0
 # only after that recovered decoder has stayed valid for five minutes.
 STABLE_GAP_RECOVERY_SECONDS = 300.0
 # A coherent snapshot can still lose its first alignment race when the receive
-# queue contains a large burst from immediately before the snapshot.  Permit a
-# very small number of fresh snapshots only until the first application message
-# proves the stream. Runtime failures after ``capture_ready`` remain fail-closed.
+# queue contains a large burst from immediately before the snapshot. Permit a
+# very small number of fresh snapshots until the first application message
+# proves the stream. Runtime gaps get one immediate recovery, then use the
+# slower bounded state retry so a live HUD cannot remain frozen indefinitely.
 PRE_READY_STATE_REFRESH_LIMIT = 2
 
 
@@ -89,6 +90,24 @@ def _can_recover_stream_gap(
             or now - ready_at >= STABLE_GAP_RECOVERY_SECONDS
         )
     )
+
+
+def _should_retry_same_connection_state(
+    initial_state_unavailable: bool,
+    details: object,
+    game_process_found: bool,
+) -> bool:
+    """Allow a throttled state refresh for startup and live stream gaps."""
+
+    return bool(
+        initial_state_unavailable
+        or (
+            game_process_found
+            and str(details).startswith("Passive stream gap;")
+        )
+    )
+
+
 PCAP_READ_TIMEOUT_MS = 50
 PCAP_BUFFER_BYTES = 32 * 1024 * 1024
 BATCH_INTERVAL_SECONDS = 0.02
@@ -1391,9 +1410,9 @@ def _bootstrap_initial_state(
 ) -> tuple[list[FrozenSessionState], dict[str, object], list[object]]:
     """Take a bounded startup snapshot after early game initialization.
 
-    This is deliberately separate from transport resynchronisation.  It may
-    retry while no decoder has ever been armed, but runtime stream failures
-    still wait for a real connection change and never rescan the same stream.
+    This is deliberately separate from transport resynchronisation. It may
+    retry while no decoder has ever been armed. Runtime stream gaps may also
+    request a throttled retry after the immediate recovery allowance is used.
     Every failed attempt closes all process handles in ``bootstrap_copies``.
     """
     last_error: Exception | None = None
@@ -2447,14 +2466,21 @@ def _session(
         # confirmed protocol frame. That is initial startup, not a previously
         # working session whose failed transport must wait for reconnection.
         initial_state_unavailable = not capture_ready_emitted
+        error_details = str(exc)
+        game_process_found = bool(shadow_capture.process_path(pid))
+        retry_same_connection_state = _should_retry_same_connection_state(
+            initial_state_unavailable,
+            error_details,
+            game_process_found,
+        )
         _put(output_queue, 'capture_error', {
-            'stage': ('npcap_waiting_connection_state' if initial_state_unavailable
+            'stage': ('npcap_waiting_connection_state' if retry_same_connection_state
                       else 'npcap_waiting_connection_change'), 'details': str(exc),
             'game_pid': pid, 'session_id': session_id,
             **_capture_state_fields(capture_source), 'capture_transport': reassembler.protocol,
             'recoverable': True,
-            'awaiting_initial_state': initial_state_unavailable,
-            'awaiting_connection_change': not initial_state_unavailable,
+            'awaiting_initial_state': retry_same_connection_state,
+            'awaiting_connection_change': not retry_same_connection_state,
             'requires_new_connection_initialization': False,
             'same_connection_memory_rescans': 0,
         })
@@ -2466,8 +2492,8 @@ def _session(
             _can_recover_stream_gap(
                 capture_ready_at, time.monotonic(), same_connection_recovery_used
             )
-            and str(exc).startswith('Passive stream gap;')
-            and shadow_capture.process_path(pid)
+            and error_details.startswith('Passive stream gap;')
+            and game_process_found
         ):
             # A dropped packet is an incomplete session. A bounded read-only
             # snapshot can resume later packets; repeated losses need a stable
@@ -2476,7 +2502,7 @@ def _session(
         return _wait_for_new_connection(
             stop_event, output_queue, watchdog, runtime_expiry, receiver, packets,
             reassembler, pid, session_id, capture_source,
-            retry_initial_state=initial_state_unavailable)
+            retry_initial_state=retry_same_connection_state)
     finally:
         if pending_records or pending_metadata or pending_team_profiles or pending_gaps:
             _emit_batch(output_queue, session_id=session_id, batch_id=batch_id,

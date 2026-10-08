@@ -62,6 +62,14 @@ class AddressSelectionTests(unittest.TestCase):
                                     ["0.0.0.0", "192.0.2.10", "10.8.0.2", "127.0.0.1", "224.0.0.1", "::1", "bad"])
         self.assertEqual(set(result), {"192.0.2.10", "10.8.0.2", "127.0.0.1"})
 
+    def test_wildcard_uses_owned_concrete_interfaces_without_virtual_adapter_scan(self):
+        provider = Mock(side_effect=AssertionError("should not enumerate"))
+        result = relevant_local_ipv4(
+            [endpoint("0.0.0.0"), endpoint("192.0.2.10"), endpoint("127.0.0.1")],
+            address_provider=provider,
+        )
+        self.assertEqual(result, ("127.0.0.1", "192.0.2.10"))
+
     def test_ipv6_is_not_silently_treated_as_ipv4(self):
         self.assertEqual(relevant_local_ipv4([endpoint("2001:db8::10")]), ())
 
@@ -128,6 +136,12 @@ class RawReceiverTests(unittest.TestCase):
     def test_other_process_port_is_discarded(self):
         receiver, _values, _factory = self.create([udp(destination_port=4322)])
         self.assertIsNone(receiver.next_frame())
+
+    def test_irrelevant_burst_is_drained_before_returning_game_frame(self):
+        frames = [udp(destination_port=4322) for _index in range(100)] + [udp()]
+        receiver, _values, _factory = self.create(frames)
+        self.assertEqual(PacketReassembler().feed(receiver.next_frame()).payload, b"game")
+        self.assertEqual(receiver.counters["raw_socket_filtered_packets"], 100)
 
     def test_non_first_fragment_reaches_existing_reassembler(self):
         payload = struct.pack("!HHHH", 1234, 4321, 32, 0) + b"a" * 24

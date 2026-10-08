@@ -121,6 +121,29 @@ class NormalizedStatisticsTests(unittest.TestCase):
         self.assertEqual(result[1].members[0].damage,300)
         self.assertIsNone(result[1].battle_id)
 
+    def test_settlement_skips_empty_auxiliary_stage(self):
+        stage=packet(battle='current-battle',success=True)['decoded_arguments'][0]
+        stage[0]=5_150_005
+        raw={'method':'OnMsgSettlementCombatStatistics','capture_timestamp_ns':200*NS,
+             'decoded_arguments':[{0:stage[5],5_150_005:stage[5],5_150_002:{}},stage]}
+
+        result=normalize_statistics(raw,instance_id='instance')
+
+        self.assertEqual([s.scope for s in result],['STAGE','ALL'])
+        self.assertEqual(result[0].battle_id,'current-battle')
+        self.assertEqual(result[0].stage_id,5_150_005)
+        self.assertEqual({m.id:m.damage for m in result[0].members},{'peer':100,'self':100})
+        self.assertEqual({m.id:m.damage for m in result[1].members},{'peer':100,'self':100})
+
+    def test_settlement_still_rejects_empty_current_stage(self):
+        stage=packet(success=True)['decoded_arguments'][0]
+        stage[5]={}
+        raw={'method':'OnMsgSettlementCombatStatistics','capture_timestamp_ns':200*NS,
+             'decoded_arguments':[{5_150_002:{}},stage]}
+
+        with self.assertRaisesRegex(ValueError,'Empty or oversized server roster'):
+            normalize_statistics(raw)
+
     def test_damage_gap_not_proportionally_allocated(self):
         m=normalized().members[0]
         self.assertEqual(m.unclassified_damage,1)

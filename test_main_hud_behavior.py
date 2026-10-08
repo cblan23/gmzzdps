@@ -4676,7 +4676,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         snapshot = window._layered_main_snapshot()
 
-        self.assertEqual(snapshot["boss_name"], "战斗首领")
+        self.assertEqual(snapshot["boss_name"], "Boss")
         self.assertFalse(snapshot.get("live_no_boss", False))
         self.assertEqual(snapshot["time"], "00:30")
         self.assertEqual(snapshot["team_dps"], "105,000")
@@ -4905,7 +4905,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertIsNone(window.live_hud_boss_state)
         self.assertEqual(renders, [True, True])
 
-    def test_unknown_packet_confirmed_boss_replaces_small_monster_hud(self):
+    def test_lambert_packet_confirmed_boss_replaces_small_monster_hud(self):
         window, _ = make_window()
         window.live_hud_boss_state = None
         window.live_hud_dps_segment = None
@@ -4942,7 +4942,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(window.live_hud_dps_segment["rows"], [])
         with mock.patch.object(time, "time", return_value=1_013.0):
             snapshot = window._layered_main_snapshot()
-        self.assertEqual(snapshot["boss_name"], "战斗首领")
+        self.assertEqual(snapshot["boss_name"], "朗伯·绞索")
         self.assertEqual(snapshot["boss_template_id"], 7_115_703)
         self.assertEqual(snapshot["boss_level"], 87)
         self.assertTrue(snapshot["live_hud_boss"])
@@ -5243,6 +5243,46 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(window._main_live_hud_dps_duration(2_000), 62.0)
         self.assertEqual(window._main_live_hud_dps_duration(2_001), 63.0)
         self.assertEqual(window._main_targetless_team_rows(2_001), rows)
+
+    def test_small_monster_live_self_survives_two_minutes_without_server_clock(self):
+        window = make_official_clock_window()
+        window.model.server_clock_offset_seconds = None
+        window.model.self_id = 1
+        window.model.entity_names.update({1: "观众", 2: "队友"})
+        window.model.entity_professions.update({1: 1_200_002, 2: 1_200_001})
+        window.settlement_ui = SimpleNamespace(tracker=EncounterTracker())
+        window._dispatch_message(
+            "live_hud_combat",
+            {"active": True, "segment_id": 1, "started_at_epoch": 1_000.0},
+        )
+
+        official_clock_snapshot(
+            window,
+            1_130,
+            {1: 1_300_000, 2: 650_000},
+            server_time=1_001,
+        )
+        official_clock_snapshot(
+            window,
+            1_140,
+            {1: 1_400_000, 2: 700_000},
+            server_time=1_001,
+        )
+
+        rows, rating_preview = window._main_display_rows(now=1_140)
+        segment = window.live_hud_dps_segment
+        self.assertFalse(rating_preview)
+        self.assertFalse(segment["official_team_clock"])
+        self.assertEqual(segment["snapshot_duration"], 140.0)
+        self.assertEqual(rows[0]["actor_id"], 1)
+        self.assertTrue(rows[0]["is_live_self"])
+        self.assertEqual(rows[0]["metric"], "dps")
+        self.assertEqual(rows[0]["total_value"], 1_400_000)
+        self.assertEqual(rows[0]["stat_value"], 10_000.0)
+        self.assertEqual(
+            [row["actor_id"] for row in rows[2:]],
+            [1, 2],
+        )
 
     def test_daily_boss_hud_keeps_common_damage_and_common_accumulated_clock_together(self):
         window = make_official_clock_window()
@@ -5563,7 +5603,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertTrue(window._main_retained_battle_active())
         snapshot = window._layered_main_snapshot()
         self.assertEqual(len([row for row in snapshot['rows'] if not row.get('row_kind')]), 6)
-        self.assertEqual(snapshot['boss_name'], '战斗首领')
+        self.assertEqual(snapshot['boss_name'], 'Boss')
         self.assertEqual(snapshot['boss_percent'], '0%')
         self.assertEqual(snapshot['time'], '00:30')
         self.assertEqual(snapshot['team_dps'], '105,000')

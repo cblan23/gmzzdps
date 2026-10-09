@@ -347,10 +347,10 @@ PVP_HISTORY_PATH = DATA_DIR / "pvp_history.sqlite3"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手"
-APP_VERSION = "0.3.6b"
+APP_VERSION = "0.3.6c"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.6+20261008.3"
+CLIENT_BUILD = "0.3.6+20261009.4"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -36951,6 +36951,8 @@ class DpsWindow:
             for row in rows
         ):
             return None
+        if not self._main_team_rows_cover_known_party(rows):
+            return None
         for row in rows:
             damage = int(row.get("damage_sort", 0) or 0)
             if duration:
@@ -46499,6 +46501,12 @@ class DpsWindow:
             0, 0, window=content, anchor="nw"
         )
         releases = (
+            (
+                "v0.3.6c",
+                """v0.3.6c 更新日志（相对 v0.3.6b）
+
+1. 修复非实时伤害 Boss 团灭后的数据显示：只有本人或少数队员的不完整实时快照不再覆盖上一场完整战斗结果；完整团队数据到达后再切换，本人实时数据继续保留。""",
+            ),
             (
                 "v0.3.6b",
                 """v0.3.6b 更新日志（相对 v0.3.6）
@@ -65374,6 +65382,46 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             )
         return rows or None
 
+    def _main_team_rows_cover_known_party(
+        self, rows: list[dict[str, object]]
+    ) -> bool:
+        """Require a complete known roster before replacing battle history."""
+
+        actor_ids: set[int] = set()
+        for row in rows:
+            try:
+                actor_id = int(row.get("actor_id", 0) or 0)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            if actor_id:
+                actor_ids.add(actor_id)
+        if not actor_ids:
+            return False
+
+        model = self.model
+        try:
+            expected = max(0, int(getattr(model, "party_member_count", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            expected = 0
+        if not bool(getattr(model, "party_known", False)) or expected <= 1:
+            return True
+
+        try:
+            self_id = int(getattr(model, "self_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            self_id = 0
+        if self_id:
+            # The local row has its own exact live source and is pinned above
+            # the team table, so a server snapshot may legitimately omit it.
+            actor_ids.add(self_id)
+        try:
+            roster_ids = set(self._main_visible_roster_members())
+        except (AttributeError, TypeError, ValueError):
+            roster_ids = set()
+        if len(roster_ids) >= expected:
+            return len(actor_ids & roster_ids) >= expected
+        return len(actor_ids) >= expected
+
     def _main_authoritative_live_team_rows(
         self, now: float | None = None
     ) -> list[dict[str, object]] | None:
@@ -65388,20 +65436,32 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
                 list(current_bosses()) if callable(current_bosses) else []
             )
             model_monster = model_bosses[0] if model_bosses else None
+        live_boss = self._main_live_hud_boss_state()
+        live_segment = self._main_live_hud_dps_segment_state(now)
+        boss_projection = bool(
+            live_boss is not None
+            or model_monster is not None
+            or (
+                isinstance(live_segment, dict)
+                and live_segment.get("kind") == "boss"
+            )
+        )
         if self._main_live_hud_projection_active(now) and (
-            self._main_live_hud_boss_state() is not None
+            live_boss is not None
             or model_monster is None
         ):
             targetless_rows = self._main_targetless_team_rows(now)
             # An empty list means that the new live segment is waiting for its
             # first snapshot; let the settlement projection handle that gap.
-            if targetless_rows:
+            if targetless_rows and (
+                not boss_projection
+                or self._main_team_rows_cover_known_party(targetless_rows)
+            ):
                 return targetless_rows
-            segment = self._main_live_hud_dps_segment_state(now)
             if (
-                self._main_live_hud_boss_state() is not None
-                and isinstance(segment, dict)
-                and segment.get("kind") == "boss"
+                live_boss is not None
+                and isinstance(live_segment, dict)
+                and live_segment.get("kind") == "boss"
             ):
                 # The Boss edge resets the visible list immediately.  Do not
                 # leak the model's stage-wide counters while the first clean
@@ -65439,6 +65499,8 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             for row in self._main_combat_display_rows(now)
             if int(row.get("actor_id", 0) or 0) in authoritative_ids
         ]
+        if boss_projection and not self._main_team_rows_cover_known_party(rows):
+            return None
         return rows or None
 
     def _main_display_rows(

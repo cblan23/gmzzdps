@@ -4566,9 +4566,10 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[2]["stat_value"], 63_000)
         self.assertEqual(rows[2]["dps_value"], 63_000)
 
-    def test_live_team_snapshot_without_self_keeps_live_self_pinned(self):
+    def test_complete_duo_snapshot_without_self_keeps_live_self_pinned(self):
         window, _ = make_window()
         window.settlement_ui = SimpleNamespace(tracker=EncounterTracker())
+        window.model.party_member_count = 2
         window.model.team_damage_states = {
             2: TeamDamageState(
                 actor_id=2,
@@ -4589,6 +4590,97 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[0]["total_value"], 630_000)
         self.assertEqual(rows[1]["row_kind"], "section")
         self.assertEqual([row["actor_id"] for row in rows[2:]], [2])
+
+    def test_partial_team_snapshot_keeps_complete_previous_battle(self):
+        window, _ = make_window()
+        window.settlement_ui = SimpleNamespace(tracker=EncounterTracker())
+        window.model.current_monster = lambda: SimpleNamespace(entity_id=90)
+        window.model.last_damage_time = 204.0
+        window.live_hud_dps_segment = {
+            "kind": "boss",
+            "active": True,
+            "started_at_epoch": 200.0,
+            "ended_at_epoch": 0.0,
+            "rows": [],
+        }
+        window.model.team_damage_states = {
+            actor_id: TeamDamageState(
+                actor_id=actor_id,
+                has_snapshot=True,
+                authoritative_snapshot=True,
+                accepted_damage=700_000 - actor_id * 70_000,
+                snapshot_time_100ns=200_000_000_000,
+                live_dps=(700_000 - actor_id * 70_000) / 10,
+                live_dps_damage=700_000 - actor_id * 70_000,
+            )
+            for actor_id in (1, 2)
+        }
+        previous = [
+            {"row_kind": "recent_boss", "boss_name": "上一只Boss"},
+            *[
+                {"actor_id": actor_id, "is_recent_battle": True}
+                for actor_id in range(1, 7)
+            ],
+        ]
+        window._settlement_main_rows = lambda _now=None: previous
+
+        rows, rating_preview = window._main_display_rows(now=205)
+
+        self.assertFalse(rating_preview)
+        self.assertTrue(rows[0]["is_live_self"])
+        self.assertEqual(rows[1]["row_kind"], "section")
+        self.assertEqual(rows[2:], previous)
+        self.assertEqual(
+            [row["actor_id"] for row in rows if row.get("is_recent_battle")],
+            list(range(1, 7)),
+        )
+
+    def test_incomplete_finished_boss_rows_wait_for_team_result(self):
+        window, _ = make_window()
+        local_rows = []
+        for actor_id, damage in ((1, 120_000), (2, 560_000)):
+            actor = ActorStats(actor_id=actor_id)
+            actor.damage = damage
+            local_rows.append(actor)
+        window.model.current_stats = lambda: local_rows
+        window.model.current_taken_rows = lambda: []
+        window.model.encounter_member_ids = {1, 2}
+        window.model.combat_end_time = 204.0
+        window.model.encounter_id = "local-wipe"
+        window.model.resolve_combat_interval = (
+            lambda _now=None: SimpleNamespace(final=True)
+        )
+        window.settlement_history_adapter = SimpleNamespace(
+            local_bindings={"local-wipe": "tracked-wipe"}
+        )
+        current = SimpleNamespace(
+            result="IN_PROGRESS",
+            settlement_status="LIVE",
+            local_encounter_id="tracked-wipe",
+        )
+
+        self.assertIsNone(window._main_finished_current_local_rows(current, 205.0))
+
+    def test_complete_finished_boss_rows_remain_available(self):
+        window, _ = make_window()
+        window.model.current_taken_rows = lambda: []
+        window.model.combat_end_time = 204.0
+        window.model.encounter_id = "local-wipe"
+        window.model.resolve_combat_interval = (
+            lambda _now=None: SimpleNamespace(final=True)
+        )
+        window.settlement_history_adapter = SimpleNamespace(
+            local_bindings={"local-wipe": "tracked-wipe"}
+        )
+        current = SimpleNamespace(
+            result="IN_PROGRESS",
+            settlement_status="LIVE",
+            local_encounter_id="tracked-wipe",
+        )
+
+        rows = window._main_finished_current_local_rows(current, 205.0)
+
+        self.assertEqual([row["actor_id"] for row in rows], list(range(1, 7)))
 
     def test_empty_live_team_snapshot_keeps_self_and_previous_result(self):
         window, _ = make_window()
@@ -5014,6 +5106,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
     def test_targetless_team_snapshot_uses_live_hud_boss_and_fight_clock(self):
         window, _ = make_window()
+        window.model.party_member_count = 2
         actors = []
         for actor_id, damage in ((1, 320_000), (2, 180_000)):
             actor = ActorStats(actor_id=actor_id)
@@ -5061,6 +5154,36 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(section["live_team_dps"], "60,000/s")
         self.assertIs(window.main_last_battle_result, retained)
+
+    def test_partial_boss_targetless_snapshot_waits_for_known_party(self):
+        window, _ = make_window()
+        actors = []
+        for actor_id, damage in ((1, 320_000), (2, 180_000)):
+            actor = ActorStats(actor_id=actor_id)
+            actor.damage = damage
+            actors.append(actor)
+        window.model.started = False
+        window.model.targetless_team_statistics = lambda _now=None: actors
+        window.model.targetless_team_duration = lambda _now=None: 10.0
+        window.model.targetless_team_states = {
+            1: SimpleNamespace(live_dps=40_000.0),
+            2: SimpleNamespace(live_dps=20_000.0),
+        }
+        window.live_hud_combat_state = None
+        window.live_hud_boss_state = None
+        window.live_hud_dps_segment = None
+        window._schedule_layered_main_render = lambda: None
+        window._dispatch_message(
+            "live_hud_boss",
+            {
+                "active": True,
+                "entity_id": 233_115_793_081_227,
+                "template_id": 7_115_718,
+                "started_at_epoch": 100.0,
+            },
+        )
+
+        self.assertEqual(window._main_authoritative_live_team_rows(110.0), [])
 
     def test_live_hud_boss_keeps_model_enrage_prediction_visible(self):
         window, _ = make_window()
@@ -5324,6 +5447,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
     def test_boss_team_snapshot_subtracts_trash_after_model_clears_targetless(self):
         window, _ = make_window()
+        window.model.party_member_count = 2
         windows_epoch = 116_444_736_000_000_000
 
         def filetime(epoch):

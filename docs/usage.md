@@ -1,8 +1,8 @@
-# 使用指南 · v0.3.6b
+# 使用指南 · v0.3.6c
 
 ## 启动
 
-Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0.3.6b) 中的便携 ZIP。先解压，再运行 EXE；无需安装 Python 或 Npcap。程序会请求管理员权限，IPv6 或兼容回退可能加载随包提供的 WinDivert 驱动。
+Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0.3.6c) 中的便携 ZIP。先解压，再运行 EXE；无需安装 Python 或 Npcap。程序会请求管理员权限，IPv6 或兼容回退可能加载随包提供的 WinDivert 驱动。
 
 建议在进入副本前启动，避免漏掉本场早期身份、血量和统计数据。首次登录输入服务器签发的有效卡号；成功登录后，卡号按 Windows 当前用户加密保存，下次启动自动带出。
 
@@ -50,4 +50,4 @@ Windows x64 使用 [Releases](https://github.com/cblan23/gmzzdps/releases/tag/v0
 
 记录版本、游戏场景、复现步骤和出现时间。程序内反馈可附诊断摘要；公开 [Issues](https://github.com/cblan23/gmzzdps/issues) 请去掉卡号、密钥和私人原始数据。
 
-更多问答见 [使用问题大全](../使用问题大全.md)，验收状态见 [发布记录](release-v0.3.6b.md)。
+更多问答见 [使用问题大全](../使用问题大全.md)，验收状态见 [发布记录](release-v0.3.6c.md)。

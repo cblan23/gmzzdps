@@ -142,6 +142,82 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
             self.assertFalse(self.window._queue_automatic_victory_upload(self.record))
         self.window.root.after.assert_not_called()
 
+    def test_recovered_failed_archive_is_saved_reset_and_queued(self):
+        recovered = {
+            **self.record,
+            "encounter_id": "legacy-polluted",
+            "self_character_id": "role-a",
+            "result": "success",
+            "completion_confirmed": True,
+            "dungeon_stage_id": 5_150_095,
+            "monster": {
+                "template_id": 7_110_208,
+                "name": "罗塞尔的污染意志",
+                "current_hp": 0,
+                "max_hp": 137_524_743,
+            },
+            "victory_recovery": {
+                "source": "legacy_polluted_will_low_hp_space_transition"
+            },
+        }
+        self.window.current_character_id = "role-a"
+        self.window.combat_history_recovery_in_progress = True
+        self.window.combat_history_recovery_character_id = ""
+        self.window.history_store = mock.Mock()
+        self.window._set_combat_upload_state = mock.Mock()
+        self.window._queue_automatic_victory_upload = mock.Mock(return_value=True)
+        self.window.combat_upload_states = {
+            "legacy-polluted": {"state": "failed"}
+        }
+
+        self.window._handle_combat_history_recovery_result(
+            {"character_id": "role-a", "records": [recovered], "error": ""}
+        )
+
+        self.window.history_store.save.assert_called_once_with(recovered)
+        self.assertEqual(
+            self.window._set_combat_upload_state.call_args.args,
+            ("legacy-polluted", "pending"),
+        )
+        self.window._queue_automatic_victory_upload.assert_called_once_with(recovered)
+
+    def test_recovery_result_from_previous_role_is_not_saved(self):
+        self.window.current_character_id = "role-b"
+        self.window.combat_history_recovery_in_progress = True
+        self.window.combat_history_recovery_character_id = ""
+        self.window.history_store = mock.Mock()
+        self.window._schedule_legacy_combat_history_recovery = mock.Mock()
+
+        self.window._handle_combat_history_recovery_result(
+            {"character_id": "role-a", "records": [self.record], "error": ""}
+        )
+
+        self.window.history_store.save.assert_not_called()
+        self.window._schedule_legacy_combat_history_recovery.assert_called_once_with()
+
+    def test_legacy_recovery_scan_waits_for_auth_and_runs_off_ui_thread(self):
+        self.window.current_character_id = "role-a"
+        self.window.combat_history_recovery_in_progress = False
+        self.window.combat_history_recovery_character_id = ""
+        self.window.licensing = SimpleNamespace(session=SimpleNamespace(active=False))
+        self.window.history_store = mock.Mock()
+        self.window.control_messages = queue.Queue()
+
+        self.assertFalse(self.window._schedule_legacy_combat_history_recovery())
+        self.window.licensing.session.active = True
+        globals_ = self.window._schedule_legacy_combat_history_recovery.__globals__
+        thread_factory = mock.Mock()
+        with mock.patch.object(globals_["threading"], "Thread", thread_factory):
+            self.assertTrue(self.window._schedule_legacy_combat_history_recovery())
+
+        thread_factory.return_value.start.assert_called_once()
+        self.window.history_store.find_legacy_polluted_will_victories.assert_not_called()
+        thread_factory.call_args.kwargs["target"]()
+        self.window.history_store.find_legacy_polluted_will_victories.assert_called_once()
+        kind, payload = self.window.control_messages.get_nowait()
+        self.assertEqual(kind, "combat_history_recovery_result")
+        self.assertEqual(payload["character_id"], "role-a")
+
     def test_failed_local_save_never_uploads(self):
         self.window.worker = SimpleNamespace(diagnostic_snapshot=lambda: {})
         self.window.history_store = mock.Mock()

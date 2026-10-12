@@ -377,6 +377,104 @@ class ProfileUploadTests(unittest.TestCase):
             self.connection.execute("SELECT COUNT(*) FROM encounters").fetchone()[0], 1
         )
 
+    def test_real_archive_replaces_server_clock_recovery_placeholder(self) -> None:
+        payload = self.encounter(self.first)
+        receipt = self.store.upload_encounter(
+            self.connection,
+            self.first,
+            payload,
+            public_mode="character",
+            app_version="0.3.6b",
+        )
+        encounter_id = receipt["encounter_id"]
+        placeholder_payload = {
+            "result": "defeated",
+            "completion_confirmed": True,
+            "participant_metrics_available": False,
+            "recovery_source": "server_combat_clock_v2",
+            "duration_source": "server_combat_clock_last_activity",
+        }
+        placeholder_validation = {
+            "statistics_status": "not_eligible",
+            "ranking_status": "not_eligible",
+            "reasons": [
+                "RECOVERED_CLOCK_ONLY",
+                "PARTICIPANT_METRICS_MISSING",
+            ],
+        }
+        self.connection.execute(
+            """
+            UPDATE encounters SET payload_json=?, data_quality=0,
+                client_first_encounter_id=?,
+                statistics_status='not_eligible', ranking_status='not_eligible',
+                validation_json=? WHERE encounter_id=?
+            """,
+            (
+                json.dumps(placeholder_payload),
+                f"recovered-clock-{payload['client_encounter_id']}",
+                json.dumps(placeholder_validation),
+                encounter_id,
+            ),
+        )
+        self.connection.execute(
+            """
+            UPDATE encounter_participants SET damage=0, dps=0, hps=0, taken=0,
+                stats_json=?, data_quality=0 WHERE encounter_id=?
+            """,
+            (
+                json.dumps(
+                    {
+                        "metrics_available": False,
+                        "recovery_source": "server_combat_clock_v2",
+                    }
+                ),
+                encounter_id,
+            ),
+        )
+        self.connection.execute(
+            """
+            UPDATE uploads SET data_completeness='clock_recovered',
+                statistics_status='not_eligible', ranking_status='not_eligible',
+                validation_json=? WHERE encounter_id=?
+            """,
+            (json.dumps(placeholder_validation), encounter_id),
+        )
+
+        replaced = self.store.upload_encounter(
+            self.connection,
+            self.first,
+            payload,
+            public_mode="character",
+            app_version="0.3.6c",
+        )
+
+        self.assertEqual(replaced["encounter_id"], encounter_id)
+        self.assertFalse(replaced["created_encounter"])
+        stored_payload = json.loads(
+            self.connection.execute(
+                "SELECT payload_json FROM encounters WHERE encounter_id=?",
+                (encounter_id,),
+            ).fetchone()[0]
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT client_first_encounter_id FROM encounters WHERE encounter_id=?",
+                (encounter_id,),
+            ).fetchone()[0],
+            payload["client_encounter_id"],
+        )
+        self.assertNotIn("recovery_source", stored_payload)
+        self.assertNotIn("participant_metrics_available", stored_payload)
+        detail = self.store.public_encounter(self.connection, encounter_id)
+        self.assertNotIn("RECOVERED_CLOCK_ONLY", detail["qualification_reasons"])
+        self.assertEqual(
+            [row["damage"] for row in detail["participants"]],
+            [2_000_000, 1_000_000],
+        )
+        for participant in detail["participants"]:
+            self.assertNotIn("metrics_available", participant["stats"])
+            self.assertNotIn("recovery_source", participant["stats"])
+
     def test_legacy_anonymous_mode_publishes_available_character_name(self) -> None:
         first_receipt = self.store.upload_encounter(
             self.connection,
@@ -1556,7 +1654,7 @@ class ProfileUploadTests(unittest.TestCase):
             'archive_reason': 'target_defeated',
             'monster': {
                 'entity_id': 99,
-                'template_id': 7_110_208,
+                'template_id': 7_110_200,
                 'name': '罗塞尔的残留意志',
                 'boss_type': 3,
                 'current_hp': 0,
@@ -1564,7 +1662,7 @@ class ProfileUploadTests(unittest.TestCase):
             },
             'targets': [{
                 'entity_id': 99,
-                'template_id': 7_110_208,
+                'template_id': 7_110_200,
                 'name': '罗塞尔的残留意志',
                 'boss_type': 3,
                 'max_hp': 50_000_000,
@@ -1626,8 +1724,8 @@ class ProfileUploadTests(unittest.TestCase):
                 'max_hit': 700,
                 'skills': [{'skill_id': 900, 'name': 'Boss Hit', 'damage': 1_000, 'hits': 2, 'max_hit': 700}],
                 'sources': [{
-                    'source_key': 'boss:7110208', 'entity_id': 99, 'entity_ids': [99],
-                    'template_id': 7_110_208, 'name': '罗塞尔的残留意志',
+                    'source_key': 'boss:7110200', 'entity_id': 99, 'entity_ids': [99],
+                    'template_id': 7_110_200, 'name': '罗塞尔的残留意志',
                     'damage': 1_000, 'hits': 2,
                     'skills': [{'skill_id': 900, 'name': 'Boss Hit', 'damage': 1_000}],
                     'targets': [{'actor_id': 11, 'name': 'Player One', 'damage': 700},
@@ -1671,8 +1769,34 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(payload['participants'][0]['opening_sequence_source'], 'successful_cast')
         self.assertEqual(payload['participants'][1]['opening_sequence_source'], 'damage_hit')
         self.assertEqual(payload['participants'][1]['opening_sequence'][0]['target_name'], '罗塞尔的残留意志')
-        self.assertEqual(payload['participants'][1]['opening_sequence'][0]['target_template_id'], 7_110_208)
+        self.assertEqual(payload['participants'][1]['opening_sequence'][0]['target_template_id'], 7_110_200)
         self.assertEqual(payload['participants'][0]['skill_timeline'][0]['target_name'], '罗塞尔的残留意志')
+
+        polluted_record = copy.deepcopy(record)
+        polluted_record['battle_id'] = 'all-modules-polluted-will'
+        polluted_record['dungeon_stage_id'] = 5_150_095
+        polluted_record['stage_name'] = '罗塞尔的污染意志'
+        polluted_record['monster']['template_id'] = 7_110_208
+        polluted_record['monster']['name'] = '罗塞尔的污染意志'
+        polluted_record['targets'][0]['template_id'] = 7_110_208
+        polluted_record['targets'][0]['name'] = '罗塞尔的污染意志'
+        for participant in polluted_record['participants']:
+            participant['targets'][0]['name'] = '罗塞尔的污染意志'
+        polluted_source = polluted_record['boss_damage']['sources'][0]
+        polluted_source.update(
+            source_key='boss:7110208', template_id=7_110_208,
+            name='罗塞尔的污染意志',
+        )
+        polluted_payload = build_upload_encounter(
+            polluted_record, self.first, current_character_name='Player One'
+        )
+        self.assertEqual(polluted_payload['stage_id'], 5_150_095)
+        self.assertEqual(polluted_payload['boss_name'], '罗塞尔的污染意志')
+        self.assertEqual(polluted_payload['boss_template_ids'], [7_110_208])
+        self.assertEqual(
+            polluted_payload['participants'][0]['skill_timeline'][0]['target_name'],
+            '罗塞尔的污染意志',
+        )
 
         missing_death_record = copy.deepcopy(record)
         missing_death_record['battle_id'] = 'all-modules-missing-death'

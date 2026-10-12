@@ -12,6 +12,7 @@ import re
 import time
 import uuid
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
@@ -22,13 +23,114 @@ from history_index import (
     rebuild_dps_timeline,
     rebuild_team_dps_timeline,
 )
+from network_state import low_hp_fight_exit_confirms_victory
 
 
 HISTORY_SCHEMA_VERSION = 1
+POLLUTED_WILL_TEMPLATE_ID = 7_110_208
+POLLUTED_WILL_STAGE_ID = 5_150_095
+POLLUTED_WILL_NAME = "罗塞尔的污染意志"
 
 
-def recent_boss_max_hp_references(directory: str | Path) -> dict[tuple[int, int], int]:
-    """Use confirmed settled HP peaks as display references for later pulls."""
+def recover_legacy_polluted_will_victory(
+    record: object,
+    current_character_id: object,
+    *,
+    recovered_at_epoch: float | None = None,
+) -> dict | None:
+    """Recover the exact low-HP victory missed by the legacy client."""
+
+    if not isinstance(record, dict):
+        return None
+    character_id = str(current_character_id or "").strip()
+    if not character_id or str(record.get("self_character_id") or "").strip() != character_id:
+        return None
+    if str(record.get("archive_reason") or "").strip().casefold() != "space_transition":
+        return None
+
+    stage_ids: set[int] = set()
+    for field in ("dungeon_stage_id", "stage_id"):
+        try:
+            stage_id = int(record.get(field, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if stage_id > 0:
+            stage_ids.add(stage_id)
+    if stage_ids != {POLLUTED_WILL_STAGE_ID}:
+        return None
+
+    monster = record.get("monster")
+    if not isinstance(monster, dict):
+        return None
+    try:
+        template_id = int(monster.get("template_id", 0) or 0)
+        current_hp = float(monster.get("current_hp"))
+        maximum_hp = float(monster.get("max_hp"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not low_hp_fight_exit_confirms_victory(
+        template_id, current_hp, maximum_hp
+    ):
+        return None
+
+    recovered = deepcopy(record)
+    recovered_monster = recovered["monster"]
+    primary_entity_id = recovered_monster.get("entity_id")
+    original_result = str(recovered.get("result") or "")
+    recovered_monster["name"] = POLLUTED_WILL_NAME
+    recovered_monster["current_hp"] = 0
+
+    def restore_target(target: object) -> None:
+        if not isinstance(target, dict):
+            return
+        try:
+            target_template_id = int(target.get("template_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            target_template_id = 0
+        same_entity = bool(
+            primary_entity_id is not None
+            and target.get("entity_id") == primary_entity_id
+        )
+        if target_template_id == POLLUTED_WILL_TEMPLATE_ID or same_entity:
+            target["name"] = POLLUTED_WILL_NAME
+            if "current_hp" in target:
+                target["current_hp"] = 0
+
+    for target in recovered.get("targets", []):
+        restore_target(target)
+    for participant in recovered.get("participants", []):
+        if not isinstance(participant, dict):
+            continue
+        for target in participant.get("targets", []):
+            restore_target(target)
+
+    recovered["archive_reason"] = "target_defeated"
+    recovered["result"] = "success"
+    recovered["completion_confirmed"] = True
+    recovered["victory_recovery"] = {
+        "version": 1,
+        "source": "legacy_polluted_will_low_hp_space_transition",
+        "template_id": POLLUTED_WILL_TEMPLATE_ID,
+        "stage_id": POLLUTED_WILL_STAGE_ID,
+        "terminal_current_hp": current_hp,
+        "terminal_max_hp": maximum_hp,
+        "terminal_hp_ratio": current_hp / maximum_hp,
+        "original_archive_reason": "space_transition",
+        "original_result": original_result,
+        "recovered_at_epoch": float(
+            time.time() if recovered_at_epoch is None else recovered_at_epoch
+        ),
+    }
+    return recovered
+
+
+def recent_boss_max_hp_catalog(
+    directory: str | Path,
+) -> tuple[
+    dict[tuple[int, int], int],
+    dict[tuple[int, int], tuple[int, ...]],
+]:
+    """Load preferred HP references and every repeatedly confirmed scale."""
 
     root = Path(directory)
     try:
@@ -42,7 +144,7 @@ def recent_boss_max_hp_references(directory: str | Path) -> dict[tuple[int, int]
             reverse=True,
         )[:256]
     except OSError:
-        return {}
+        return {}, {}
     observed_counts: dict[tuple[int, int], Counter[int]] = {}
     settlement_counts: dict[tuple[int, int], Counter[int]] = {}
     for path in paths:
@@ -108,6 +210,26 @@ def recent_boss_max_hp_references(directory: str | Path) -> dict[tuple[int, int]
             len(ranked) == 1 or ranked[0][1] > ranked[1][1]
         ):
             references[identity] = ranked[0][0]
+    candidates: dict[tuple[int, int], tuple[int, ...]] = {}
+    for identity, values in observed_counts.items():
+        repeated = tuple(sorted(value for value, count in values.items() if count >= 2))
+        if repeated:
+            candidates[identity] = repeated
+        elif len(values) == 1:
+            candidates[identity] = (next(iter(values)),)
+    for identity, values in settlement_counts.items():
+        if identity in candidates:
+            continue
+        repeated = tuple(sorted(value for value, count in values.items() if count >= 2))
+        if repeated:
+            candidates[identity] = repeated
+    return references, candidates
+
+
+def recent_boss_max_hp_references(directory: str | Path) -> dict[tuple[int, int], int]:
+    """Use confirmed settled HP peaks as display references for later pulls."""
+
+    references, _candidates = recent_boss_max_hp_catalog(directory)
     return references
 _SAFE_ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 _FILETIME_EPOCH_OFFSET = 116_444_736_000_000_000
@@ -786,6 +908,41 @@ class CombatHistoryStore:
         except (OSError, TypeError, ValueError):
             return None
         return record if self._valid_record(record) else None
+
+    def find_legacy_polluted_will_victories(
+        self,
+        current_character_id: object,
+        *,
+        limit: int = 1024,
+        minimum_ended_at_epoch: float = 0.0,
+    ) -> list[dict]:
+        """Read recent archives and return safe in-memory recovery copies."""
+
+        try:
+            paths = sorted(
+                self.directory.glob("*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )[: max(1, int(limit))]
+        except (OSError, TypeError, ValueError, OverflowError):
+            return []
+        recovered: list[dict] = []
+        for path in paths:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                ended_at_epoch = float(record.get("ended_at_epoch", 0.0) or 0.0)
+            except (OSError, AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            if ended_at_epoch < float(minimum_ended_at_epoch or 0.0):
+                continue
+            if not self._valid_record(record):
+                continue
+            restored = recover_legacy_polluted_will_victory(
+                record, current_character_id
+            )
+            if restored is not None:
+                recovered.append(restored)
+        return recovered
 
     def refresh_index(self) -> dict[str, int]:
         return self._index().sync(self._valid_record)

@@ -24,6 +24,7 @@ from network_state import (
     VERIFIED_SIMULTANEOUS_BOSS_SUCCESSORS,
     VERIFIED_SIMULTANEOUS_BOSS_TEMPLATE_GROUPS,
     boss_template_continues_encounter,
+    low_hp_fight_exit_confirms_victory,
 )
 from settlement_presenter import completed_statistics_scope, encounter_view
 
@@ -462,6 +463,34 @@ class SettlementUIController:
             'origin_started_at_epoch':encounter.started_at_ns/1_000_000_000,
             'rows':[rows[second] for second in sorted(rows)],
         }
+
+    def _low_hp_fight_exit_is_victory(self, encounter, entity, stamp):
+        """Recognize the captured non-zero terminal state of one exact Boss."""
+
+        if encounter is None:
+            return False
+        candidates=[
+            sample for sample in self.boss_health_samples.get(str(entity),())
+            if int(sample.get('timestamp_ns',0) or 0)<=int(stamp or 0)
+            and self._health_sample_matches(encounter,str(entity),sample)
+        ]
+        if not candidates:
+            return False
+        sample=max(candidates,key=lambda value:int(value.get('timestamp_ns',0) or 0))
+        maximum=sample.get('max_hp')
+        if maximum is None:
+            maxima=[
+                value for value in self.boss_max_health_samples.get(str(entity),())
+                if int(value.get('timestamp_ns',0) or 0)<=int(stamp or 0)
+                and self._health_sample_matches(encounter,str(entity),value)
+            ]
+            if maxima:
+                maximum=max(
+                    maxima,key=lambda value:int(value.get('timestamp_ns',0) or 0)
+                ).get('max_hp')
+        return low_hp_fight_exit_confirms_victory(
+            encounter.boss_template_id,sample.get('current_hp'),maximum
+        )
 
     def reset_capture_session(self, timestamp_ns=None):
         """Abandon only the interrupted live pull and clear session identity.
@@ -1429,6 +1458,16 @@ class SettlementUIController:
                 else:
                     self.boss_in_combat[entity]=False
                     self.boss_out_at[entity]=stamp
+                    if (
+                        was_in_combat is True
+                        and current is not None
+                        and current.boss_token==boss.get('token')
+                        and self._low_hp_fight_exit_is_victory(
+                            current,entity,stamp
+                        )
+                    ):
+                        self._end_observed_encounter('VICTORY',stamp)
+                        current=None
         if method=='OnMsgDungeonStageSettlement':
             self._apply_stage_victory_boundary(args,stamp,instance)
         current=self.tracker.encounters.get(self.tracker.current_id)

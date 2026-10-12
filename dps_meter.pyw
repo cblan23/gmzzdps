@@ -113,7 +113,7 @@ from combat_history import (
     CombatHistoryStore,
     HISTORY_SCHEMA_VERSION,
     ResolvedCombatInterval,
-    recent_boss_max_hp_references,
+    recent_boss_max_hp_catalog,
     authoritative_team_combat_seconds,
     settlement_clock_covers_boss_phases,
     interval_iso_timestamp,
@@ -184,6 +184,7 @@ from network_state import (
     HEALING_TARGET_NAME,
     HEALING_TARGET_TEMPLATE_IDS,
     LONG_GAP_BOSS_PHASE_TRANSITIONS,
+    low_hp_fight_exit_confirms_victory,
     MAX_PARTY_MEMBERS,
     NetworkPacketParser,
     direct_numeric_map,
@@ -347,10 +348,10 @@ PVP_HISTORY_PATH = DATA_DIR / "pvp_history.sqlite3"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手"
-APP_VERSION = "0.3.6c"
+APP_VERSION = "0.3.6d"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.3.6+20261009.4"
+CLIENT_BUILD = "0.3.6+20261012.1"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -2626,7 +2627,10 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
             ) <= 999
         except (TypeError, ValueError, OverflowError):
             monster_level_valid = False
-        needs_name = not str(raw_monster.get("name", "")).strip() or (
+        needs_name = (
+            primary_template_id in AUTHORITATIVE_BOSS_NAME_TEMPLATE_IDS
+            and str(raw_monster.get("name", "")).strip() != primary_name
+        ) or not str(raw_monster.get("name", "")).strip() or (
             boss_name_is_placeholder(raw_monster.get("name", ""))
         )
         if (primary_name and needs_name) or (
@@ -2674,7 +2678,10 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
                 ) <= 999
             except (TypeError, ValueError, OverflowError):
                 target_level_valid = False
-            needs_name = not str(raw_target.get("name", "")).strip() or (
+            needs_name = (
+                template_id in AUTHORITATIVE_BOSS_NAME_TEMPLATE_IDS
+                and str(raw_target.get("name", "")).strip() != canonical_name
+            ) or not str(raw_target.get("name", "")).strip() or (
                 boss_name_is_placeholder(raw_target.get("name", ""))
             )
             if (canonical_name and needs_name) or (
@@ -2716,10 +2723,7 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
             actor_targets: list[object] = []
             actor_targets_changed = False
             for raw_target in raw_actor_targets:
-                if not isinstance(raw_target, dict) or (
-                    str(raw_target.get("name", "")).strip()
-                    and not boss_name_is_placeholder(raw_target.get("name", ""))
-                ):
+                if not isinstance(raw_target, dict):
                     actor_targets.append(raw_target)
                     continue
                 candidate_names: set[str] = set()
@@ -2727,8 +2731,26 @@ def restore_history_boss_names(record: object, catalog: object) -> object:
                     entity_id = int(raw_target.get("entity_id", 0) or 0)
                 except (TypeError, ValueError, OverflowError):
                     entity_id = 0
+                try:
+                    target_template_id = int(
+                        raw_target.get("template_id", 0)
+                        or template_by_entity.get(entity_id, 0)
+                        or 0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    target_template_id = 0
+                authoritative_name = bool(
+                    target_template_id in AUTHORITATIVE_BOSS_NAME_TEMPLATE_IDS
+                )
+                if (
+                    str(raw_target.get("name", "")).strip()
+                    and not boss_name_is_placeholder(raw_target.get("name", ""))
+                    and not authoritative_name
+                ):
+                    actor_targets.append(raw_target)
+                    continue
                 direct_catalog_name = _catalog_boss_name(
-                    catalog, raw_target.get("template_id", 0)
+                    catalog, target_template_id
                 )
                 if direct_catalog_name:
                     candidate_names.add(direct_catalog_name)
@@ -12834,6 +12856,34 @@ class CombatModel:
             return changed or linked or boss_clock_armed
         if not self.first_damage_time or self.combat_end_time:
             return changed
+
+        monster = self.monsters.get(entity_id)
+        if (
+            previous is True
+            and entity_id == int(self.combat_target_id or 0)
+            and monster is not None
+            and low_hp_fight_exit_confirms_victory(
+                monster.template_id,
+                monster.current_hp,
+                self._monster_max_hp(monster),
+            )
+        ):
+            # This encounter has no literal HP=0 packet.  Preserve the real
+            # non-zero HP timeline, but project the explicit low-HP fight exit
+            # as the completed HUD/archive state.
+            ended_at = self._event_seconds(update)
+            monster.current_hp = 0.0
+            monster.death_confirmed = True
+            monster.death_time_100ns = max(monster.death_time_100ns, timestamp)
+            monster.last_hp_update_100ns = max(
+                monster.last_hp_update_100ns, timestamp
+            )
+            monster.last_update_100ns = max(monster.last_update_100ns, timestamp)
+            self.combat_end_time = max(self.first_damage_time, ended_at)
+            self.combat_end_reason = "target_defeated"
+            self._rebuild_member_life_metrics()
+            self.archive_current("target_defeated")
+            return True
 
         if (
             entity_id == int(self.combat_target_id or 0)
@@ -23486,9 +23536,12 @@ class DpsWindow:
             profession_path=SKILL_METADATA_PATH,
         )
         self._boss_max_hp_references = {}
+        self._boss_max_hp_reference_candidates = {}
 
         def load_boss_hp_references() -> None:
-            self._boss_max_hp_references = recent_boss_max_hp_references(HISTORY_DIR)
+            references, candidates = recent_boss_max_hp_catalog(HISTORY_DIR)
+            self._boss_max_hp_reference_candidates = candidates
+            self._boss_max_hp_references = references
 
         threading.Thread(
             target=load_boss_hp_references,
@@ -23997,6 +24050,8 @@ class DpsWindow:
         self.pending_upload_battle_id = ""
         self.history_upload_in_progress: set[str] = set()
         self.automatic_upload_queued: set[str] = set()
+        self.combat_history_recovery_in_progress = False
+        self.combat_history_recovery_character_id = ""
         self.login_status_message = ""
         self.opacity_value_label: tk.Label | None = None
         self.opacity_scale: ModernSlider | None = None
@@ -26331,6 +26386,106 @@ class DpsWindow:
             self.profile_resolved_character_id = ""
         self._sync_upload_profile_label()
         self._resolve_upload_profile_async()
+        self._schedule_legacy_combat_history_recovery()
+
+    def _schedule_legacy_combat_history_recovery(self) -> bool:
+        """Scan old archives after both authorization and role binding exist."""
+
+        character_id = str(getattr(self, "current_character_id", "") or "").strip()
+        licensing = getattr(self, "licensing", None)
+        session = getattr(licensing, "session", None)
+        if (
+            not character_id
+            or not bool(getattr(session, "active", False))
+            or bool(getattr(self, "closing", False))
+            or bool(getattr(self, "combat_history_recovery_in_progress", False))
+            or str(
+                getattr(self, "combat_history_recovery_character_id", "") or ""
+            )
+            == character_id
+        ):
+            return False
+        self.combat_history_recovery_in_progress = True
+        store = self.history_store
+
+        def scan() -> None:
+            try:
+                records = store.find_legacy_polluted_will_victories(
+                    character_id,
+                    minimum_ended_at_epoch=time.time() - 30 * 86400,
+                )
+                error = ""
+            except (OSError, TypeError, ValueError) as exc:
+                records = []
+                error = type(exc).__name__
+            self.control_messages.put(
+                (
+                    "combat_history_recovery_result",
+                    {
+                        "character_id": character_id,
+                        "records": records,
+                        "error": error,
+                    },
+                )
+            )
+
+        threading.Thread(
+            target=scan,
+            name="combat-history-recovery",
+            daemon=True,
+        ).start()
+        return True
+
+    def _handle_combat_history_recovery_result(self, payload: object) -> None:
+        self.combat_history_recovery_in_progress = False
+        if not isinstance(payload, dict):
+            return
+        character_id = str(payload.get("character_id", "") or "").strip()
+        current_character_id = str(
+            getattr(self, "current_character_id", "") or ""
+        ).strip()
+        if character_id != current_character_id:
+            self._schedule_legacy_combat_history_recovery()
+            return
+        self.combat_history_recovery_character_id = character_id
+        if payload.get("error"):
+            return
+        records = payload.get("records")
+        if not isinstance(records, list):
+            return
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            recovery = record.get("victory_recovery")
+            monster = record.get("monster")
+            if (
+                str(record.get("self_character_id") or "").strip()
+                != character_id
+                or not isinstance(recovery, dict)
+                or recovery.get("source")
+                != "legacy_polluted_will_low_hp_space_transition"
+                or not isinstance(monster, dict)
+                or int(monster.get("template_id", 0) or 0) != 7_110_208
+                or int(record.get("dungeon_stage_id", 0) or 0) != 5_150_095
+            ):
+                continue
+            battle_id = str(record.get("encounter_id", "") or "").strip()
+            if not battle_id:
+                continue
+            try:
+                self.history_store.save(record)
+            except (OSError, TypeError, ValueError):
+                continue
+            state = str(
+                self._history_upload_state(battle_id).get("state", "") or ""
+            ).casefold()
+            if state == "failed":
+                self._set_combat_upload_state(
+                    battle_id,
+                    "pending",
+                    message="已恢复污染意志胜利记录，等待自动补传。",
+                )
+            self._queue_automatic_victory_upload(record)
 
     def _resolve_upload_profile_async(self) -> None:
         character_id = str(getattr(self, "current_character_id", "") or "")
@@ -27977,11 +28132,40 @@ class DpsWindow:
                 if isinstance(monster, MonsterStats) and boss_level is not None:
                     try:
                         template_id = int(getattr(monster, "template_id", 0) or 0)
+                        identity = (template_id, boss_level)
                         reference = float(getattr(
                             self, "_boss_max_hp_references", {}
-                        ).get((template_id, boss_level), 0) or 0)
+                        ).get(identity, 0) or 0)
+                        raw_candidates = getattr(
+                            self, "_boss_max_hp_reference_candidates", {}
+                        ).get(identity, ())
+                        candidates = sorted({
+                            float(candidate)
+                            for candidate in raw_candidates
+                            if math.isfinite(float(candidate))
+                            and float(candidate) > 0
+                        })
                     except (TypeError, ValueError, OverflowError, AttributeError):
                         reference = 0.0
+                        candidates = []
+                    if candidates:
+                        viable = [
+                            candidate for candidate in candidates
+                            if candidate >= observed_maximum
+                        ]
+                        reference = 0.0
+                        if viable:
+                            nearest = viable[0]
+                            # Multiple full-HP scales can share one Boss
+                            # template and level. A near-full live sample
+                            # identifies the closest scale; a lower live
+                            # sample remains ambiguous until it crosses all
+                            # smaller confirmed scales.
+                            if (
+                                len(viable) == 1
+                                or observed_maximum / nearest >= 0.95
+                            ):
+                                reference = nearest
                     if reference > 0 and 0 < observed_maximum / reference <= 1.0:
                         maximum_hp = reference
         boss_ratio = None
@@ -46501,6 +46685,14 @@ class DpsWindow:
             0, 0, window=content, anchor="nw"
         )
         releases = (
+            (
+                "v0.3.6d",
+                """v0.3.6d 更新日志（相对 v0.3.6c）
+
+1. 修复“罗塞尔的污染意志”低血量退战时未正确判定胜利的问题，并确保与“罗塞尔的残留意志”分场记录。
+2. 自动恢复旧版本遗留的污染意志完整本地记录并补传伤害、DPS、HPS、技能和时间轴。
+3. 优化同模板不同血量规模 Boss 的最大血量选择，减少血量比例显示不准。""",
+            ),
             (
                 "v0.3.6c",
                 """v0.3.6c 更新日志（相对 v0.3.6b）
@@ -68386,6 +68578,8 @@ PVE进入战斗后自动切换到“最近战斗记录”，同一场战斗中�
             self._handle_feedback_result(payload)
         elif kind == "profile_resolve_result":
             self._handle_profile_resolve_result(payload)
+        elif kind == "combat_history_recovery_result":
+            self._handle_combat_history_recovery_result(payload)
         elif kind == "profile_mutation_result":
             self._handle_profile_mutation_result(payload)
         elif kind == "profile_link_code_result":

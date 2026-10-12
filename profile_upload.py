@@ -2358,6 +2358,18 @@ class ProfileUploadStore:
         ).fetchone()
         if same_client_record is not None:
             return same_client_record
+        recovered_clock_record = connection.execute(
+            """
+            SELECT * FROM encounters
+            WHERE client_first_encounter_id=?
+                AND json_extract(payload_json, '$.recovery_source')=
+                    'server_combat_clock_v2'
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (f"recovered-clock-{parsed['client_encounter_id']}",),
+        ).fetchone()
+        if recovered_clock_record is not None:
+            return recovered_clock_record
         exact = connection.execute(
             "SELECT * FROM encounters WHERE encounter_fingerprint=?",
             (parsed["fingerprint"],),
@@ -2715,6 +2727,7 @@ class ProfileUploadStore:
         timestamp = self.now()
         existing_encounter = self._matching_encounter(connection, parsed)
         created = existing_encounter is None
+        replacing_clock_recovery = False
         if created:
             encounter_id = _new_id("enc_")
             connection.execute(
@@ -2766,7 +2779,14 @@ class ProfileUploadStore:
                 stored_payload = {}
             if not isinstance(stored_payload, dict):
                 stored_payload = {}
-            merged_payload = dict(stored_payload)
+            replacing_clock_recovery = bool(
+                stored_payload.get("recovery_source")
+                == "server_combat_clock_v2"
+                and incoming_quality > stored_quality
+            )
+            merged_payload = (
+                {} if replacing_clock_recovery else dict(stored_payload)
+            )
             for field, value in parsed["payload"].items():
                 if field == "brass_tome_status":
                     stored_status = str(
@@ -2843,7 +2863,8 @@ class ProfileUploadStore:
             connection.execute(
                 """
                 UPDATE encounters SET
-                    boss_key=?, boss_name=?, boss_template_ids_json=?,
+                    client_first_encounter_id=?, boss_key=?, boss_name=?,
+                    boss_template_ids_json=?,
                     dungeon_id=?, stage_id=?, difficulty=?, started_at=?,
                     ended_at=?, duration_seconds=?, team_size=?,
                     team_total_damage=?, game_version=?, participant_set_hash=?,
@@ -2852,6 +2873,9 @@ class ProfileUploadStore:
                 WHERE encounter_id=?
                 """,
                 (
+                    parsed["client_encounter_id"]
+                    if replacing_clock_recovery
+                    else existing_encounter["client_first_encounter_id"],
                     parsed["boss_key"] if replace_encounter_core else existing_encounter["boss_key"],
                     boss_name,
                     _json_text(template_ids),
@@ -2873,6 +2897,11 @@ class ProfileUploadStore:
                     timestamp,
                     encounter_id,
                 ),
+            )
+        if replacing_clock_recovery:
+            connection.execute(
+                "DELETE FROM encounter_participants WHERE encounter_id=?",
+                (encounter_id,),
             )
         for participant in parsed["participants"]:
             self._upsert_participant(connection, encounter_id, participant, timestamp)

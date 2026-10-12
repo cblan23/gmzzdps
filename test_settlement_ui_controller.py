@@ -648,6 +648,149 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(encounter.boss_health_observed_at_ns,140*NS)
         self.assertEqual(encounter.boss_health_source,'server_statistics')
 
+    def test_roselle_phases_stay_separate_and_delayed_polluted_table_matches(self):
+        self.context['stage_id']=5_150_113
+        self.context['bosses']={
+            '300':{
+                'token':'roselle-residual','template_id':7_110_200,
+                'name':'罗塞尔的残留意志',
+            }
+        }
+        self.send('OnMsgSyncFightMode',100,300,[2])
+        residual=self.controller.tracker.encounters[
+            self.controller.tracker.current_id
+        ]
+        self.send('OnMsgEntityDead',110,300,[0,'roselle-residual'])
+        first_stage=packet(
+            battle='roselle-residual-battle',received=111,
+            success=True,damage=123,
+        )['decoded_arguments'][0]
+        first_stage[0]=5_150_113
+        first_members=deepcopy(first_stage[5])
+        self.send(
+            'OnMsgSettlementCombatStatistics',111,100,
+            [{0:first_members,5_150_113:first_stage[5]},first_stage],
+        )
+        self.assertEqual(residual.result,'VICTORY')
+        self.assertEqual(residual.settlement_status,'SETTLED')
+
+        self.context['stage_id']=5_150_095
+        self.context['bosses']={
+            '301':{
+                'token':'roselle-polluted','template_id':7_110_208,
+                'name':'罗塞尔的污染意志',
+            }
+        }
+        self.send('OnMsgSyncFightMode',120,301,[2])
+        polluted=self.controller.tracker.encounters[
+            self.controller.tracker.current_id
+        ]
+        self.controller.observe_boss_health({
+            'entity_id':301,'current_hp':137_524_743,'max_hp':137_524_743,
+            'capture_timestamp_ns':121*NS,
+        })
+        self.controller.observe_boss_health({
+            'entity_id':301,'current_hp':28_123,
+            'capture_timestamp_ns':129*NS,
+        })
+
+        self.send('OnMsgSyncFightMode',130,301,[0])
+
+        self.assertIsNone(self.controller.tracker.current_id)
+        self.assertEqual(len(self.controller.tracker.encounters),2)
+        self.assertEqual(
+            [row.boss_template_id for row in self.controller.tracker.encounters.values()],
+            [7_110_200,7_110_208],
+        )
+        self.assertEqual(
+            [row.boss_name for row in self.controller.tracker.encounters.values()],
+            ['罗塞尔的残留意志','罗塞尔的污染意志'],
+        )
+        self.assertEqual(polluted.result,'VICTORY')
+        self.assertEqual(polluted.settlement_status,'PENDING')
+        self.assertEqual(polluted.ended_at_ns,130*NS)
+        self.assertEqual(polluted.encounter_duration_seconds,10)
+        self.assertEqual(polluted.boss_current_hp,0)
+        self.assertEqual(polluted.boss_max_hp,137_524_743)
+
+        second_stage=packet(
+            battle='roselle-polluted-battle',received=156,
+            success=True,damage=456,
+        )['decoded_arguments'][0]
+        second_stage[0]=5_150_095
+        for member in second_stage[5].values():
+            member[36]={'roselle-polluted':20}
+            member[37]={'roselle-polluted':1}
+        second_members=deepcopy(second_stage[5])
+        self.send(
+            'OnMsgSettlementCombatStatistics',156,100,
+            [{0:second_members,5_150_095:second_stage[5]},second_stage],
+        )
+
+        self.assertEqual(polluted.settlement_status,'SETTLED')
+        self.assertEqual(polluted.server_battle_id,'roselle-polluted-battle')
+        self.assertEqual([row['damage'] for row in polluted.participants],[456,456])
+        self.assertFalse(self.controller.tracker.orphans)
+
+        ended_at=polluted.ended_at_ns
+        duration=polluted.encounter_duration_seconds
+        self.send('OnMsgBeforeEnterNewSpace',200,0,[])
+        self.assertEqual(polluted.ended_at_ns,ended_at)
+        self.assertEqual(polluted.encounter_duration_seconds,duration)
+        self.assertEqual(polluted.result,'VICTORY')
+
+    def test_residual_will_low_hp_exit_is_not_special_victory(self):
+        self.context['bosses']={
+            '300':{
+                'token':'roselle-residual','template_id':7_110_200,
+                'name':'罗塞尔的残留意志',
+            }
+        }
+        self.send('OnMsgSyncFightMode',100,300,[2])
+        encounter=self.controller.tracker.encounters[
+            self.controller.tracker.current_id
+        ]
+        self.controller.observe_boss_health({
+            'entity_id':300,'current_hp':137_524_743,'max_hp':137_524_743,
+            'capture_timestamp_ns':101*NS,
+        })
+        self.controller.observe_boss_health({
+            'entity_id':300,'current_hp':28_123,
+            'capture_timestamp_ns':109*NS,
+        })
+
+        self.send('OnMsgSyncFightMode',110,300,[0])
+
+        self.assertEqual(self.controller.tracker.current_id,encounter.local_encounter_id)
+        self.assertEqual(encounter.result,'IN_PROGRESS')
+        self.assertIsNone(encounter.ended_at_ns)
+
+    def test_polluted_will_high_hp_exit_is_not_special_victory(self):
+        self.context['bosses']={
+            '300':{
+                'token':'roselle-polluted','template_id':7_110_208,
+                'name':'罗塞尔的污染意志',
+            }
+        }
+        self.send('OnMsgSyncFightMode',100,300,[2])
+        encounter=self.controller.tracker.encounters[
+            self.controller.tracker.current_id
+        ]
+        self.controller.observe_boss_health({
+            'entity_id':300,'current_hp':137_524_743,'max_hp':137_524_743,
+            'capture_timestamp_ns':101*NS,
+        })
+        self.controller.observe_boss_health({
+            'entity_id':300,'current_hp':10_000_000,
+            'capture_timestamp_ns':109*NS,
+        })
+
+        self.send('OnMsgSyncFightMode',110,300,[0])
+
+        self.assertEqual(self.controller.tracker.current_id,encounter.local_encounter_id)
+        self.assertEqual(encounter.result,'IN_PROGRESS')
+        self.assertIsNone(encounter.ended_at_ns)
+
     def test_current_final_table_adds_missed_projections_with_multiple_target_references(self):
         self.context['bosses'] = {
             '300': {

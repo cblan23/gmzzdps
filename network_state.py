@@ -215,8 +215,34 @@ VERIFIED_SIMULTANEOUS_BOSS_SUCCESSORS = {
     frozenset({7_100_208, 7_100_209}): frozenset({7_100_210}),
 }
 AUTHORITATIVE_BOSS_NAME_TEMPLATE_IDS = frozenset(
-    {7_100_208, 7_100_209, 7_100_210}
+    {7_100_208, 7_100_209, 7_100_210, 7_110_200, 7_110_208}
 )
+# 罗塞尔的污染意志 finishes at a small non-zero HP sentinel and then emits
+# an explicit FightMode [0].  Keep this exception template-scoped: the first
+# phase (7110200) uses its ordinary death/settlement boundary and is a separate
+# encounter.
+LOW_HP_FIGHT_EXIT_VICTORY_TEMPLATE_IDS = frozenset({7_110_208})
+LOW_HP_FIGHT_EXIT_VICTORY_RATIO = 0.02
+
+
+def low_hp_fight_exit_confirms_victory(
+    template_id: object, current_hp: object, maximum_hp: object
+) -> bool:
+    """Return whether an exact captured low-HP FightMode exit proves victory."""
+
+    try:
+        parsed_template = int(template_id or 0)
+        current = float(current_hp)
+        maximum = float(maximum_hp)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return bool(
+        parsed_template in LOW_HP_FIGHT_EXIT_VICTORY_TEMPLATE_IDS
+        and math.isfinite(current)
+        and math.isfinite(maximum)
+        and maximum > 0
+        and 0 < current <= maximum * LOW_HP_FIGHT_EXIT_VICTORY_RATIO
+    )
 TEAM_STATISTICS_METHODS = {
     "RetCommonCombatStatisticsByTeam",
     "RetDirtyCommonCombatStatisticsByTeam",

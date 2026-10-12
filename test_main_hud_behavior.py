@@ -4187,6 +4187,49 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(values['boss_percent'], '44.4%')
         self.assertAlmostEqual(values['boss_ratio'], 3_363_055 / 7_578_453)
 
+    def test_scaled_boss_uses_nearest_confirmed_full_hp_mode(self):
+        window, _ = make_window()
+        identity = (7_100_401, 72)
+        window._boss_max_hp_references = {identity: 42_153_692}
+        window._boss_max_hp_reference_candidates = {
+            identity: (31_957_956, 42_153_692),
+        }
+        monster = MonsterStats(
+            entity_id=57_200_374_653_768,
+            name='厄水巨龟',
+            level=72,
+            template_id=identity[0],
+            current_hp=7_173_268,
+            observed_max_hp=31_763_405,
+        )
+
+        values = window._main_boss_display_values(monster)
+
+        self.assertEqual(values['boss_percent'], '22.4%')
+        self.assertAlmostEqual(values['boss_ratio'], 7_173_268 / 31_957_956)
+        self.assertIn('3195.8', values['boss_hp'])
+
+    def test_scaled_boss_does_not_guess_when_multiple_modes_are_still_possible(self):
+        window, _ = make_window()
+        identity = (7_100_401, 72)
+        window._boss_max_hp_references = {identity: 42_153_692}
+        window._boss_max_hp_reference_candidates = {
+            identity: (31_957_956, 42_153_692),
+        }
+        monster = MonsterStats(
+            entity_id=57_200_374_653_768,
+            name='厄水巨龟',
+            level=72,
+            template_id=identity[0],
+            current_hp=7_000_000,
+            observed_max_hp=20_000_000,
+        )
+
+        values = window._main_boss_display_values(monster)
+
+        self.assertAlmostEqual(values['boss_ratio'], 7_000_000 / 20_000_000)
+        self.assertIn('2000', values['boss_hp'])
+
     def test_recent_boss_uses_stage_identity_without_faking_template_or_hp(self):
         window, _ = make_window()
         window.history_store = SimpleNamespace(load=lambda _encounter_id: None)

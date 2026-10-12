@@ -3326,6 +3326,54 @@ class CombatModelTests(unittest.TestCase):
             "未分配目标",
         )
 
+    def test_history_polluted_will_overrides_old_residual_will_name(self):
+        record = {
+            "monster": {
+                "entity_id": MONSTER_ID,
+                "template_id": 7_110_208,
+                "name": "罗塞尔的残留意志",
+            },
+            "targets": [
+                {
+                    "entity_id": MONSTER_ID,
+                    "template_id": 7_110_208,
+                    "name": "罗塞尔的残留意志",
+                }
+            ],
+            "participants": [
+                {
+                    "actor_id": SELF_ID,
+                    "targets": [
+                        {
+                            "entity_id": MONSTER_ID,
+                            "kind": "Boss",
+                            "name": "罗塞尔的残留意志",
+                            "damage": 100,
+                        }
+                    ],
+                }
+            ],
+        }
+
+        restored = restore_history_boss_names(
+            record,
+            {
+                "7110208": {
+                    "boss_type": 3,
+                    "name": "罗塞尔的污染意志",
+                    "level": 84,
+                }
+            },
+        )
+
+        self.assertEqual(record["monster"]["name"], "罗塞尔的残留意志")
+        self.assertEqual(restored["monster"]["name"], "罗塞尔的污染意志")
+        self.assertEqual(restored["targets"][0]["name"], "罗塞尔的污染意志")
+        self.assertEqual(
+            restored["participants"][0]["targets"][0]["name"],
+            "罗塞尔的污染意志",
+        )
+
     def test_history_first_believer_target_damage_is_one_encounter_row(self):
         first_phase_id = 246_380_262_337_520
         partner_id = 246_380_262_337_521
@@ -6652,7 +6700,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
     def test_release_version_matches_client_build_and_notes(self):
-        self.assertEqual(APP_VERSION, "0.3.6c")
+        self.assertEqual(APP_VERSION, "0.3.6d")
         numeric_version = (
             APP_VERSION[:-1] if APP_VERSION[-1:].isalpha() else APP_VERSION
         )
@@ -15368,6 +15416,76 @@ class CombatModelTests(unittest.TestCase):
 
         record = model.pop_completed_combats()[0]
         self.assertEqual(record["monster"]["current_hp"], 8_000_000_000)
+
+    def test_polluted_will_low_hp_fight_exit_is_template_scoped(self):
+        maximum_hp = 137_524_743
+        cases = (
+            (7_110_208, 28_123, True, "polluted-low"),
+            (7_110_200, 28_123, False, "residual-low"),
+            (7_110_208, 10_000_000, False, "polluted-high"),
+        )
+        for template_id, current_hp, expected_victory, label in cases:
+            with self.subTest(label=label):
+                model = CombatModel(run_id=f"roselle-{label}")
+                model.ingest_identity({"entity_id": SELF_ID})
+                model.ingest_profile(
+                    {
+                        "entity_id": MONSTER_ID,
+                        "name": "罗塞尔的污染意志",
+                        "entity_type": "Boss",
+                        "template_id": template_id,
+                        "boss_type": 3,
+                        "boss_rank": 3,
+                    }
+                )
+                model.ingest_monster(
+                    {
+                        "entity_id": MONSTER_ID,
+                        "current_hp": maximum_hp,
+                        "max_hp": maximum_hp,
+                        "filetime_100ns": BASE_FILETIME,
+                    }
+                )
+                model.ingest_combat_state(
+                    {
+                        "entity_id": MONSTER_ID,
+                        "in_combat": True,
+                        "filetime_100ns": BASE_FILETIME + 10_000,
+                    }
+                )
+                model.ingest(damage(2, SELF_ID, MONSTER_ID, 598))
+                model.ingest_monster(
+                    {
+                        "entity_id": MONSTER_ID,
+                        "current_hp": current_hp,
+                        "filetime_100ns": BASE_FILETIME + 30_000,
+                    }
+                )
+                exit_timestamp = BASE_FILETIME + 40_000
+
+                model.ingest_combat_state(
+                    {
+                        "entity_id": MONSTER_ID,
+                        "in_combat": False,
+                        "filetime_100ns": exit_timestamp,
+                    }
+                )
+
+                records = model.pop_completed_combats()
+                if expected_victory:
+                    self.assertEqual(len(records), 1)
+                    self.assertEqual(records[0]["archive_reason"], "target_defeated")
+                    self.assertEqual(records[0]["monster"]["current_hp"], 0.0)
+                    self.assertTrue(model.monsters[MONSTER_ID].death_confirmed)
+                    self.assertEqual(model.combat_end_reason, "target_defeated")
+                    self.assertEqual(
+                        model.combat_end_time,
+                        model._event_seconds({"filetime_100ns": exit_timestamp}),
+                    )
+                else:
+                    self.assertEqual(records, [])
+                    self.assertEqual(model.combat_end_reason, "")
+                    self.assertEqual(model.monsters[MONSTER_ID].current_hp, current_hp)
 
     def test_team_stats_teammate_damage_starts_healer_clock_without_hp_drop(self):
         model = CombatModel(run_id="healer-team-stats-start-test")

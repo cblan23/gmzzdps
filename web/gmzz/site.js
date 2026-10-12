@@ -90,6 +90,8 @@
     skillNames: null,
     iconCatalog: null,
     basePromise: null,
+    historyPromise: null,
+    catalogPromise: null,
     skillNamesPromise: null,
     renderToken: 0,
     insightsRequestToken: 0,
@@ -237,34 +239,68 @@
     }
   }
 
+  async function loadHistoryData(force = false) {
+    if (force) {
+      state.bossCatalog = null;
+      state.bannerCatalog = null;
+      state.historyPromise = null;
+    }
+    if (state.bossCatalog && state.bannerCatalog) return;
+    if (state.historyPromise) return state.historyPromise;
+    state.historyPromise = Promise.all([
+      fetchJson("assets/bosses/boss_icon_sources.json"),
+      fetchJson("assets/bosses/boss_banner_catalog.json"),
+    ])
+      .then(([bossCatalog, bannerCatalog]) => {
+        state.bossCatalog = bossCatalog || {};
+        state.bannerCatalog = bannerCatalog || {};
+      })
+      .finally(() => {
+        state.historyPromise = null;
+      });
+    return state.historyPromise;
+  }
+
+  async function loadCatalogData(force = false) {
+    if (force) {
+      state.catalog = null;
+      state.catalogPromise = null;
+    }
+    if (state.catalog) return;
+    if (state.catalogPromise) return state.catalogPromise;
+    state.catalogPromise = fetchJson(`${API_ROOT}/catalog`)
+      .then((catalog) => {
+        state.catalog = catalog.catalog || {};
+      })
+      .finally(() => {
+        state.catalogPromise = null;
+      });
+    return state.catalogPromise;
+  }
+
   async function loadBaseData(force = false) {
     if (force) {
       state.statistics = null;
       state.leaderboards = null;
-      state.bossCatalog = null;
-      state.bannerCatalog = null;
-      state.catalog = null;
+      state.iconCatalog = null;
       state.basePromise = null;
     }
-    if (state.statistics && state.leaderboards && state.bossCatalog && state.bannerCatalog && state.catalog) return;
+    if (state.statistics && state.leaderboards && state.iconCatalog
+        && state.bossCatalog && state.bannerCatalog && state.catalog) return;
     if (state.basePromise) return state.basePromise;
     state.basePromise = Promise.all([
       fetchJson(`${API_ROOT}/statistics`),
       fetchJson(`${API_ROOT}/leaderboards?limit=500`),
-      fetchJson("assets/bosses/boss_icon_sources.json"),
-      fetchJson("assets/bosses/boss_banner_catalog.json"),
-      fetchJson(`${API_ROOT}/catalog`),
+      loadHistoryData(force),
+      loadCatalogData(force),
       fetchJson("assets/icon_catalog.json"),
     ])
-      .then(([statistics, leaderboards, bossCatalog, bannerCatalog, catalog, iconCatalog]) => {
+      .then(([statistics, leaderboards, , , iconCatalog]) => {
         state.iconCatalog = iconCatalog;
         state.statistics = statistics.statistics || {};
         state.leaderboards = Array.isArray(leaderboards.leaderboards)
           ? leaderboards.leaderboards
           : [];
-        state.bossCatalog = bossCatalog || {};
-        state.bannerCatalog = bannerCatalog || {};
-        state.catalog = catalog.catalog || {};
       })
       .finally(() => {
         state.basePromise = null;
@@ -1712,6 +1748,8 @@
       CLIENT_VERSION_UNSUPPORTED: "客户端版本未支持", GAME_VERSION_UNSUPPORTED: "游戏版本未支持",
       DURATION_INVALID: "战斗时长异常", KEY_DATA_MISSING: "关键数据缺失",
       AI_PARTICIPANT: "包含人机成员",
+      RECOVERED_CLOCK_ONLY: "服务器战斗时钟补录",
+      PARTICIPANT_METRICS_MISSING: "成员明细未留存",
     };
     return (Array.isArray(reasons) ? reasons : []).map((reason) => labels[reason] || "数据未满足统计条件").join("、");
   }
@@ -1735,7 +1773,7 @@
         request.set(key, String(epoch));
       }
     }
-    const [, history] = await Promise.all([loadBaseData(), fetchJson(`${API_ROOT}/records?${request}`)]);
+    const [, history] = await Promise.all([loadHistoryData(), fetchJson(`${API_ROOT}/records?${request}`)]);
     if (token !== state.renderToken) return;
     const fragment = document.createDocumentFragment();
     fragment.appendChild(historyFilters(params));
@@ -1764,8 +1802,11 @@
       info.appendChild(element("span", "", formatDate(row.ended_at)));
       const hasAi = Boolean(row.has_ai) || (row.qualification_reasons || []).includes("AI_PARTICIPANT");
       const incompleteIdentity = (row.qualification_reasons || []).includes("PARTICIPANT_IDENTITY_INCOMPLETE");
+      const clockRecovered = (row.qualification_reasons || []).includes("RECOVERED_CLOCK_ONLY");
       const status = element("small", `history-status ${row.statistics_status === "included" && !hasAi && !incompleteIdentity ? "history-included" : "history-partial"}`,
-        hasAi
+        clockRecovered
+          ? "服务器战斗时钟补录 · 成员明细未留存"
+          : hasAi
           ? "人机场次 · 仅供查询"
           : row.statistics_status === "included" && incompleteIdentity
             ? "队友身份未完整记录 · 不进排行/职业分析"
@@ -1799,6 +1840,12 @@
     pagination.append(previous, element("span", "", `${Math.floor(history.offset / history.limit) + 1} / ${Math.max(1, Math.ceil(history.total / history.limit))}`), next);
     fragment.appendChild(pagination);
     contentNode.replaceChildren(fragment);
+    if (!state.catalog) {
+      loadCatalogData().then(() => {
+        if (token !== state.renderToken || parseRoute().name !== "search") return;
+        contentNode.querySelector(".history-filters")?.replaceWith(historyFilters(params));
+      }).catch((error) => console.warn("历史筛选目录加载失败", error));
+    }
   }
 
   function renderShare() {
@@ -3363,8 +3410,11 @@
     fragment.appendChild(actions);
     const hasAi = (encounter.participants || []).some((participant) => participant.is_ai);
     const incompleteIdentity = (encounter.qualification_reasons || []).includes("PARTICIPANT_IDENTITY_INCOMPLETE");
+    const clockRecovered = (encounter.qualification_reasons || []).includes("RECOVERED_CLOCK_ONLY");
     const included = encounter.statistics_status === "included" && encounter.ranking_status === "eligible" && !hasAi;
-    const qualificationCopy = hasAi
+    const qualificationCopy = clockRecovered
+      ? "本场由服务器战斗时钟补录。团队总伤害和战斗起止时间来自原始时钟记录，名单根据同一队伍的上一场记录恢复；团队 DPS 按此时间计算。成员个人伤害、DPS、HPS、技能和时间轴未留存，因此不进入正式统计、排行榜和职业分析。"
+      : hasAi
       ? "本场包含人机成员，可查询战斗详情，不进入数据排行和职业分析。"
       : encounter.statistics_status === "included" && incompleteIdentity
         ? "本场有队友身份未被完整记录；战斗详情可以查看，但不进入数据排行和职业分析。"
@@ -3377,8 +3427,8 @@
 
     const metrics = element("div", "metric-grid");
     const healing = encounterHealingTotals(encounter);
-    const totalDamage = metricCard("团队总伤害", formatCompact(encounter.team_total_damage), "本场累计");
-    const teamDps = metricCard("团队 DPS", formatInteger(encounter.data?.team_dps), "有效战斗时间");
+    const totalDamage = metricCard("团队总伤害", clockRecovered ? formatInteger(encounter.team_total_damage) : formatCompact(encounter.team_total_damage), "本场累计");
+    const teamDps = metricCard("团队 DPS", formatInteger(encounter.data?.team_dps), clockRecovered ? "按服务器时钟计算" : "有效战斗时间");
     const teamHealing = metricCard("团队有效治疗", formatCompact(healing.healing), "本场累计");
     const teamHps = metricCard("团队 HPS", formatInteger(healing.hps), "有效治疗时间");
     totalDamage.classList.add("damage-metric");
@@ -3397,6 +3447,26 @@
     deaths.classList.add("death-metric");
     metrics.appendChild(deaths);
     fragment.appendChild(metrics);
+    if (clockRecovered) {
+      const roster = element("section", "recovered-roster");
+      const participants = Array.isArray(encounter.participants) ? encounter.participants : [];
+      roster.appendChild(sectionHeading("队伍名单", `${participants.length} 名成员 · 个人明细未留存`));
+      const list = element("div", "records-list participants-list");
+      const head = element("div", "participant-row participant-head");
+      ["#", "角色 / 职业", "个人伤害", "DPS / HPS", "承伤", "死亡次数"].forEach((label) => head.appendChild(element("div", "", label)));
+      list.appendChild(head);
+      participants.forEach((participant) => {
+        const row = element("div", "participant-row");
+        row.dataset.slot = participant.slot;
+        row.style.cursor = "default";
+        row.append(element("div", "rank-cell", participant.slot), participantIdentity(participant));
+        row.append(element("div", "number-cell", "未留存"), element("div", "number-cell primary", "未留存"), element("div", "number-cell", "未留存"), element("div", "death-count", "未留存"));
+        list.appendChild(row);
+      });
+      roster.appendChild(list);
+      fragment.appendChild(roster);
+      return fragment;
+    }
     fragment.appendChild(renderEncounterCurves(encounter));
     const tabs = element("div", "mode-tabs");
     [["dps", "伤害 DPS"], ["hps", "治疗 HPS"], ["dt", "承伤 DT"], ["boss_damage", "Boss 伤害"]].forEach(([mode, labelText]) => {
@@ -3491,11 +3561,14 @@
     setPage("BATTLE DETAIL", "战斗详情");
     showStatus("正在读取战斗详情");
     await Promise.all([
-      loadBaseData(),
+      loadHistoryData(),
       loadSkillNames(),
       loadECharts(),
+      state.iconCatalog || fetchJson("assets/icon_catalog.json").then((catalog) => {
+        state.iconCatalog = catalog;
+      }),
       fetchJson(`${API_ROOT}/encounters/${encodeURIComponent(id)}`),
-    ]).then(([, , , payload]) => {
+    ]).then(([, , , , payload]) => {
       if (token !== state.renderToken) return;
       const encounter = payload.encounter;
       if (!encounter) throw new Error("encounter_not_found");
@@ -3571,7 +3644,13 @@
     document.title = "叨叨诡秘助手 · 战斗记录";
     refreshButton.hidden = route.name === "share" || route.name === "lab";
     try {
-      if (force) await loadBaseData(true);
+      if (force) {
+        if (route.name === "search" || route.name === "history" || route.name === "battle") {
+          await loadHistoryData(true);
+        } else {
+          await loadBaseData(true);
+        }
+      }
       if (route.name === "insights") await renderInsights(token);
       else if (route.name === "records") await renderRecords(token);
       else if (route.name === "history") {

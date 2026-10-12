@@ -12,6 +12,8 @@ from pathlib import Path
 from combat_history import (
     CombatHistoryStore,
     HISTORY_SCHEMA_VERSION,
+    recover_legacy_polluted_will_victory,
+    recent_boss_max_hp_catalog,
     recent_boss_max_hp_references,
     rebase_relative_combat_logs,
 )
@@ -35,6 +37,108 @@ class CombatHistoryStoreTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def polluted_will_record(self, **changes) -> dict:
+        value = {
+            **record("polluted-win", ended_at=time.time()),
+            "archive_reason": "space_transition",
+            "result": "interrupted",
+            "self_character_id": "role-a",
+            "dungeon_stage_id": 5_150_095,
+            "monster": {
+                "entity_id": 9001,
+                "template_id": 7_110_208,
+                "name": "罗塞尔的残留意志",
+                "current_hp": 28_123,
+                "max_hp": 137_524_743,
+            },
+            "targets": [
+                {
+                    "entity_id": 9001,
+                    "template_id": 7_110_208,
+                    "name": "罗塞尔的残留意志",
+                    "current_hp": 28_123,
+                    "max_hp": 137_524_743,
+                }
+            ],
+        }
+        value.update(changes)
+        return value
+
+    def test_recovers_exact_legacy_polluted_will_low_hp_archive(self):
+        source = self.polluted_will_record()
+
+        recovered = recover_legacy_polluted_will_victory(
+            source, "role-a", recovered_at_epoch=123.0
+        )
+
+        self.assertEqual(source["archive_reason"], "space_transition")
+        self.assertEqual(source["monster"]["current_hp"], 28_123)
+        self.assertEqual(recovered["archive_reason"], "target_defeated")
+        self.assertEqual(recovered["result"], "success")
+        self.assertTrue(recovered["completion_confirmed"])
+        self.assertEqual(recovered["monster"]["current_hp"], 0)
+        self.assertEqual(recovered["targets"][0]["current_hp"], 0)
+        self.assertEqual(recovered["monster"]["name"], "罗塞尔的污染意志")
+        self.assertEqual(
+            recovered["victory_recovery"]["terminal_current_hp"], 28_123
+        )
+        self.assertEqual(recovered["victory_recovery"]["recovered_at_epoch"], 123.0)
+
+    def test_legacy_polluted_will_recovery_is_strictly_scoped(self):
+        cases = (
+            ("other-role", self.polluted_will_record(), "role-b"),
+            (
+                "other-template",
+                self.polluted_will_record(
+                    monster={
+                        "template_id": 7_110_200,
+                        "current_hp": 28_123,
+                        "max_hp": 137_524_743,
+                    }
+                ),
+                "role-a",
+            ),
+            (
+                "other-stage",
+                self.polluted_will_record(dungeon_stage_id=5_150_113),
+                "role-a",
+            ),
+            (
+                "high-hp",
+                self.polluted_will_record(
+                    monster={
+                        "template_id": 7_110_208,
+                        "current_hp": 10_000_000,
+                        "max_hp": 137_524_743,
+                    }
+                ),
+                "role-a",
+            ),
+            (
+                "other-reason",
+                self.polluted_will_record(archive_reason="party_wipe"),
+                "role-a",
+            ),
+        )
+        for label, value, character_id in cases:
+            with self.subTest(label=label):
+                self.assertIsNone(
+                    recover_legacy_polluted_will_victory(value, character_id)
+                )
+
+    def test_store_scans_recent_archives_without_writing_them(self):
+        source = self.polluted_will_record()
+        path = self.store.save(source)
+
+        recovered = self.store.find_legacy_polluted_will_victories(
+            "role-a", minimum_ended_at_epoch=time.time() - 60
+        )
+
+        self.assertEqual([row["encounter_id"] for row in recovered], ["polluted-win"])
+        self.assertEqual(recovered[0]["archive_reason"], "target_defeated")
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["archive_reason"], "space_transition")
 
     def test_repeated_settled_hp_peak_becomes_boss_display_reference(self):
         for index, observed in enumerate((36_519_704, 36_519_704, 35_971_650)):
@@ -74,6 +178,30 @@ class CombatHistoryStoreTests(unittest.TestCase):
         references = recent_boss_max_hp_references(self.directory)
 
         self.assertEqual(references[(7_115_080, 63)], 7_578_453)
+
+    def test_reference_catalog_retains_repeated_scaled_hp_modes(self):
+        values = (31_957_956, 31_957_956, 42_153_692, 42_153_692, 42_153_692)
+        for index, maximum in enumerate(values):
+            value = {
+                "settlement_status": "SETTLED",
+                "monster": {
+                    "template_id": 7_100_401,
+                    "level": 72,
+                    "max_hp": maximum,
+                    "observed_max_hp": maximum,
+                },
+            }
+            (self.directory / f"scaled-{index}.json").write_text(
+                json.dumps(value), encoding="utf-8"
+            )
+
+        references, candidates = recent_boss_max_hp_catalog(self.directory)
+
+        self.assertEqual(references[(7_100_401, 72)], 42_153_692)
+        self.assertEqual(
+            candidates[(7_100_401, 72)],
+            (31_957_956, 42_153_692),
+        )
 
     def test_repeated_authoritative_stage_total_recovers_partial_max_hp(self):
         for index, maximum in enumerate((6_988_788, 7_474_081)):

@@ -260,7 +260,12 @@ button:disabled{opacity:.4;cursor:default}
 .participant-data-body,.participant-tab-panel{min-width:0}
 .participant-tab-panel>.participant-metrics{margin:0 0 20px}
 .participant-tab-panel>.section-head:first-child{margin-top:4px}
+.skill-export-heading{align-items:center}
+.skill-export-heading .section-meta{margin-left:auto}
+.skill-export-button{min-width:148px;border-color:#47623e;color:#d3ecb8;font-weight:700}
+.skill-export-button:hover:not(:disabled){border-color:#79a85f;color:#f0ffe2}
 @media(max-width:800px){.participant-data-tabs{margin-right:-14px;margin-left:-14px;padding:0 12px}.participant-data-tab{padding:10px 11px;font-size:11px}}
+@media(max-width:800px){.skill-export-heading{align-items:flex-start;flex-wrap:wrap;gap:8px}.skill-export-heading .section-meta{order:3;flex-basis:100%;margin-left:0}.skill-export-button{margin-left:auto}}
 @media(max-width:1000px){.skill-statistics{grid-template-columns:1fr}.skill-composition-echart{min-height:410px}.skill-list-heading span{display:none}}
 @media(max-width:800px){.skill-statistics{gap:10px;margin:14px 0 20px}.skill-stat-card{padding:12px 8px}.skill-stat-title{padding:0 5px}.skill-composition-echart{min-height:400px}.skill-ranking-echart{margin-left:-5px}.damage-distribution-echart{height:270px}.luck-echart{height:235px}}
 @media(max-width:800px){.skill-timeline-panel{margin:14px 0;padding:12px 8px}.skill-timeline-toolbar{grid-template-columns:1fr}.timeline-skill-filters{flex-wrap:nowrap;overflow-x:auto;padding:0 1px 4px;scrollbar-width:thin}.timeline-skill-filter{min-width:116px;flex:0 0 116px}.timeline-controls{justify-content:flex-start;overflow-x:auto;padding-bottom:3px}.skill-hit-timeline-echart{height:500px}.timeline-hit-detail{grid-template-columns:1fr;gap:9px}.timeline-hit-values{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 10px}.timeline-hit-flags{justify-content:flex-start}}

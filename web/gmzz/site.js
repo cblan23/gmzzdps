@@ -1992,6 +1992,254 @@
     return filename ? `assets/skills/${encodeURIComponent(filename)}` : "assets/skills/0.png";
   }
 
+  function xmlText(value) {
+    return String(value ?? "")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
+  }
+
+  function excelColumnName(index) {
+    let value = index + 1;
+    let name = "";
+    while (value > 0) {
+      value -= 1;
+      name = String.fromCharCode(65 + value % 26) + name;
+      value = Math.floor(value / 26);
+    }
+    return name;
+  }
+
+  function excelCell(value, rowIndex, columnIndex, style = 0) {
+    const reference = `${excelColumnName(columnIndex)}${rowIndex}`;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return `<c r="${reference}"${style ? ` s="${style}"` : ""}><v>${value}</v></c>`;
+    }
+    return `<c r="${reference}"${style ? ` s="${style}"` : ""} t="inlineStr"><is><t xml:space="preserve">${xmlText(value)}</t></is></c>`;
+  }
+
+  function excelWorksheet(columns, rows) {
+    const lastColumn = excelColumnName(columns.length - 1);
+    const lastRow = rows.length + 1;
+    const widths = columns.map((column, index) => `<col min="${index + 1}" max="${index + 1}" width="${column.width}" customWidth="1"/>`).join("");
+    const header = `<row r="1" ht="24" customHeight="1">${columns.map((column, index) => excelCell(column.label, 1, index, 1)).join("")}</row>`;
+    const body = rows.map((row, rowOffset) => {
+      const rowIndex = rowOffset + 2;
+      return `<row r="${rowIndex}">${columns.map((column, columnIndex) => excelCell(row[column.key], rowIndex, columnIndex)).join("")}</row>`;
+    }).join("");
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${lastColumn}${lastRow}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="18"/><cols>${widths}</cols><sheetData>${header}${body}</sheetData><autoFilter ref="A1:${lastColumn}${lastRow}"/></worksheet>`;
+  }
+
+  const CRC32_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let index = 0; index < table.length; index += 1) {
+      let value = index;
+      for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+      table[index] = value >>> 0;
+    }
+    return table;
+  })();
+
+  function crc32(bytes) {
+    let value = 0xffffffff;
+    bytes.forEach((byte) => { value = CRC32_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8); });
+    return (value ^ 0xffffffff) >>> 0;
+  }
+
+  function zipRecord(size, fields) {
+    const bytes = new Uint8Array(size);
+    const view = new DataView(bytes.buffer);
+    fields.forEach(([offset, value, width]) => {
+      if (width === 2) view.setUint16(offset, value, true);
+      else view.setUint32(offset, value >>> 0, true);
+    });
+    return bytes;
+  }
+
+  function joinBytes(parts) {
+    const output = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+    let offset = 0;
+    parts.forEach((part) => { output.set(part, offset); offset += part.length; });
+    return output;
+  }
+
+  function zipFiles(files) {
+    const encoder = new TextEncoder();
+    const localParts = [];
+    const centralParts = [];
+    let localOffset = 0;
+    const now = new Date();
+    const year = Math.max(1980, now.getFullYear());
+    const dosDate = ((year - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+    files.forEach(([path, content]) => {
+      const name = encoder.encode(path);
+      const data = encoder.encode(content);
+      const checksum = crc32(data);
+      const localHeader = zipRecord(30, [
+        [0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2],
+        [10, dosTime, 2], [12, dosDate, 2], [14, checksum, 4], [18, data.length, 4],
+        [22, data.length, 4], [26, name.length, 2], [28, 0, 2],
+      ]);
+      localParts.push(localHeader, name, data);
+      const centralHeader = zipRecord(46, [
+        [0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2],
+        [12, dosTime, 2], [14, dosDate, 2], [16, checksum, 4], [20, data.length, 4],
+        [24, data.length, 4], [28, name.length, 2], [30, 0, 2], [32, 0, 2],
+        [34, 0, 2], [36, 0, 2], [38, 0, 4], [42, localOffset, 4],
+      ]);
+      centralParts.push(centralHeader, name);
+      localOffset += localHeader.length + name.length + data.length;
+    });
+    const centralDirectory = joinBytes(centralParts);
+    const end = zipRecord(22, [
+      [0, 0x06054b50, 4], [4, 0, 2], [6, 0, 2], [8, files.length, 2],
+      [10, files.length, 2], [12, centralDirectory.length, 4], [16, localOffset, 4], [20, 0, 2],
+    ]);
+    return joinBytes([...localParts, centralDirectory, end]);
+  }
+
+  function createExcelWorkbook(columns, rows) {
+    const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
+    const packageRelations = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+    const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView/></bookViews><sheets><sheet name="技能释放时间" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+    const workbookRelations = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+    const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Microsoft YaHei"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Microsoft YaHei"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1C4A64"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+    return zipFiles([
+      ["[Content_Types].xml", contentTypes],
+      ["_rels/.rels", packageRelations],
+      ["xl/workbook.xml", workbook],
+      ["xl/_rels/workbook.xml.rels", workbookRelations],
+      ["xl/styles.xml", styles],
+      ["xl/worksheets/sheet1.xml", excelWorksheet(columns, rows)],
+    ]);
+  }
+
+  function formatBattleMilliseconds(timeMs) {
+    const value = Math.max(0, Math.round(Number(timeMs) || 0));
+    const hours = Math.floor(value / 3600000);
+    const minutes = Math.floor(value % 3600000 / 60000);
+    const seconds = Math.floor(value % 60000 / 1000);
+    const milliseconds = value % 1000;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0")}`;
+  }
+
+  function formatCastDateTime(startedAt, timeMs) {
+    const startMilliseconds = Math.round(Number(startedAt) * 1000);
+    if (!Number.isFinite(startMilliseconds) || startMilliseconds <= 0) return "未记录";
+    const timestamp = startMilliseconds + Number(timeMs);
+    const date = new Date(timestamp);
+    if (!Number.isFinite(date.getTime())) return "未记录";
+    return `${formatDateTime(timestamp / 1000, true)}.${String(date.getUTCMilliseconds()).padStart(3, "0")}`;
+  }
+
+  function safeDownloadName(value) {
+    return String(value || "未命名").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim().slice(0, 42) || "未命名";
+  }
+
+  function exportSkillCastTimes(encounter, participant) {
+    const stats = participant?.stats || {};
+    const skills = Array.isArray(stats.skills) ? stats.skills : [];
+    const allCasts = (Array.isArray(stats.cast_timeline) ? stats.cast_timeline : [])
+      .filter((event) => Number.isFinite(Number(event.time_ms)) && Number(event.skill_id) > 0)
+      .sort((left, right) => Number(left.time_ms) - Number(right.time_ms) || Number(left.sequence || 0) - Number(right.sequence || 0));
+    const recordedCasts = allCasts.filter((event) => String(event.source || "") !== "damage_hit");
+    const hitOnlyIds = new Set(allCasts.filter((event) => event.source === "damage_hit").map((event) => Number(event.skill_id)));
+    const skillsById = new Map();
+    skills.forEach((skill) => {
+      const skillId = Number(skill.skill_id);
+      if (skillId > 0) skillsById.set(skillId, skill);
+    });
+    allCasts.forEach((event) => {
+      const skillId = Number(event.skill_id);
+      if (!skillsById.has(skillId)) skillsById.set(skillId, {skill_id: skillId});
+    });
+    const recordedIds = new Set(recordedCasts.map((event) => Number(event.skill_id)));
+    const perSkillOrdinals = new Map();
+    const sourceLabels = {successful_cast: "成功施法", cast_broadcast: "施法广播"};
+    const base = {
+      character: participant?.display_name || "未记录姓名",
+      profession: professionName(participant?.profession_id),
+      boss: encounter?.boss_name || "未知首领",
+      encounterId: encounter?.encounter_id || "",
+    };
+    const rows = recordedCasts.map((event, index) => {
+      const skillId = Number(event.skill_id);
+      const ordinal = (perSkillOrdinals.get(skillId) || 0) + 1;
+      perSkillOrdinals.set(skillId, ordinal);
+      return {
+        ordinal: index + 1,
+        character: base.character,
+        profession: base.profession,
+        skill: skillDisplayName(skillsById.get(skillId) || event),
+        skillId,
+        skillOrdinal: ordinal,
+        battleTime: formatBattleMilliseconds(event.time_ms),
+        timeMs: Number(event.time_ms),
+        castAt: formatCastDateTime(encounter?.started_at, event.time_ms),
+        source: sourceLabels[event.source] || String(event.source || "施法记录"),
+        sourceSequence: event.sequence ?? "",
+        target: event.target_name || (Number.isSafeInteger(Number(event.target_id)) && Number(event.target_id) > 0 ? `目标 ${event.target_id}` : "未记录"),
+        boss: base.boss,
+        encounterId: base.encounterId,
+        status: "已记录",
+        note: "",
+      };
+    });
+    skillsById.forEach((skill, skillId) => {
+      if (recordedIds.has(skillId)) return;
+      rows.push({
+        ordinal: "",
+        character: base.character,
+        profession: base.profession,
+        skill: skillDisplayName(skill),
+        skillId,
+        skillOrdinal: "",
+        battleTime: "未记录",
+        timeMs: "未记录",
+        castAt: "未记录",
+        source: "未记录",
+        sourceSequence: "",
+        target: "未记录",
+        boss: base.boss,
+        encounterId: base.encounterId,
+        status: "未记录释放时间",
+        note: hitOnlyIds.has(skillId) ? "仅采集到命中时间，未将其当作释放时间" : "本场未采集该技能的释放时间",
+      });
+    });
+    const columns = [
+      {key: "ordinal", label: "释放序号", width: 11},
+      {key: "character", label: "角色", width: 18},
+      {key: "profession", label: "职业", width: 12},
+      {key: "skill", label: "技能", width: 24},
+      {key: "skillId", label: "技能ID", width: 14},
+      {key: "skillOrdinal", label: "本技能第几次", width: 14},
+      {key: "battleTime", label: "战斗内时间", width: 17},
+      {key: "timeMs", label: "战斗内毫秒", width: 14},
+      {key: "castAt", label: "释放时间（北京时间）", width: 27},
+      {key: "source", label: "记录来源", width: 15},
+      {key: "sourceSequence", label: "原始序列号", width: 14},
+      {key: "target", label: "目标", width: 22},
+      {key: "boss", label: "Boss", width: 24},
+      {key: "encounterId", label: "场次ID", width: 34},
+      {key: "status", label: "数据状态", width: 18},
+      {key: "note", label: "备注", width: 38},
+    ];
+    const bytes = createExcelWorkbook(columns, rows);
+    const blob = new Blob([bytes], {type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `叨叨诡秘_${safeDownloadName(base.character)}_${safeDownloadName(base.boss)}_技能释放时间.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    return recordedCasts.length;
+  }
+
   function renderEventTable(events, className = "skill-events", metadata = {}) {
     const details = element("details", className);
     const total = Number(metadata.total);
@@ -2597,7 +2845,7 @@
     container.appendChild(mountEChart("damage-distribution-echart", chartOption, "单次伤害分布：蓝色普通，紫色暴击，灰色未知"));
   }
 
-  function renderSkills(panel, participant, mode) {
+  function renderSkills(panel, participant, mode, encounter) {
     disposeCharts(panel);
     panel.replaceChildren();
     const stats = participant?.stats || {};
@@ -2634,9 +2882,22 @@
     overviewPanel.appendChild(metrics);
 
     const skillPanel = createTabPanel("skills");
-    skillPanel.appendChild(sectionHeading(mode === "hps" ? "治疗技能构成" : "技能构成", mode === "hps"
+    const skillHeading = sectionHeading(mode === "hps" ? "治疗技能构成" : "技能构成", mode === "hps"
       ? "按有效治疗排序 · 点击技能展开详情"
-      : `暴击 ${formatPercent(stats.critical_rate)} · 穿刺 ${formatPercent(stats.penetration_rate)} · 点击技能展开详情`));
+      : `暴击 ${formatPercent(stats.critical_rate)} · 穿刺 ${formatPercent(stats.penetration_rate)} · 点击技能展开详情`);
+    skillHeading.classList.add("skill-export-heading");
+    const exportButton = button("timeline-control skill-export-button", "导出技能释放时间");
+    const exportableSkills = Array.isArray(stats.skills) && stats.skills.some((skill) => Number(skill.skill_id) > 0);
+    const exportableCasts = Array.isArray(stats.cast_timeline) && stats.cast_timeline.some((event) => Number(event.skill_id) > 0);
+    exportButton.disabled = !exportableSkills && !exportableCasts;
+    exportButton.title = exportButton.disabled ? "该成员没有可导出的技能数据" : "生成 Excel，每行一条已记录释放；缺失时间的技能会明确标注";
+    exportButton.addEventListener("click", () => {
+      const count = exportSkillCastTimes(encounter, participant);
+      exportButton.textContent = `已导出 ${formatInteger(count)} 条释放`;
+      window.setTimeout(() => { exportButton.textContent = "导出技能释放时间"; }, 1800);
+    });
+    skillHeading.appendChild(exportButton);
+    skillPanel.appendChild(skillHeading);
     const key = mode === "hps" ? "effective_healing" : "damage";
     const skills = (Array.isArray(stats.skills) ? stats.skills : []).map((skill) => ({...skill, metricValue: Number(skill[key] || 0)})).filter((skill) => skill.metricValue > 0).sort((a, b) => b.metricValue - a.metricValue);
     if (mode === "dt" || !skills.length) {
@@ -3529,7 +3790,7 @@
         row.classList.add("is-selected");
         selectedRow = row;
         state.encounterSlot = participant.slot;
-        renderSkills(skillsPanel, participant, state.encounterMode);
+        renderSkills(skillsPanel, participant, state.encounterMode, encounter);
       });
       list.appendChild(row);
       if (participant.slot === state.encounterSlot) selectedRow = row;
@@ -3541,7 +3802,7 @@
 
     window.requestAnimationFrame(() => {
       if (selectedRow) selectedRow.click();
-      else renderSkills(skillsPanel, null, state.encounterMode);
+      else renderSkills(skillsPanel, null, state.encounterMode, encounter);
     });
     return fragment;
   }

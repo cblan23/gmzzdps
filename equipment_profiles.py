@@ -48,8 +48,8 @@ from runtime_capability import runtime_profile_hook
 
 REQUEST_METHOD = "ReqOtherRoleShapeData"
 RESPONSE_METHOD = "RetOtherRoleShapeData"
-REQUEST_METHOD_ID = 313
-RESPONSE_METHOD_ID = 352
+REQUEST_METHOD_ID = 318
+RESPONSE_METHOD_ID = 363
 EXPECTED_ARGUMENT_DESCRIPTORS = (("ListStr", 5), ("int", 1))
 ARGUMENT_DESCRIPTOR_SNAPSHOT_SIZE = 0x80
 ROLE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{10,32}$")
@@ -148,8 +148,7 @@ SAVED_ENTRY_STACK_ARG0 = 0xA0
 
 DESCRIPTOR_PATTERN = bytes.fromhex(
     "03 00 00 00 01 00 00 00 "
-    "00 01 00 01 00 00 00 00 "
-    "39 01 00 00 00 00 00 00"
+    "00 01 00 01 00 00 00 00"
 )
 PVP_ITEM_TAG = 2
 ACTIVE_WORD_CLASS_TYPE = 1
@@ -1518,7 +1517,10 @@ def _descriptor_schema(process: int, descriptor_address: int) -> tuple[tuple[str
     descriptor = read_region(process, descriptor_address, 0x70)
     if descriptor is None or len(descriptor) != 0x70:
         return ()
-    if struct.unpack_from("<Q", descriptor, 0x20)[0] != REQUEST_METHOD_ID:
+    # Protocol IDs are assigned by the live registry and can move between
+    # data revisions.  The exact method name and full argument schema below
+    # are the stable identity; reject only an unregistered placeholder.
+    if struct.unpack_from("<Q", descriptor, 0x20)[0] <= 0:
         return ()
     if _read_std_string(process, descriptor_address + 0x28) != REQUEST_METHOD:
         return ()

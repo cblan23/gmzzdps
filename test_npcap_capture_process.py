@@ -821,6 +821,31 @@ class NpcapProtocolTests(unittest.TestCase):
         self.assertEqual(records[0]['npcap_method_scope'], 'damage_shape_compat')
         self.assertEqual(list(decoder.unknown_records), [])
 
+    def test_current_method_96_damage_shape_is_accepted(self):
+        attacker = 57_277_149_005_551
+        arguments = [
+            attacker,
+            57_264_798_964_364,
+            8_700_081_007_452,
+            0,
+            2,
+            4_495,
+            0,
+            4_495,
+            False,
+        ]
+        decoder = NpcapProtocolDecoder(capture_unknown=True)
+
+        self._append_numeric_rpc(decoder, attacker, 96, arguments)
+        records = decoder._rpc_records()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['method'], 'OnMsgDamageSyncV2')
+        self.assertEqual(records[0]['decoded_arguments'], arguments)
+        self.assertEqual(records[0]['npcap_method_id'], 96)
+        self.assertEqual(records[0]['npcap_method_scope'], 'damage_shape_compat')
+        self.assertEqual(list(decoder.unknown_records), [])
+
     def test_method_93_with_unrelated_shape_remains_unknown(self):
         attacker = 57_223_461_897_621
         decoder = NpcapProtocolDecoder(capture_unknown=True)
@@ -835,6 +860,47 @@ class NpcapProtocolTests(unittest.TestCase):
 
         self.assertEqual(decoder._rpc_records(), [])
         self.assertEqual([row['method_id'] for row in decoder.unknown_records], [93])
+
+    def test_method_96_with_unrelated_shape_remains_unknown(self):
+        attacker = 57_277_149_005_551
+        decoder = NpcapProtocolDecoder(capture_unknown=True)
+
+        self._append_numeric_rpc(
+            decoder,
+            attacker,
+            96,
+            [attacker, 57_264_798_964_364, 8_700_081_007_452, 0, 2, 4_495],
+        )
+
+        self.assertEqual(decoder._rpc_records(), [])
+        self.assertEqual([row['method_id'] for row in decoder.unknown_records], [96])
+
+    def test_current_local_role_descriptor_shift_is_named_and_scoped(self):
+        decoder = NpcapProtocolDecoder(capture_unknown=True)
+        entity = 57_277_149_005_551
+        expected = [
+            (359, 'OnMsgUpdateStageCombatStatistics', 'local_role'),
+            (2451, 'OnMsgEntityDead', 'player_entity'),
+            (2452, 'OnMsgEntityRelive', 'player_entity'),
+            (2460, 'RetNTP', 'local_role'),
+        ]
+        for method_id, _method, _scope in expected:
+            self._append_numeric_rpc(decoder, entity, method_id, [])
+
+        records = decoder._rpc_records()
+
+        self.assertEqual(
+            [
+                (
+                    row['npcap_method_id'],
+                    row['method'],
+                    row['npcap_method_scope'],
+                )
+                for row in records
+            ],
+            expected,
+        )
+        self.assertEqual(list(decoder.unknown_records), [])
 
     def test_unverified_numeric_lifecycle_never_emits_death_or_revive(self):
         decoder = NpcapProtocolDecoder(capture_unknown=True)
@@ -1071,7 +1137,39 @@ class NpcapProtocolTests(unittest.TestCase):
         self.assertEqual(LOCAL_ROLE_RPC_METHODS[389], "OnMsgBeforeEnterNewSpace")
         self.assertEqual(LOCAL_ROLE_RPC_METHODS[1441], "OnMsgLeaveQuestControl")
         self.assertIn("OnMsgLeaveQuestControl", SCENE_TRANSITION_METHODS)
+        self.assertEqual(METHOD_ID_NAMES[352], "RetOtherRoleShapeData")
+        self.assertEqual(METHOD_ID_NAMES[363], "RetOtherRoleShapeData")
         self.assertEqual(METHOD_ID_NAMES[1067], "OnMsgAddBuffNew")
+
+    def test_current_and_legacy_application_ids_preserve_rating_without_joining_party(self):
+        applicant = "applicant-token-0001"
+        for method_id in (213, 220):
+            with self.subTest(method_id=method_id):
+                decoder = NpcapProtocolDecoder()
+                self._append_numeric_rpc(decoder, 57_223_461_897_621, method_id, [{
+                    2: applicant, 4: "申请玩家", 5: 1_200_003,
+                    7: 90, 8: 63_737, 9: 1_792_405_000, 10: 1_108,
+                }])
+                record, = decoder._rpc_records()
+                self.assertEqual(record["method"], "OnMsgNewTeamGroupApply")
+                parser = NetworkPacketParser()
+                updates = parser.process(record)
+                application, = [value for kind, value in updates if kind == "team_application"]
+                self.assertEqual(application["name"], "申请玩家")
+                self.assertEqual(application["extraordinary_rating"], 63_737)
+                self.assertNotIn(applicant, parser.party_tokens)
+                self.assertNotIn(applicant, parser.token_actors)
+                self.assertFalse(any(kind in {"party", "profile"} for kind, _ in updates))
+
+    def test_application_id_220_preserves_legacy_self_properties(self):
+        decoder = NpcapProtocolDecoder()
+        self._append_numeric_rpc(decoder, 57_223_461_897_621, 220, [{
+            4: False, 5: 100, 6: 100,
+        }])
+        record, = decoder._rpc_records()
+        self.assertEqual(record["method"], "OnUpdateTeamGroupSelfProps")
+        updates = NetworkPacketParser().process(record)
+        self.assertFalse(any(kind == "team_application" for kind, _ in updates))
 
     def test_current_team_and_settlement_ids_decode_to_existing_handlers(self):
         decoder = NpcapProtocolDecoder()

@@ -46,6 +46,24 @@ def predictor(**overrides) -> BossEnragePredictor:
 
 
 class BossEnrageTests(unittest.TestCase):
+    def test_hard_antigonus_note_bosses_use_six_minute_rules(self):
+        catalog = load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        )
+
+        for template_id, expected_rule_id in (
+            (7_103_001, "ray_biber"),
+            (7_103_008, "joker"),
+            (7_103_012, "joker"),
+        ):
+            with self.subTest(template_id=template_id):
+                rule = catalog.match(
+                    [boss(1, 43_372_710, 43_372_710, template_id=template_id)]
+                )
+                self.assertIsNotNone(rule)
+                self.assertEqual(rule.rule_id, expected_rule_id)
+                self.assertEqual(rule.enrage_seconds, 360)
+
     def test_catalog_skips_unverified_zero_duration_and_prefers_template(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rules.json"
@@ -764,7 +782,6 @@ class BossEnrageTests(unittest.TestCase):
             7_102_932,
             7_102_936,
             7_102_938,
-            7_103_001,
             7_109_801,
             7_110_581,
             7_110_642,

@@ -44,6 +44,15 @@ LOCAL_ROLE_RPC_METHODS = {
     349: 'OnMsgSettlementCombatStatistics',
     350: 'OnMsgReconnectOrEnter',
     351: 'OnMsgRemoveAvatarsCombatStatistics',
+    # Verified from the running 2026-10-16 LocalRole descriptors.
+    353: 'RetNpcCombatStatisticsByTeam',
+    354: 'RetDirtyNpcCombatStatisticsByTeam',
+    355: 'RetNpcCombatStatistics',
+    356: 'RetCommonCombatStatisticsByTeam',
+    357: 'RetDirtyCommonCombatStatisticsByTeam',
+    358: 'RetCommonCombatStatistics',
+    359: 'OnMsgUpdateStageCombatStatistics',
+    360: 'OnMsgSettlementCombatStatistics',
     389: 'OnMsgBeforeEnterNewSpace',
     # Verified LocalRole descriptor indexes from the 2026-09-17 client.
     # PVP has its own passive consumer; these never query TeamStats.
@@ -64,6 +73,12 @@ LOCAL_ROLE_RPC_METHODS = {
     2341: 'OnMsgEntityDead',
     2342: 'OnMsgEntityRelive',
     2350: 'RetNTP',
+    2451: 'OnMsgEntityDead',
+    2452: 'OnMsgEntityRelive',
+    2460: 'RetNTP',
 }
 
-NPC_RPC_METHODS = {253: 'OnMsgEntityDead'}
+NPC_RPC_METHODS = {
+    253: 'OnMsgEntityDead',
+    267: 'OnMsgEntityDead',  # Verified current NpcActor descriptor.
+}

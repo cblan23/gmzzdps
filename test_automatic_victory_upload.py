@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 from test_combat_model import DpsWindow, EncounterUploadResult, ProfileUploadError
-from test_settlement_official_ui import CanvasProbe, FontProbe
 
 
 class AutomaticVictoryUploadTests(unittest.TestCase):
@@ -16,7 +15,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.window.combat_upload_states = {}
         self.window.history_upload_in_progress = set()
         self.window.automatic_upload_queued = set()
-        self.window._start_history_upload = mock.Mock()
+        self.window._start_automatic_history_upload = mock.Mock()
         self.record = {
             "encounter_id": "victory-1",
             "result": "defeated",
@@ -31,9 +30,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         delay, callback = self.window.root.after.call_args.args
         self.assertEqual(delay, 0)
         callback()
-        self.window._start_history_upload.assert_called_once_with(
-            "victory-1", "character", silent=True
-        )
+        self.window._start_automatic_history_upload.assert_called_once_with("victory-1")
 
     def test_disabled_setting_does_not_queue_automatic_upload(self):
         self.window.auto_upload_combat_records_enabled = False
@@ -49,7 +46,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
 
         callback()
 
-        self.window._start_history_upload.assert_not_called()
+        self.window._start_automatic_history_upload.assert_not_called()
 
     def test_pending_equipment_response_is_attached_before_upload(self):
         waiting = {
@@ -75,7 +72,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         first_callback = self.window.root.after.call_args.args[1]
         first_callback()
 
-        self.window._start_history_upload.assert_not_called()
+        self.window._start_automatic_history_upload.assert_not_called()
         self.window._schedule_team_equipment_profiles.assert_called_once_with(
             extra_attempt_tokens={"teammate-uid"}
         )
@@ -87,9 +84,7 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         retry_callback = self.window.root.after.call_args.args[1]
         retry_callback()
 
-        self.window._start_history_upload.assert_called_once_with(
-            "victory-1", "character", silent=True
-        )
+        self.window._start_automatic_history_upload.assert_called_once_with("victory-1")
 
     def test_projection_member_does_not_delay_upload(self):
         projection = {
@@ -108,9 +103,26 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.assertTrue(self.window._queue_automatic_victory_upload(projection))
         self.window.root.after.call_args.args[1]()
 
-        self.window._start_history_upload.assert_called_once_with(
-            "victory-1", "character", silent=True
-        )
+        self.window._start_automatic_history_upload.assert_called_once_with("victory-1")
+
+    def test_ai_member_does_not_delay_upload(self):
+        ai_team = {
+            **self.record,
+            "participants": [
+                {
+                    "actor_id": 2,
+                    "user_token": "ai-teammate",
+                    "name": "人机队友",
+                    "is_ai": True,
+                }
+            ],
+        }
+        self.window.team_equipment_requested_at = {"ai-teammate": 1.0}
+
+        self.assertTrue(self.window._queue_automatic_victory_upload(ai_team))
+        self.window.root.after.call_args.args[1]()
+
+        self.window._start_automatic_history_upload.assert_called_once_with("victory-1")
 
     def test_wipe_uploads_but_training_dummies_never_upload(self):
         wipe = {
@@ -136,11 +148,54 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
             {**pending, "settlement_status": "SETTLED"}
         ))
 
+    def test_pending_wipe_uploads_without_official_settlement(self):
+        wipe = {
+            **self.record,
+            "encounter_id": "wipe-pending-1",
+            "result": "failed",
+            "archive_reason": "party_wipe",
+            "settlement_status": "PENDING",
+        }
+
+        self.assertTrue(self.window._queue_automatic_victory_upload(wipe))
+
+    def test_party_wipe_reason_uploads_before_result_projection(self):
+        wipe = {
+            key: value for key, value in self.record.items() if key != "result"
+        }
+        wipe.update(
+            encounter_id="wipe-local-1",
+            archive_reason="party_wipe",
+        )
+
+        self.assertTrue(self.window._queue_automatic_victory_upload(wipe))
+
     def test_upload_states_prevent_duplicate_or_looping_requests(self):
+        signature = self.window._history_detail_signature(self.record)
         for state in ("uploading", "uploaded", "included", "ranked", "failed"):
-            self.window.combat_upload_states = {"victory-1": {"state": state}}
+            self.window.combat_upload_states = {
+                "victory-1": {
+                    "state": state,
+                    "detail_signature": signature,
+                }
+            }
             self.assertFalse(self.window._queue_automatic_victory_upload(self.record))
         self.window.root.after.assert_not_called()
+
+    def test_uploaded_record_requeues_when_outcome_evidence_changes(self):
+        self.window.combat_upload_states = {
+            "victory-1": {
+                "state": "uploaded",
+                "detail_signature": self.window._history_detail_signature(self.record),
+            }
+        }
+        corrected = {
+            **self.record,
+            "result": "failed",
+            "archive_reason": "party_wipe",
+        }
+
+        self.assertTrue(self.window._queue_automatic_victory_upload(corrected))
 
     def test_recovered_failed_archive_is_saved_reset_and_queued(self):
         recovered = {
@@ -199,12 +254,15 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.window.current_character_id = "role-a"
         self.window.combat_history_recovery_in_progress = False
         self.window.combat_history_recovery_character_id = ""
+        self.window.profile_resolved_character_id = ""
         self.window.licensing = SimpleNamespace(session=SimpleNamespace(active=False))
         self.window.history_store = mock.Mock()
         self.window.control_messages = queue.Queue()
 
         self.assertFalse(self.window._schedule_legacy_combat_history_recovery())
         self.window.licensing.session.active = True
+        self.assertFalse(self.window._schedule_legacy_combat_history_recovery())
+        self.window.profile_resolved_character_id = "role-a"
         globals_ = self.window._schedule_legacy_combat_history_recovery.__globals__
         thread_factory = mock.Mock()
         with mock.patch.object(globals_["threading"], "Thread", thread_factory):
@@ -214,9 +272,44 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.window.history_store.find_legacy_polluted_will_victories.assert_not_called()
         thread_factory.call_args.kwargs["target"]()
         self.window.history_store.find_legacy_polluted_will_victories.assert_called_once()
+        self.window.history_store.find_recent_character_records.assert_called_once()
         kind, payload = self.window.control_messages.get_nowait()
         self.assertEqual(kind, "combat_history_recovery_result")
         self.assertEqual(payload["character_id"], "role-a")
+
+    def test_recovery_result_queues_only_pending_recent_records_for_current_role(self):
+        pending = {
+            **self.record,
+            "encounter_id": "pending-recent",
+            "self_character_id": "role-a",
+        }
+        already_failed = {
+            **pending,
+            "encounter_id": "failed-recent",
+        }
+        wrong_role = {
+            **pending,
+            "encounter_id": "other-role",
+            "self_character_id": "role-b",
+        }
+        self.window.current_character_id = "role-a"
+        self.window.combat_history_recovery_in_progress = True
+        self.window.combat_history_recovery_character_id = ""
+        self.window.combat_upload_states = {
+            "failed-recent": {"state": "failed"}
+        }
+        self.window._queue_automatic_victory_upload = mock.Mock(return_value=True)
+
+        self.window._handle_combat_history_recovery_result(
+            {
+                "character_id": "role-a",
+                "records": [],
+                "upload_candidates": [pending, already_failed, wrong_role],
+                "error": "",
+            }
+        )
+
+        self.window._queue_automatic_victory_upload.assert_called_once_with(pending)
 
     def test_failed_local_save_never_uploads(self):
         self.window.worker = SimpleNamespace(diagnostic_snapshot=lambda: {})
@@ -254,18 +347,14 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.window.root.after.assert_called_once()
 
     def prepare_sender(self):
-        del self.window._start_history_upload
+        del self.window._start_automatic_history_upload
         self.window._build_history_upload_payload = mock.Mock(return_value=(
             self.record,
             {"participants": [{"character_id": "AQAAAOwNKLYHAAAA", "is_uploader": True}]},
             "本人",
         ))
         self.window._set_combat_upload_state = mock.Mock()
-        self.window._show_notice = mock.Mock()
-        self.window._close_history_modal = mock.Mock()
-        self.window.history_window = None
-        self.window.upload_public_mode = "character"
-        self.window.config = {"upload_public_mode": "character"}
+        self.window.auto_upload_combat_records_enabled = True
         self.window.licensing = SimpleNamespace(upload_encounter=mock.Mock(
             return_value=EncounterUploadResult(True)
         ))
@@ -273,10 +362,10 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
 
     def test_automatic_sender_runs_in_background_without_touching_dialog_or_privacy(self):
         self.prepare_sender()
-        globals_ = self.window._start_history_upload.__globals__
+        globals_ = self.window._start_automatic_history_upload.__globals__
         thread_factory = mock.Mock()
         with mock.patch.object(globals_["threading"], "Thread", thread_factory):
-            self.window._start_history_upload("victory-1", "character", silent=True)
+            self.window._start_automatic_history_upload("victory-1")
         thread_factory.return_value.start.assert_called_once()
         self.assertTrue(thread_factory.call_args.kwargs["daemon"])
         self.window.licensing.upload_encounter.assert_not_called()
@@ -284,36 +373,30 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.window.licensing.upload_encounter.assert_called_once()
         kind, payload = self.window.control_messages.get_nowait()
         self.assertEqual(kind, "encounter_upload_result")
-        self.assertTrue(payload["silent"])
         self.window._handle_encounter_upload_result(payload)
+        signature = self.window._history_detail_signature(self.record)
         self.window._set_combat_upload_state.assert_called_with(
             "victory-1", "uploaded", rank=None, encounter_id="", upload_id="",
             message="", upload_status="", statistics_status="", ranking_status="",
             validation_reasons=(), public_mode="character",
-            detail_signature='',
+            detail_signature=signature,
         )
-        self.window._close_history_modal.assert_not_called()
-        self.window._show_notice.assert_not_called()
-        self.assertEqual(self.window.upload_public_mode, "character")
-        self.assertEqual(self.window.config, {"upload_public_mode": "character"})
 
-    def test_disabled_setting_blocks_silent_sender_before_payload_build(self):
+    def test_disabled_setting_blocks_sender_before_payload_build(self):
         self.prepare_sender()
         self.window.auto_upload_combat_records_enabled = False
 
-        self.window._start_history_upload("victory-1", "character", silent=True)
+        self.window._start_automatic_history_upload("victory-1")
 
         self.window._build_history_upload_payload.assert_not_called()
         self.window.licensing.upload_encounter.assert_not_called()
 
-    def test_silent_validation_failure_does_not_open_dialog(self):
+    def test_validation_failure_is_recorded_without_a_dialog(self):
         self.prepare_sender()
         self.window._build_history_upload_payload.side_effect = ProfileUploadError("BAD_ENCOUNTER")
-        self.window._start_history_upload("victory-1", "character", silent=True)
+        self.window._start_automatic_history_upload("victory-1")
         self.assertEqual(self.window._set_combat_upload_state.call_args.args,
                          ("victory-1", "failed"))
-        self.window._close_history_modal.assert_not_called()
-        self.window._show_notice.assert_not_called()
         self.window.licensing.upload_encounter.assert_not_called()
 
     def test_detail_arriving_during_upload_is_sent_once_after_receipt(self):
@@ -328,12 +411,12 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
         self.window.combat_upload_states["victory-1"] = {"state": "uploading"}
         self.assertFalse(self.window._queue_automatic_victory_upload(latest))
         self.window._handle_encounter_upload_result({
-            "battle_id": "victory-1", "silent": True, "detail_signature": initial_signature,
+            "battle_id": "victory-1", "detail_signature": initial_signature,
             "result": EncounterUploadResult(True),
         })
         self.window.root.after.assert_called_once()
         self.window._handle_encounter_upload_result({
-            "battle_id": "victory-1", "silent": True,
+            "battle_id": "victory-1",
             "detail_signature": self.window._history_detail_signature(latest),
             "result": EncounterUploadResult(True),
         })
@@ -360,23 +443,15 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
                 self.window.combat_upload_states["victory-1"]["detail_signature"] = self.window._history_detail_signature(latest)
                 self.assertFalse(self.window._automatic_upload_needs_update("victory-1", latest))
 
-    def test_silent_network_failure_is_recorded_without_popup(self):
+    def test_network_failure_is_recorded_without_popup(self):
         self.prepare_sender()
         self.window._handle_encounter_upload_result({
-            "battle_id": "victory-1", "silent": True,
+            "battle_id": "victory-1",
             "result": EncounterUploadResult(False, error="connection", message="离线"),
         })
         self.assertEqual(self.window._set_combat_upload_state.call_args.args,
                          ("victory-1", "failed"))
-        self.window._show_notice.assert_not_called()
 
-    def test_history_renders_no_upload_button(self):
-        self.window.icons = SimpleNamespace(toolbar=lambda *_: object())
-        self.window._ui_font = lambda *_: FontProbe()
-        tags = self.window._draw_history_inline_actions(
-            CanvasProbe(), 0, 20, 0, False, "victory-1", self.record
-        )
-        self.assertEqual(set(tags), {"report", "favorite", "delete"})
 
 
 if __name__ == "__main__":

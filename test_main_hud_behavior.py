@@ -94,26 +94,6 @@ def make_equipment_window(mode="pve"):
     )
     window._invalidate_team_rating_preview_rows = mock.Mock()
     window._schedule_layered_main_render = mock.Mock()
-    if mode == "pvp":
-        def roster(**options):
-            if options.get("side") == "enemy":
-                return []
-            return [
-                dict(user_token=token, actor_id=actor, is_self=actor == 1,
-                     name=f"玩家{actor}", profession_id=1_200_001,
-                     extraordinary_rating=window.model.entity_extraordinary_ratings[actor])
-                for actor, token in ((1, "self-token"), (2, "peer-token"))
-                if actor != 1 or options.get("include_self")
-            ]
-        tracker = SimpleNamespace(
-            self_token="self-token", map_id=5208003, generation=1,
-            pvp_allies={"peer-token": {}}, pvp_team_members=roster,
-        )
-        window.pvp_recording = SimpleNamespace(
-            active=True, map_id=5208003, display_tracker=tracker,
-            recording={"map_id": 5208003, "match_id": "manual-equipment-refresh"},
-            snapshot=lambda: {"session_id": "manual-equipment-refresh", "allies": roster(include_self=True)},
-        )
     window.team_equipment_context = (222, "self-token", window._team_equipment_party_session_id())
     return window, submissions
 
@@ -194,38 +174,6 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(saved, [tracker])
         self.assertEqual(bound, [("local-encounter", encounter.local_encounter_id)])
 
-    def test_main_combat_mode_switches_without_mutating_pve_state(self):
-        window, _ = make_window()
-        scheduled = []
-        hidden = []
-        window.main_combat_mode = "pve"
-        window.show_pvp_button = True
-        window.main_scroll_offset = 180
-        window.layered_main_hover_action = "pvp"
-        window._layered_main_active = lambda: True
-        window._schedule_layered_main_render = lambda: scheduled.append(True)
-        window._hide_enrage_tooltip = lambda: hidden.append(True)
-        retained = {"encounter_id": "pve-result"}
-        window.main_last_battle_result = retained
-
-        globals_ = window._set_main_combat_mode.__globals__
-        original_enabled = globals_["PVP_FEATURE_ENABLED"]
-        globals_["PVP_FEATURE_ENABLED"] = True
-        self.addCleanup(globals_.__setitem__, "PVP_FEATURE_ENABLED", original_enabled)
-        window._set_main_combat_mode("pvp")
-
-        self.assertEqual(window.main_combat_mode, "pvp")
-        self.assertEqual(window.main_scroll_offset, 0)
-        self.assertEqual(window.layered_main_hover_action, "")
-        self.assertIs(window.main_last_battle_result, retained)
-        self.assertEqual(len(scheduled), 1)
-
-        window._set_main_combat_mode("pve")
-
-        self.assertEqual(window.main_combat_mode, "pve")
-        self.assertIs(window.main_last_battle_result, retained)
-        self.assertEqual(len(scheduled), 2)
-        self.assertEqual(len(hidden), 2)
 
     def test_pve_combat_entry_switches_to_recent_battle_only_once(self):
         window, _ = make_window()
@@ -254,255 +202,15 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(window.pve_hud_view, "team")
         self.assertEqual(window.main_scroll_offset, 7)
 
-    def test_pvp_combat_entry_does_not_change_pve_content_view(self):
-        window, _ = make_window()
-        window.main_combat_mode = "pvp"
-        window.pve_hud_view = "team"
-        window.live_hud_combat_state = None
-        window.live_hud_boss_state = None
-        window.live_hud_dps_segment = None
-        window._schedule_layered_main_render = lambda: None
 
-        window._dispatch_message(
-            "live_hud_combat",
-            {
-                "active": True,
-                "segment_id": 1,
-                "started_at_epoch": 1_000.0,
-            },
-        )
 
-        self.assertEqual(window.pve_hud_view, "team")
 
-    def test_disabled_pvp_feature_cannot_change_main_mode(self):
-        window, _ = make_window()
-        window.main_combat_mode = "pve"
-        window.show_pvp_button = True
 
-        globals_ = window._set_main_combat_mode.__globals__
-        original_enabled = globals_["PVP_FEATURE_ENABLED"]
-        globals_["PVP_FEATURE_ENABLED"] = False
-        self.addCleanup(globals_.__setitem__, "PVP_FEATURE_ENABLED", original_enabled)
 
-        window._set_main_combat_mode("pvp")
 
-        self.assertEqual(window.main_combat_mode, "pve")
 
-    def test_pvp_mode_can_be_selected_before_entering_a_pvp_map(self):
-        window, _ = make_window()
-        window.main_combat_mode = "pve"
-        window.show_pvp_button = True
-        window._pvp_hud_map_active = lambda: False
-        window._layered_main_active = lambda: True
-        window._schedule_layered_main_render = lambda: None
-        window._hide_enrage_tooltip = lambda: None
 
-        window._set_main_combat_mode("pvp")
 
-        self.assertEqual(window.main_combat_mode, "pvp")
-
-    def test_pvp_hud_switches_live_and_team_without_changing_main_mode(self):
-        window, _ = make_window()
-        window.main_combat_mode = "pvp"
-        window.pvp_hud_view = "live"
-        window.pvp_team_offset = 5
-        window.layered_main_hover_action = "pvp_team"
-        queries = []
-        renders = []
-        window._schedule_team_equipment_profiles = lambda: queries.append(True)
-        window._layered_main_active = lambda: True
-        window._schedule_layered_main_render = lambda: renders.append(True)
-
-        window._set_pvp_hud_view("team")
-
-        self.assertEqual(window.main_combat_mode, "pvp")
-        self.assertEqual(window.pvp_hud_view, "team")
-        self.assertEqual(window.pvp_team_offset, 0)
-        self.assertEqual(window.layered_main_hover_action, "")
-        self.assertEqual(queries, [True])
-        self.assertEqual(renders, [True])
-
-        window._set_pvp_hud_view("live")
-        self.assertEqual(window.pvp_hud_view, "live")
-        self.assertEqual(renders, [True, True])
-
-    def test_pvp_snapshot_reuses_the_live_self_identity_and_profession(self):
-        window, _ = make_window()
-        window.current_character_name = "莫雪"
-        window.current_character_profession_id = 1_200_004
-        window.model.entity_extraordinary_ratings[1] = 80_616
-        window.pvp_hud_state = {
-            "map_name": "诸王战纪",
-            # Presentation state must never replace the live local identity.
-            "player_name": "旧角色",
-            "rating": 1,
-            "profession_id": 1_200_007,
-            "outgoing": [
-                {"rating": "79,840", "kills": 1},
-                {"rating": 88_893, "kills": 2},
-                {"rating": 99_999, "kills": 0},
-            ],
-        }
-        window._main_display_rows = lambda: self.fail(
-            "PVP identity must not borrow PVE encounter rows"
-        )
-        window._startup_interaction_blocked = lambda: False
-        window.process_is_elevated = True
-        window.window_locked = False
-        window.layered_main_hover_action = ""
-
-        snapshot = window._pvp_layered_main_snapshot()
-
-        self.assertEqual(snapshot["pvp_player_name"], "莫雪")
-        self.assertEqual(snapshot["pvp_rating"], "80616")
-        self.assertEqual(snapshot["pvp_profession_id"], 1_200_004)
-        self.assertEqual(snapshot["pvp_map_name"], "诸王战纪")
-        self.assertEqual(snapshot["pvp_average_kill_rating"], "85875")
-
-    def test_hunter_city_keeps_team_composition_and_local_combat_views(self):
-        window, _ = make_window()
-        window.pvp_hud_view = "team"
-        window._startup_interaction_blocked = lambda: False
-        window._pvp_team_composition_rows = lambda: [
-            {"name": "队友", "rating_value": 90000},
-        ]
-        window._pvp_current_teammates = lambda: [{"name": "队友"}]
-        state = {
-            "session_id": "hunter-1", "kills": 1, "deaths": 1,
-            "total_damage": "100", "total_taken": "50",
-            "outgoing": [{"name": "敌人甲", "kills": 1, "damage": 100}],
-            "incoming": [{"name": "敌人乙", "defeats": 1, "damage": 50}],
-            "allies": [{"name": "队友"}], "enemies": [{"name": "敌方全队"}],
-        }
-        window.pvp_recording = SimpleNamespace(
-            display_tracker=SimpleNamespace(map_id=5200167),
-            snapshot=lambda: state, active=True,
-            recording={"map_id": 5200167}, map_id=5200167,
-        )
-
-        snapshot = window._pvp_layered_main_snapshot()
-
-        self.assertTrue(snapshot["pvp_self_only"])
-        self.assertEqual(snapshot["pvp_hud_view"], "team")
-        self.assertFalse(snapshot["pvp_team_battle"])
-        self.assertEqual(snapshot["pvp_allies"], [])
-        self.assertEqual(snapshot["pvp_enemies"], [])
-        self.assertEqual(snapshot["pvp_teammates"], [])
-        self.assertEqual(snapshot["pvp_team_rows"][0]["name"], "队友")
-        self.assertEqual(snapshot["pvp_team_average_rating"], "90000")
-        window.pvp_hud_view = "live"
-        snapshot = window._pvp_layered_main_snapshot()
-        self.assertEqual(snapshot["pvp_hud_view"], "live")
-        self.assertEqual(snapshot["pvp_team_rows"], [])
-        self.assertEqual(snapshot["pvp_outgoing"][0]["name"], "敌人甲")
-        self.assertEqual(snapshot["pvp_incoming"][0]["name"], "敌人乙")
-
-    def test_hunter_healer_uses_exact_effective_healing_without_changing_dps(self):
-        window, _ = make_window()
-        window._startup_interaction_blocked = lambda: False
-        window._pvp_team_composition_rows = lambda: []
-        window._pvp_current_teammates = lambda: []
-        state = {
-            "session_id": "hunter-healer", "kills": 2, "deaths": 1,
-            "healing": 123456, "total_damage": "200", "total_taken": "50",
-            "outgoing": [{"name": "敌人", "kills": 2, "damage": 200}],
-        }
-        window.pvp_recording = SimpleNamespace(
-            display_tracker=SimpleNamespace(map_id=5200167),
-            snapshot=lambda: state, active=True,
-            recording={"map_id": 5200167}, map_id=5200167,
-        )
-        window.current_character_profession_id = 1_200_002
-        healer = window._pvp_layered_main_snapshot()
-        self.assertTrue(healer["pvp_healer"])
-        self.assertEqual(healer["pvp_effective_healing"], "123,456")
-        self.assertEqual(healer["pvp_deaths"], 1)
-        self.assertEqual(healer["pvp_outgoing"][0]["damage"], 200)
-
-        window.current_character_profession_id = 1_200_001
-        dps = window._pvp_layered_main_snapshot()
-        self.assertFalse(dps["pvp_healer"])
-        self.assertEqual(dps["pvp_kills"], 2)
-        self.assertEqual(dps["pvp_outgoing"][0]["damage"], 200)
-
-        state["healing"] = None
-        window.current_character_profession_id = 1_200_002
-        self.assertEqual(
-            window._pvp_layered_main_snapshot()["pvp_effective_healing"],
-            "未记录",
-        )
-
-    def test_hunter_unattributed_deaths_are_visible_without_guessing_killer(self):
-        window, _ = make_window()
-        window._startup_interaction_blocked = lambda: False
-        window._pvp_team_composition_rows = lambda: []
-        window._pvp_current_teammates = lambda: []
-        window.pvp_recording = SimpleNamespace(
-            display_tracker=SimpleNamespace(map_id=5200167),
-            snapshot=lambda: {
-                "session_id": "hunter-deaths", "deaths": 7,
-                "incoming": [{"name": "已确认敌人", "defeats": 2, "damage": 300}],
-            },
-            active=True, recording={"map_id": 5200167}, map_id=5200167,
-        )
-
-        incoming = window._pvp_layered_main_snapshot()["pvp_incoming"]
-
-        self.assertEqual(incoming[0]["name"], "已确认敌人")
-        self.assertEqual(incoming[1]["name"], "击败者未识别")
-        self.assertEqual(incoming[1]["defeats"], 5)
-
-    def test_pvp_live_team_rows_label_real_rating_ai_and_missing_rating(self):
-        window, _ = make_window()
-        window.model.entity_extraordinary_ratings[1] = 94_764
-        window.pvp_hud_state = {
-            "team_size": 6,
-            "allies": [
-                {"name": "本人", "is_self": True, "is_ai": False,
-                 "extraordinary_rating": None},
-                {"name": "真人队友", "user_token": "human", "is_ai": False,
-                 "extraordinary_rating": 0},
-                {"name": "人机队友", "is_ai": True,
-                 "extraordinary_rating": 0},
-            ],
-            "enemies": [
-                {"name": "未知敌人", "is_ai": False,
-                 "extraordinary_rating": 0},
-            ],
-        }
-        window.pvp_tracker = SimpleNamespace(
-            snapshot=lambda: window.pvp_hud_state,
-            token_profiles={"human": {"extraordinary_rating": 133_344}},
-            pvp_allies={}, pvp_enemies={}, profiles={},
-        )
-        window._pvp_team_composition_rows = lambda: []
-        window._pvp_current_teammates = lambda: []
-        window._startup_interaction_blocked = lambda: False
-
-        snapshot = window._pvp_layered_main_snapshot()
-
-        self.assertEqual(
-            [row["rating"] for row in snapshot["pvp_allies"]],
-            ["94764", "133344", "人机"],
-        )
-        self.assertEqual(snapshot["pvp_enemies"][0]["rating"], "--")
-
-    def test_pvp_team_skips_bot_equipment_lookup(self):
-        window, _ = make_window()
-        window._pvp_current_team_members = lambda: [
-            {"user_token": "bot", "actor_id": 3, "name": "机器人",
-             "is_ai": True},
-        ]
-        queries = []
-        window._equipment_summary_for_actor = lambda actor, token: queries.append((actor, token)) or {
-            "equipment_count": 1, "pvp_equipment_count": 0,
-        }
-
-        rows = window._pvp_team_composition_rows()
-
-        self.assertEqual(queries, [])
-        self.assertEqual(rows[0]["rating"], "人机")
-        self.assertFalse(rows[0]["equipment_profile_ready"])
 
     def test_previous_settled_team_dps_is_hidden_during_new_pull(self):
         window, _ = make_window()
@@ -655,108 +363,8 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(ended_snapshot["team_dps"], "309,500/s")
         self.assertEqual(ended_section["live_team_dps"], "--")
 
-    def test_pvp_unconnected_statistics_use_placeholders(self):
-        window, _ = make_window()
-        window.current_character_name = "莫雪"
-        window.current_character_profession_id = 1_200_004
-        window.model.entity_extraordinary_ratings[1] = 80_616
-        window.pvp_hud_state = {}
-        window._startup_interaction_blocked = lambda: False
-        window.process_is_elevated = True
-        window.window_locked = False
-        window.layered_main_hover_action = ""
 
-        snapshot = window._pvp_layered_main_snapshot()
 
-        self.assertEqual(snapshot["pvp_player_name"], "莫雪")
-        self.assertEqual(snapshot["pvp_rating"], "80616")
-        self.assertEqual(snapshot["pvp_kills"], "--")
-        self.assertEqual(snapshot["pvp_assists"], "--")
-        self.assertEqual(snapshot["pvp_deaths"], "--")
-        self.assertEqual(snapshot["pvp_total_damage"], "--")
-        self.assertEqual(snapshot["pvp_total_taken"], "--")
-        self.assertEqual(snapshot["pvp_outgoing"], [])
-        self.assertEqual(snapshot["pvp_incoming"], [])
-
-    def test_pvp_hud_shows_damaged_opponents_without_kills(self):
-        window, _ = make_window()
-        damage_only_outgoing = {
-            "opponent_id": "damage-only",
-            "name": "only damaged",
-            "damage": 1200,
-            "kills": 0,
-            "share_text": "80.0%",
-        }
-        damage_only_incoming = {
-            "opponent_id": "incoming-only",
-            "name": "only hit self",
-            "damage": 900,
-            "defeats": 0,
-        }
-        window.pvp_hud_state = {
-            "total_damage": "1,500",
-            "total_taken": "1,100",
-            "outgoing": [
-                damage_only_outgoing,
-                {
-                    "opponent_id": "defeated",
-                    "name": "defeated player",
-                    "damage": 300,
-                    "kills": 1,
-                },
-            ],
-            "incoming": [
-                damage_only_incoming,
-                {
-                    "opponent_id": "killer",
-                    "name": "killer player",
-                    "damage": 200,
-                    "defeats": 1,
-                },
-            ],
-        }
-        window._startup_interaction_blocked = lambda: False
-        window.process_is_elevated = True
-        window.window_locked = False
-        window.layered_main_hover_action = ""
-
-        snapshot = window._pvp_layered_main_snapshot()
-
-        self.assertEqual(
-            [row["opponent_id"] for row in snapshot["pvp_outgoing"]],
-            ["damage-only", "defeated"],
-        )
-        self.assertEqual(snapshot["pvp_outgoing"][0]["name"], "only damaged")
-        self.assertEqual(snapshot["pvp_outgoing"][0]["share_text"], "80.0%")
-        self.assertEqual(
-            [row["opponent_id"] for row in snapshot["pvp_incoming"]],
-            ["killer"],
-        )
-        self.assertEqual(snapshot["pvp_total_damage"], "1,500")
-        self.assertEqual(snapshot["pvp_total_taken"], "1,100")
-        self.assertEqual(window.pvp_hud_state["outgoing"][0], damage_only_outgoing)
-        self.assertEqual(window.pvp_hud_state["incoming"][0], damage_only_incoming)
-
-    def test_pvp_live_view_still_provides_team_rating_for_shared_footer(self):
-        window, _ = make_window()
-        window.pvp_hud_view = "live"
-        window.pvp_hud_state = {}
-        window._pvp_team_composition_rows = lambda: [
-            {"rating_value": 88_801, "is_ai": False},
-            {"rating_value": 91_199, "is_ai": False},
-            {"rating_value": None, "is_ai": False},
-            {"rating_value": 999_999, "is_ai": True},
-        ]
-        window._startup_interaction_blocked = lambda: False
-        window.process_is_elevated = True
-        window.window_locked = False
-        window.layered_main_hover_action = ""
-
-        snapshot = window._pvp_layered_main_snapshot()
-
-        self.assertEqual(snapshot["pvp_hud_view"], "live")
-        self.assertEqual(snapshot["pvp_team_rows"], [])
-        self.assertEqual(snapshot["pvp_team_average_rating"], "90000")
 
     def test_capture_fatal_reports_details_and_does_not_restart_forever(self):
         window, _ = make_window()
@@ -1066,6 +674,28 @@ class MainHudBehaviorTests(unittest.TestCase):
         expired = window._settlement_main_rows()
         self.assertEqual(expired[1]["section_text"], "实时战斗/战斗记录")
         self.assertEqual(window._team_application_section_rows(), [])
+
+    def test_current_application_packet_displays_name_and_server_rating(self):
+        import struct
+        import msgpack
+        from npcap_parser_adapter import NpcapParserAdapter
+        from npcap_protocol import NpcapProtocolDecoder
+
+        payload = msgpack.packb([{}, [57_223_461_897_621, 220, [{
+            2: "applicant-token-0001", 4: "申请甲", 5: 1_200_003,
+            7: 90, 8: 63_737,
+        }]]], use_bin_type=True)
+        decoder = NpcapProtocolDecoder()
+        decoder._append_application(struct.pack('<IH', len(payload) + 2, 22) + payload, 1, 10.0)
+        parser = NpcapParserAdapter()
+        parser.native_self_id = 57_223_461_897_621
+        window, _ = make_window()
+        for record in decoder._rpc_records():
+            for kind, value in parser.process(record):
+                if kind == 'team_application':
+                    window._ingest_team_application(value)
+        row, = window._team_application_section_rows()
+        self.assertEqual(row['application_text'], '入队申请  申请甲  非凡评分 63737')
 
     def test_team_application_notices_have_no_row_limit_and_refresh_duplicate(self):
         window, _ = make_window()
@@ -1752,8 +1382,8 @@ class MainHudBehaviorTests(unittest.TestCase):
             ["new-peer-token"],
         )
 
-    def test_rating_change_waits_for_manual_refresh_in_pve_and_pvp(self):
-        for mode in ("pve", "pvp"):
+    def test_rating_change_waits_for_manual_refresh_in_pve(self):
+        for mode in ("pve",):
             with self.subTest(mode=mode):
                 window, submissions = make_equipment_window(mode)
                 old_profiles = copy.deepcopy(window.team_equipment_profiles)
@@ -1764,10 +1394,7 @@ class MainHudBehaviorTests(unittest.TestCase):
                 self.assertEqual(window.team_equipment_profiles, old_profiles)
                 self.assertEqual(window._equipment_refresh_fields(1), {})
                 self.assertEqual(window._equipment_refresh_fields(2)["equipment_refresh_token"], "peer-token")
-                if mode == "pvp":
-                    rows = window._pvp_layered_main_snapshot()["pvp_team_rows"]
-                else:
-                    rows = window._layered_main_snapshot()["rows"]
+                rows = window._layered_main_snapshot()["rows"]
                 peer = next(row for row in rows if row.get("actor_id") == 2)
                 self.assertEqual(peer["equipment_refresh_token"], "peer-token")
 
@@ -1783,7 +1410,7 @@ class MainHudBehaviorTests(unittest.TestCase):
                 self.assertFalse(window._schedule_team_equipment_profiles())
 
     def test_self_rating_change_refreshes_automatically_without_button(self):
-        for mode in ("pve", "pvp"):
+        for mode in ("pve",):
             with self.subTest(mode=mode):
                 window, submissions = make_equipment_window(mode)
                 window.model.entity_extraordinary_ratings[1] += 1
@@ -1798,7 +1425,7 @@ class MainHudBehaviorTests(unittest.TestCase):
                 self.assertFalse(window._schedule_team_equipment_profiles())
 
     def test_manual_equipment_timeout_preserves_snapshot_and_never_retries_automatically(self):
-        for mode in ("pve", "pvp"):
+        for mode in ("pve",):
             with self.subTest(mode=mode):
                 window, submissions = make_equipment_window(mode)
                 old_profile = copy.deepcopy(window.team_equipment_profiles["peer-token"])
@@ -1823,7 +1450,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(window.worker.schedule_equipment_profiles.call_count, 2)
 
     def test_rating_changes_during_manual_query_require_another_click(self):
-        window, submissions = make_equipment_window("pvp")
+        window, submissions = make_equipment_window()
         window.model.entity_extraordinary_ratings[2] = 90_001
         self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
         window.model.entity_extraordinary_ratings[2] = 90_002
@@ -1837,7 +1464,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
 
     def test_map_context_change_rebaselines_successful_equipment_rating(self):
-        for mode in ("pve", "pvp"):
+        for mode in ("pve",):
             with self.subTest(mode=mode):
                 window, submissions = make_equipment_window(mode)
                 window.model.entity_extraordinary_ratings[2] = 90_001
@@ -1854,7 +1481,7 @@ class MainHudBehaviorTests(unittest.TestCase):
                 self.assertEqual(submissions, [])
 
     def test_capture_session_change_waits_for_new_map_rating_before_refresh(self):
-        for mode in ("pve", "pvp"):
+        for mode in ("pve",):
             with self.subTest(mode=mode):
                 window, submissions = make_equipment_window(mode)
                 window.team_equipment_profile_capture_sessions = {
@@ -1898,19 +1525,6 @@ class MainHudBehaviorTests(unittest.TestCase):
                     ["self-token"],
                 )
 
-    def test_pvp_manual_refresh_uses_stable_token_before_actor_binding(self):
-        window, submissions = make_equipment_window("pvp")
-        window.model.actor_character_ids.pop(2)
-        window.model.entity_extraordinary_ratings[2] = 90_001
-        window.pvp_recording.display_tracker.pvp_team_members = lambda **options: [] if options.get("side") == "enemy" else [
-            {"user_token": "self-token", "actor_id": 1, "is_self": True, "extraordinary_rating": 100_000},
-            {"user_token": "peer-token", "actor_id": 0, "extraordinary_rating": 90_001},
-        ]
-        self.assertFalse(window._schedule_team_equipment_profiles())
-        row = next(row for row in window._pvp_layered_main_snapshot()["pvp_team_rows"] if row["user_token"] == "peer-token")
-        self.assertEqual(row["equipment_refresh_token"], "peer-token")
-        self.assertTrue(window._schedule_team_equipment_profiles(refresh_token="peer-token"))
-        self.assertEqual(submissions[0]["members"][0]["actor_id"], 0)
 
     def test_large_roster_equipment_queries_are_batched_without_dropping_members(self):
         window, _members = make_window()
@@ -1957,147 +1571,10 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(len(submitted), len(set(submitted)))
         self.assertEqual(window.team_equipment_requested_tokens, tokens)
 
-    def test_pvp_team_composition_does_not_cap_the_resolved_roster(self):
-        window, members = make_window()
-        members.update(range(7, 18))
-        for actor_id in range(7, 18):
-            window.model.entity_names[actor_id] = f"队员{actor_id}"
-            window.model.entity_professions[actor_id] = 1_200_001
-            window.model.entity_extraordinary_ratings[actor_id] = 80_000 + actor_id
-        window.model.actor_character_ids = {
-            actor_id: f"token-{actor_id}" for actor_id in members
-        }
-        window.team_equipment_profiles = {
-            f"token-{actor_id}": {
-                "equipment_count": 8,
-                "pvp_equipment_count": 8,
-                "active_word_count": 3,
-                "total_word_count": 10,
-            }
-            for actor_id in members
-        }
 
-        rows = window._pvp_team_composition_rows()
 
-        self.assertEqual(len(rows), 17)
-        self.assertEqual(rows[0]["actor_id"], 1)
-        self.assertTrue(all(row["equipment_profile_ready"] for row in rows))
 
-    def test_hunter_live_team_excludes_departed_member_without_mutating_match(self):
-        window, _ = make_window()
-        members = [
-            {"user_token": "self-token", "actor_id": 1, "name": "本人", "is_self": True},
-            {"user_token": "current-token", "actor_id": 2, "name": "仍在队伍"},
-            {"user_token": "departed-token", "actor_id": 3, "name": "夜柯"},
-        ]
-        tracker = SimpleNamespace(
-            self_token="self-token",
-            pvp_allies={row["user_token"]: row for row in members[1:]},
-            pvp_team_members=lambda **options: (
-                members if options.get("include_self") else members[1:]
-            ),
-        )
-        window.model.actor_character_ids = {
-            1: "self-token", 2: "current-token", 3: "departed-token",
-        }
-        window.pvp_recording = SimpleNamespace(
-            party_seen=True, party_active=True,
-            party_tokens={"self-token", "current-token"},
-            active=True, duel_recording=None,
-            recording={"map_id": 5200167, "party_observed_in_match": True},
-            display_tracker=tracker, map_id=5200167,
-        )
 
-        rows = window._pvp_team_composition_rows()
-        teammates = window._pvp_current_teammates()
-
-        self.assertEqual([row["name"] for row in rows], ["本人", "仍在队伍"])
-        self.assertEqual([row["name"] for row in teammates], ["仍在队伍"])
-        self.assertIn("departed-token", tracker.pvp_allies)
-
-    def test_hunter_teammates_and_team_composition_share_fresh_party(self):
-        window, _ = make_window()
-        window.model.party_ids = {1, 2, 3}
-        window.model.provisional_party_ids = set()
-        window.model.actor_character_ids = {
-            1: "self-token", 2: "ally-two", 3: "ally-three", 4: "old-member",
-        }
-        tracker = SimpleNamespace(
-            self_token="self-token",
-            pvp_allies={},
-            pvp_team_members=lambda **options: (
-                [{"user_token": "self-token", "actor_id": 1,
-                  "name": "Self", "is_self": True}]
-                if options.get("include_self") else []
-            ),
-        )
-        window.pvp_recording = SimpleNamespace(
-            party_seen=True, party_active=True, active=True,
-            party_tokens={"self-token", "ally-two", "ally-three"},
-            recording={"map_id": 5200167, "party_observed_in_match": True},
-            display_tracker=tracker, map_id=5200167,
-        )
-
-        composition = window._pvp_team_composition_rows()
-        teammates = window._pvp_current_teammates()
-
-        self.assertEqual(
-            {row["actor_id"] for row in composition if not row["is_self"]},
-            {row["actor_id"] for row in teammates},
-        )
-        self.assertEqual({row["actor_id"] for row in teammates}, {2, 3})
-
-    def test_pvp_footer_action_survives_transparent_release_region_miss(self):
-        window, _ = make_window()
-        window.main_combat_mode = "pvp"
-        window.window_locked = False
-        window.layered_main_dragged = False
-        window.layered_main_resize_origin = None
-        window.layered_main_scroll_drag_origin = None
-        window.layered_main_pvp_scroll_drag_origin = None
-        window.layered_main_press_action = "pve"
-        window.layered_main_press_origin = (10, 10)
-        window._layered_main_active = lambda: True
-        window._startup_interaction_blocked = lambda: False
-        window._layered_main_region_at = lambda _x, _y: ""
-        window._set_main_combat_mode = lambda mode: setattr(
-            window, "main_combat_mode", mode
-        )
-        window._schedule_layered_main_render = lambda: None
-
-        window._layered_main_release(
-            SimpleNamespace(x=999, y=999, x_root=999, y_root=999)
-        )
-
-        self.assertEqual(window.main_combat_mode, "pve")
-
-    def test_large_pvp_team_scroll_uses_last_painted_count(self):
-        window, _ = make_window()
-        window.main_combat_mode = "pvp"
-        window.pvp_hud_view = "team"
-        window.pvp_team_row_count = 30
-        window.pvp_team_offset = 0
-        window._startup_interaction_blocked = lambda: False
-        window._layered_main_active = lambda: True
-        window._layered_main_region_at = lambda _x, _y: "scroll:pvp_team"
-        window._pvp_layered_main_snapshot = lambda: self.fail(
-            "wheel event rebuilt the complete PVP snapshot"
-        )
-        renders = []
-        window._schedule_layered_main_render = lambda: renders.append(True)
-
-        window._scroll_main(SimpleNamespace(delta=-120, num=0, x=1, y=1))
-
-        self.assertEqual(window.pvp_team_offset, 1)
-        self.assertEqual(renders, [True])
-        window.layered_main_hit_regions = {"scroll:pvp_team": (0, 0, 20, 100)}
-        for region in ("action:refresh_equipment:peer-token", "equipment_refresh_pending:peer-token"):
-            window._layered_main_region_at = lambda _x, _y, selected=region: selected
-            window._scroll_main(SimpleNamespace(delta=-120, num=0, x=1, y=1))
-        self.assertEqual(window.pvp_team_offset, 3)
-        window.main_visible_rows = 16
-        window._scroll_main(SimpleNamespace(delta=-3600, num=0, x=1, y=1))
-        self.assertEqual(window.pvp_team_offset, 20)
 
     def test_victory_upload_is_queued_with_character_without_manual_button(self):
         window, _ = make_window()
@@ -2110,11 +1587,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             after=lambda _delay, callback: callbacks.append(callback)
         )
         window._history_upload_state = lambda _battle_id: {"state": "pending"}
-        window._start_history_upload = (
-            lambda battle_id, mode, **options: uploads.append(
-                (battle_id, mode, options)
-            )
-        )
+        window._start_automatic_history_upload = uploads.append
         victory = {
             "encounter_id": "victory-one",
             "result": "defeated",
@@ -2129,7 +1602,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         self.assertEqual(
             uploads,
-            [("victory-one", "character", {"silent": True})],
+            ["victory-one"],
         )
 
     def test_different_game_pid_resets_old_role_before_marking_connected(self):
@@ -2391,24 +1864,40 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(moves, [(250, 290)])
         self.assertIn(id(window.root), window.drag_state)
 
-    def test_dragging_from_action_does_not_click_and_cleans_drag_state(self):
-        window, _ = make_window()
-        window.window_locked = False
-        window._layered_main_active = lambda: True
-        window._layered_main_region_at = lambda _x, _y: 'action:settings'
-        window.drag_state, window.restore_geometry = {}, {}
-        window._flush_window_geometry = lambda _window: None
-        window.root = SimpleNamespace(winfo_x=lambda: 100, winfo_y=lambda: 100)
-        window._drag_move = lambda _event, _window: None
-        window._remember_root_geometry = lambda: None
-        settings = []
-        window.show_settings = lambda: settings.append(True)
-        event = SimpleNamespace(x=10, y=10, x_root=110, y_root=110)
-        window._layered_main_press(event)
-        window._layered_main_drag(SimpleNamespace(x=30, y=10, x_root=130, y_root=110))
-        window._layered_main_release(SimpleNamespace(x=10, y=10, x_root=130, y_root=110))
-        self.assertEqual(settings, [])
-        self.assertFalse(window.drag_state)
+    def test_settings_and_update_actions_never_arm_window_drag(self):
+        for action in ('settings', 'update', 'download_update'):
+            with self.subTest(action=action):
+                window, _ = make_window()
+                window.window_locked = False
+                window._layered_main_active = lambda: True
+                window._layered_main_region_at = lambda _x, _y: f'action:{action}'
+                window.drag_state, window.restore_geometry = {}, {}
+                window._flush_window_geometry = lambda _window: None
+                window.root = SimpleNamespace(winfo_x=lambda: 100, winfo_y=lambda: 100)
+                window._drag_move = lambda _event, _window: None
+                window._remember_root_geometry = lambda: None
+                window.show_settings = mock.Mock()
+                window._start_update_check = mock.Mock()
+                window._download_pending_update = mock.Mock()
+                window.update_status_action = 'download_update'
+                event = SimpleNamespace(x=10, y=10, x_root=110, y_root=110)
+                window._layered_main_press(event)
+                window._layered_main_drag(SimpleNamespace(x=30, y=10, x_root=130, y_root=110))
+                window._layered_main_release(SimpleNamespace(x=10, y=10, x_root=130, y_root=110))
+                if action == 'update':
+                    window._start_update_check.assert_called_once_with(manual=True)
+                    window.show_settings.assert_not_called()
+                    window._download_pending_update.assert_not_called()
+                elif action == 'download_update':
+                    window._download_pending_update.assert_called_once_with()
+                    window._start_update_check.assert_not_called()
+                    window.show_settings.assert_not_called()
+                else:
+                    window.show_settings.assert_called_once_with()
+                    window._start_update_check.assert_not_called()
+                    window._download_pending_update.assert_not_called()
+                self.assertFalse(window.layered_main_drag_armed)
+                self.assertFalse(window.drag_state)
 
     def test_fallback_drag_from_button_does_not_execute_its_command(self):
         window, _ = make_window()
@@ -4281,7 +3770,6 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.show_main_totals = True
         window.show_deaths = True
         window.show_team_dps = True
-        window.show_pvp_button = True
         window.highlight_self = True
         window.main_row_mask_opacity = 0
         window.window_locked = False
@@ -4332,7 +3820,6 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.show_main_totals = True
         window.show_deaths = True
         window.show_team_dps = True
-        window.show_pvp_button = True
         window.highlight_self = True
         window.main_row_mask_opacity = 0
         window.window_locked = False
@@ -4496,7 +3983,6 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.show_main_totals = True
         window.show_deaths = True
         window.show_team_dps = True
-        window.show_pvp_button = True
         window.highlight_self = True
         window.main_row_mask_opacity = 0
         window.window_locked = False
@@ -5227,6 +4713,53 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
 
         self.assertEqual(window._main_authoritative_live_team_rows(110.0), [])
+
+    def test_live_boss_accepts_statistics_when_only_zero_stat_ai_are_missing(self):
+        window, _ = make_window()
+        window.model.entity_ai_states = {
+            actor_id: True for actor_id in range(2, 7)
+        }
+        window.model.ingest_team_stat = lambda _payload: False
+        window.live_hud_combat_state = None
+        window.live_hud_boss_state = None
+        window.live_hud_dps_segment = None
+        window._schedule_layered_main_render = lambda: None
+        window._dispatch_message(
+            "live_hud_boss",
+            {
+                "active": True,
+                "entity_id": 233_115_793_081_227,
+                "template_id": 7_115_718,
+                "boss_type": 3,
+                "started_at_epoch": 100.0,
+            },
+        )
+        snapshot_tokens = ["self", "bot-1", "bot-2"]
+        filetime = 116_444_736_000_000_000 + 110 * 10_000_000
+        for token, actor_id, damage in (
+            ("self", 1, 6_000),
+            ("bot-1", 2, 3_000),
+            ("bot-2", 3, 1_000),
+        ):
+            window._dispatch_message(
+                "team_stat",
+                {
+                    "filetime_100ns": filetime,
+                    "actor_id": actor_id,
+                    "user_token": token,
+                    "snapshot_tokens": snapshot_tokens,
+                    "absolute_damage": damage,
+                    "server_time": 0,
+                    "full_snapshot": True,
+                },
+            )
+
+        rows = window._main_authoritative_live_team_rows(110.0)
+
+        self.assertEqual({row["actor_id"] for row in rows}, {1, 2, 3})
+        self.assertEqual(
+            window._main_live_team_dps_text(rows, now=110.0), "1,000/s"
+        )
 
     def test_live_hud_boss_keeps_model_enrage_prediction_visible(self):
         window, _ = make_window()
@@ -6076,7 +5609,6 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.show_main_totals = True
         window.show_deaths = True
         window.show_team_dps = True
-        window.show_pvp_button = True
         window.highlight_self = True
         window.main_row_mask_opacity = 0
         window.window_locked = False
@@ -6181,7 +5713,6 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.show_main_totals = True
         window.show_deaths = True
         window.show_team_dps = True
-        window.show_pvp_button = True
         window.highlight_self = True
         window.main_row_mask_opacity = 0
         window.window_locked = False
@@ -6471,7 +6002,6 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.main_last_battle_result = {"encounter_id": "old"}
         window.main_last_live_display_snapshot = {"encounter_id": "old"}
         window.upload_profile = object()
-        window.pvp_recording = None
         window._flush_combat_history = lambda **options: flush_calls.append(options)
         window._clear_team_equipment_profiles = lambda: None
         window._invalidate_team_rating_preview_rows = lambda *_args, **_kwargs: None
@@ -6503,7 +6033,6 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.model.reset = lambda **_kwargs: None
         window._flush_combat_history = lambda: None
         window._draw_main_rows = lambda: None
-        window._render_skill_details = lambda: None
         window.reset()
         self.assertIsNone(window.main_last_battle_result)
         self.assertTrue(window._team_rating_preview_active())

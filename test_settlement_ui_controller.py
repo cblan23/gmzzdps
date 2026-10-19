@@ -1010,6 +1010,20 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(self.controller.tracker.encounters),1)
         self.assertFalse(self.controller.boss_entities)
 
+    def test_leave_after_boss_fight_exit_marks_wipe_at_exit_edge(self):
+        self.send('OnMsgSyncFightMode',100,300,[2])
+        encounter_id=self.controller.tracker.current_id
+        self.send('OnMsgSyncFightMode',110,300,[0])
+
+        self.assertEqual(self.controller.tracker.current_id,encounter_id)
+        self.send('OnMsgLeaveQuestControl',120,100,[])
+
+        encounter=self.controller.tracker.encounters[encounter_id]
+        self.assertEqual(encounter.result,'WIPE')
+        self.assertEqual(encounter.settlement_status,'PENDING')
+        self.assertEqual(encounter.ended_at_ns,110*NS)
+        self.assertIsNone(self.controller.tracker.current_id)
+
     def test_delayed_old_leave_does_not_reset_a_newer_live_pull(self):
         self.send('OnMsgSyncFightMode', 200, 300, [2])
         encounter_id = self.controller.tracker.current_id

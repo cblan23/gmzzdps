@@ -83,6 +83,9 @@ DAMAGE_TARGET_TEMPLATE_IDS = frozenset(
         7_100_632,
         7_100_633,
         7_100_634,
+        7_100_635,
+        7_100_636,
+        7_100_637,
         7_101_004,
         7_101_017,
         7_101_025,
@@ -2555,6 +2558,11 @@ class NetworkPacketParser:
                 and self.active_boss_fight_exit_time_100ns
                 and timestamp >= self.active_boss_fight_exit_time_100ns
             )
+            confirmed_training_dummy_start = bool(
+                corroborated_signal
+                and incoming_catalog_confirmed
+                and self._is_damage_target_template_id(incoming_template_id)
+            )
             active_activity = max(
                 int(self.active_boss_time_100ns or 0),
                 int(self.active_boss_damage_epoch or 0),
@@ -2573,6 +2581,7 @@ class NetworkPacketParser:
                 simultaneous_peer
                 and current_is_alive
                 and not confirmed_start_after_exit
+                and not confirmed_training_dummy_start
             ):
                 # A verified dual-Boss encounter publishes both metadata and
                 # HP streams.  Keep the first live main target stable; the
@@ -2589,6 +2598,7 @@ class NetworkPacketParser:
                 not phase_continuation
                 and not separate_encounter
                 and not confirmed_start_after_exit
+                and not confirmed_training_dummy_start
                 and (
                 (not damage_evidence and not same_template_replacement)
                 or (

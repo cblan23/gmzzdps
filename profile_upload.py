@@ -58,6 +58,24 @@ TRAINING_DUMMY_TEMPLATE_IDS = frozenset(
 UPLOAD_VICTORY_ARCHIVE_REASONS = frozenset(
     {"target_defeated", "boss_defeated", "stage_completed", "completed"}
 )
+UPLOAD_FAILED_ARCHIVE_REASONS = frozenset({"party_wipe", "wipe", "failed"})
+UPLOAD_INTERRUPTED_ARCHIVE_REASONS = frozenset(
+    {
+        "party_exit",
+        "space_transition",
+        "scene_change",
+        "scene_refresh",
+        "exit",
+        "reset",
+        "target_reset",
+        "manual_reset",
+        "team_counter_reset",
+        "boss_replaced",
+        "shutdown",
+        "capture_stopped",
+        "idle",
+    }
+)
 
 MAP_DIFFICULTIES = {
     5_200_056: "normal",
@@ -166,6 +184,7 @@ PUBLIC_DUNGEON_CATEGORIES: tuple[dict[str, object], ...] = (
                 "name": "安提哥努斯笔记",
                 "dungeon_ids": (5_100_040, 5_100_044),
                 "stage_ids": (5_150_038, 5_150_039, 5_150_040, 5_150_047, 5_150_048, 5_150_049),
+                "difficulties": ("normal", "hard"),
             },
             {
                 "key": "abundant-tree",
@@ -336,11 +355,6 @@ PUBLIC_PERFORMANCE_METRICS = frozenset({"dps", "boss_damage"})
 PUBLIC_PERFORMANCE_SORTS = frozenset(
     {"p10", "p25", "p50", "p75", "p90", "best", "sample_count"}
 )
-PUBLIC_NO_PROJECTION_SQL = """NOT EXISTS (
-    SELECT 1 FROM encounter_participants projection
-    WHERE projection.encounter_id=e.encounter_id
-      AND projection.public_character_name LIKE '%·投影'
-)"""
 PUBLIC_COMPETITIVE_ENCOUNTER_SQL = """NOT EXISTS (
     SELECT 1 FROM encounter_participants participant
     WHERE participant.encounter_id=e.encounter_id
@@ -387,13 +401,122 @@ class ProfileUploadError(ValueError):
         super().__init__(self.message)
 
 
+def _encounter_is_training_dummy(
+    encounter: Mapping[str, object], nested: Mapping[str, object]
+) -> bool:
+    for container in (encounter, nested):
+        target_filter = _safe_text(container.get("target_filter"), 32).casefold()
+        if target_filter in {"damage_dummy", "healing_dummy", "training_dummy"}:
+            return True
+        monster = container.get("monster")
+        if not isinstance(monster, Mapping):
+            continue
+        try:
+            template_id = int(monster.get("template_id") or 0)
+        except (TypeError, ValueError, OverflowError):
+            template_id = 0
+        if (
+            template_id in TRAINING_DUMMY_TEMPLATE_IDS
+            or "\u6728\u6869" in _safe_text(monster.get("name"), 64)
+        ):
+            return True
+    return False
+
+
+def _normalized_encounter_outcome(
+    encounter: Mapping[str, object],
+) -> tuple[str, bool, str]:
+    """Return one evidence-backed public result for an archived encounter."""
+
+    nested = encounter.get("payload")
+    nested = nested if isinstance(nested, Mapping) else {}
+    raw_result = _safe_text(
+        encounter.get("result", nested.get("result")), 24
+    ).casefold()
+    aliases = {
+        "胜利": "defeated",
+        "已击败": "defeated",
+        "success": "defeated",
+        "victory": "defeated",
+        "completed": "defeated",
+        "defeated": "defeated",
+        "失败": "failed",
+        "wipe": "failed",
+        "failed": "failed",
+        "中断": "interrupted",
+        "reset": "interrupted",
+        "interrupted": "interrupted",
+        "unknown": "undetermined",
+        "undetermined": "undetermined",
+        "invalid": "undetermined",
+    }
+    explicit = aliases.get(raw_result, "")
+    archive_reason = _safe_text(
+        encounter.get("archive_reason", nested.get("archive_reason")), 48
+    ).casefold()
+
+    completion_confirmed = bool(
+        encounter.get(
+            "completion_confirmed", nested.get("completion_confirmed")
+        )
+    )
+    for container in (encounter, nested):
+        accounting = container.get("damage_accounting")
+        validations = (
+            accounting.get("stage_summary_validations")
+            if isinstance(accounting, Mapping)
+            else None
+        )
+        if isinstance(validations, list) and any(
+            bool(item.get("completion_confirmed"))
+            for item in validations
+            if isinstance(item, Mapping)
+        ):
+            completion_confirmed = True
+            break
+
+    target_depleted = False
+    for container in (encounter, nested):
+        monster = container.get("monster")
+        if not isinstance(monster, Mapping) or "current_hp" not in monster:
+            continue
+        try:
+            current_hp = float(monster.get("current_hp"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(current_hp) and current_hp <= 0:
+            target_depleted = True
+            break
+
+    if explicit == "failed" or (
+        archive_reason == "target_reset"
+        and not _encounter_is_training_dummy(encounter, nested)
+    ):
+        return "failed", False, archive_reason
+    if explicit == "interrupted":
+        return "interrupted", False, archive_reason
+    if completion_confirmed:
+        return "defeated", True, archive_reason
+    if archive_reason in UPLOAD_FAILED_ARCHIVE_REASONS:
+        return "failed", False, archive_reason
+    if archive_reason in UPLOAD_INTERRUPTED_ARCHIVE_REASONS:
+        return "interrupted", False, archive_reason
+    if target_depleted:
+        return "defeated", True, archive_reason
+    if explicit == "defeated" or archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS:
+        # A stale target can disappear or be replaced while still alive.
+        # Without confirmed completion or zero HP, retain it as an interruption.
+        return "interrupted", False, archive_reason
+    return "undetermined", False, archive_reason
+
+
 def encounter_upload_rejection_code(encounter: object) -> str:
     """Return the hard upload rejection shared by the desktop and server.
 
     The input may be a complete local archive, a history-index summary, the
-    compact API payload, or the server's parsed representation.  A concrete
-    target-death archive reason and a confirmed settlement are both accepted
-    forms of victory evidence, matching the result displayed in battle history.
+    compact API payload, or the server's parsed representation.  Decided
+    victories, failures, and interruptions are uploadable; training targets
+    and records without a usable outcome remain local.
     """
 
     if not isinstance(encounter, Mapping):
@@ -454,46 +577,14 @@ def encounter_upload_rejection_code(encounter: object) -> str:
     ):
         return "UPLOAD_TRAINING_DUMMY_NOT_ALLOWED"
 
-    result = _safe_text(encounter.get("result"), 24).casefold()
-    result_aliases = {
-        "胜利": "defeated",
-        "已击败": "defeated",
-        "defeated": "defeated",
-        "失败": "failed",
-        "failed": "failed",
-        "中断": "interrupted",
-        "interrupted": "interrupted",
-        "unknown": "undetermined",
-        "undetermined": "undetermined",
-    }
-    normalized_result = result_aliases.get(result, "")
-    archive_reason = _safe_text(encounter.get("archive_reason", nested_payload.get("archive_reason")), 48).casefold()
-    completion_value = encounter.get(
-        "completion_confirmed", nested_payload.get("completion_confirmed")
+    normalized_result, _completion_confirmed, _archive_reason = (
+        _normalized_encounter_outcome(encounter)
     )
-    completion_confirmed = bool(completion_value)
-    accounting = encounter.get("damage_accounting")
-    if not completion_confirmed and isinstance(accounting, Mapping):
-        validations = accounting.get("stage_summary_validations")
-        completion_confirmed = bool(
-            isinstance(validations, list)
-            and any(
-                bool(item.get("completion_confirmed"))
-                for item in validations
-                if isinstance(item, Mapping)
-            )
-        )
-    if normalized_result in {"", "undetermined"} and (
-        completion_confirmed or archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
-    ):
-        normalized_result = "defeated"
-    # Upload eligibility and statistics/ranking qualification are separate.
-    # A captured target-death verdict is valid victory evidence even when a
-    # settlement detail packet never arrived; the latter still gates ranking.
-    victory = normalized_result == "defeated" and (
-        completion_confirmed or archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
+    return (
+        ""
+        if normalized_result in {"defeated", "failed", "interrupted"}
+        else "UPLOAD_VICTORY_REQUIRED"
     )
-    return "" if victory or normalized_result == "failed" else "UPLOAD_VICTORY_REQUIRED"
 
 
 @dataclass(frozen=True)
@@ -2125,29 +2216,16 @@ class ProfileUploadStore:
         fingerprint = hashlib.sha256(
             _json_text(fingerprint_source).encode("utf-8")
         ).hexdigest()
-        result = _safe_text(encounter.get("result"), 24).casefold()
-        archive_reason = _safe_text(encounter.get("archive_reason"), 48).casefold()
-        completion_confirmed = bool(encounter.get("completion_confirmed"))
-        if result not in {"defeated", "failed", "interrupted", "undetermined"} or (
-            result == "undetermined"
-            and archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
-        ):
-            result = (
-                "defeated"
-                if completion_confirmed
-                or archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
-                else "undetermined"
-            )
-        if (
-            result == "defeated"
-            and archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
-        ):
-            completion_confirmed = True
+        result, completion_confirmed, archive_reason = (
+            _normalized_encounter_outcome(encounter)
+        )
         completeness = _safe_text(encounter.get("data_completeness"), 32).casefold()
         if completeness not in {"complete", "partial", "incomplete", "mid_encounter"}:
             completeness = "complete" if all_resolved else "partial"
         payload = {
             "result": result,
+            "roster_authoritative": encounter.get("roster_authoritative") is True,
+            "team_total_damage_known": encounter.get("team_total_damage") is not None,
             "archive_reason": archive_reason,
             "completion_confirmed": completion_confirmed,
             "target_filter": _safe_text(encounter.get("target_filter"), 32),
@@ -2159,7 +2237,10 @@ class ProfileUploadStore:
             "brass_tome_enabled": brass_tome_enabled,
             "brass_tome_challenge_ids": brass_tome_challenge_ids,
             "brass_tome_source": brass_tome_source,
-            "team_dps": _as_float(encounter.get("team_dps"), maximum=1e18),
+            "team_dps": (
+                _as_float(encounter.get("team_dps"), maximum=1e18)
+                if encounter.get("team_dps") is not None else None
+            ),
             "hps_duration_seconds": _as_float(
                 encounter.get("hps_duration_seconds", duration), maximum=86_400.0
             ),
@@ -2728,6 +2809,7 @@ class ProfileUploadStore:
         existing_encounter = self._matching_encounter(connection, parsed)
         created = existing_encounter is None
         replacing_clock_recovery = False
+        replace_roster = False
         if created:
             encounter_id = _new_id("enc_")
             connection.execute(
@@ -2773,12 +2855,37 @@ class ProfileUploadStore:
             incoming_quality = int(parsed["data_quality"])
             stored_quality = int(existing_encounter["data_quality"])
             replace_encounter_core = incoming_quality >= stored_quality
+            same_client_record = bool(
+                parsed["client_encounter_id"]
+                and parsed["client_encounter_id"]
+                == existing_encounter["client_first_encounter_id"]
+            )
+            replace_roster = bool(
+                same_client_record
+                and parsed["payload"].get("roster_authoritative") is True
+                and not connection.execute(
+                    "SELECT 1 FROM uploads WHERE encounter_id=? "
+                    "AND uploader_character_hash<>? LIMIT 1",
+                    (encounter_id, uploader_hash),
+                ).fetchone()
+            )
             try:
                 stored_payload = json.loads(str(existing_encounter["payload_json"]))
             except (TypeError, ValueError):
                 stored_payload = {}
             if not isinstance(stored_payload, dict):
                 stored_payload = {}
+            replace_outcome = bool(
+                same_client_record
+                and any(
+                    stored_payload.get(field) != parsed["payload"].get(field)
+                    for field in (
+                        "result",
+                        "archive_reason",
+                        "completion_confirmed",
+                    )
+                )
+            )
             replacing_clock_recovery = bool(
                 stored_payload.get("recovery_source")
                 == "server_combat_clock_v2"
@@ -2788,6 +2895,16 @@ class ProfileUploadStore:
                 {} if replacing_clock_recovery else dict(stored_payload)
             )
             for field, value in parsed["payload"].items():
+                if replace_roster and field in {"module_coverage", "roster_authoritative"}:
+                    merged_payload[field] = value
+                    continue
+                if same_client_record and field in {
+                    "result",
+                    "archive_reason",
+                    "completion_confirmed",
+                }:
+                    merged_payload[field] = value
+                    continue
                 if field == "brass_tome_status":
                     stored_status = str(
                         stored_payload.get(field, "unknown") or "unknown"
@@ -2885,15 +3002,15 @@ class ProfileUploadStore:
                     parsed["started_at"] if replace_encounter_core else existing_encounter["started_at"],
                     parsed["ended_at"] if replace_encounter_core else existing_encounter["ended_at"],
                     parsed["duration"] if replace_encounter_core else existing_encounter["duration_seconds"],
-                    parsed["team_size"] if replace_encounter_core else existing_encounter["team_size"],
+                    parsed["team_size"] if replace_encounter_core or replace_roster else existing_encounter["team_size"],
                     parsed["team_total_damage"] if replace_encounter_core else existing_encounter["team_total_damage"],
                     game_version,
-                    parsed["participant_set_hash"] if replace_encounter_core else existing_encounter["participant_set_hash"],
+                    parsed["participant_set_hash"] if replace_encounter_core or replace_roster else existing_encounter["participant_set_hash"],
                     _json_text(merged_payload),
                     max(incoming_quality, stored_quality),
-                    qualification["statistics_status"] if replace_encounter_core else existing_encounter["statistics_status"],
-                    qualification["ranking_status"] if replace_encounter_core else existing_encounter["ranking_status"],
-                    _json_text(qualification) if replace_encounter_core else existing_encounter["validation_json"],
+                    qualification["statistics_status"] if replace_encounter_core or replace_outcome else existing_encounter["statistics_status"],
+                    qualification["ranking_status"] if replace_encounter_core or replace_outcome else existing_encounter["ranking_status"],
+                    _json_text(qualification) if replace_encounter_core or replace_outcome else existing_encounter["validation_json"],
                     timestamp,
                     encounter_id,
                 ),
@@ -2902,6 +3019,14 @@ class ProfileUploadStore:
             connection.execute(
                 "DELETE FROM encounter_participants WHERE encounter_id=?",
                 (encounter_id,),
+            )
+        elif replace_roster:
+            member_hashes = [row["character_hash"] for row in parsed["participants"]]
+            placeholders = ",".join("?" for _ in member_hashes)
+            connection.execute(
+                "DELETE FROM encounter_participants WHERE encounter_id=? "
+                f"AND character_hash NOT IN ({placeholders})",
+                [encounter_id, *member_hashes],
             )
         for participant in parsed["participants"]:
             self._upsert_participant(connection, encounter_id, participant, timestamp)
@@ -3186,7 +3311,7 @@ class ProfileUploadStore:
     ) -> dict[str, object] | None:
         public_id = _safe_text(encounter_id, 64)
         encounter = connection.execute(
-            f"SELECT e.* FROM encounters e WHERE e.encounter_id=? AND {PUBLIC_NO_PROJECTION_SQL}",
+            "SELECT e.* FROM encounters e WHERE e.encounter_id=?",
             (public_id,),
         ).fetchone()
         if encounter is None:
@@ -3278,7 +3403,10 @@ class ProfileUploadStore:
             "ended_at": float(encounter["ended_at"]),
             "duration_seconds": float(encounter["duration_seconds"]),
             "team_size": int(encounter["team_size"]),
-            "team_total_damage": int(encounter["team_total_damage"]),
+            "team_total_damage": (
+                None if payload.get("team_total_damage_known") is False
+                else int(encounter["team_total_damage"])
+            ),
             "statistics_status": str(encounter["statistics_status"]),
             "ranking_status": str(encounter["ranking_status"]),
             "game_version": str(encounter["game_version"]),
@@ -3296,8 +3424,9 @@ class ProfileUploadStore:
     ) -> dict[str, object]:
         """Browse stored battles independently of leaderboard qualification."""
         needle = _safe_text(query, 48).strip()
-        conditions = ["EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)",
-                      PUBLIC_NO_PROJECTION_SQL]
+        conditions = [
+            "EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)"
+        ]
         params: list[object] = []
         boss_name = _safe_text(boss, 96).strip()
         if boss_name:
@@ -3375,7 +3504,9 @@ class ProfileUploadStore:
                 'boss_name': _public_canonical_boss_name(row['boss_name']),
                 'stage_id': int(row['stage_id']), 'difficulty': str(row['difficulty']),
                 'ended_at': float(row['ended_at']), 'duration_seconds': float(row['duration_seconds']),
-                'team_size': int(row['team_size']), 'team_total_damage': int(row['team_total_damage']),
+                'team_size': int(row['team_size']),
+                'team_total_damage': (None if payload.get('team_total_damage_known') is False
+                                      else int(row['team_total_damage'])),
                 'team_dps': payload.get('team_dps'), 'result': payload.get('result', 'undetermined'),
                 'brass_tome_status': payload.get('brass_tome_status', 'unknown'),
                 'brass_tome_enabled': payload.get('brass_tome_enabled'),
@@ -3400,7 +3531,6 @@ class ProfileUploadStore:
             SUM({PUBLIC_RANKING_ENTRY_COUNT_SQL}) AS ranking_entries,
             MAX(ended_at) AS last_at
             FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
-                AND {PUBLIC_NO_PROJECTION_SQL}
             GROUP BY boss_name ORDER BY included DESC, last_at DESC""").fetchall()
         catalog_bosses: dict[str, dict[str, object]] = {}
         for row in rows:
@@ -3439,7 +3569,6 @@ class ProfileUploadStore:
                 {PUBLIC_RANKING_ENTRY_COUNT_SQL} AS ranking_entries
             FROM encounters e
             WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
-                AND {PUBLIC_NO_PROJECTION_SQL}
             ORDER BY e.ended_at DESC"""
         ).fetchall()
 
@@ -3456,7 +3585,7 @@ class ProfileUploadStore:
                     "included": 0,
                     "ranking_entries": 0,
                     "last_at": 0.0,
-                    "difficulties": set(),
+                    "difficulties": set(dungeon.get("difficulties", ())),
                     "brass_tome_statuses": set(),
                     "bosses": (
                         {
@@ -3565,7 +3694,7 @@ class ProfileUploadStore:
                 key=lambda boss: (-int(boss['included']), -float(boss['last_at'])),
             ),
             'difficulties': [str(row[0]) for row in connection.execute(
-                f"SELECT DISTINCT e.difficulty FROM encounters e WHERE e.difficulty!='' AND {PUBLIC_NO_PROJECTION_SQL} ORDER BY e.difficulty")],
+                "SELECT DISTINCT e.difficulty FROM encounters e WHERE e.difficulty!='' ORDER BY e.difficulty")],
             'dungeon_categories': categories,
             'brass_tome_statuses': sorted({
                 status
@@ -3591,10 +3720,9 @@ class ProfileUploadStore:
         ).fetchone()[0]
         history = connection.execute(f"""SELECT COUNT(*) AS encounters, MAX(ended_at) AS last_at
             FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
-                AND {PUBLIC_NO_PROJECTION_SQL}""").fetchone()
+                """).fetchone()
         last_uploaded = connection.execute(f"""SELECT MAX(u.last_uploaded_at) FROM uploads u
-            JOIN encounters e ON e.encounter_id=u.encounter_id
-            WHERE {PUBLIC_NO_PROJECTION_SQL}""").fetchone()[0]
+            JOIN encounters e ON e.encounter_id=u.encounter_id""").fetchone()[0]
         return {
             "encounters": int(summary["encounters"] if summary else 0),
             "uploads": int(uploads),
@@ -4332,6 +4460,20 @@ def build_upload_encounter(
     raw_participants = record.get("participants")
     if not isinstance(raw_participants, list) or not raw_participants:
         raise ProfileUploadError("BAD_ENCOUNTER")
+    accounting = record.get("damage_accounting")
+    raw_encounter_member_ids = (
+        accounting.get("encounter_member_ids")
+        if isinstance(accounting, Mapping)
+        else None
+    )
+    encounter_member_ids = {
+        actor_id
+        for actor_id in (
+            _as_int(value, minimum=-(1 << 63), maximum=(1 << 63) - 1)
+            for value in raw_encounter_member_ids
+        )
+        if actor_id
+    } if isinstance(raw_encounter_member_ids, list) else set()
     participant_by_actor: dict[int, dict[str, object]] = {}
     order: list[int] = []
     self_actor_ids: list[int] = []
@@ -4369,6 +4511,8 @@ def build_upload_encounter(
     stage_rows = _record_stage_actor_rows(record)
     for actor_id, stage_row in stage_rows.items():
         if actor_id not in participant_by_actor:
+            if encounter_member_ids and actor_id not in encounter_member_ids:
+                continue
             participant_by_actor[actor_id] = stage_row
             order.append(actor_id)
         else:
@@ -4385,6 +4529,12 @@ def build_upload_encounter(
                 healer.get("actor_id"), minimum=-(1 << 63), maximum=(1 << 63) - 1
             )
             if not actor_id:
+                continue
+            if (
+                actor_id not in participant_by_actor
+                and encounter_member_ids
+                and actor_id not in encounter_member_ids
+            ):
                 continue
             included_healers.append(healer)
             if actor_id not in participant_by_actor:
@@ -4422,6 +4572,7 @@ def build_upload_encounter(
             member["skills"] = damage_skills
 
     raw_damage_taken = record.get("damage_taken")
+    included_damage_taken: list[Mapping[str, object]] = []
     if isinstance(raw_damage_taken, list):
         for taken_row in raw_damage_taken:
             if not isinstance(taken_row, dict):
@@ -4433,6 +4584,13 @@ def build_upload_encounter(
             )
             if not actor_id:
                 continue
+            if (
+                actor_id not in participant_by_actor
+                and encounter_member_ids
+                and actor_id not in encounter_member_ids
+            ):
+                continue
+            included_damage_taken.append(taken_row)
             if actor_id not in participant_by_actor:
                 participant_by_actor[actor_id] = {"actor_id": actor_id}
                 order.append(actor_id)
@@ -4453,6 +4611,8 @@ def build_upload_encounter(
                 member["taken_source"] = taken_row["source"]
     for actor_id in identities:
         if actor_id not in participant_by_actor:
+            if encounter_member_ids and actor_id not in encounter_member_ids:
+                continue
             participant_by_actor[actor_id] = {"actor_id": actor_id}
             order.append(actor_id)
     order = list(dict.fromkeys(order))[:MAX_ENCOUNTER_PARTICIPANTS]
@@ -4475,9 +4635,9 @@ def build_upload_encounter(
         raw = participant_by_actor[actor_id]
         identity_value = identities.get(actor_id, "")
         is_uploader = actor_id == self_actor_id
-        is_ai = False
+        is_ai = bool(raw.get("is_ai"))
         if identity_value:
-            is_ai = canonical_character_identity(
+            is_ai = is_ai or canonical_character_identity(
                 identity_value, allow_ai=True
             ).kind == "ai"
         participant = {
@@ -4586,44 +4746,9 @@ def build_upload_encounter(
     primary_template = _as_int(monster.get("template_id"), maximum=2_000_000_000)
     if primary_template > 0:
         template_ids.add(primary_template)
-    accounting = record.get("damage_accounting")
-    validations = accounting.get("stage_summary_validations") if isinstance(accounting, dict) else []
-    completion_confirmed = bool(record.get("completion_confirmed"))
-    if not completion_confirmed and isinstance(validations, list):
-        completion_confirmed = any(
-            bool(item.get("completion_confirmed"))
-            for item in validations
-            if isinstance(item, dict)
-        )
-    archive_reason = _safe_text(record.get("archive_reason"), 48).casefold()
-    raw_result = _safe_text(record.get("result"), 32).casefold()
-    result_aliases = {
-        "胜利": "defeated",
-        "已击败": "defeated",
-        "defeated": "defeated",
-        "失败": "failed",
-        "failed": "failed",
-        "中断": "interrupted",
-        "interrupted": "interrupted",
-    }
-    result = result_aliases.get(raw_result, "")
-    if not result:
-        if (
-            archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
-            or completion_confirmed
-        ):
-            result = "defeated"
-        elif archive_reason in {"party_wipe", "failed"}:
-            result = "failed"
-        elif archive_reason in {"party_exit", "space_transition", "exit", "reset"}:
-            result = "interrupted"
-        else:
-            result = "undetermined"
-    if (
-        result == "defeated"
-        and archive_reason in UPLOAD_VICTORY_ARCHIVE_REASONS
-    ):
-        completion_confirmed = True
+    result, completion_confirmed, archive_reason = _normalized_encounter_outcome(
+        record
+    )
     all_resolved = bool(participants) and all(item["character_id"] for item in participants)
     completeness = "complete" if all_resolved and len(participants) == team_size else "partial"
     team_timeline: list[dict[str, object]] = []
@@ -4667,14 +4792,13 @@ def build_upload_encounter(
         team_hps = team_healing / healing_duration if healing_duration > 0 else 0
     team_taken = record.get("team_taken", 0)
     if (
-        isinstance(raw_damage_taken, list)
-        and raw_damage_taken
+        included_damage_taken
         and all(
-            isinstance(row, Mapping) and row.get("taken") is not None
-            for row in raw_damage_taken
+            row.get("taken") is not None
+            for row in included_damage_taken
         )
     ):
-        team_taken = sum(_as_int(row.get("taken")) for row in raw_damage_taken)
+        team_taken = sum(_as_int(row.get("taken")) for row in included_damage_taken)
 
     difficulty, difficulty_source = _encounter_difficulty(record)
     (
@@ -4774,6 +4898,9 @@ def build_upload_encounter(
         "completion_confirmed": completion_confirmed,
         "capture_started_mid_encounter": bool(record.get("capture_started_mid_encounter")),
         "data_completeness": completeness,
+        "roster_authoritative": bool(encounter_member_ids) or (
+            str(record.get("settlement_status") or "").upper() == "SETTLED"
+        ),
         "team_size": team_size,
         "team_total_damage": record.get("total_damage", 0),
         "team_dps": record.get("team_dps", 0),

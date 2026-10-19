@@ -12,15 +12,10 @@ from main_hud_artwork import (
     HUD_DEFAULT_VISIBLE_ROWS,
     HUD_MAX_VISIBLE_ROWS,
     HUD_ROW_HEIGHT,
-    PVP_TEAM_PAGE_SIZE,
-    PVP_MAX_TEAM_PAGES,
-    PVP_MAX_TEAM_MEMBERS,
-    PVP_TEAM_VISIBLE_ROWS,
     HudRenderResult,
     MainHudRenderer,
     clamp_visible_rows,
     equipment_type_badge,
-    pvp_equipment_type_badge,
 )
 
 

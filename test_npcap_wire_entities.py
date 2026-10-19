@@ -393,6 +393,84 @@ class WireEntityTests(unittest.TestCase):
             for kind, value in baldwin_hp
         ))
 
+    def test_damage_dummy_fight_start_replaces_cached_boss_without_exit(self):
+        clown_id = ENTITY + 3
+        dummy_id = ENTITY + 4
+        base = 1_792_110_645_507_159_000
+        parser = NpcapParserAdapter(
+            {},
+            {
+                '7103012': {'name': '小丑', 'boss_type': 3, 'level': 91},
+                '7100635': {'name': '伤害木桩', 'boss_type': 3, 'level': 91},
+            },
+            boss_name_allowlist=('小丑', '伤害木桩'),
+        )
+
+        def created(entity, template, name, offset):
+            return {
+                'method': 'NpcapEntityCreated',
+                'capture_source': 'npcap',
+                'arguments_synchronized': True,
+                'decoded_arguments': [{
+                    'entity_id': entity,
+                    'entity_token': name,
+                    'entity_class': 'NpcActor',
+                    'properties': {
+                        'TemplateID': template,
+                        'Level': 91,
+                        'BossType': 3,
+                    },
+                }],
+                'network_entity_id': entity,
+                'script_entity': entity,
+                'capture_timestamp_ns': base + offset,
+                'filetime_100ns': (
+                    (base + offset) // 100 + 116_444_736_000_000_000
+                ),
+            }
+
+        def rpc(entity, method, args, offset):
+            return {
+                **created(entity, 0, '', offset),
+                'method': method,
+                'decoded_arguments': args,
+            }
+
+        parser.process(created(clown_id, 7_103_012, 'clown', 0))
+        parser.process(rpc(
+            clown_id, 'OnMsgSyncDirtyFightAttributes', [{'21': 51_979_305.0}],
+            1_000,
+        ))
+        parser.process(rpc(
+            clown_id, 'OnMsgSyncCurrentHp', [7_169_274.0], 2_000,
+        ))
+
+        parser.process(created(dummy_id, 7_100_635, 'dummy', 3_000))
+        parser.process(rpc(
+            dummy_id, 'OnMsgSyncDirtyFightAttributes', [{'21': 9_999_999_999.0}],
+            4_000,
+        ))
+        self.assertEqual(parser.active_boss_entity_id, clown_id)
+
+        parser.process(rpc(dummy_id, 'OnMsgSyncFightMode', [2], 5_000))
+        self.assertEqual(parser.active_boss_entity_id, dummy_id)
+        self.assertEqual(parser.active_boss_pointer, dummy_id)
+
+        hp_updates = parser.process(rpc(
+            dummy_id, 'OnMsgSyncCurrentHp', [9_999_979_570.0], 6_000,
+        ))
+        state = parser.current_active_boss_state()
+        self.assertEqual(state['template_id'], 7_100_635)
+        self.assertEqual(state['name'], '伤害木桩')
+        self.assertEqual(state['level'], 91)
+        self.assertEqual(state['max_hp'], 9_999_999_999.0)
+        self.assertTrue(any(
+            kind == 'monster'
+            and value.get('entity_id') == dummy_id
+            and value.get('current_hp') == 9_999_979_570.0
+            for kind, value in hp_updates
+        ))
+
     def test_live_second_boss_does_not_steal_active_lock(self):
         first_id = ENTITY + 10
         second_id = ENTITY + 11
@@ -511,25 +589,6 @@ class WireEntityTests(unittest.TestCase):
         self.assertEqual(p.dungeon_id,5100069)
         self.assertTrue(any(k=='instance_context' for k,v in updates))
 
-    def test_last_hunt_uses_its_verified_shifted_space_properties(self):
-        decoder = NpcapProtocolDecoder()
-        decoder._append_application(envelope(11, create(
-            entity=57363585205503, cls=b'PVPLastHuntSpace', token=b'aq0ZR5dVgmeSfQSK',
-            props={4:1, 5:0, 8:0, 11:1200001,
-                   17:16709800008, 18:b'aq0ZR5dVgmeSfQSK',
-                   21:5200167, 24:5200167, 44:16709800008},
-        )), 1, 1789732324.883635)
-        record = decoder._rpc_records()[0]
-        value = record['decoded_arguments'][0]
-        self.assertTrue(value['known_property_schema'])
-        self.assertEqual(value['properties']['TemplateID'], 5200167)
-        parser = NpcapParserAdapter()
-        context = next(v for k, v in parser.process(record) if k == 'instance_context')
-        self.assertEqual(context['map_id'], 5200167)
-        self.assertEqual(context['instance_id'], 'aq0ZR5dVgmeSfQSK')
-        observation = parser.take_pvp_observations()[0]
-        self.assertEqual(observation['context']['map_id'], 5200167)
-        self.assertEqual(observation['context']['instance_id'], 'aq0ZR5dVgmeSfQSK')
 
     def test_space_creation_clears_stale_stage_but_duplicate_retains_it(self):
         p = NpcapParserAdapter()

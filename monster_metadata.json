@@ -1550,6 +1550,24 @@
       "level": 84,
       "name": "伤害木桩"
     },
+    "7100635": {
+      "boss_type": 3,
+      "level": 91,
+      "localization_id": 435407409907200,
+      "name": "伤害木桩"
+    },
+    "7100636": {
+      "boss_type": 3,
+      "level": 93,
+      "localization_id": 435407409907200,
+      "name": "伤害木桩"
+    },
+    "7100637": {
+      "boss_type": 3,
+      "level": 95,
+      "localization_id": 435407409907200,
+      "name": "伤害木桩"
+    },
     "7100700": {
       "boss_type": 4,
       "localization_id": 915000906483456

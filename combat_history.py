@@ -909,6 +909,45 @@ class CombatHistoryStore:
             return None
         return record if self._valid_record(record) else None
 
+    def find_recent_character_records(
+        self,
+        current_character_id: object,
+        *,
+        limit: int = 256,
+        minimum_saved_at_epoch: float = 0.0,
+    ) -> list[dict]:
+        """Return recent valid archives owned by the current character."""
+
+        character_id = str(current_character_id or "").strip()
+        if not character_id or limit <= 0:
+            return []
+        try:
+            paths = sorted(
+                self.directory.glob("*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )[: int(limit)]
+            minimum_epoch = float(minimum_saved_at_epoch or 0.0)
+        except (OSError, TypeError, ValueError, OverflowError):
+            return []
+        records: list[dict] = []
+        for path in paths:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                saved_at_epoch = float(
+                    record.get("ended_at_epoch")
+                    or record.get("saved_at_epoch")
+                    or 0.0
+                )
+            except (OSError, AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            if saved_at_epoch < minimum_epoch or not self._valid_record(record):
+                continue
+            if str(record.get("self_character_id") or "").strip() != character_id:
+                continue
+            records.append(record)
+        return records
+
     def find_legacy_polluted_will_victories(
         self,
         current_character_id: object,

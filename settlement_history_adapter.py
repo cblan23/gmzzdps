@@ -13,8 +13,17 @@ import math
 
 from combat_history import rebase_relative_combat_logs
 from encounter_tracker import EncounterRecord, EncounterTracker
-from history_index import rebuild_team_dps_timeline
-from network_state import boss_template_continues_encounter
+from history_index import (
+    RESULT_DEFEATED,
+    RESULT_FAILED,
+    RESULT_INTERRUPTED,
+    normalize_battle_result,
+    rebuild_team_dps_timeline,
+)
+from network_state import (
+    boss_template_continues_encounter,
+    is_training_dummy_template_id,
+)
 
 
 SETTLEMENT_HISTORY_SOURCE = "passive_npcap_settlement"
@@ -23,6 +32,22 @@ _RESULTS = {
     "WIPE": ("wipe", "party_wipe"),
     "RESET": ("interrupted", "scene_change"),
 }
+
+
+def _record_is_training_dummy(record: dict) -> bool:
+    if str(record.get("target_filter") or "").strip().casefold() in {
+        "damage_dummy",
+        "healing_dummy",
+        "training_dummy",
+    }:
+        return True
+    monster = record.get("monster")
+    if not isinstance(monster, dict):
+        return False
+    return bool(
+        is_training_dummy_template_id(monster.get("template_id"))
+        or "\u6728\u6869" in str(monster.get("name") or "")
+    )
 
 
 def _epoch_text(value: float | None) -> str:
@@ -37,6 +62,15 @@ def _actor_id(value: object) -> int:
     except (TypeError, ValueError, OverflowError):
         return 0
     return parsed if parsed > 0 else 0
+
+
+def _combat_actor_id(value: object) -> int:
+    """Return a real or stable token actor ID, including negative AI IDs."""
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return parsed if parsed else 0
 
 
 def visible_encounter_member_tokens(
@@ -67,7 +101,7 @@ def visible_encounter_member_tokens(
         member = members.get(token, {})
         if (
             identity.get("is_ai") is True
-            and not _actor_id(identity.get("iid") or member.get("iid"))
+            and not _combat_actor_id(identity.get("iid") or member.get("iid"))
             and token not in server_tokens
             and all(member.get(key) is None for key in ("damage", "bear", "heal"))
         ):
@@ -228,11 +262,26 @@ def _base_actor_rows(base: dict, collection_name: str) -> dict[int, dict]:
     if not isinstance(rows, list):
         return {}
     return {
-        _actor_id(row.get("actor_id")): deepcopy(row)
+        _combat_actor_id(row.get("actor_id")): deepcopy(row)
         for row in rows
         if isinstance(row, dict)
-        and _actor_id(row.get("actor_id"))
+        and _combat_actor_id(row.get("actor_id"))
     }
+
+
+def _base_actor_identities(base: dict) -> dict[int, dict]:
+    identities: dict[int, dict] = {}
+    for field in ("participant_identities", "participants_snapshot"):
+        rows = base.get(field) if isinstance(base, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            actor_id = _combat_actor_id(row.get("actor_id") or row.get("iid"))
+            if actor_id and actor_id not in identities:
+                identities[actor_id] = deepcopy(row)
+    return identities
 
 
 def encounter_history_record(
@@ -261,6 +310,7 @@ def encounter_history_record(
     existing_participants = _base_actor_rows(base, "participants")
     existing_healers = _base_actor_rows(base, "healers")
     existing_taken = _base_actor_rows(base, "damage_taken")
+    existing_identities = _base_actor_identities(base)
     existing_equipment = {}
     for collection_name in ("participants", "healers", "damage_taken"):
         collection = base.get(collection_name)
@@ -299,7 +349,7 @@ def encounter_history_record(
             continue
         token = str(identity["id"])
         values = members.get(token, {})
-        actor = _actor_id(identity.get("iid") or values.get("iid"))
+        actor = _combat_actor_id(identity.get("iid") or values.get("iid"))
         is_self = token == encounter.self_token
         local = existing_participants.get(actor, {})
         if token not in visible_tokens:
@@ -514,6 +564,126 @@ def encounter_history_record(
             )
             healers.append(healer_row)
 
+    if not settled:
+        represented_actors = {
+            _combat_actor_id(row.get("actor_id"))
+            for row in participants
+            if isinstance(row, dict)
+        }
+        for actor, local in existing_participants.items():
+            if actor in represented_actors:
+                continue
+            damage = _optional_nonnegative(local.get("damage"))
+            if damage is None:
+                continue
+            identity = existing_identities.get(actor, {})
+            token = str(
+                local.get("user_token")
+                or local.get("character_id")
+                or identity.get("character_id")
+                or identity.get("user_token")
+                or identity.get("id")
+                or ""
+            ).strip()
+            row = deepcopy(local)
+            row.update(
+                {
+                    "actor_id": actor,
+                    "name": str(local.get("name") or identity.get("name") or ""),
+                    "is_self": bool(local.get("is_self")),
+                    "profession_id": (
+                        local.get("profession_id")
+                        or identity.get("profession_id")
+                        or 0
+                    ),
+                    "extraordinary_rating": (
+                        local.get("extraordinary_rating")
+                        or identity.get("extraordinary_rating")
+                    ),
+                    "is_ai": bool(
+                        local.get("is_ai", identity.get("is_ai", False))
+                    ),
+                    "damage": damage,
+                    "dps": _optional_nonnegative_float(local.get("dps")),
+                    "share": None,
+                    "settlement_status": encounter.settlement_status,
+                    "settlement_hint": (
+                        "未取得结算"
+                        if encounter.settlement_status == "ABANDONED"
+                        else "等待结算"
+                    ),
+                    "data_source": str(
+                        local.get("data_source") or "verified_local_observation"
+                    ),
+                    "local_detail_available": True,
+                }
+            )
+            if token:
+                row["user_token"] = token
+            participants.append(row)
+            represented_actors.add(actor)
+
+            local_taken = existing_taken.get(actor, {})
+            taken = _optional_nonnegative(local_taken.get("taken"))
+            taken_values.append(taken)
+            taken_row = deepcopy(local_taken) if local_taken else {}
+            taken_row.update(
+                {
+                    "actor_id": actor,
+                    "name": row["name"],
+                    "is_self": row["is_self"],
+                    "profession_id": row["profession_id"],
+                    "extraordinary_rating": row.get("extraordinary_rating"),
+                    "is_ai": row["is_ai"],
+                    "taken": taken,
+                    "share": None,
+                    "source": (
+                        str(local_taken.get("source") or "verified_local_observation")
+                        if taken is not None
+                        else "unavailable"
+                    ),
+                }
+            )
+            taken_rows.append(taken_row)
+
+            local_healer = existing_healers.get(actor, {})
+            heal = _optional_nonnegative(local_healer.get("effective_healing"))
+            healing_values.append(heal)
+            if local_healer or not existing_healers:
+                healer_row = deepcopy(local_healer) if local_healer else {}
+                healer_row.update(
+                    {
+                        "actor_id": actor,
+                        "name": row["name"],
+                        "is_self": row["is_self"],
+                        "profession_id": row["profession_id"],
+                        "extraordinary_rating": row.get("extraordinary_rating"),
+                        "is_ai": row["is_ai"],
+                        "hps": _optional_nonnegative_float(local_healer.get("hps")),
+                        "total_healing": _optional_nonnegative(
+                            local_healer.get("total_healing")
+                        ),
+                        "effective_healing": heal,
+                        "overhealing": _optional_nonnegative(
+                            local_healer.get("overhealing")
+                        ),
+                        "overheal_rate": _optional_nonnegative_float(
+                            local_healer.get("overheal_rate")
+                        ),
+                        "skills": deepcopy(local_healer.get("skills", [])),
+                        "targets": deepcopy(local_healer.get("targets", [])),
+                        "coverage": (
+                            str(
+                                local_healer.get("coverage")
+                                or "verified_local_observation"
+                            )
+                            if heal is not None
+                            else "unavailable"
+                        ),
+                    }
+                )
+                healers.append(healer_row)
+
     damage_values = [row.get("damage") for row in participants]
     if damage_values and all(value is not None for value in damage_values):
         total_damage = sum(int(value) for value in damage_values)
@@ -552,6 +722,36 @@ def encounter_history_record(
     result, archive_reason = _RESULTS.get(
         encounter.result, ("interrupted", "scene_change")
     )
+    if encounter.result == "RESET":
+        base_reason = str(base.get("archive_reason") or "").strip().casefold()
+        if base_reason in {"party_wipe", "wipe", "failed"} or (
+            base_reason == "target_reset"
+            and not _record_is_training_dummy(base)
+        ):
+            result = "failed"
+            archive_reason = (
+                "party_wipe" if base_reason == "target_reset" else base_reason
+            )
+        else:
+            result = "interrupted"
+            archive_reason = (
+                base_reason
+                if base_reason
+                in {
+                    "party_exit",
+                    "space_transition",
+                    "scene_change",
+                    "scene_refresh",
+                    "target_reset",
+                    "manual_reset",
+                    "team_counter_reset",
+                    "boss_replaced",
+                    "shutdown",
+                    "capture_stopped",
+                    "idle",
+                }
+                else "scene_change"
+            )
     started = encounter.started_at_ns / 1_000_000_000
     ended = (
         encounter.ended_at_ns / 1_000_000_000
@@ -592,6 +792,20 @@ def encounter_history_record(
         deepcopy(row) for row in encounter.participants_snapshot
         if isinstance(row, dict) and row.get("id") in visible_tokens
     ]
+    visible_identity_actors = {
+        _combat_actor_id(row.get("actor_id") or row.get("iid"))
+        for row in visible_identities
+    }
+    participant_actors = {
+        _combat_actor_id(row.get("actor_id"))
+        for row in participants
+        if isinstance(row, dict)
+    }
+    for actor, identity in existing_identities.items():
+        if actor not in participant_actors or actor in visible_identity_actors:
+            continue
+        visible_identities.append(deepcopy(identity))
+        visible_identity_actors.add(actor)
     base_duration = _optional_nonnegative_float(base.get("duration_seconds"))
     if duration is None and base_duration:
         duration = base_duration
@@ -681,21 +895,37 @@ def encounter_history_record(
             "damage_accounting": damage_accounting,
         }
     )
+    if result != "failed":
+        output.pop("failure_reason", None)
     return output
 
 
 def _record_result(record: dict) -> str | None:
-    result = str(record.get("result", "")).casefold()
     reason = str(record.get("archive_reason", "")).casefold()
-    if result in {"success", "defeated", "completed"} or reason in {
-        "target_defeated",
-        "boss_defeated",
-        "stage_completed",
-    }:
-        return "VICTORY"
-    if result in {"wipe", "failed"} or reason in {"party_wipe", "wipe"}:
+    if reason in {"party_wipe", "wipe", "failed"}:
         return "WIPE"
-    if result in {"interrupted", "reset"}:
+    if reason == "target_reset" and not _record_is_training_dummy(record):
+        return "WIPE"
+    if reason in {
+        "party_exit",
+        "space_transition",
+        "scene_change",
+        "scene_refresh",
+        "target_reset",
+        "manual_reset",
+        "team_counter_reset",
+        "boss_replaced",
+        "shutdown",
+        "capture_stopped",
+        "idle",
+    }:
+        return "RESET"
+    result = normalize_battle_result(record)
+    if result == RESULT_DEFEATED:
+        return "VICTORY"
+    if result == RESULT_FAILED:
+        return "WIPE"
+    if result == RESULT_INTERRUPTED:
         return "RESET"
     return None
 
@@ -1175,10 +1405,28 @@ class SettlementHistoryAdapter:
         encounter = tracker.encounters.get(self.local_bindings.get(local_id, ""))
         if encounter is None:
             encounter = match_local_history_record(tracker, record)
-        if encounter is None or encounter.history_deleted:
+        if (
+            encounter is None
+            or encounter.history_deleted
+        ):
             return None
         if local_id:
             self.local_bindings[local_id] = encounter.local_encounter_id
+        if encounter.ended_at_ns is None:
+            # Local callbacks can go idle while an AI party keeps fighting.
+            # Keep the archive on the bound pull's ID and wait for its end or
+            # delayed server table before uploading it as a decided battle.
+            if str(record.get("archive_reason") or "").casefold() != "idle":
+                return None
+            projected = deepcopy(record)
+            projected.update(
+                encounter_id=encounter.local_encounter_id,
+                battle_id=encounter.local_encounter_id,
+                local_encounter_id=encounter.local_encounter_id,
+                local_observation_id=local_id,
+                settlement_status="PENDING",
+            )
+            return projected
         duration = encounter.encounter_duration_seconds
         if duration is None:
             duration = max(0.0, ((encounter.ended_at_ns or encounter.started_at_ns)

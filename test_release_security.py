@@ -38,17 +38,20 @@ class ReleaseSecurityTests(unittest.TestCase):
             build_script,
         )
         self.assertIn(
-            '"--include-data-files=assets/*.png=assets/"',
+            '"--include-data-files=assets/main_hud_reference.png=assets/main_hud_reference.png"',
             build_script,
         )
+        self.assertNotIn('"--include-data-files=assets/*.png=assets/"', build_script)
+        self.assertNotIn('"--include-module=pvp_tracker"', build_script)
+        self.assertNotIn('"--include-data-files=assets/pvp/', build_script)
         self.assertIn(
             '"--include-data-files=assets/professions/*.png=assets/professions/"',
             build_script,
         )
-        self.assertIn(
-            '"--include-data-files=assets/skills/*.png=assets/skills/"',
-            build_script,
-        )
+        self.assertNotIn('assets/skills/', build_script)
+        self.assertNotIn('assets/equipment/', build_script)
+        self.assertNotIn('assets/sidebar_', build_script)
+        self.assertNotIn('assets/pve_mode_icon.png', build_script)
         self.assertIn(
             '"--include-data-files=assets/bosses/*.png=assets/bosses/"',
             build_script,

@@ -25,9 +25,9 @@ class HudRenderCache:
                 and options == self.options and snapshot == self.snapshot):
             self.hits += 1
             return self.result
-        # PVP snapshots are freshly projected for each paint and are never
-        # mutated after this call. Avoid copying every roster/equipment row on
-        # each combat event; retain the defensive copy for legacy PVE callers.
+        # Layered HUD snapshots are freshly projected for each paint and are
+        # never mutated after this call. Avoid copying every row on each combat
+        # event; retain the defensive copy for callers that reuse their input.
         owned = snapshot if assume_snapshot_immutable else deepcopy(snapshot)
         result = renderer.render(snapshot, pixel_scale=pixel_scale, font_size=font_size)
         self.renderer, self.snapshot, self.options, self.result = renderer, owned, options, result

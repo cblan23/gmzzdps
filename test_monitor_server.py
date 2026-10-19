@@ -426,7 +426,13 @@ class MonitorServerTests(unittest.TestCase):
         session = service.sign_in_card(card_key)
         self.assertTrue(session.active)
 
-        start_ns = 1_789_700_000_000_000_000
+        start_ns = time.time_ns() - 30_000_000_000
+        started_at = time.strftime(
+            "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(start_ns / 1_000_000_000)
+        )
+        ended_at = time.strftime(
+            "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime((start_ns + 30_000_000_000) / 1_000_000_000)
+        )
         character_id = profile_character_token(9_001)
         record = {
             "schema_version": 1,
@@ -438,8 +444,8 @@ class MonitorServerTests(unittest.TestCase):
             "instance_id": "http-pvp-instance",
             "started_at_ns": start_ns,
             "ended_at_ns": start_ns + 30_000_000_000,
-            "started_at": "2026-09-18T12:00:00+00:00",
-            "ended_at": "2026-09-18T12:00:30+00:00",
+            "started_at": started_at,
+            "ended_at": ended_at,
             "duration_seconds": 30,
             "result": "未知",
             "end_reason": "left_map",
@@ -474,11 +480,11 @@ class MonitorServerTests(unittest.TestCase):
             "profession_id": 1_200_003,
             "extraordinary_rating": 90_001,
             "captured_at_ns": start_ns,
-            "captured_at": "2026-09-18T12:00:00+00:00",
+            "captured_at": started_at,
             "source": "RetOtherRoleShapeData",
             "equipment_snapshot": {
                 "captured_at_ns": start_ns,
-                "captured_at": "2026-09-18T12:00:00+00:00",
+                "captured_at": started_at,
                 "extraordinary_rating": 90_001,
                 "equipment_score": None,
                 "equipment": [],

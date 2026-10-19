@@ -218,6 +218,44 @@ def _dict_rows(value: object) -> list[dict]:
     return [row for row in value if isinstance(row, dict)]
 
 
+_TRAINING_DUMMY_TEMPLATE_IDS = frozenset(
+    {
+        7_100_632,
+        7_100_633,
+        7_100_634,
+        7_100_635,
+        7_100_636,
+        7_100_637,
+        7_101_004,
+        7_101_006,
+        7_101_017,
+        7_101_025,
+        7_101_029,
+        7_101_030,
+        7_106_050,
+        7_107_304,
+        7_114_223,
+        7_114_224,
+        7_114_225,
+        7_114_226,
+        7_114_227,
+        7_114_228,
+        7_114_233,
+    }
+)
+
+
+def _record_is_training_dummy(record: dict, monster: dict) -> bool:
+    target_filter = _text(record.get("target_filter")).casefold()
+    if target_filter in {"damage_dummy", "healing_dummy", "training_dummy"}:
+        return True
+    template_id = _optional_int(monster.get("template_id"))
+    return bool(
+        template_id in _TRAINING_DUMMY_TEMPLATE_IDS
+        or "\u6728\u6869" in _text(monster.get("name"))
+    )
+
+
 def _extraordinary_rating(*sources: object) -> int | None:
     """Read only explicitly identified rating fields; never infer a score."""
 
@@ -502,18 +540,27 @@ def normalize_battle_result(record: dict) -> str:
         "undetermined": RESULT_UNDETERMINED,
         "invalid": RESULT_UNDETERMINED,
     }
-    if explicit in aliases:
-        return aliases[explicit]
+    explicit_result = aliases.get(explicit)
+    monster = _dict(record.get("monster"))
+    reason = _text(record.get("archive_reason")).casefold()
+    if explicit_result == RESULT_FAILED:
+        return explicit_result
+    if reason == "target_reset" and not _record_is_training_dummy(record, monster):
+        return RESULT_FAILED
+    if explicit_result == RESULT_INTERRUPTED:
+        return explicit_result
 
     accounting = _dict(record.get("damage_accounting"))
-    for validation in _dict_rows(accounting.get("stage_summary_validations")):
-        if bool(validation.get("completion_confirmed")):
-            return RESULT_DEFEATED
+    completion_confirmed = bool(record.get("completion_confirmed")) or any(
+        bool(validation.get("completion_confirmed"))
+        for validation in _dict_rows(accounting.get("stage_summary_validations"))
+    )
+    terminal_hp = _optional_float(monster.get("current_hp"))
+    target_depleted = terminal_hp is not None and terminal_hp <= 0
+    if completion_confirmed:
+        return RESULT_DEFEATED
 
-    reason = _text(record.get("archive_reason")).casefold()
     if reason == "target_reset":
-        monster = _dict(record.get("monster"))
-        terminal_hp = _optional_float(monster.get("current_hp"))
         if (
             _text(record.get("duration_source")).casefold()
             == "game_server_dummy_clock"
@@ -526,19 +573,15 @@ def normalize_battle_result(record: dict) -> str:
             # zero.  Keep early disengages as interrupted, but present this
             # authoritative terminal edge as a completed history result.
             return RESULT_DEFEATED
-    if reason in {
-        "target_defeated",
-        "boss_defeated",
-        "stage_completed",
-        "completed",
-    }:
-        return RESULT_DEFEATED
     if reason in {"party_wipe", "wipe", "failed"}:
         return RESULT_FAILED
     if reason in {
         "party_exit",
+        "space_transition",
         "scene_change",
         "scene_refresh",
+        "exit",
+        "reset",
         "target_reset",
         "manual_reset",
         "team_counter_reset",
@@ -547,6 +590,18 @@ def normalize_battle_result(record: dict) -> str:
         "capture_stopped",
         "idle",
     }:
+        return RESULT_INTERRUPTED
+    if target_depleted:
+        return RESULT_DEFEATED
+    if explicit_result == RESULT_DEFEATED or reason in {
+        "target_defeated",
+        "boss_defeated",
+        "stage_completed",
+        "completed",
+    }:
+        # A label or archive reason alone cannot prove a kill.  This covers
+        # stale-target replacement records that still contain positive Boss
+        # HP and have no independently confirmed settlement.
         return RESULT_INTERRUPTED
     return RESULT_UNDETERMINED
 

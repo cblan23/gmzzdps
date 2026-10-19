@@ -68,11 +68,13 @@ METHOD_ID_NAMES: dict[int, str] = {
     102: "OnMsgSyncFightMode",
     104: "OnMsgDungeonReadinessCheck",
     108: "OnMsgDungeonStageSettlement",
+    114: "OnMsgDungeonStageSettlement",  # Verified 2026-10-16 descriptor.
     118: "OnMsgActorBuffStateSync",
     131: "OnMsgCreateLUnitSpellField",
     140: "OnMsgCreateBullet",
     147: "OnMsgCastSkillNew",
     352: "RetOtherRoleShapeData",
+    363: "RetOtherRoleShapeData",
     463: "RetGetBothWayFriends",
     464: "RetGetBothwayFriendFrequentInfo",
     508: "OnMsgActorBuffStateSync",
@@ -91,6 +93,23 @@ METHOD_ID_NAMES: dict[int, str] = {
 }
 
 
+def current_team_rpc_method(method_id: int, arguments: list) -> str:
+    """Distinguish the current application from legacy self-property updates."""
+    # Verified in the running 2026-10-19 LocalRole registry: 213 moved to 220.
+    # Legacy 220 also carries one map, but lacks the applicant token/name pair.
+    if method_id != 220 or len(arguments) != 1 or not isinstance(arguments[0], dict):
+        return ''
+    fields = arguments[0]
+    token = fields.get(2, fields.get('2'))
+    name = fields.get(4, fields.get('4'))
+    if (
+        isinstance(token, str) and 12 <= len(token) <= 128
+        and isinstance(name, str) and 1 <= len(name.strip()) <= 20
+    ):
+        return 'OnMsgNewTeamGroupApply'
+    return ''
+
+
 def current_combat_rpc_method(method_id: int, arguments: list) -> str:
     """Apply the current client descriptors only to their verified payloads.
 
@@ -98,6 +117,17 @@ def current_combat_rpc_method(method_id: int, arguments: list) -> str:
     The old 1119/1121 IDs now describe buff removal/lifetime, and 94 is healing.
     Legacy captures with the earlier shapes continue to use METHOD_ID_NAMES.
     """
+    # Current statistics IDs overlap older callbacks. Their descriptor
+    # signatures distinguish a current response from the saved legacy shape.
+    if method_id in (346, 347) and len(arguments) == 3 and all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in arguments[:2]
+    ):
+        return ('RetDungeonBattleStatistics' if method_id == 346
+                else 'RetMonsterBattleStatistics')
+    if method_id in (348, 349) and len(arguments) == 2 and isinstance(arguments[1], bool):
+        return ('OnMsgUpdateDungeonBattleStatistics' if method_id == 348
+                else 'OnMsgUpdateDungeonTeamPlayerBattleStatistics')
     if method_id == 1170 and len(arguments) == 9:
         return 'OnMsgCastSkillNew'
     if method_id == 1172 and len(arguments) == 3:
@@ -223,7 +253,7 @@ def _valid_named_method(value: object) -> bool:
 def _valid_current_damage_sync_v2(
     entity_id: int, arguments: object
 ) -> bool:
-    """Recognize the current client's method 93 damage callback by shape.
+    """Recognize current method 93/96 damage callbacks by exact shape.
 
     Numeric RPC IDs are scoped to an entity class, so method 93 cannot be
     added to the global table without also accepting unrelated callbacks.  A
@@ -991,17 +1021,25 @@ class NpcapProtocolDecoder:
                     method_id = int(call[1])
                 except (TypeError, ValueError, OverflowError):
                     continue
+                current_team_method = current_team_rpc_method(method_id, arguments)
                 current_method = current_combat_rpc_method(method_id, arguments)
-                if current_method:
+                if current_team_method:
+                    method = current_team_method
+                    method_scope = 'local_role'
+                elif current_method:
                     method = current_method
                     method_scope = 'verified_current_combat'
                 elif method_id in LOCAL_ROLE_RPC_METHODS:
                     method = LOCAL_ROLE_RPC_METHODS[method_id]
-                    method_scope = 'player_entity' if method_id in (2244, 2245) else 'local_role'
+                    method_scope = (
+                        'player_entity'
+                        if method_id in (2244, 2245, 2341, 2342, 2451, 2452)
+                        else 'local_role'
+                    )
                 elif method_id in NPC_RPC_METHODS:
                     method = NPC_RPC_METHODS[method_id]
                     method_scope = 'npc'
-                elif method_id == 93 and _valid_current_damage_sync_v2(
+                elif method_id in (93, 96) and _valid_current_damage_sync_v2(
                     entity_id, arguments
                 ):
                     method = "OnMsgDamageSyncV2"

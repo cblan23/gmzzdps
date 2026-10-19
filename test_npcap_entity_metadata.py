@@ -65,23 +65,26 @@ class EntityMetadataTests(unittest.TestCase):
     def test_future_damage_targets_require_matching_type_and_localization(self):
         validated = validated_reserved_damage_targets(
             [
-                MonsterSource(7_100_635, 3, 90, 422_213_270_373_888, "", ()),
-                MonsterSource(7_100_638, 1, None, None, "", ()),
-                MonsterSource(7_100_639, 3, 90, 422_213_270_374_144, "", ()),
+                MonsterSource(7_100_635, 3, 91, 435_407_409_907_200, "", ()),
+                MonsterSource(7_100_636, 3, 93, 435_407_409_907_200, "", ()),
+                MonsterSource(7_100_637, 3, 95, 435_407_409_907_200, "", ()),
+                MonsterSource(7_100_638, 1, None, 435_407_409_907_200, "", ()),
+                MonsterSource(7_100_639, 3, 97, 435_407_409_907_456, "", ()),
             ]
         )
 
-        self.assertEqual(set(validated), {"7100635"})
+        self.assertEqual(set(validated), {"7100635", "7100636", "7100637"})
         self.assertEqual(validated["7100635"]["name"], "伤害木桩")
         self.assertTrue(validated["7100635"]["damage_target_validated"])
+        self.assertEqual(validated["7100637"]["level"], 95)
 
     def test_validated_damage_target_evidence_reaches_parser_record(self):
         reader = object.__new__(PassiveEntityMetadataReader)
         reader.templates = {
             "7100635": {
                 "boss_type": 3,
-                "level": 90,
-                "localization_id": 422_213_270_373_888,
+                "level": 91,
+                "localization_id": 435_407_409_907_200,
                 "name": "伤害木桩",
                 "damage_target_validated": True,
             }
@@ -95,8 +98,8 @@ class EntityMetadataTests(unittest.TestCase):
         )
 
         self.assertTrue(record["damage_target_validated"])
-        self.assertEqual(record["localization_id"], 422_213_270_373_888)
-        self.assertEqual(record["level"], 90)
+        self.assertEqual(record["localization_id"], 435_407_409_907_200)
+        self.assertEqual(record["level"], 91)
 
     def test_newest_object_slots_are_checked_first(self):
         reader = object.__new__(PassiveEntityMetadataReader)

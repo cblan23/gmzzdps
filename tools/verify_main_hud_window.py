@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import runpy
 import sys
 import tkinter as tk
@@ -74,31 +75,45 @@ def main():
     window.main_combat_mode = 'pve'
     window.pve_hud_view = 'recent_battle'
     # Exercise the flat player viewport; grouped headings are covered by the
-    # renderer regressions. The preview's PvP data represents an allowed map.
+    # renderer regressions.
     window.show_team_dps = False
-    window._pvp_hud_map_active = lambda: True
-    window.pvp_hud_state = {
-        'active': True,
-        'time': '08:42',
-        'status': '预览数据 · 统计中',
-        'result': '进行中',
-        'map_name': '诸王战纪',
-        'kills': 2,
-        'assists': '--',
-        'deaths': 1,
-        'total_damage': '862.4万',
-        'total_taken': '463.1万',
-        'outgoing': [
-            dict(actor_id=101, name='逐风', profession_id=1200007,
-                 rating='79,840', kills=1,
-                 assists='--', damage_text='328.6万', share_text='38.1%'),
-        ],
-        'incoming': [
-            dict(actor_id=201, name='折光', profession_id=1200001,
-                 rating='84,270', defeats=1,
-                 damage_text='214.8万', share_text='46.4%'),
-        ],
-    }
+    window.hud_settings_open = False
+    window.hud_settings_page = 0
+    window.hud_settings_fallback_label = None
+    window.hud_settings_fallback_geometry = None
+    window.licensing = SimpleNamespace(session=SimpleNamespace(
+        card_tier='normal', expires_at=dt.datetime(2026, 11, 1, 12, 30),
+    ))
+    window.hide_names = False
+    window.team_rating_preview_enabled = True
+    window.show_main_totals = True
+    window.highlight_self = True
+    window.show_combat_time = True
+    window.show_boss_hp_bar = True
+    window.boss_enrage_prediction_enabled = True
+    window.auto_upload_combat_records_enabled = True
+    window.profession_display_metrics = {}
+    window.main_row_mask_opacity = 50
+    window.toggle_visibility_hotkey_enabled = False
+    window.hud_view_hotkey_enabled = False
+    window.unlock_hotkey_enabled = False
+    window.lock_toggle_hotkey_enabled = False
+    window.toggle_visibility_hotkey = 'Home'
+    window.hud_view_hotkey = 'Ctrl+Tab'
+    window.unlock_hotkey = 'Ctrl+U'
+    window.toggle_hotkey_registered = False
+    window.hud_view_hotkey_registered = False
+    window.unlock_hotkey_registered = False
+    window.toggle_hotkey_capture_active = False
+    window.hud_view_hotkey_capture_active = False
+    window.unlock_hotkey_capture_active = False
+    window.toggle_hotkey_capture_modifiers = set()
+    window.hud_view_hotkey_capture_modifiers = set()
+    window.unlock_hotkey_capture_modifiers = set()
+    window.toggle_hotkey_error = ''
+    window.hud_view_hotkey_error = ''
+    window.unlock_hotkey_error = ''
+    window.automatic_upload_queued = set()
     monster = SimpleNamespace(name='测试首领', entity_id=501, current_hp=815_000_000, max_hp=1_260_000_000, observed_max_hp=1_260_000_000)
     window.current_character_name = '莫雪'
     window.current_character_profession_id = 1200004
@@ -115,7 +130,8 @@ def main():
     preview = [False]
     window._main_display_rows = lambda: (rows, preview[0])
     calls = []
-    window.show_settings = lambda: calls.append('settings')
+    window._save_preferences = lambda: calls.append('save')
+    window._refresh_main_scale_layout = lambda: calls.append('scale')
     window._request_close = lambda: calls.append('close')
 
     def toggle_pin():
@@ -136,7 +152,7 @@ def main():
         calls.append('lock')
 
     window.toggle_window_lock = toggle_lock
-    for sequence, handler in (('<Motion>', window._layered_main_motion), ('<ButtonPress-1>', window._layered_main_press), ('<B1-Motion>', window._layered_main_drag), ('<ButtonRelease-1>', window._layered_main_release)):
+    for sequence, handler in (('<Motion>', window._layered_main_motion), ('<ButtonPress-1>', window._layered_main_press), ('<B1-Motion>', window._layered_main_drag), ('<ButtonRelease-1>', window._layered_main_release), ('<KeyPress>', window._hud_settings_key), ('<KeyRelease>', window._hud_settings_key_release)):
         root.bind(sequence, handler)
     root.deiconify()
     root.update()
@@ -170,43 +186,61 @@ def main():
             event = SimpleNamespace(x=x, y=y, x_root=root.winfo_x() + x, y_root=root.winfo_y() + y)
             window._layered_main_press(event)
             window._layered_main_release(event)
+            window._render_layered_main_hud()
             root.update()
 
-        click('pvp')
-        assert window.main_combat_mode == 'pvp'
-        assert 'action:pve' in window.layered_main_hit_regions
-        assert calls == [], calls
-        pvp_snapshot = window._layered_main_snapshot()
-        assert pvp_snapshot['pvp_player_name'] == '莫雪'
-        assert pvp_snapshot['pvp_rating'] == '80616'
-        assert pvp_snapshot['pvp_profession_id'] == 1200004
-        shot('window-pvp-white.png')
-        window.pvp_hud_state = {
-            'active': False,
-            'time': '00:00',
-            'status': '等待 PVP 战斗数据',
-            'result': '等待中',
-            'kills': '--',
-            'assists': '--',
-            'deaths': '--',
-            'outgoing': [],
-            'incoming': [],
-            'total_damage': '--',
-            'total_taken': '--',
-        }
-        render()
-        shell_snapshot = window._layered_main_snapshot()
-        assert shell_snapshot['pvp_player_name'] == '莫雪'
-        assert shell_snapshot['pvp_rating'] == '80616'
-        assert shell_snapshot['pvp_kills'] == '--'
-        assert shell_snapshot['pvp_outgoing'] == []
-        assert shell_snapshot['pvp_incoming'] == []
-        shot('window-pvp-shell-white.png')
-        click('pve')
-        assert window.main_combat_mode == 'pve'
-        assert 'action:pvp' in window.layered_main_hit_regions
+        hud_size = (root.winfo_width(), root.winfo_height())
+        hud_position = (root.winfo_x(), root.winfo_y())
+        assert 'action:pvp' not in window.layered_main_hit_regions
         click('settings')
-        assert calls == ['settings'], calls
+        assert window.hud_settings_open
+        expected_settings_position = module['settings_panel_position'](
+            window.hud_settings_anchor_bounds,
+            (root.winfo_width(), root.winfo_height()),
+            window.hud_settings_work_area,
+        )
+        assert (root.winfo_x(), root.winfo_y()) == expected_settings_position
+        assert window._hud_settings_values()['expiry'] == '到期时间：2026-11-01 12:30:00'
+        assert 'action:settings_page:2' in window.layered_main_hit_regions
+        assert 'action:pvp' not in window.layered_main_hit_regions
+        shot('window-settings-display-white.png')
+
+        click('settings_toggle:deaths')
+        assert not window.show_deaths and calls[-1] == 'save'
+        click('settings_toggle:deaths')
+        assert window.show_deaths and calls[-1] == 'save'
+
+        click('settings_page:1')
+        assert window.hud_settings_page == 1
+        before_scale_size = (root.winfo_width(), root.winfo_height())
+        click('settings_step:scale:1')
+        assert window.main_ui_scale == 1.1 and calls[-2:] == ['scale', 'save']
+        assert (root.winfo_width(), root.winfo_height()) > before_scale_size
+        shot('window-settings-appearance-scaled-white.png')
+        click('settings_step:scale:-1')
+        assert window.main_ui_scale == 1.0 and calls[-2:] == ['scale', 'save']
+
+        click('settings_page:2')
+        assert window.hud_settings_page == 2
+        shot('window-settings-hotkeys-white.png')
+        click('settings_capture:visibility')
+        assert window.toggle_hotkey_capture_active
+        with mock.patch.dict(Window._capture_toggle_hotkey_key.__globals__, save_config=mock.Mock()):
+            root.event_generate('<KeyPress>', keysym='Control_L', state=0x0004)
+            root.event_generate('<KeyPress>', keysym='h', state=0x0004)
+            root.update()
+        assert not window.toggle_hotkey_capture_active
+        assert window.toggle_visibility_hotkey == 'Ctrl+H'
+        render()
+        shot('window-settings-hotkey-recorded-white.png')
+
+        click('settings_close')
+        assert not window.hud_settings_open
+        render()
+        assert (root.winfo_width(), root.winfo_height()) == hud_size
+        assert (root.winfo_x(), root.winfo_y()) == hud_position
+        assert 'action:settings' in window.layered_main_hit_regions
+        assert 'action:pvp' not in window.layered_main_hit_regions
         click('lock')
         render()
         assert window.window_locked and window.unlock_window.winfo_exists()
@@ -286,7 +320,7 @@ def main():
         assert calls[-1] == 'pin'
         assert window._preferred_main_topmost() != previous_topmost
         assert 'action:close' not in window.layered_main_hit_regions
-        print('PASS: real HWND, PVE/PVP switch, live values, settings/pin, lock/unlock, drag, alpha, deaths, rating, DPI 100-200%')
+        print('PASS: real HWND, live values, HUD settings/expiry/pages/hotkey/scale/close, pin, lock/unlock, drag, alpha, deaths, rating, DPI 100-200%')
     finally:
         window.closing = True
         window._destroy_unlock_window()

@@ -140,6 +140,22 @@ class CombatHistoryStoreTests(unittest.TestCase):
         persisted = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(persisted["archive_reason"], "space_transition")
 
+    def test_store_finds_recent_archives_for_current_character(self):
+        recent = record("recent", ended_at=time.time())
+        recent["self_character_id"] = "role-a"
+        other_role = record("other-role", ended_at=time.time())
+        other_role["self_character_id"] = "role-b"
+        old = record("old", ended_at=time.time() - 3600)
+        old["self_character_id"] = "role-a"
+        for value in (recent, other_role, old):
+            self.store.save(value)
+
+        matches = self.store.find_recent_character_records(
+            "role-a", minimum_saved_at_epoch=time.time() - 60
+        )
+
+        self.assertEqual([value["encounter_id"] for value in matches], ["recent"])
+
     def test_repeated_settled_hp_peak_becomes_boss_display_reference(self):
         for index, observed in enumerate((36_519_704, 36_519_704, 35_971_650)):
             value = {

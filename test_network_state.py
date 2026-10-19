@@ -3562,8 +3562,85 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(parser.active_boss_entity_id, dummy_id)
         self.assertIn(dummy_id, parser.training_dummy_entities)
 
+    def test_current_client_level_91_93_95_damage_dummies_are_recognized(self):
+        catalog = load_monster_metadata(Path(__file__).with_name("monster_metadata.json"))
+        expected = {
+            7_100_635: 91,
+            7_100_636: 93,
+            7_100_637: 95,
+        }
+
+        for offset, (template_id, level) in enumerate(expected.items()):
+            self.assertEqual(
+                catalog[str(template_id)],
+                {
+                    "boss_type": 3,
+                    "level": level,
+                    "localization_id": 435_407_409_907_200,
+                    "name": "伤害木桩",
+                },
+            )
+            self.assertIn(template_id, DAMAGE_TARGET_TEMPLATE_IDS)
+
+            dummy_id = 57_228_828_730_510 + offset
+            parser = NetworkPacketParser(
+                boss_template_catalog=catalog,
+                boss_name_allowlist=("伤害木桩",),
+            )
+            updates = parser.process_native_boss_type(
+                {
+                    "entity_id": dummy_id,
+                    "template_id": template_id,
+                    "boss_type": 3,
+                    "filetime_100ns": 134_353_748_206_558_300 + offset,
+                }
+            )
+
+            profile = next(value for kind, value in updates if kind == "profile")
+            self.assertEqual(profile["name"], "伤害木桩")
+            self.assertEqual(profile["level"], level)
+            self.assertEqual(parser.active_boss_entity_id, dummy_id)
+            self.assertIn(dummy_id, parser.training_dummy_entities)
+
+    def test_current_damage_dummy_hit_replaces_stale_clown_lock(self):
+        catalog = load_monster_metadata(Path(__file__).with_name("monster_metadata.json"))
+        clown_id = 57_410_827_849_984
+        dummy_id = 57_410_827_850_001
+        parser = NetworkPacketParser(
+            boss_template_catalog=catalog,
+            boss_name_allowlist=("小丑", "伤害木桩"),
+        )
+        parser.process_native_boss_type(
+            {
+                "entity_id": clown_id,
+                "template_id": 7_103_012,
+                "boss_type": 3,
+                "filetime_100ns": 134_365_840_380_827_904,
+            }
+        )
+        parser.entity_current_hp[clown_id] = 7_169_274.0
+        parser.process_native_boss_type(
+            {
+                "entity_id": dummy_id,
+                "template_id": 7_100_635,
+                "boss_type": 3,
+                "filetime_100ns": 134_365_840_380_827_905,
+            }
+        )
+        self.assertEqual(parser.active_boss_entity_id, clown_id)
+
+        parser.process(
+            packet(
+                "OnMsgDamageSyncV2",
+                [PLAYER_ID, dummy_id, 86_010_010, 0, 1, 3_558, 0, 3_558, False],
+                sequence=10,
+            )
+        )
+
+        self.assertEqual(parser.active_boss_entity_id, dummy_id)
+
     def test_reserved_damage_dummy_requires_current_client_validation(self):
-        template_id = 7_100_635
+        template_id = 7_100_639
         dummy_id = 57_228_828_730_502
         parser = NetworkPacketParser(boss_template_catalog={})
 
@@ -3572,7 +3649,7 @@ class NetworkPacketParserTests(unittest.TestCase):
                 "entity_id": dummy_id,
                 "template_id": template_id,
                 "boss_type": 3,
-                "localization_id": 422_213_270_373_888,
+                "localization_id": 435_407_409_907_200,
                 "filetime_100ns": 134_353_748_206_558_294,
             }
         )
@@ -3584,24 +3661,24 @@ class NetworkPacketParserTests(unittest.TestCase):
                 "entity_id": dummy_id,
                 "template_id": template_id,
                 "boss_type": 3,
-                "localization_id": 422_213_270_373_888,
+                "localization_id": 435_407_409_907_200,
                 "damage_target_validated": True,
-                "level": 90,
+                "level": 97,
                 "filetime_100ns": 134_353_748_206_558_295,
             }
         )
 
         profile = next(value for kind, value in updates if kind == "profile")
         self.assertEqual(profile["name"], "伤害木桩")
-        self.assertEqual(profile["level"], 90)
+        self.assertEqual(profile["level"], 97)
         self.assertIn(template_id, parser.damage_target_template_ids)
         self.assertIn(dummy_id, parser.training_dummy_entities)
 
     def test_reserved_non_dummy_template_is_never_registered(self):
         parser = NetworkPacketParser(boss_template_catalog={})
         for boss_type, localization_id in (
-            (1, 422_213_270_373_888),
-            (3, 422_213_270_374_144),
+            (1, 435_407_409_907_200),
+            (3, 435_407_409_907_456),
         ):
             updates = parser.process_native_boss_type(
                 {

@@ -243,10 +243,7 @@ New-Item -ItemType Directory -Path $TemporaryDirectory -Force | Out-Null
 $CompiledCaptureSourceNames = @(
     "dps_meter.pyw",
     "capture_backend.py",
-    "runtime_capability.py",
-    "pvp_tracker.py",
-    "pvp_records.py",
-    "pvp_backend_ui.py"
+    "runtime_capability.py"
 )
 $CompiledCaptureSourceNames += @(
     # The protocol decoder retains its historical module names internally;
@@ -297,8 +294,20 @@ foreach ($CaptureSource in $CompiledCaptureSources) {
 
 $ResourceFiles = @()
 $AssetRoot = Join-Path $ProjectDir "assets"
-Get-ChildItem -LiteralPath $AssetRoot -Recurse -File |
-    Where-Object { $_.Extension -in @('.png', '.ico') } |
+$RuntimeAssetFiles = @(
+    foreach ($Name in @(
+        "app_logo.png",
+        "main_boss_icon.png",
+        "main_hud_reference.png",
+        "app_icon.ico"
+    )) {
+        Get-Item -LiteralPath (Join-Path $AssetRoot $Name)
+    }
+    Get-ChildItem -LiteralPath (Join-Path $AssetRoot "professions") -File -Filter "*.png"
+    Get-ChildItem -LiteralPath (Join-Path $AssetRoot "bosses") -File -Filter "*.png"
+    Get-ChildItem -LiteralPath (Join-Path $AssetRoot "bosses\hud") -File -Filter "*.png"
+)
+$RuntimeAssetFiles |
     Sort-Object FullName |
     ForEach-Object {
         $Relative = $_.FullName.Substring($ProjectDir.Length).TrimStart('\')
@@ -378,13 +387,6 @@ $ResourceFiles += [pscustomobject]@{
 $ResourceFiles += [pscustomobject]@{
     Source = Join-Path $AssetRoot "bosses\hud\manifest.json"
     Target = "assets/bosses/hud/manifest.json"
-}
-$PvpAppearanceManifest = Join-Path $AssetRoot "pvp\appearance_manifest.json"
-if (Test-Path -LiteralPath $PvpAppearanceManifest) {
-    $ResourceFiles += [pscustomobject]@{
-        Source = $PvpAppearanceManifest
-        Target = "assets/pvp/appearance_manifest.json"
-    }
 }
 foreach ($Name in @(
     "skill_names.json",
@@ -519,26 +521,20 @@ try {
         "--include-package=capstone",
         "--include-module=main_hud",
         "--include-module=main_hud_artwork",
-        "--include-module=pvp_tracker",
-        "--include-module=pvp_records",
-        "--include-module=pvp_backend_ui",
+        "--include-module=hud_settings",
         "--include-module=equipment_profiles",
         "--include-module=ksbc2_skill_names",
         "--include-module=profile_upload",
         "--include-module=resumable_update",
         "--include-module=update_cdn",
         "--include-data-files=$CapstoneDll=capstone/lib/capstone.dll",
-        "--include-data-files=assets/*.png=assets/",
+        "--include-data-files=assets/app_logo.png=assets/app_logo.png",
+        "--include-data-files=assets/main_boss_icon.png=assets/main_boss_icon.png",
+        "--include-data-files=assets/main_hud_reference.png=assets/main_hud_reference.png",
         "--include-data-files=assets/professions/*.png=assets/professions/",
-        "--include-data-files=assets/skills/*.png=assets/skills/",
-        "--include-data-files=assets/equipment/*.png=assets/equipment/",
-        "--include-data-files=assets/equipment/manifest.json=assets/equipment/manifest.json",
         "--include-data-files=assets/bosses/*.png=assets/bosses/",
         "--include-data-files=assets/bosses/hud/*.png=assets/bosses/hud/",
         "--include-data-files=assets/bosses/hud/manifest.json=assets/bosses/hud/manifest.json",
-        "--include-data-files=assets/pvp/avatars/*.png=assets/pvp/avatars/",
-        "--include-data-files=assets/pvp/frames/*.png=assets/pvp/frames/",
-        "--include-data-files=assets/pvp/appearance_manifest.json=assets/pvp/appearance_manifest.json",
         "--include-data-files=assets/app_icon.ico=assets/app_icon.ico",
         "--include-data-files=$SanitizedIconManifestPath=assets/icon_sources.json",
         "--include-data-files=$SanitizedBossCatalogPath=assets/bosses/boss_icon_sources.json",
@@ -637,7 +633,13 @@ try {
     ) -Raw -Encoding UTF8
     foreach ($ModuleName in @(
         "capture_process",
-        "damage_hook"
+        "damage_hook",
+        "pvp_tracker",
+        "pvp_records",
+        "pvp_backend_ui",
+        "pvp_client_bootstrap",
+        "native_history_detail",
+        "settlement_history_ui"
     )) {
         $ModulePattern = '<module\s+name="' + [regex]::Escape($ModuleName) + '"'
         if ($NuitkaReportText -match $ModulePattern) {

@@ -90,32 +90,24 @@ class HudViewHotkeyTests(unittest.TestCase):
         self.assertEqual(window.hud_view_hotkey, "")
         window.tray_icon.set_hotkey.assert_not_called()
 
-    def test_dispatch_switches_current_mode_without_touching_combat(self):
+    def test_dispatch_switches_pve_view_without_touching_combat(self):
         window = self.window("F8", True)
         window.model = object()
         original_model = window.model
         window._set_pve_hud_view = mock.Mock(side_effect=lambda view: setattr(window, "pve_hud_view", view))
-        window._set_pvp_hud_view = mock.Mock(side_effect=lambda view: setattr(window, "pvp_hud_view", view))
         window.main_combat_mode = "pve"
         window.pve_hud_view = "team"
-        window.pvp_hud_view = "team"
         for _ in range(2):
             window._dispatch_message("hotkey_toggle_hud_view", None)
         self.assertEqual(window._set_pve_hud_view.call_args_list, [mock.call("recent_battle"), mock.call("team")])
-        window._set_pvp_hud_view.assert_not_called()
-
-        window.main_combat_mode = "pvp"
-        for _ in range(2):
-            window._dispatch_message("hotkey_toggle_hud_view", None)
-        self.assertEqual(window._set_pvp_hud_view.call_args_list, [mock.call("live"), mock.call("team")])
         self.assertIs(window.model, original_model)
-        window._set_pvp_hud_view.reset_mock()
+        window._set_pve_hud_view.reset_mock()
         window.hud_view_hotkey_capture_active = True
         window._dispatch_message("hotkey_toggle_hud_view", None)
         window.hud_view_hotkey_capture_active = False
         window.hud_view_hotkey_enabled = False
         window._dispatch_message("hotkey_toggle_hud_view", None)
-        window._set_pvp_hud_view.assert_not_called()
+        window._set_pve_hud_view.assert_not_called()
 
     def test_native_conflict_preserves_binding_and_other_shortcuts(self):
         tray = object.__new__(WINDOWS_TRAY_MODULE.WindowsTrayIcon)

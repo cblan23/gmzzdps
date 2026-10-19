@@ -26,6 +26,7 @@ from equipment_profiles import (
     TRAMPOLINE_OFFSET,
     _absolute_patch,
     _build_request_stub,
+    _descriptor_schema,
     _owned_idle_request_hook,
     _restore_owned_idle_request_hook,
     _scan_descriptor_range,
@@ -618,6 +619,32 @@ class EquipmentQueryLatencyTests(unittest.TestCase):
         ):
             self.assertEqual(_scan_descriptor_range(123, 0x10000, 0x30000), [0x20000])
         self.assertEqual(read.call_count, 2)
+
+    def test_descriptor_schema_uses_method_name_and_arguments_across_id_changes(self):
+        descriptor = bytearray(0x70)
+        struct.pack_into('<Q', descriptor, 0x20, 999)
+        struct.pack_into('<QQ', descriptor, 0x48, 0x2000, 0x2010)
+        pointers = struct.pack('<QQ', 0x3000, 0x4000)
+        list_argument = bytearray(0x80)
+        list_argument[0x10:0x18] = b'ListStr\0'
+        list_argument[0x50] = 5
+        int_argument = bytearray(0x80)
+        int_argument[0x10:0x14] = b'int\0'
+        int_argument[0x50] = 1
+        with patch(
+            'equipment_profiles._read_std_string',
+            return_value='ReqOtherRoleShapeData',
+        ), patch(
+            'equipment_profiles.read_region',
+            side_effect=[
+                bytes(descriptor), pointers,
+                bytes(list_argument), bytes(int_argument),
+            ],
+        ):
+            self.assertEqual(
+                _descriptor_schema(123, 0x1000),
+                EXPECTED_ARGUMENT_DESCRIPTORS,
+            )
 
     def test_verified_descriptor_location_does_not_rescan_process(self):
         with patch('equipment_profiles._descriptor_schema', return_value=EXPECTED_ARGUMENT_DESCRIPTORS) as schema:

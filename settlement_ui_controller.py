@@ -24,6 +24,7 @@ from network_state import (
     VERIFIED_SIMULTANEOUS_BOSS_SUCCESSORS,
     VERIFIED_SIMULTANEOUS_BOSS_TEMPLATE_GROUPS,
     boss_template_continues_encounter,
+    is_training_dummy_template_id,
     low_hp_fight_exit_confirms_victory,
 )
 from settlement_presenter import completed_statistics_scope, encounter_view
@@ -1382,7 +1383,23 @@ class SettlementUIController:
             # negative interval or reset the new pull at zero seconds.
             return False
         if scene_transition:
-            if self.instance_id:self.tracker.leave_instance(self.instance_id,stamp)
+            if self.instance_id:
+                current=self.tracker.encounters.get(self.tracker.current_id)
+                if (
+                    current is not None
+                    and not is_training_dummy_template_id(current.boss_template_id)
+                ):
+                    exited_at=[
+                        int(self.boss_out_at.get(boss_entity,0) or 0)
+                        for boss_entity,boss_identity in self.boss_entities.items()
+                        if boss_identity.get('token')==current.boss_token
+                        and self.boss_in_combat.get(boss_entity) is False
+                        and int(self.boss_out_at.get(boss_entity,0) or 0)
+                        >= current.started_at_ns
+                    ]
+                    if exited_at:
+                        self._end_observed_encounter('WIPE',max(exited_at))
+                self.tracker.leave_instance(self.instance_id,stamp)
             self.instance_id=None;self.last_visible_id=None;self.boss_entities.clear();self.boss_in_combat.clear();self.boss_out_at.clear();self.boss_health_samples.clear();self.boss_max_health_samples.clear();self.pending_boss_starts.clear();self.last_statistics_boundary=None
         elif instance:
             if self.instance_id and instance!=self.instance_id:

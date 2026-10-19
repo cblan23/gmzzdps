@@ -339,15 +339,6 @@ class HudLiveRegressions(unittest.TestCase):
         self.assertEqual(window.main_scroll_offset, 30)
         self.assertIsNotNone(window.layered_main_scroll_drag_origin)
 
-    def test_trend_refreshes_same_record_when_settlement_arrives(self):
-        window = self.window()
-        record = {'encounter_id': 'battle', 'duration_seconds': None, 'total_damage': None}
-        window.history_selected_id = 'battle'
-        window.history_trend_record_id = ''
-        window._selected_history_record = lambda: record
-        self.assertEqual(window._history_snapshot_team_dps_points(), [])
-        record.update(duration_seconds=20, dps_duration_seconds=None, total_damage=3000, settlement_revision=2)
-        self.assertEqual(window._history_snapshot_team_dps_points(), [(0, 150), (20, 150)])
 
     def test_exact_roster_replacement_drops_provisional_ghost(self):
         model = CombatModel()

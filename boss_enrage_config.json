@@ -33,13 +33,13 @@
     {
       "id": "ray_biber",
       "display_name": "瑞尔比伯",
-      "template_ids": [7102834],
+      "template_ids": [7102834, 7103001],
       "enrage_seconds": 360
     },
     {
       "id": "joker",
       "display_name": "小丑",
-      "template_ids": [7102873],
+      "template_ids": [7102873, 7103008, 7103012],
       "enrage_seconds": 360
     },
     {

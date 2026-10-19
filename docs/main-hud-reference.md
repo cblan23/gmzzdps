@@ -5,7 +5,7 @@
 
 ## 素材与实时内容
 
-- Boss 徽记、骷髅和按钮外框使用设计图素材。依最新要求，原关闭按钮替换为置顶，底部为 PVP / 设置 / 锁定 / 置顶，不增加第五个按钮。置顶状态蓝色高亮，点击可取消；退出仍使用托盘菜单。
+- Boss 徽记、骷髅和按钮外框使用设计图素材。底部保留网页战绩、设置、锁定和置顶；桌面 PvP 入口已删除。置顶状态蓝色高亮，点击可取消；退出仍使用托盘菜单。
 - 左下角使用项目 `assets/app_logo.png`，叠加金色圆形边框，不替换项目图片。
 - 职业符号来自现有 `assets/professions/1200001.png`～`1200007.png`。沿用既有职业色相，直接给内侧图案上色并增加轮廓辉光，不再使用任何圆形底盘。
 - 未取得的数据在显示层留空（包括 Boss HP/百分比、个人数值/总量、评分），保留真实 0 和“人机”；不改底层 `None` 语义，也不编造数值。
@@ -29,7 +29,7 @@
 
 采用 `UpdateLayeredWindow` 预乘 Alpha 绘制；Tk 负责窗口生命周期和输入。主窗口整体透明度固定 100%，不再提供选项；任何旧 `alpha` 值在启动迁移和保存时强制变为 `1.0`，旧回调也不能重新设置淡出。每像素透明仍保留，不创建不透明矩形背景。锁定时只在原锁按钮位置提供相同外观的可点击解锁区域，主窗口继续鼠标穿透。
 
-设置改为无 tab 的单页：常用显示 / 职业显示指标 / 首领信息 / 外观与缩放 / 快捷操作。按最新反馈恢复职业配置：观众 HPS/DPS，战士 DPS/DT，其余固定 DPS。移除目标 Boss 资料识别、旧版选项及整体透明度入口；其余设置按组排列，可滚动查看。仍被详情/采集使用的兼容数据保留，不删除整个旧配置文件。
+设置直接绘制在 HUD 中，分为显示、外观与缩放、快捷操作三页，页首显示当前卡号到期时间。观众可选择 HPS/DPS，战士可选择 DPS/DT，其余职业固定 DPS。目标 Boss 资料识别、旧版选项及整体透明度入口已移除；配置即时生效并自动保存。
 
 首领已损失 HP 的区域加深至近黑色，剩余 HP 保持明亮红色；预警框宽度随文本测量，不保留大块空白。一号信徒双 Boss 初期把现有预警归属者巴尼先生排列在上方；原阶段规则进入安西娅后按同一规则调整顺序，不改双血池与计时算法。
 
@@ -37,17 +37,16 @@
 
 HP 回归：已验证的 Boss HP 更新到达后触发主窗口绘制，不额外等待 DPS 汇总定时器；旧时间戳 HP 不能覆盖新值。纠正被误绑到玩家的 Boss 指针时，仅保留同一来源指针实际发布的 MaxHp 字段，避免星象仪者等场景退回“第一笔已掉血 CurrentHp”作为最大值。仍保留异常技能值过滤、场景清理和双 Boss 的血量校验，不按 DPS 推算 HP。
 
-上传确认弹窗优先保留底部按钮空间，并按实际字体、选项换行和内容高度计算弹窗高度，避免 100%～200% DPI 下按钮被挤压裁切；不改变上传权限或身份逻辑。
+战绩详情在 HUD 中打开网页。客户端继续在后台保存本地战斗记录并自动上传符合条件的战绩，不再提供历史浏览、手动上传、资料编辑、反馈和独立技能详情窗口。
 
-本轮无新增持久化配置键，继续消费已有 `main_ui_scale`、`font_size`、`alpha`、`show_deaths` 等配置。未修改 DPS/HPS/DT 的取数、DPS 排序、底层战斗判定、采集、卡号鉴权、上传权限或战斗记录口径；显示状态优先级按上文调整。
+继续消费已有 `main_ui_scale`、`font_size`、`alpha`、`show_deaths` 等配置。未修改 DPS/HPS/DT 的取数、DPS 排序、底层战斗判定、采集、卡号鉴权、自动上传权限或战斗记录口径；显示状态优先级按上文调整。
 
 ## 验证
 
 ```powershell
-py -3 -m unittest test_main_hud.py test_main_hud_behavior.py test_combat_model.py
-py -3 tools/preview_main_hud.py
-py -3 tools/verify_main_hud_window.py
-py -3 tools/verify_settings_upload_ui.py
+.\.venv-build310\Scripts\python.exe -m unittest test_hud_settings.py test_main_hud.py test_main_hud_behavior.py test_automatic_victory_upload.py
+.\.venv-build310\Scripts\python.exe tools\preview_main_hud.py
+.\.venv-build310\Scripts\python.exe tools\verify_main_hud_window.py
 ```
 
 `preview_main_hud.py` 输出原图与渲染结果的 100/125/150/175/200% 明暗底色并排图。

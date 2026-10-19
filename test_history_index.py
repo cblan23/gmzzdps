@@ -153,12 +153,16 @@ class HistoryIndexTests(unittest.TestCase):
                 "template_id": 7100001,
                 "name": "测试首领",
                 "boss_type": 3,
+                "current_hp": 0,
+                "max_hp": 3000,
             },
             "targets": [
                 {
                     "entity_id": 99,
                     "template_id": 7100001,
                     "name": "测试首领",
+                    "current_hp": 0,
+                    "max_hp": 3000,
                 }
             ],
             "participants": [
@@ -319,6 +323,33 @@ class HistoryIndexTests(unittest.TestCase):
 
         self.assertEqual(completed["result"], RESULT_DEFEATED)
         self.assertEqual(left_early["result"], RESULT_INTERRUPTED)
+
+    def test_non_dummy_target_reset_is_presented_as_failed(self):
+        record = self.record("battle-boss-reset")
+        record["result"] = "interrupted"
+        record["archive_reason"] = "target_reset"
+        record["monster"].update(
+            template_id=7_103_012,
+            name="\u5c0f\u4e11",
+            current_hp=9_866_707,
+            max_hp=51_979_305,
+        )
+        record["targets"] = [dict(record["monster"])]
+
+        summary = build_history_summary(record, self.catalog)
+
+        self.assertEqual(summary["result"], RESULT_FAILED)
+
+    def test_residual_hp_target_defeated_reason_is_interrupted(self):
+        record = self.record("battle-stale-target-defeated")
+        record["completion_confirmed"] = False
+        record["monster"]["current_hp"] = 1_074_359
+        record["monster"]["max_hp"] = 5_197_930
+        record["targets"] = [dict(record["monster"])]
+
+        summary = build_history_summary(record, self.catalog)
+
+        self.assertEqual(summary["result"], RESULT_INTERRUPTED)
 
     def test_old_incorrect_castle_name_is_normalized_for_existing_history(self):
         record = self.record("battle-old-castle-name")
@@ -694,6 +725,8 @@ class HistoryIndexTests(unittest.TestCase):
         interrupted["archive_reason"] = "party_exit"
         undetermined = self.record("battle-undetermined", ended_at=2001)
         undetermined.pop("archive_reason")
+        undetermined["monster"].pop("current_hp")
+        undetermined["targets"] = [dict(undetermined["monster"])]
         store.save(self.record("battle-victory", ended_at=1999))
         store.save(interrupted)
         store.save(undetermined)

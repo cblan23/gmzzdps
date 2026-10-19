@@ -15,27 +15,6 @@ from network_state import (
 )
 
 
-# These callbacks are routed through the local-role capture channel, but the
-# wire ``network_entity_id`` is not guaranteed to be the local avatar.  In
-# particular, live 1v1 captures report the opponent entity for
-# ``IndividualPVPState/Result``.  They are control messages, not combat
-# events, so the local-role scope is the authoritative ownership signal.
-PVP_LOCAL_ROLE_CONTROL_METHODS = frozenset({
-    "OnMsgSyncBattleType",
-    "OnMsgIndividualPVP",
-    "RetIndividualPVP",
-    "OnMsgIndividualPVPResponse",
-    "OnMsgIndividualPVPState",
-    "OnMsgIndividualPVPResult",
-    "OnMsgIndividualPVPLeave",
-    "OnMsgAddFightRelationship",
-    "OnMsgDelFightRelationship",
-    "OnMsgSyncTeamPVPInfo",
-    "OnMsgTeamPVPSettlement",
-    "RetGetTeamArenaBattleInfo",
-})
-
-
 def normalize_npcap_record(record):
     if (str(record.get('capture_source', '')).casefold() != 'npcap'
             or record.get('arguments_synchronized') is not True):
@@ -61,8 +40,6 @@ class NpcapParserAdapter(NetworkPacketParser):
         super().__init__(*args, **kwargs)
         self.pending_scoped_records = deque()
         self.completed_settlement_observations = deque()
-        self.completed_pvp_observations = deque(maxlen=2048)
-        self.pvp_observation_errors = 0
         self.pending_scoped_bytes = 0
         self.scoped_records_dropped = 0
         self.wire_instance_id = None
@@ -291,25 +268,6 @@ class NpcapParserAdapter(NetworkPacketParser):
         observation = parser_observation(self, record, updates)
         if observation is not None:
             self.completed_settlement_observations.append(observation)
-
-    def _freeze_pvp_observation(self, record, updates):
-        from pvp_tracker import parser_observation
-
-        try:
-            observation = parser_observation(self, record, updates)
-        except (TypeError, ValueError, OverflowError, KeyError):
-            # Optional PVP enrichment must never break the formal PVE parser.
-            self.pvp_observation_errors += 1
-            return
-        if observation is not None:
-            if len(self.completed_pvp_observations) == self.completed_pvp_observations.maxlen:
-                observation['capture_gap'] = True
-            self.completed_pvp_observations.append(observation)
-
-    def take_pvp_observations(self):
-        observations = list(self.completed_pvp_observations)
-        self.completed_pvp_observations.clear()
-        return observations
 
     @staticmethod
     def _record_timestamp_ns(record):
@@ -541,10 +499,7 @@ class NpcapParserAdapter(NetworkPacketParser):
         self.wire_classes[entity] = cls
         props = value['properties']
         updates = []
-        if cls in SPACE_CLASSES or (
-            record.get('capture_source') == 'npcap_read_only_pvp_lifecycle'
-            and cls.endswith('Space')
-        ):
+        if cls in SPACE_CLASSES:
             instance_id = props.get('WorldEntityID') or token
             map_id = props.get('TemplateID')
             changed_space = (
@@ -613,7 +568,6 @@ class NpcapParserAdapter(NetworkPacketParser):
                 )
             )
         self._freeze_settlement_observation(record, updates)
-        self._freeze_pvp_observation(record, updates)
         updates.extend(self._drain_scoped())
         return updates
 
@@ -630,12 +584,6 @@ class NpcapParserAdapter(NetworkPacketParser):
         if scope == 'local_role':
             if self.native_self_id is None and self._is_local_clock_reply(record):
                 return True
-            if record.get('method') in PVP_LOCAL_ROLE_CONTROL_METHODS:
-                # The capture backend has already classified this callback as
-                # local-role traffic.  Some PVP server callbacks carry the
-                # peer's entity as their wire owner, so requiring an exact
-                # actor match here silently drops the duel result.
-                return self.native_self_id is not None
             return self.native_self_id is not None and entity == self.native_self_id
         if scope == 'player_entity':
             return bool(entity and (entity == self.native_self_id or self._is_known_player_actor(entity, int(record.get('filetime_100ns', 0)))))
@@ -682,8 +630,6 @@ class NpcapParserAdapter(NetworkPacketParser):
                 previously_confirmed = set(self.confirmed_boss_entities)
                 record_updates = super().process(record)
                 self._freeze_settlement_observation(record, record_updates)
-                if record.get('method') not in ('OnMsgEntityDead', 'OnMsgEntityRelive'):
-                    self._freeze_pvp_observation(record, record_updates)
                 record_updates.extend(
                     self._freeze_new_boss_confirmations(
                         record, previously_confirmed
@@ -750,20 +696,6 @@ class NpcapParserAdapter(NetworkPacketParser):
             self._freeze_new_boss_confirmations(record, previously_confirmed)
         )
         updates.extend(self._drain_scoped())
-        return updates
-
-    def process_native_damage(self, record, *, include_damage=True):
-        updates = super().process_native_damage(
-            record, include_damage=include_damage
-        )
-        observation_record = {
-            **record,
-            'method': 'KAPI_HandleDamageSyncV2',
-            'capture_source': str(
-                record.get('capture_source') or 'native_damage'
-            ),
-        }
-        self._freeze_pvp_observation(observation_record, updates)
         return updates
 
     def _confirm_local_actor(self, actor_id, record, *, native=False):
@@ -859,10 +791,6 @@ class NpcapParserAdapter(NetworkPacketParser):
 
     def process(self, record, *, include_damage=True):
         record = normalize_npcap_record(record)
-        # The affected player can be an enemy, not the local role/party. Keep
-        # this passive observation even when the PVE scoped gate rejects it.
-        if record.get('method') in ('OnMsgEntityDead', 'OnMsgEntityRelive'):
-            self._freeze_pvp_observation(record, [])
         if record.get('method') in SCENE_TRANSITION_METHODS:
             # Wire creation IDs are scoped to the space being left.  A missing
             # BeforeEnterNewSpace packet must not let the next instance inherit
@@ -875,9 +803,7 @@ class NpcapParserAdapter(NetworkPacketParser):
             self.unconfirmed_hp_activity.clear()
             self.boss_hp_activity_observation_keys.clear()
             self._discard_scoped_before_scene_boundary()
-        if record.get('method') == 'NpcapEntityCreated' and record.get('capture_source') in (
-            'npcap', 'npcap_read_only_pvp_lifecycle',
-        ):
+        if record.get('method') == 'NpcapEntityCreated' and record.get('capture_source') == 'npcap':
             return self._wire_creation(record)
         if not self._scope_ready(record):
             self._queue_scoped(record)
@@ -966,8 +892,6 @@ class NpcapParserAdapter(NetworkPacketParser):
                     'current_hp': 0, 'end_zero_candidate': True,
                 }))
         self._freeze_settlement_observation(record, updates)
-        if record.get('method') not in ('OnMsgEntityDead', 'OnMsgEntityRelive'):
-            self._freeze_pvp_observation(record, updates)
         updates.extend(
             self._freeze_new_boss_confirmations(record, previously_confirmed)
         )

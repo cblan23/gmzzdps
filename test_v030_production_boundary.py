@@ -62,18 +62,14 @@ print(json.dumps([m for m in forbidden if m in sys.modules]))
         self.assertNotIn('VirtualAllocEx',text)
         self.assertNotIn('WriteProcessMemory',text)
 
-    def test_production_uses_established_history_ui_not_preview_window(self):
+    def test_desktop_entry_keeps_history_storage_without_history_windows(self):
         text=(ROOT/'dps_meter.pyw').read_text(encoding='utf-8')
         self.assertIn('SettlementHistoryAdapter',text)
-        self.assertNotIn('SettlementHistoryWindow',text)
-
-    def test_preview_uses_full_backend_shell_and_both_recorded_wipes(self):
-        text=(ROOT/'tools'/'preview_official_settlement_history.py').read_text(
-            encoding='utf-8'
-        )
-        self.assertIn('window._build_history_window()',text)
-        self.assertNotIn('window._build_backend_history_page(root)',text)
-        self.assertIn('second-start-first-wipe-evidence.json',text)
-        self.assertIn('third-start-second-wipe-skills.json',text)
+        self.assertIn('_start_automatic_history_upload',text)
+        for symbol in (
+            '_build_history_window', '_open_history_modal',
+            '_show_history_upload_confirmation', '_selected_history_record',
+        ):
+            self.assertNotIn(symbol,text)
 
 if __name__=='__main__':unittest.main()

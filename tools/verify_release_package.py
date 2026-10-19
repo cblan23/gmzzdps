@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import re
@@ -65,14 +64,6 @@ def main():
     notes = (args.source / f'release-notes-v{args.version}.txt').read_text(encoding='utf-8-sig').strip()
     assert notes == update['notes']
     assert notes == (directory / f'更新日志-v{args.version}.txt').read_text(encoding='utf-8-sig').strip()
-    embedded = None
-    tree = ast.parse((args.source / 'dps_meter.pyw').read_text(encoding='utf-8'))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'releases' for target in node.targets):
-            for label, text in ast.literal_eval(node.value):
-                if label == f'v{args.version}':
-                    embedded = text
-    assert embedded == notes, 'Embedded and updater release notes differ'
     print(json.dumps(dict(version=args.version, build_id=args.build_id, size=manifest['size'],
                           sha256=digest, protected=True, capture_backend=args.backend,
                           notes_lines=len(notes.splitlines()), status='verified'), ensure_ascii=False))

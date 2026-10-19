@@ -32,46 +32,28 @@ HUD_MAX_VISIBLE_ROWS = 16
 HUD_ROW_HEIGHT = 75.4 * REFERENCE_SCALE
 BOSS_BAR_EXTRA_HEIGHT = 8
 HUD_BASE_SOURCE_HEIGHT = 1004
-# PVP keeps its approved fixed 12-row composition while the PVE player list can
-# grow to the larger resizable viewport above.  The team page size is a data
-# boundary (one real/display group), whereas PVP_TEAM_VISIBLE_ROWS remains the
-# number of rows that fit in the current viewport and is therefore scrollable.
-PVP_HUD_VISIBLE_ROWS = HUD_DEFAULT_VISIBLE_ROWS
-HUD_MAX_SOURCE_HEIGHT = (
-    HUD_BASE_SOURCE_HEIGHT
-    - round((10 - PVP_HUD_VISIBLE_ROWS) * 75.4)
-    + BOSS_BAR_EXTRA_HEIGHT
-)
 SUMMARY_FONT_HEIGHT = 40
 TEAM_SUMMARY_AVATAR_SIZE = (109, 107)
 INLINE_RATING_GAP = 12
-# Keep the shared PVE/PVP view switch clear of the timer at every supported
+# Keep the view switch clear of the timer at every supported
 # font scale.  The previous 300px source-art anchor left only a few rendered
 # pixels between ``00:00`` and the first pill.
 TITLE_RAIL_TAB_LEFT = 326
 TITLE_RAIL_TAB_WIDTH = 170
 TITLE_RAIL_TAB_GAP = 12
-# PVP's two result tables use the same left visual anchor as the PVE player
-# rows.  Keeping the adjustment in source-art pixels makes it invariant across
-# DPI/scale settings and avoids moving the self summary or footer controls.
-PVP_RESULTS_SHIFT_X = -14
-PVP_RETURN_ICON_TARGET = 72
-PVP_TEAM_VISIBLE_ROWS = 10
-PVP_TEAM_PAGE_SIZE = 30
-PVP_MAX_TEAM_PAGES = 5
-PVP_MAX_TEAM_MEMBERS = PVP_TEAM_PAGE_SIZE * PVP_MAX_TEAM_PAGES
 ADMIN_INDICATOR_ELEVATED = (58, 211, 116)
 ADMIN_INDICATOR_STANDARD = (239, 76, 91)
 ROW_CENTERS = (319, 395, 470, 546, 621, 697, 772, 848, 923, 997)
 ACTION_BOXES = {
-    "pvp": (750, 1038, 839, 1126),
     "settings": (839, 1038, 922, 1126),
     "lock": (922, 1038, 1004, 1126),
     "pin": (1004, 1038, 1089, 1126),
 }
-# The visible footer has no manual-clear action. Keep the four remaining
-# controls aligned to the source artwork instead of leaving a dead gap.
-FOOTER_ACTION_BOXES = dict(ACTION_BOXES)
+# Keep the update action immediately left of the settings artwork.
+FOOTER_ACTION_BOXES = {
+    "update": (756, 1038, 839, 1126),
+    **ACTION_BOXES,
+}
 
 
 @dataclass(frozen=True)
@@ -101,26 +83,6 @@ def equipment_type_badge(pvp_count: object) -> tuple[str, bool]:
     if count:
         return f"竞技装备 ×{count}", True
     return "冒险装备", False
-
-
-def pvp_equipment_type_badge(
-    equipment_count: object,
-    pvp_count: object,
-) -> tuple[str, bool]:
-    """Return the inverse warning used by the PVP team-composition page."""
-
-    try:
-        total = max(0, int(equipment_count or 0))
-    except (TypeError, ValueError, OverflowError):
-        total = 0
-    try:
-        competitive = max(0, int(pvp_count or 0))
-    except (TypeError, ValueError, OverflowError):
-        competitive = 0
-    adventure = max(0, total - competitive)
-    if adventure:
-        return f"冒险装备 ×{adventure}", True
-    return "竞技装备", False
 
 
 def _color(hex_value: str):
@@ -245,15 +207,7 @@ class MainHudRenderer:
         self._team_caption = self._crop((279, 1055, 426, 1110))
         self._warning = self._crop((798, 151, 835, 184))
         self._actions = {name: self._crop(box) for name, box in ACTION_BOXES.items()}
-        self._actions['pvp'] = self._pvp_action_sprite()
-        dragon_path = self.asset_dir / "hunter_dragon_icon.png"
-        try:
-            dragon = Image.open(dragon_path).convert("RGBA")
-            bounds = dragon.getchannel("A").getbbox()
-            self._hunter_dragon_icon = dragon.crop(bounds) if bounds else None
-        except OSError:
-            self._hunter_dragon_icon = None
-        self._pve_action = self._pve_action_sprite()
+        self._actions["update"] = self._update_sprite()
         self._equipment_word_badge = self._equipment_badge("word")
         self._unlocked = self._unlock_sprite()
         self._pin_on = self._pin_sprite(True)
@@ -346,6 +300,18 @@ class MainHudRenderer:
         sprite.alpha_composite(shackle, (24, 12))
         return sprite
 
+    def _update_sprite(self):
+        sprite = self._actions['pin'].copy()
+        middle = sprite.crop((11, 15, 13, 73)).resize((59, 58))
+        sprite.paste(middle, (13, 15))
+        size = sprite.size
+        sprite = sprite.resize((size[0] * 3, size[1] * 3), Image.Resampling.LANCZOS)
+        draw = ImageDraw.Draw(sprite)
+        ink = (239, 245, 250, 255)
+        draw.arc((22 * 3, 24 * 3, 62 * 3, 64 * 3), 45, 330, fill=ink, width=5 * 3)
+        draw.polygon([(64 * 3, 40 * 3), (49 * 3, 40 * 3), (64 * 3, 25 * 3)], fill=ink)
+        return sprite.resize(size, Image.Resampling.LANCZOS)
+
     def _pin_sprite(self, active):
         """Replace only the former × glyph, retaining the approved button rim."""
         sprite = self._actions['pin'].copy()
@@ -365,95 +331,8 @@ class MainHudRenderer:
             draw.line((19 * 3, 77 * 3, 65 * 3, 77 * 3), fill=(70, 180, 255, 255), width=5)
         return sprite.resize(size, Image.Resampling.LANCZOS)
 
-    def _pve_action_sprite(self):
-        """Adventure emblem, matched to the red PVP action's visible size."""
 
-        width = ACTION_BOXES["pvp"][2] - ACTION_BOXES["pvp"][0]
-        height = ACTION_BOXES["pvp"][3] - ACTION_BOXES["pvp"][1]
-        scale = 3
-        extent = (width * scale, height * scale)
-        sprite = Image.new("RGBA", extent)
 
-        sprite = self._mode_action_plate((68, 183, 255), scale)
-
-        try:
-            with Image.open(self.asset_dir / "pve_mode_icon.png") as source:
-                icon = source.convert("RGBA")
-            # The screenshot-derived PNG carries almost-transparent pixels
-            # over its entire canvas. They must not shrink the actual emblem.
-            icon.putalpha(icon.getchannel("A").point(lambda value: 0 if value < 16 else value))
-            bounds = icon.getchannel("A").getbbox()
-            if not bounds:
-                raise ValueError("empty PVE mode icon")
-            icon = icon.crop(bounds)
-            # Same optical target and padding as the opposite mode action.
-            target = PVP_RETURN_ICON_TARGET * scale
-            ratio = target / max(icon.size)
-            icon = icon.resize(
-                (max(1, round(icon.width * ratio)), max(1, round(icon.height * ratio))),
-                Image.Resampling.LANCZOS,
-            )
-            icon_left = (extent[0] - icon.width) // 2
-            icon_top = (extent[1] - icon.height) // 2
-            glyph_mask = Image.new("L", extent)
-            glyph_mask.paste(
-                icon.getchannel("A"),
-                (icon_left, icon_top),
-            )
-            glow = Image.new("RGBA", extent, (30, 185, 255, 0))
-            glow.putalpha(
-                glyph_mask.filter(ImageFilter.GaussianBlur(2.7 * scale)).point(
-                    lambda value: round(value * 0.45)
-                )
-            )
-            sprite.alpha_composite(glow)
-            sprite.alpha_composite(icon, (icon_left, icon_top))
-        except (OSError, ValueError):
-            # The packaged asset is required, but keep a readable blue action
-            # if a development checkout is temporarily incomplete.
-            fallback = self._actions["pvp"].resize(extent, Image.Resampling.LANCZOS)
-            blue = Image.new("RGBA", extent, (68, 181, 255, 0))
-            blue.putalpha(fallback.getchannel("A"))
-            sprite.alpha_composite(blue)
-        return sprite.resize((width, height), Image.Resampling.LANCZOS)
-
-    def _mode_action_plate(self, accent, scale=3):
-        """Both mode switches share the same dark tile, rim and padding."""
-        width = ACTION_BOXES['pvp'][2] - ACTION_BOXES['pvp'][0]
-        height = ACTION_BOXES['pvp'][3] - ACTION_BOXES['pvp'][1]
-        sprite = Image.new('RGBA', (width * scale, height * scale))
-        draw = ImageDraw.Draw(sprite)
-        draw.rounded_rectangle(
-            (3 * scale, 3 * scale, (width - 4) * scale, (height - 4) * scale),
-            radius=13 * scale, fill=(8, 21, 36, 250),
-            outline=accent + (255,), width=2 * scale,
-        )
-        draw.rounded_rectangle(
-            (7 * scale, 7 * scale, (width - 8) * scale, (height - 8) * scale),
-            radius=10 * scale, outline=(135, 165, 191, 170), width=scale,
-        )
-        return sprite
-
-    def _pvp_action_sprite(self):
-        """Retain the approved red swords, with the shared mode-switch rim."""
-        scale = 3
-        sprite = self._mode_action_plate((246, 80, 110), scale)
-        original = self._crop(ACTION_BOXES['pvp'])
-        icon = original.crop((11, 10, original.width - 11, original.height - 11))
-        r, g, b, a = icon.split()
-        bright = ImageChops.lighter(ImageChops.lighter(r, g), b)
-        mask = bright.point(lambda value: max(0, min(255, (value - 55) * 3)))
-        icon.putalpha(ImageChops.multiply(mask, a))
-        bounds = icon.getchannel('A').getbbox()
-        if bounds:
-            icon = icon.crop(bounds)
-        target = PVP_RETURN_ICON_TARGET * scale
-        ratio = target / max(icon.size)
-        icon = icon.resize((max(1, round(icon.width * ratio)),
-                            max(1, round(icon.height * ratio))), Image.Resampling.LANCZOS)
-        sprite.alpha_composite(icon, ((sprite.width - icon.width) // 2,
-                                     (sprite.height - icon.height) // 2))
-        return sprite.resize(original.size, Image.Resampling.LANCZOS)
 
     def _equipment_badge(self, kind):
         """Small equipment markers used beside the live team rating."""
@@ -769,1146 +648,10 @@ class MainHudRenderer:
         region = ("equipment_refresh_pending:" + token) if pending else ("action:" + action)
         return tile, region
 
-    def _render_pvp(self, snapshot: Mapping[str, object], *, pixel_scale=1.0, font_size=14):
-        """Render PVP data with the established PVE artwork and spacing."""
-
-        pixel_scale = max(0.75, min(4.0, float(pixel_scale)))
-        font_factor = max(0.8, min(1.4, float(font_size) / 14))
-        # Use the same compact row spacing at every viewport height. Stretching
-        # the spacing as well as the row count puts the list over the footer.
-        try:
-            pvp_visible_rows = max(
-                12, min(HUD_MAX_VISIBLE_ROWS, int(snapshot.get("visible_rows", PVP_HUD_VISIBLE_ROWS) or PVP_HUD_VISIBLE_ROWS))
-            )
-        except (TypeError, ValueError, OverflowError):
-            pvp_visible_rows = PVP_HUD_VISIBLE_ROWS
-        footer_shift = round((pvp_visible_rows - 10) * 75.4) + BOSS_BAR_EXTRA_HEIGHT
-        row_centers = tuple(
-            ROW_CENTERS[0] + index * 75.4
-            for index in range(pvp_visible_rows - 1)
-        )
-        source_width = REFERENCE_WIDTH
-        source_height = (
-            HUD_MAX_SOURCE_HEIGHT + round((pvp_visible_rows - PVP_HUD_VISIBLE_ROWS) * 75.4)
-        )
-        frame = Image.new("RGBA", (source_width, source_height), (0, 0, 0, 1))
-        draw = ImageDraw.Draw(frame)
-        regions: dict[str, tuple[int, int, int, int]] = {}
-        actors: list[tuple[tuple[int, int, int, int], int]] = []
-        result_shift = PVP_RESULTS_SHIFT_X
-
-        def result_x(value):
-            """Translate only the result tables, never the fixed HUD chrome."""
-            return value + result_shift
-
-        def local_box(box):
-            return (
-                round(box[0] - REFERENCE_BOUNDS[0]),
-                round(box[1] - REFERENCE_BOUNDS[1]),
-                round(box[2] - REFERENCE_BOUNDS[0]),
-                round(box[3] - REFERENCE_BOUNDS[1]),
-            )
-
-        def paste(image, x, y):
-            frame.alpha_composite(
-                image,
-                (round(x - REFERENCE_BOUNDS[0]), round(y - REFERENCE_BOUNDS[1])),
-            )
-
-        def paste_text(tile, x, center_y):
-            paste(tile, x, text_top_for_center(tile, center_y))
-
-        def label(text, x, y, height, *, anchor="left", max_width=None, **opts):
-            tile = (
-                self._fitted_label(
-                    text, max_width, height * font_factor, **opts
-                )
-                if max_width
-                else self._label(text, height * font_factor, **opts)
-            )
-            left = x - (
-                tile.width
-                if anchor == "right"
-                else tile.width / 2
-                if anchor == "center"
-                else 0
-            )
-            paste_text(tile, left, y)
-            return tile
-
-        def visible_value(value, fallback="—"):
-            text = str(value if value is not None else "").strip()
-            return fallback if text in {"", "--", "None"} else text
-
-        def compact_stat(caption, value, center_x, color):
-            caption_tile = self._label(
-                caption,
-                27 * font_factor,
-                color=(205, 214, 224),
-                regular=True,
-                stroke_radius=2,
-            )
-            value_text = visible_value(value)
-            value_tile = self._label(
-                value_text,
-                34 * font_factor,
-                color=color,
-                numeric=value_text.isdigit(),
-                flat=True,
-                stroke_radius=2,
-            )
-            gap = 5
-            group_width = caption_tile.width + gap + value_tile.width
-            left = center_x - group_width / 2
-            paste_text(caption_tile, left, 237)
-            paste_text(value_tile, left + caption_tile.width + gap, 237)
-
-        def draw_identity(row, center_y, *, max_name_width=205):
-            refresh = self._equipment_refresh_button(row, font_factor, hover) if pvp_view == "live" else None
-            if refresh and refresh[1] in regions:
-                refresh = None
-            try:
-                profession_id = int(row.get("profession_id", 0) or 0)
-            except (TypeError, ValueError, OverflowError):
-                profession_id = 0
-            name_left = result_x(255)
-            if profession_id:
-                # Keep a small safety margin inside the frame after shifting;
-                # long/unknown names still render without being clipped.
-                profession_left = max(
-                    REFERENCE_BOUNDS[0] + 2,
-                    result_x(166),
-                )
-                paste(self._profession(profession_id), profession_left, center_y - 47)
-            else:
-                name_left = result_x(182)
-            if refresh:
-                max_name_width = min(max_name_width, max(36, 558 - name_left - 120 - INLINE_RATING_GAP - 102))
-            name_tile = self._fitted_label(
-                str(row.get("name") or "未知玩家"),
-                max_name_width,
-                min(34 * font_factor, 28) if refresh else 34 * font_factor,
-                contour=True,
-                padding=6 if refresh else 13,
-            )
-            paste_text(name_tile, name_left, center_y)
-            name_ink = name_tile.info.get("hud_ink_bounds", (0, 0, name_tile.width, name_tile.height))
-            identity_right = name_left + name_ink[2]
-            rating = (
-                "人机" if bool(row.get("is_ai"))
-                else str(row.get("rating") or "--").strip()
-            )
-            if rating == "0":
-                rating = "--"
-            if rating:
-                rating_tile = self._fitted_label(
-                    f"（{rating}）",
-                    120 if refresh else 150,
-                    27 * font_factor,
-                    truncate=False,
-                    color=(
-                        (116, 210, 235)
-                        if bool(row.get("is_ai"))
-                        else (180, 192, 205)
-                        if rating == "--"
-                        else (247, 207, 109)
-                    ),
-                    contour=True,
-                    padding=11,
-                )
-                name_ink = name_tile.info.get(
-                    "hud_ink_bounds", (0, 0, name_tile.width, name_tile.height)
-                )
-                rating_ink = rating_tile.info.get(
-                    "hud_ink_bounds", (0, 0, rating_tile.width, rating_tile.height)
-                )
-                rating_left = (
-                    name_left + name_ink[2] + INLINE_RATING_GAP - rating_ink[0]
-                )
-                paste_text(rating_tile, rating_left, center_y)
-                identity_right = rating_left + rating_ink[2]
-            if refresh:
-                button, region = refresh
-                left = identity_right + 8
-                paste(button, left, center_y - 21)
-                regions[region] = (left, center_y - 21, left + button.width, center_y + 21)
-
-        def section_heading(title, center_y, accent, columns):
-            label(
-                title,
-                result_x(207),
-                center_y,
-                31,
-                color=accent,
-                contour=True,
-                flat=True,
-            )
-            y = round(center_y - REFERENCE_BOUNDS[1])
-            draw.line(
-                (round(result_x(281) - REFERENCE_BOUNDS[0]), y,
-                 round(result_x(604) - REFERENCE_BOUNDS[0]), y),
-                fill=accent + (135,),
-                width=2,
-            )
-            for caption, x in columns:
-                label(
-                    caption,
-                    result_x(x),
-                    center_y,
-                    29,
-                    anchor="center",
-                    color=(163, 180, 198),
-                    regular=True,
-                    stroke_radius=2,
-                )
-
-        # The timer and elevation lamp deliberately occupy the same source-art
-        # coordinates as PVE, so switching modes does not make the window jump.
-        self_only = bool(snapshot.get("pvp_self_only"))
-        if not self_only:
-            timer = self._label(
-                str(snapshot.get("time") or "00:00"),
-                36 * font_factor,
-                numeric=True,
-            )
-            paste_text(timer, 177, 158)
-        indicator_color = (
-            ADMIN_INDICATOR_ELEVATED
-            if bool(snapshot.get("admin_elevated", False))
-            else ADMIN_INDICATOR_STANDARD
-        )
-        indicator = Image.new("RGBA", (48, 48))
-        indicator_draw = ImageDraw.Draw(indicator)
-        indicator_draw.ellipse((3, 3, 45, 45), fill=indicator_color + (28,))
-        indicator_draw.ellipse((11, 11, 37, 37), fill=indicator_color + (255,))
-        indicator_draw.ellipse((15, 14, 24, 23), fill=(255, 255, 255, 105))
-        paste(indicator, 995, 134)
-
-        # PVE's Boss bar becomes the PVP match bar. It carries match identity
-        # and K/A/D without introducing a second dashboard/card visual system.
-        match_skin = self._strip_skin("boss", 1097 - 236)
-        match_skin = match_skin.resize(
-            (match_skin.width, match_skin.height + BOSS_BAR_EXTRA_HEIGHT),
-            Image.Resampling.LANCZOS,
-        )
-        paste(match_skin, 236, 194)
-        match_fill = Image.new("RGBA", match_skin.size)
-        ImageDraw.Draw(match_fill).rectangle(
-            (22, 12, match_skin.width - 14, 64 + BOSS_BAR_EXTRA_HEIGHT),
-            fill=(194, 7, 47, 108),
-        )
-        paste(match_fill, 236, 194)
-        # Dragon damage is pinned inside the personal-results view. Keep the
-        # old value as a compatibility alias, but never expose a third tab.
-        pvp_view = "team" if str(snapshot.get("pvp_hud_view") or "live") == "team" else "live"
-        hover = str(snapshot.get("hover_action", "") or "")
-        in_pvp_map = bool(snapshot.get("pvp_in_map"))
-        pvp_map_name = str(snapshot.get("pvp_map_name") or "PVP 对战")
-        if (in_pvp_map and self_only and pvp_map_name.strip() == "终末猎杀"
-                and self._hunter_dragon_icon is not None):
-            crest = self._hunter_dragon_icon.resize(
-                (104, 103), Image.Resampling.LANCZOS
-            )
-        else:
-            crest = self._actions["pvp"].resize((104, 103), Image.Resampling.LANCZOS)
-        paste(crest, 166, 186)
-        label(
-            pvp_map_name, 286, 237, 31, max_width=330,
-            color=(249, 250, 253), contour=True, truncate=False,
-        )
-
-        # Keep navigation in the title rail beside the timer. The match bar
-        # stays dedicated to the mode name, kills and deaths.
-        tab_center_y = 158
-        tab_specs = [
-            (
-                "team",
-                "团队构成",
-                (
-                    TITLE_RAIL_TAB_LEFT,
-                    tab_center_y - 23,
-                    TITLE_RAIL_TAB_LEFT + TITLE_RAIL_TAB_WIDTH,
-                    tab_center_y + 23,
-                ),
-                False,
-                True,
-            ),
-            (
-                "live",
-                "实时战斗",
-                (
-                    TITLE_RAIL_TAB_LEFT
-                    + TITLE_RAIL_TAB_WIDTH
-                    + TITLE_RAIL_TAB_GAP,
-                    tab_center_y - 23,
-                    TITLE_RAIL_TAB_LEFT
-                    + TITLE_RAIL_TAB_WIDTH * 2
-                    + TITLE_RAIL_TAB_GAP,
-                    tab_center_y + 23,
-                ),
-                True,
-                False,
-            ),
-        ]
-        for view, caption, box, red, blue in tab_specs:
-            if self_only and view == "live":
-                caption = "个人战果"
-            selected = pvp_view == view
-            hovered = hover == f"pvp_{view}"
-            accent = (
-                (255, 105, 127)
-                if view == "live"
-                else (80, 189, 246)
-            )
-            tile = self._pill(
-                box[2] - box[0],
-                box[3] - box[1],
-                accent=accent,
-                red=red and selected,
-                blue=blue and selected,
-            )
-            if not selected and not hovered:
-                tile = tile.copy()
-                tile.putalpha(tile.getchannel("A").point(lambda value: value * 3 // 5))
-            paste(tile, box[0], box[1])
-            label(
-                caption,
-                (box[0] + box[2]) / 2,
-                tab_center_y,
-                28,
-                anchor="center",
-                max_width=box[2] - box[0] - 10,
-                color=(250, 252, 255) if selected else (226, 236, 246),
-                regular=False,
-                flat=True,
-                padding=3,
-                stroke_radius=1,
-                truncate=False,
-            )
-            regions[f"action:pvp_{view}"] = box
-        if self_only:
-            if snapshot.get("pvp_healer"):
-                compact_stat("有效治疗", snapshot.get("pvp_effective_healing"), 795, (111, 224, 173))
-            else:
-                compact_stat("击杀", snapshot.get("pvp_kills", 0), 795, (111, 224, 173))
-            compact_stat("阵亡", snapshot.get("pvp_deaths", 0), 1008, (255, 126, 144))
-        else:
-            compact_stat("击杀", snapshot.get("pvp_kills", 0), 795, (111, 224, 173))
-            compact_stat("阵亡", snapshot.get("pvp_deaths", 0), 1008, (255, 126, 144))
-
-        all_outgoing = [
-            dict(row)
-            for row in snapshot.get("pvp_outgoing", ())
-            if isinstance(row, Mapping)
-        ]
-        all_incoming = [
-            dict(row)
-            for row in snapshot.get("pvp_incoming", ())
-            if isinstance(row, Mapping)
-        ]
-        team_battle = bool(snapshot.get("pvp_team_battle")) and pvp_view == "live"
-        all_allies = [
-            dict(row)
-            for row in snapshot.get("pvp_allies", ())
-            if isinstance(row, Mapping)
-        ]
-        all_enemies = [
-            dict(row)
-            for row in snapshot.get("pvp_enemies", ())
-            if isinstance(row, Mapping)
-        ]
-        outgoing_offset = min(max(0, len(all_outgoing) - 4), max(0, int(snapshot.get('pvp_outgoing_offset', 0))))
-        incoming_offset = min(max(0, len(all_incoming) - 4), max(0, int(snapshot.get('pvp_incoming_offset', 0))))
-        ally_offset = min(max(0, len(all_allies) - 4), max(0, int(snapshot.get('pvp_allies_offset', 0))))
-        enemy_offset = min(max(0, len(all_enemies) - 4), max(0, int(snapshot.get('pvp_enemies_offset', 0))))
-        outgoing = all_outgoing[outgoing_offset:outgoing_offset + 4]
-        incoming = all_incoming[incoming_offset:incoming_offset + 4]
-        allies = all_allies[ally_offset:ally_offset + 4]
-        enemies = all_enemies[enemy_offset:enemy_offset + 4]
-        if team_battle:
-            regions['scroll:pvp_allies'] = (146, row_centers[2] - 38, 1130, row_centers[5] + 37)
-            regions['scroll:pvp_enemies'] = (146, row_centers[7] - 38, 1130, row_centers[10] + 37)
-        else:
-            regions['scroll:pvp_outgoing'] = (146, row_centers[2] - 38, 1130, row_centers[5] + 37)
-            regions['scroll:pvp_incoming'] = (146, row_centers[7] - 38, 1130, row_centers[10] + 37)
-
-        # The local-player row is the familiar PVE blue highlight. Totals live
-        # here, while the red match bar remains reserved for K/A/D.
-        self_y = row_centers[0]
-        paste(self._strip_skin("self", 902), 191, self_y - 43)
-        paste(self._self_arrow, 146, self_y - 33)
-        try:
-            self_profession = int(snapshot.get("pvp_profession_id", 0) or 0)
-        except (TypeError, ValueError, OverflowError):
-            self_profession = 0
-        if self_profession:
-            paste(self._profession(self_profession), 191, self_y - 47)
-            self_name_left = 280
-        else:
-            self_name_left = 207
-        self_refresh = None
-        self_name = self._fitted_label(
-            str(snapshot.get("pvp_player_name") or "等待识别"),
-            min(205, max(36, 558 - self_name_left - 120 - INLINE_RATING_GAP - 102)) if self_refresh else 205,
-            min(35 * font_factor, 28) if self_refresh else 35 * font_factor,
-            padding=6 if self_refresh else 13,
-        )
-        paste_text(self_name, self_name_left, self_y)
-        self_name_ink = self_name.info.get("hud_ink_bounds", (0, 0, self_name.width, self_name.height))
-        self_identity_right = self_name_left + self_name_ink[2]
-        self_rating = visible_value(snapshot.get("pvp_rating"), fallback="")
-        if self_rating:
-            self_rating_tile = self._fitted_label(
-                f"（{self_rating}）",
-                120 if self_refresh else 145,
-                27 * font_factor,
-                truncate=False,
-                color=(255, 218, 115),
-                padding=11,
-            )
-            self_name_ink = self_name.info.get(
-                "hud_ink_bounds", (0, 0, self_name.width, self_name.height)
-            )
-            self_rating_ink = self_rating_tile.info.get(
-                "hud_ink_bounds",
-                (0, 0, self_rating_tile.width, self_rating_tile.height),
-            )
-            paste_text(
-                self_rating_tile,
-                self_name_left
-                + self_name_ink[2]
-                + INLINE_RATING_GAP
-                - self_rating_ink[0],
-                self_y,
-            )
-            self_identity_right = self_name_left + self_name_ink[2] + INLINE_RATING_GAP + self_rating_ink[2] - self_rating_ink[0]
-        if self_refresh:
-            button, region = self_refresh
-            left = self_identity_right + 8
-            paste(button, left, self_y - 21)
-            regions[region] = (left, self_y - 21, left + button.width, self_y + 21)
-
-        def summary_value(caption, value, center_x, value_color):
-            caption_tile = self._label(
-                caption,
-                26 * font_factor,
-                color=(196, 216, 231),
-                regular=True,
-                stroke_radius=2,
-            )
-            value_tile = self._fitted_label(
-                visible_value(value),
-                165,
-                28 * font_factor,
-                truncate=False,
-                color=value_color,
-                stroke_radius=2,
-            )
-            gap = 4
-            group_width = caption_tile.width + gap + value_tile.width
-            left = center_x - group_width / 2
-            paste_text(caption_tile, left, self_y)
-            paste_text(value_tile, left + caption_tile.width + gap, self_y)
-
-        summary_value(
-            "有效治疗" if snapshot.get("pvp_healer") else "伤害",
-            snapshot.get("pvp_effective_healing") if snapshot.get("pvp_healer")
-            else snapshot.get("pvp_total_damage"),
-            710,
-            (111, 224, 173) if snapshot.get("pvp_healer") else (249, 250, 253),
-        )
-        summary_value(
-            "承伤", snapshot.get("pvp_total_taken"), 960, (134, 198, 255)
-        )
-
-        if team_battle:
-            def draw_team_section(title, rows, centers, accent, empty_text, *, enemy=False):
-                section_heading(
-                    title,
-                    centers[0] - (row_centers[2] - row_centers[1]),
-                    accent,
-                    ((("对我伤害" if enemy else "伤害 / 治疗"), 672), ("击杀", 849),
-                     ("阵亡", 1010)),
-                )
-                for index, center_y in enumerate(centers):
-                    if index >= len(rows):
-                        continue
-                    row = rows[index]
-                    if bool(row.get("is_self")):
-                        paste(self._strip_skin("self", 902), 191, center_y - 43)
-                        paste(self._self_arrow, 146, center_y - 33)
-                    draw_identity(row, center_y, max_name_width=190)
-                    try:
-                        profession_id = int(row.get("profession_id", 0) or 0)
-                    except (TypeError, ValueError, OverflowError):
-                        profession_id = 0
-                    healer = profession_id == 1_200_002
-                    metric = (
-                        row.get("damage_to_self")
-                        if enemy else row.get("healing") if healer else row.get("damage")
-                    )
-                    label(
-                        visible_value(metric), result_x(725), center_y, 27,
-                        anchor="right", max_width=150,
-                        color=(111, 224, 173) if healer else (249, 250, 253),
-                        contour=True, truncate=False,
-                    )
-                    for field, x, color in (
-                        ("kills", 849, (255, 126, 144)),
-                        ("deaths", 1010, (134, 198, 255)),
-                    ):
-                        value = visible_value(row.get(field))
-                        label(
-                            value, result_x(x), center_y, 27,
-                            anchor="center", max_width=72, color=color,
-                            contour=True, truncate=False,
-                        )
-                    try:
-                        actor_id = int(row.get("actor_id", 0) or 0)
-                    except (TypeError, ValueError, OverflowError):
-                        actor_id = 0
-                    if actor_id:
-                        actors.append(((146, center_y - 38, 1130, center_y + 37), actor_id))
-                if not rows:
-                    label(
-                        empty_text, result_x(704), (centers[0] + centers[-1]) / 2,
-                        30, anchor="center", max_width=500,
-                        color=(183, 200, 216), contour=True,
-                    )
-
-            draw_team_section(
-                "己方", allies, row_centers[2:6], (80, 189, 246), "等待己方阵容数据"
-            )
-            draw_team_section(
-                "敌方", enemies, row_centers[7:11], (255, 105, 127), "等待敌方阵容数据", enemy=True
-            )
-        else:
-            monsters = [
-                row for row in snapshot.get("pvp_monsters", ())
-                if isinstance(row, Mapping)
-            ]
-            if self_only:
-                dragon = monsters[0] if monsters else {}
-                dragon_name = str(dragon.get("name") or "战争巨龙")
-                dragon_text = (
-                    f"{dragon_name}  ·  对龙伤害 {visible_value(dragon.get('damage_to'), fallback='未记录')}"
-                    f"  ·  承受龙伤害 {visible_value(dragon.get('damage_from'), fallback='未记录')}"
-                    f"  ·  {'已击败' if dragon.get('defeated') else '状态未确认'}"
-                ) if monsters else "巨龙战果  ·  未记录"
-                label(
-                    dragon_text, result_x(208), row_centers[1], 24,
-                    max_width=930, color=(255, 170, 125), contour=True,
-                    truncate=False,
-                )
-            if self_only and snapshot.get("pvp_healer"):
-                section_heading(
-                    "有效治疗", row_centers[2] if self_only else row_centers[1], (111, 224, 173),
-                    (("治疗量", 872),),
-                )
-                label(
-                    "本人", result_x(255), row_centers[3], 34,
-                    color=(249, 250, 253), contour=True,
-                )
-                label(
-                    visible_value(snapshot.get("pvp_effective_healing"), fallback="未记录"),
-                    result_x(915), row_centers[3], 31,
-                    anchor="right", max_width=210,
-                    color=(111, 224, 173), contour=True, truncate=False,
-                )
-                label(
-                    "仅统计已确认的有效治疗", result_x(255), row_centers[4], 25,
-                    color=(163, 180, 198), regular=True,
-                )
-            else:
-                section_heading(
-                    "战果",
-                    row_centers[2] if self_only else row_centers[1],
-                    (255, 105, 127),
-                    (("击杀", 694),
-                     ("伤害", 872),
-                     ("输出占比" if self_only else "占比", 1038)),
-                )
-                result_centers = row_centers[3:6] if self_only else row_centers[2:6]
-                for index, center_y in enumerate(result_centers):
-                    if index >= len(outgoing):
-                        continue
-                    row = outgoing[index]
-                    draw_identity(row, center_y)
-                    kills = visible_value(row.get("kills"), fallback="0")
-                    label(
-                        kills,
-                        result_x(694), center_y, 28,
-                        anchor="center", max_width=145, color=(238, 244, 249),
-                        regular=True, contour=True, truncate=False,
-                    )
-                    label(
-                        visible_value(row.get("damage_text") or row.get("damage")),
-                        result_x(915), center_y, 29, anchor="right", max_width=180,
-                        color=(249, 250, 253), contour=True, truncate=False,
-                    )
-                    label(
-                        visible_value(row.get("share_text") or row.get("share")),
-                        result_x(1080), center_y, 27, anchor="right", max_width=125,
-                        color=(255, 126, 144), contour=True, truncate=False,
-                    )
-                    try:
-                        actor_id = int(row.get("actor_id", 0) or 0)
-                    except (TypeError, ValueError, OverflowError):
-                        actor_id = 0
-                    if actor_id:
-                        actors.append(((146, center_y - 38, 1130, center_y + 37), actor_id))
-                if not outgoing:
-                    label(
-                        "进入 PVP 地图后加载数据" if not in_pvp_map else "等待对战伤害数据", result_x(704),
-                        (row_centers[2] + row_centers[5]) / 2, 30,
-                        anchor="center", max_width=500,
-                        color=(183, 200, 216), contour=True,
-                    )
-
-            section_heading(
-                "阵亡", row_centers[6], (111, 191, 244),
-                (("击败", 694), ("承伤", 872), ("占比", 1038)),
-            )
-            incoming_centers = row_centers[7:11]
-            for index, center_y in enumerate(incoming_centers):
-                if index >= len(incoming):
-                    continue
-                row = incoming[index]
-                draw_identity(row, center_y)
-                label(
-                    visible_value(row.get("defeats"), fallback="0"),
-                    result_x(694), center_y, 30, anchor="center", max_width=100,
-                    color=(255, 126, 144), numeric=True, contour=True, truncate=False,
-                )
-                label(
-                    visible_value(row.get("damage_text") or row.get("damage")),
-                    result_x(915), center_y, 29, anchor="right", max_width=180,
-                    color=(249, 250, 253), contour=True, truncate=False,
-                )
-                label(
-                    visible_value(row.get("share_text") or row.get("share")),
-                    result_x(1080), center_y, 27, anchor="right", max_width=125,
-                    color=(109, 194, 247), contour=True, truncate=False,
-                )
-                try:
-                    actor_id = int(row.get("actor_id", 0) or 0)
-                except (TypeError, ValueError, OverflowError):
-                    actor_id = 0
-                if actor_id:
-                    actors.append(((146, center_y - 38, 1130, center_y + 37), actor_id))
-            if not incoming:
-                label(
-                    "暂无阵亡记录", result_x(704),
-                    (incoming_centers[0] + incoming_centers[-1]) / 2, 30,
-                    anchor="center", max_width=500,
-                    color=(183, 200, 216), contour=True,
-                )
-
-        if pvp_view == "team":
-            # Keep the approved PVP chrome, but replace the two combat tables
-            # with the same rating/equipment vocabulary used by the PVE HUD.
-            content_bottom = 1038 + footer_shift
-            draw.rectangle(
-                (
-                    0,
-                    round(282 - REFERENCE_BOUNDS[1]),
-                    source_width,
-                    round(content_bottom - REFERENCE_BOUNDS[1]),
-                ),
-                fill=(0, 0, 0, 1),
-            )
-            actors.clear()
-            regions.pop("scroll:pvp_outgoing", None)
-            regions.pop("scroll:pvp_incoming", None)
-            regions.pop("scroll:pvp_allies", None)
-            regions.pop("scroll:pvp_enemies", None)
-            team_rows = [
-                dict(row)
-                for row in snapshot.get("pvp_team_rows", ())
-                if isinstance(row, Mapping)
-            ]
-            league = snapshot.get("pvp_league_roster") or {}
-            league_raids = league.get("raids") if isinstance(league, Mapping) else None
-            real_groups = bool(isinstance(league_raids, Mapping) and league_raids)
-            team_rows = team_rows[:PVP_MAX_TEAM_MEMBERS]
-            page_rows = team_rows
-            scroll_rows = team_rows
-            scroll_offset = 0
-            if real_groups:
-                raid_numbers = sorted(
-                    {int(raid.get("number", 0) or 0)
-                     for raid in league_raids.values()
-                     if isinstance(raid, Mapping) and int(raid.get("number", 0) or 0) > 0}
-                )[:PVP_MAX_TEAM_PAGES]
-                if not raid_numbers:
-                    real_groups = False
-                else:
-                    selected_raid = int(snapshot.get("pvp_league_selected_raid", 0) or 0)
-                    if selected_raid not in raid_numbers:
-                        selected_raid = int(league.get("raid_number", 0) or 0)
-                    if selected_raid not in raid_numbers:
-                        selected_raid = raid_numbers[0]
-                    team_rows = [
-                        row for row in team_rows
-                        if int(row.get("raid_number", 0) or 0) == selected_raid
-                    ][:PVP_TEAM_PAGE_SIZE]
-                    page_rows = team_rows
-                    scroll_rows = page_rows
-                    team_pages = len(raid_numbers)
-                    visible_team_rows = len(row_centers) - 1
-                    team_page = raid_numbers.index(selected_raid)
-                    team_offset = max(0, int(snapshot.get("pvp_team_offset", 0) or 0))
-                    team_offset = min(
-                        max(0, len(scroll_rows) - visible_team_rows), team_offset
-                    )
-                    scroll_offset = team_offset
-            if not real_groups:
-                # Ten rows fit in the artwork viewport, but each tab is a
-                # complete 30-member display group. Scrolling stays inside
-                # that group instead of turning each viewport into a fake team.
-                visible_team_rows = len(row_centers) - 1
-                team_pages = max(
-                    1,
-                    min(
-                        PVP_MAX_TEAM_PAGES,
-                        (len(team_rows) + PVP_TEAM_PAGE_SIZE - 1) // PVP_TEAM_PAGE_SIZE,
-                    ),
-                )
-                raw_offset = max(0, int(snapshot.get("pvp_team_offset", 0) or 0))
-                team_page = min(team_pages - 1, raw_offset // PVP_TEAM_PAGE_SIZE)
-                page_start = team_page * PVP_TEAM_PAGE_SIZE
-                page_rows = team_rows[page_start:page_start + PVP_TEAM_PAGE_SIZE]
-                local_offset = min(
-                    max(0, len(page_rows) - visible_team_rows),
-                    max(0, raw_offset - page_start),
-                )
-                team_offset = page_start + local_offset
-                scroll_rows = page_rows
-                scroll_offset = local_offset
-            shown_team = page_rows[scroll_offset:scroll_offset + visible_team_rows]
-            label(
-                "团队构成", result_x(207), row_centers[0], 31,
-                color=(80, 189, 246), contour=True, flat=True,
-            )
-            label(
-                f"共 {len(page_rows)} 人",
-                result_x(415),
-                row_centers[0],
-                26,
-                color=(205, 222, 233),
-                stroke_radius=2,
-            )
-            tab_left, tab_right, tab_gap = 630, 1110, 6
-            tab_width = min(
-                155 if real_groups else 78,
-                max(42, (tab_right - tab_left - tab_gap * (team_pages - 1)) // team_pages),
-            )
-            for page in range(team_pages):
-                left = tab_left + page * (tab_width + tab_gap)
-                right = left + tab_width
-                action = f"pvp_team_page_{page}"
-                selected = page == team_page
-                hovered = hover == action
-                draw.rounded_rectangle(
-                    local_box((left, row_centers[0] - 21, right, row_centers[0] + 21)),
-                    radius=8,
-                    fill=(16, 71, 72, 225) if selected else (13, 23, 34, 200),
-                    outline=(110, 237, 202, 245) if selected or hovered else (74, 95, 114, 200),
-                    width=2 if selected else 1,
-                )
-                label(
-                    (
-                        f"{raid_numbers[page]}团" if real_groups
-                        else f"{page + 1}组"
-                    ),
-                    (left + right) / 2, row_centers[0], 22,
-                    anchor="center", max_width=tab_width - 8,
-                    color=(184, 255, 231) if selected else (171, 190, 209),
-                    regular=not selected,
-                )
-                regions[f"action:{action}"] = (
-                    left, row_centers[0] - 21, right, row_centers[0] + 21,
-                )
-            if len(scroll_rows) > visible_team_rows:
-                track_left = 1112
-                track_top = row_centers[1] - 34
-                track_bottom = row_centers[-1] + 34
-                draw.line(
-                    local_box((track_left, track_top, track_left, track_bottom)),
-                    fill=(74, 95, 114, 180), width=4,
-                )
-                thumb_height = max(
-                    30,
-                    round((track_bottom - track_top) * visible_team_rows / len(scroll_rows)),
-                )
-                thumb_travel = max(0, track_bottom - track_top - thumb_height)
-                thumb_top = track_top + round(
-                    thumb_travel * scroll_offset / max(1, len(scroll_rows) - visible_team_rows)
-                )
-                draw.rounded_rectangle(
-                    local_box((track_left - 4, thumb_top, track_left + 4, thumb_top + thumb_height)),
-                    radius=4, fill=(111, 224, 173, 230), outline=(111, 224, 173, 230),
-                )
-                regions["scrollbar:pvp_team"] = (
-                    track_left - 18, track_top, track_left + 18, track_bottom
-                )
-            regions["scroll:pvp_team"] = (
-                146,
-                row_centers[1] - 38,
-                1130,
-                row_centers[-1] + 37,
-            )
-            for index, center_y in enumerate(row_centers[1:]):
-                if index >= len(shown_team):
-                    continue
-                row = shown_team[index]
-                is_ai = bool(row.get("is_ai"))
-                refresh = self._equipment_refresh_button(row, font_factor, hover)
-                if index % 2:
-                    draw.rectangle(
-                        local_box((191, center_y - 37, 1093, center_y + 37)),
-                        fill=(7, 18, 30, 72),
-                    )
-                is_self = bool(row.get("is_self"))
-                if is_self:
-                    paste(self._strip_skin("self", 902), 191, center_y - 43)
-                    paste(self._self_arrow, 146, center_y - 33)
-                try:
-                    profession_id = int(row.get("profession_id", 0) or 0)
-                except (TypeError, ValueError, OverflowError):
-                    profession_id = 0
-                paste(self._profession(profession_id), 191, center_y - 47)
-                name_tile = self._fitted_label(
-                    str(row.get("name") or "玩家识别中"),
-                    208 if refresh else 274,
-                    36 * font_factor,
-                    contour=not is_self,
-                    padding=13,
-                )
-                paste_text(name_tile, 280, center_y)
-                rating_text = "人机" if is_ai else visible_value(row.get("rating"))
-                rating_tile = self._fitted_label(
-                    f"（{rating_text}）",
-                    130 if refresh else 170,
-                    30 * font_factor,
-                    truncate=False,
-                    color=(
-                        (116, 210, 235)
-                        if is_ai
-                        else (247, 207, 109)
-                        if rating_text != "—"
-                        else (180, 192, 205)
-                    ),
-                    contour=not is_self,
-                    padding=13,
-                )
-                name_ink = name_tile.info.get(
-                    "hud_ink_bounds", (0, 0, name_tile.width, name_tile.height)
-                )
-                rating_ink = rating_tile.info.get(
-                    "hud_ink_bounds", (0, 0, rating_tile.width, rating_tile.height)
-                )
-                paste_text(
-                    rating_tile,
-                    280 + name_ink[2] + INLINE_RATING_GAP - rating_ink[0],
-                    center_y,
-                )
-                if refresh:
-                    button, region = refresh
-                    left = 280 + name_ink[2] + INLINE_RATING_GAP + rating_ink[2] - rating_ink[0] + 8
-                    paste(button, left, center_y - 21)
-                    regions[region] = (left, center_y - 21, left + button.width, center_y + 21)
-
-                if bool(row.get("equipment_profile_ready", False)) and not is_ai:
-                    equipment_text, _equipment_is_pve_warning = pvp_equipment_type_badge(
-                        row.get("equipment_count"),
-                        row.get("pvp_equipment_count"),
-                    )
-                    try:
-                        equipment_total = max(
-                            0, int(row.get("equipment_count", 0) or 0)
-                        )
-                        equipment_pvp = max(
-                            0,
-                            int(row.get("pvp_equipment_count", 0) or 0),
-                        )
-                    except (TypeError, ValueError, OverflowError):
-                        equipment_total = equipment_pvp = 0
-                    # Colour identifies the actual gear type in both modes;
-                    # the warning target is supplied by the mode-specific
-                    # badge helper above (PVP warns about adventure pieces).
-                    equipment_is_adventure = equipment_total > equipment_pvp
-                    active_words = max(
-                        0, int(row.get("active_word_count", 0) or 0)
-                    )
-                    total_words = max(
-                        0, int(row.get("total_word_count", 0) or 0)
-                    )
-                    badge_right = 1060
-                    word_text = f"{active_words}/{total_words}"
-                    word_tile = self._fitted_label(
-                        word_text,
-                        78,
-                        28 * font_factor,
-                        truncate=False,
-                        numeric=True,
-                        color=(255, 221, 73),
-                        contour=not is_self,
-                        padding=7,
-                    )
-                    word_ink = word_tile.info.get(
-                        "hud_ink_bounds",
-                        (0, 0, word_tile.width, word_tile.height),
-                    )
-                    paste_text(word_tile, badge_right - word_ink[2], center_y)
-                    word_icon_x = badge_right - word_tile.width - 35
-                    paste(self._equipment_word_badge, word_icon_x, center_y - 15)
-                    equipment_color = (
-                        (105, 202, 255)
-                        if equipment_is_adventure
-                        else (255, 145, 161)
-                    )
-                    equipment_tile = self._fitted_label(
-                        equipment_text,
-                        150,
-                        27 * font_factor,
-                        truncate=False,
-                        regular=True,
-                        color=equipment_color,
-                        contour=not is_self,
-                        padding=7,
-                    )
-                    equipment_right = word_icon_x - 18
-                    equipment_ink = equipment_tile.info.get(
-                        "hud_ink_bounds",
-                        (0, 0, equipment_tile.width, equipment_tile.height),
-                    )
-                    equipment_width = min(
-                        158,
-                        max(104, equipment_ink[2] - equipment_ink[0] + 24),
-                    )
-                    equipment_height = 43
-                    equipment_left = equipment_right - equipment_width
-                    paste(
-                        self._pill(
-                            equipment_width,
-                            equipment_height,
-                            accent=(221, 61, 99)
-                            if not equipment_is_adventure
-                            else (45, 151, 226),
-                            red=not equipment_is_adventure,
-                            blue=equipment_is_adventure,
-                        ),
-                        equipment_left,
-                        center_y - equipment_height / 2,
-                    )
-                    paste_text(
-                        equipment_tile,
-                        equipment_left
-                        + (equipment_width - (equipment_ink[2] - equipment_ink[0])) / 2
-                        - equipment_ink[0],
-                        center_y,
-                    )
-                else:
-                    label(
-                        "--" if is_ai else "装备读取中",
-                        result_x(856),
-                        center_y,
-                        26,
-                        anchor="center",
-                        max_width=170,
-                        color=(163, 180, 198),
-                        regular=True,
-                        stroke_radius=2,
-                    )
-                    label(
-                        "--",
-                        result_x(1041),
-                        center_y,
-                        28,
-                        anchor="center",
-                        color=(183, 200, 216),
-                        regular=True,
-                        stroke_radius=2,
-                    )
-                try:
-                    actor_id = int(row.get("actor_id", 0) or 0)
-                except (TypeError, ValueError, OverflowError):
-                    actor_id = 0
-                if actor_id:
-                    actors.append(
-                        ((146, center_y - 38, 1130, center_y + 37), actor_id)
-                    )
-            if not team_rows:
-                label(
-                    "进入 PVP 地图后加载数据" if not in_pvp_map else "等待团队成员数据",
-                    626,
-                    (row_centers[0] + content_bottom) / 2,
-                    30,
-                    anchor="center",
-                    max_width=520,
-                    color=(183, 200, 216),
-                    contour=True,
-                )
-
-        if pvp_view == "live":
-            sections = (
-                (("allies", len(all_allies), ally_offset),
-                 ("enemies", len(all_enemies), enemy_offset))
-                if team_battle else
-                (("outgoing", len(all_outgoing), outgoing_offset),
-                 ("incoming", len(all_incoming), incoming_offset))
-            )
-            for (name, total, offset), centers in zip(
-                sections, (row_centers[2:6], row_centers[7:11])
-            ):
-                if total <= 4:
-                    continue
-                track_left = 1112
-                track_top, track_bottom = centers[0] - 34, centers[-1] + 34
-                track_height = track_bottom - track_top
-                thumb_height = max(28, round(track_height * 4 / total))
-                thumb_top = track_top + round(
-                    (track_height - thumb_height) * offset / (total - 4)
-                )
-                draw.line(
-                    local_box((track_left, track_top, track_left, track_bottom)),
-                    fill=(74, 95, 114, 180), width=4,
-                )
-                draw.rounded_rectangle(
-                    local_box((track_left - 4, thumb_top,
-                               track_left + 4, thumb_top + thumb_height)),
-                    radius=4, fill=(111, 224, 173, 230),
-                )
-                regions[f"scrollbar:pvp_{name}"] = (
-                    track_left - 12, track_top, track_left + 12, track_bottom
-                )
-                regions[f"scroll:pvp_{name}"] = (
-                    146, track_top - 4, track_left - 13, track_bottom + 4
-                )
-
-        # Footer is the original PVE summary strip and action rail. Only the
-        # left action changes to the blue PVE return control.
-        fy = 1039 + footer_shift
-        team_width = 434
-        team_strip = self._strip_skin("team", team_width)
-        team_strip = team_strip.resize(
-            (team_strip.width, team_strip.height + 6),
-            Image.Resampling.LANCZOS,
-        )
-        paste(team_strip, 248, fy - 3)
-        paste(
-            self._avatar.resize(TEAM_SUMMARY_AVATAR_SIZE, Image.Resampling.LANCZOS),
-            169,
-            fy - 13,
-        )
-        show_self_rating = self_only and pvp_view == "live"
-        average_rating = visible_value(
-            snapshot.get("pvp_rating" if show_self_rating else "pvp_team_average_rating"), fallback="—"
-        )
-        caption, value = self._footer_summary_pair(
-            "本人超凡评分" if show_self_rating else "团队超凡评分", average_rating,
-            248 + team_width - 275 - 9, font_factor,
-        )
-        paste_text(caption, 275, fy + 43)
-        paste_text(value, 275 + caption.width + 4, fy + 43)
-
-        interaction_blocked = bool(snapshot.get("interaction_blocked", False))
-        for name, source_name in (
-            ("pve", "pvp"),
-            ("settings", "settings"),
-            ("lock", "lock"),
-            ("pin", "pin"),
-        ):
-            source_box = ACTION_BOXES[source_name]
-            box = (
-                source_box[0],
-                source_box[1] + footer_shift,
-                source_box[2],
-                source_box[3] + footer_shift,
-            )
-            tile = self._pve_action if name == "pve" else self._actions[source_name]
-            if name == "pin":
-                tile = (
-                    self._pin_on
-                    if bool(snapshot.get("topmost", False))
-                    else self._pin_off
-                )
-            if name == "lock" and not bool(snapshot.get("locked", False)):
-                tile = self._unlocked
-            disabled = bool(
-                (interaction_blocked and name != "settings")
-                or (
-                    name == "settings"
-                    and snapshot.get("settings_disabled", False)
-                )
-            )
-            if disabled:
-                tile = tile.copy()
-                tile.putalpha(tile.getchannel("A").point(lambda n: n // 3))
-            elif name == hover:
-                tile = tile.copy()
-                glow_color = (
-                    (74, 184, 246, 0)
-                    if name == "pve"
-                    else (178, 218, 255, 0)
-                )
-                glow = Image.new("RGBA", tile.size, glow_color)
-                glow.putalpha(tile.getchannel("A").point(lambda n: n // 10))
-                tile.alpha_composite(glow)
-            tile = tile.resize(
-                (source_box[2] - source_box[0], source_box[3] - source_box[1]),
-                Image.Resampling.LANCZOS,
-            )
-            paste(tile, box[0], box[1])
-            if not disabled:
-                regions["action:" + name] = box
-
-        regions["drag:window"] = (146, 126, 1130, 191)
-        if not bool(snapshot.get("locked", False)):
-            right = REFERENCE_BOUNDS[2] - 2
-            bottom = REFERENCE_BOUNDS[1] + source_height - 4
-            regions["resize:height"] = (
-                right - 30, bottom - 30, right, bottom
-            )
-            for span in (10, 20):
-                draw.line(
-                    local_box((right - span, bottom - 5,
-                               right - 5, bottom - span)),
-                    fill=(145, 174, 201, 180), width=2,
-                )
-        if interaction_blocked:
-            regions = {
-                key: box for key, box in regions.items() if key == "action:settings"
-            }
-            actors.clear()
-
-        scale = REFERENCE_SCALE * pixel_scale
-        image = frame.resize(
-            (round(source_width * scale), round(source_height * scale)),
-            Image.Resampling.LANCZOS,
-        )
-
-        def physical(box):
-            return tuple(round(value * scale) for value in local_box(box))
-
-        return HudRenderResult(
-            image,
-            {key: physical(box) for key, box in regions.items()},
-            tuple((physical(box), actor) for box, actor in actors),
-            max(1, round(HUD_ROW_HEIGHT * pixel_scale)),
-            pvp_visible_rows,
-        )
 
     def render(self, snapshot: Mapping[str, object], *, pixel_scale=1.0, font_size=14):
         pixel_scale = max(0.75, min(4.0, float(pixel_scale)))
         font_factor = max(0.8, min(1.4, float(font_size) / 14))
-        if str(snapshot.get("combat_mode") or "pve").casefold() == "pvp":
-            return self._render_pvp(
-                snapshot,
-                pixel_scale=pixel_scale,
-                font_size=font_size,
-            )
         rows = [dict(row) for row in snapshot.get("rows", ()) if isinstance(row, Mapping)]
         application_rows = [
             dict(row)
@@ -1938,8 +681,10 @@ class MainHudRenderer:
         # when the user hides the combat timer.
         top_removed = 0 + (0 if show_boss else 88)
         footer_offset = round((10 - count) * 75.4)
+        update_status_text = str(snapshot.get("update_status_text", "") or "").strip()
+        update_status_height = 76 if update_status_text else 0
         source_width = REFERENCE_WIDTH - width_removed
-        source_height = HUD_BASE_SOURCE_HEIGHT - footer_offset - top_removed + boss_extra
+        source_height = HUD_BASE_SOURCE_HEIGHT - footer_offset - top_removed + boss_extra + update_status_height
         frame = Image.new("RGBA", (source_width, source_height), (0, 0, 0, 1))
         regions = {}
         actors = []
@@ -1966,7 +711,7 @@ class MainHudRenderer:
             # Only outlined text: no pill, tile or background behind the clock.
             paste_text(timer, 177, timer_y + 29)
 
-        # Both PVE and PVP use the same compact title-rail navigation.  Keep
+        # Keep the compact title-rail navigation
         # it immediately to the right of the clock so the content switch does
         # not consume another row or alter the approved window dimensions.
         if "pve_hud_view" in snapshot:
@@ -2814,7 +1559,26 @@ class MainHudRenderer:
                     truncate=False,
                 )
 
-        fy = 1039 - footer_offset + boss_extra
+        fy = 1039 - footer_offset + boss_extra + update_status_height
+        if update_status_text:
+            left, right = 169, 1097 - width_removed
+            top = fy - update_status_height + 4
+            bottom = top + 58
+            update_action = str(snapshot.get("update_status_action", "") or "")
+            draw = ImageDraw.Draw(frame)
+            draw.rounded_rectangle(
+                (left - 146, top - 126 - top_removed,
+                 right - 146, bottom - 126 - top_removed),
+                radius=12, fill=(13, 28, 42, 245),
+                outline=(65, 137, 180, 220), width=2,
+            )
+            label(
+                update_status_text, left + 16, (top + bottom) / 2,
+                28, max_width=right - left - 32, regular=True,
+                color=(120, 216, 255) if update_action else (214, 234, 247),
+            )
+            if update_action == "download_update" and not interaction_blocked:
+                regions["action:download_update"] = (left, top, right, bottom)
         if bool(snapshot.get("show_team_dps", True)):
             team_width = 434 - max(0, width_removed - 65)
             team_width = min(team_width, min(box[0] for box in FOOTER_ACTION_BOXES.values()) - width_removed - 248 - 10)
@@ -2841,8 +1605,6 @@ class MainHudRenderer:
             paste_text(value_tile, 275 + caption.width + 4, fy + 43)
         hover = str(snapshot.get("hover_action", ""))
         for name, box in FOOTER_ACTION_BOXES.items():
-            if name == "pvp" and not bool(snapshot.get("show_pvp", True)):
-                continue
             tile = self._actions[name]
             if name == 'pin':
                 tile = self._pin_on if bool(snapshot.get('topmost', False)) else self._pin_off
@@ -2858,18 +1620,18 @@ class MainHudRenderer:
             if disabled:
                 tile = tile.copy()
                 tile.putalpha(tile.getchannel('A').point(lambda n: n // 3))
-            if name == hover and name != "pvp" and not disabled:
+            if name == hover and not disabled:
                 tile = tile.copy()
                 glow = Image.new("RGBA", tile.size, (178, 218, 255, 0))
                 glow.putalpha(tile.getchannel("A").point(lambda n: n // 12))
                 tile.alpha_composite(glow)
             tile = tile.resize((box[2] - box[0], box[3] - box[1]), Image.Resampling.LANCZOS)
-            paste(tile, box[0] - width_removed, box[1] - footer_offset + boss_extra)
+            paste(tile, box[0] - width_removed, box[1] - footer_offset + boss_extra + update_status_height)
             if not disabled:
-                regions["action:" + name] = (box[0] - width_removed, box[1] - footer_offset + boss_extra, box[2] - width_removed, box[3] - footer_offset + boss_extra)
+                regions["action:" + name] = (box[0] - width_removed, box[1] - footer_offset + boss_extra + update_status_height, box[2] - width_removed, box[3] - footer_offset + boss_extra + update_status_height)
 
         if not bool(snapshot.get("locked", False)):
-            right, bottom = 1128 - width_removed, 1128 - footer_offset + boss_extra
+            right, bottom = 1128 - width_removed, 1128 - footer_offset + boss_extra + update_status_height
             regions['resize:height'] = (right - 30, bottom - 30, right, bottom)
             draw = ImageDraw.Draw(frame)
             for span in (10, 20):

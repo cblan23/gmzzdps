@@ -135,6 +135,97 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
                 self.assertEqual(taken[200]["taken"], 75)
                 self.assertEqual(taken[200]["share"], 0.75)
 
+    def test_scene_exit_preserves_negative_ai_rows_and_marks_interrupted_pull(self):
+        tracker = EncounterTracker()
+        encounter = tracker.begin(
+            instance_id="instance",
+            started_at_ns=START_EPOCH * NS,
+            participants_snapshot=[ROSTER[0]],
+            dungeon_id=5_100_044,
+            map_id=5_200_095,
+            boss_template_id=7_103_001,
+            boss_token="boss",
+            self_token="self",
+        )
+        tracker.end("RESET", (START_EPOCH + 405) * NS)
+        first_ai = -5_273_117_938_068_274_874
+        second_ai = -687_583_909_553_308_637
+        base = {
+            "archive_reason": "scene_change",
+            "target_filter": "boss",
+            "dungeon_id": 5_100_044,
+            "map_id": 5_200_095,
+            "duration_seconds": 405.0,
+            "dps_duration_seconds": 405.0,
+            "monster": {
+                "template_id": 7_103_001,
+                "name": "瑞尔·比伯",
+                "boss_type": 3,
+                "boss_rank": 3,
+                "current_hp": 24_907_601,
+                "max_hp": 43_372_710,
+            },
+            "participants": [
+                {
+                    "actor_id": first_ai,
+                    "name": "风华·投影",
+                    "profession_id": 1_200_006,
+                    "is_ai": True,
+                    "damage": 3_658_674,
+                    "dps": 3_658_674 / 405.0,
+                },
+                {
+                    "actor_id": second_ai,
+                    "name": "慕南·投影",
+                    "profession_id": 1_200_005,
+                    "is_ai": True,
+                    "damage": 15_096_969,
+                    "dps": 15_096_969 / 405.0,
+                },
+                {
+                    "actor_id": 100,
+                    "name": "Self",
+                    "is_self": True,
+                    "damage": 24_841,
+                    "dps": 24_841 / 405.0,
+                },
+            ],
+            "participant_identities": [
+                {"actor_id": first_ai, "character_id": "ai-first"},
+                {"actor_id": second_ai, "character_id": "ai-second"},
+                {"actor_id": 100, "character_id": "self"},
+            ],
+            "total_damage": 18_780_484,
+            "damage_accounting": {"final_total": 18_780_484},
+        }
+
+        record = encounter_history_record(encounter, base)
+
+        rows = {row["actor_id"]: row for row in record["participants"]}
+        self.assertEqual(set(rows), {first_ai, second_ai, 100})
+        self.assertTrue(rows[first_ai]["is_ai"])
+        self.assertTrue(rows[second_ai]["is_ai"])
+        self.assertEqual(record["total_damage"], 18_780_484)
+        self.assertEqual(record["team_size"], 3)
+        self.assertEqual(record["result"], "interrupted")
+        self.assertEqual(record["archive_reason"], "scene_change")
+        self.assertNotIn("failure_reason", record)
+        identity_actors = {
+            int(row.get("actor_id") or row.get("iid") or 0)
+            for row in record["participant_identities"]
+        }
+        self.assertEqual(identity_actors, {first_ai, second_ai, 100})
+
+        completed = encounter_history_record(
+            encounter,
+            {
+                **base,
+                "monster": {**base["monster"], "current_hp": 0},
+            },
+        )
+        self.assertEqual(completed["result"], "interrupted")
+        self.assertNotIn("failure_reason", completed)
+
     def test_server_settlement_replaces_unsettled_local_team_metrics(self):
         tracker = EncounterTracker()
         encounter = self.wipe(tracker)
@@ -724,6 +815,37 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
         self.assertEqual(saved["participants"][0]["damage"], 100)
         self.assertEqual(saved["participants"][0]["dps"], 10.0)
 
+    def test_live_encounter_does_not_override_archived_local_record(self):
+        tracker = EncounterTracker()
+        encounter = tracker.begin(
+            instance_id="instance",
+            started_at_ns=START_EPOCH * NS,
+            participants_snapshot=ROSTER,
+            boss_template_id=7_102_990,
+            boss_token="entity:first",
+            self_token="self",
+        )
+        local = {
+            "encounter_id": "archived-local-id",
+            "started_at_epoch": float(START_EPOCH),
+            "ended_at_epoch": float(START_EPOCH + 10),
+            "duration_seconds": 10.0,
+            "result": "interrupted",
+            "archive_reason": "manual_leave",
+            "target_filter": "boss",
+            "monster": {"template_id": 7_102_990, "name": "Boss"},
+            "participants": [],
+        }
+        self.assertTrue(
+            self.adapter.bind(local["encounter_id"], encounter.local_encounter_id)
+        )
+
+        projected = self.adapter.project_local_record(tracker, local)
+
+        self.assertIsNone(projected)
+        self.assertEqual(local["ended_at_epoch"], float(START_EPOCH + 10))
+        self.assertEqual(local["result"], "interrupted")
+
     def test_unsettled_self_dps_uses_local_clock_without_fabricating_team_data(self):
         tracker = EncounterTracker()
         encounter = self.wipe(tracker)
@@ -762,6 +884,44 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
 
         self.assertEqual(record["monster"]["current_hp"], 0)
         self.assertEqual(record["monster"]["max_hp"], 1_000)
+
+    def test_local_idle_before_delayed_result_keeps_one_record_id(self):
+        tracker = EncounterTracker()
+        encounter = tracker.begin(
+            instance_id="instance", started_at_ns=START_EPOCH * NS,
+            participants_snapshot=ROSTER, self_token="self",
+            dungeon_id=10, map_id=20, stage_id=55, stage_index=1,
+            boss_template_id=7102990, boss_token="boss",
+        )
+        self.adapter.bind("live-idle", encounter.local_encounter_id)
+        local = {
+            "encounter_id": "live-idle",
+            "archive_reason": "idle",
+            "started_at_epoch": START_EPOCH,
+            "ended_at_epoch": START_EPOCH + 10,
+            "duration_seconds": 10,
+            "total_damage": 60,
+            "participants": [{"actor_id": 100, "damage": 60}],
+        }
+
+        pending = self.adapter.project_local_record(tracker, local)
+        self.assertEqual(pending["encounter_id"], encounter.local_encounter_id)
+        self.assertEqual(pending["settlement_status"], "PENDING")
+        self.assertEqual(pending["total_damage"], 60)
+        self.assertEqual(local["encounter_id"], "live-idle")
+        self.store.save(pending)
+
+        tracker.end("VICTORY", (START_EPOCH + 10) * NS)
+        self.adapter.sync(tracker)
+        tracker.accept(self.settlement(success=True))
+        self.adapter.sync(tracker)
+
+        saved = self.store.load(encounter.local_encounter_id)
+        self.assertEqual(saved["result"], "success")
+        self.assertEqual(saved["settlement_status"], "SETTLED")
+        self.assertTrue(saved["completion_confirmed"])
+        self.assertEqual(len(list(self.directory.glob("*.json"))), 1)
+        self.assertFalse((self.directory / "live-idle.json").exists())
 
     def test_explicit_live_binding_forces_one_settings_record_id(self):
         tracker = EncounterTracker()

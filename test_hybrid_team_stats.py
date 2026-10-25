@@ -74,7 +74,7 @@ class FakeReceiveHook:
         records, self.pending = self.pending, []
         for record in records:
             method = str(record.get("method", ""))
-            if options["decode_method_filter"](method):
+            if options.get("decode_arguments") and options["decode_method_filter"](method):
                 record.setdefault("decoded_arguments", [{}])
         return records
 
@@ -234,7 +234,7 @@ class HybridTeamStatsTests(unittest.TestCase):
         self.assertTrue(driver.pause_for_external_request())
         self.assertIsNone(driver.hook)
 
-    def test_receive_driver_retains_only_team_statistics(self):
+    def test_receive_driver_observes_identity_without_decoding_statistics(self):
         driver = HybridTeamStatsReceiveDriver(
             {"profile": "test"},
             self.events.append,
@@ -242,6 +242,7 @@ class HybridTeamStatsTests(unittest.TestCase):
         )
         driver.sync(game_pid=88)
         hook = FakeReceiveHook.instances[-1]
+        self.assertFalse(hook.options["synchronize_arguments"])
         hook.pending.extend(
             [
                 {"sequence": 0, "method": "OnMsgSyncCurrentHp"},
@@ -255,17 +256,14 @@ class HybridTeamStatsTests(unittest.TestCase):
         )
         deadline = time.monotonic() + 1.0
         records = []
-        while not records and time.monotonic() < deadline:
+        while not driver.status_snapshot()["response_count"] and time.monotonic() < deadline:
             time.sleep(0.01)
             records = driver.poll()
-        self.assertEqual(len(records), 1)
-        self.assertEqual(
-            records[0]["method"], "RetCommonCombatStatisticsByTeam"
-        )
-        self.assertEqual(records[0]["capture_source"], "memory_receive_hook")
+        self.assertEqual(records, [])
         status = driver.status_snapshot()
         self.assertEqual(status["response_count"], 1)
-        self.assertEqual(status["decoded_response_count"], 1)
+        self.assertEqual(status["decoded_response_count"], 0)
+        self.assertEqual(status["decode_error_count"], 0)
         self.assertEqual(status["local_role_script_entity"], 880088)
         driver.close()
         self.assertTrue(hook.closed)

@@ -46,8 +46,11 @@ WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 258
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 ERROR_FILE_NOT_FOUND = 2
+ERROR_PATH_NOT_FOUND = 3
 SC_MANAGER_CONNECT = 0x0001
 DELETE_SERVICE = 0x00010000
+SERVICE_QUERY_STATUS = 0x0004
+SERVICE_STOPPED = 1
 RECEIVE_CLOCK_RESOLUTION_NS = max(
     1, round(time.get_clock_info("time").resolution * 1_000_000_000)
 )
@@ -55,6 +58,18 @@ RECEIVE_CLOCK_RESOLUTION_NS = max(
 
 class WinDivertUnavailable(RawSocketUnavailable):
     """The bundled receive-only WinDivert source cannot be opened."""
+
+
+class _ServiceStatus(ctypes.Structure):
+    _fields_ = [
+        ("service_type", ctypes.c_uint32),
+        ("current_state", ctypes.c_uint32),
+        ("controls_accepted", ctypes.c_uint32),
+        ("win32_exit_code", ctypes.c_uint32),
+        ("service_specific_exit_code", ctypes.c_uint32),
+        ("check_point", ctypes.c_uint32),
+        ("wait_hint", ctypes.c_uint32),
+    ]
 
 
 class _WinDivertAddress(ctypes.Structure):
@@ -172,12 +187,13 @@ def _normalise_driver_path(value: object) -> Path | None:
 
 
 def _remove_stale_windivert_service() -> bool:
-    """Remove only a stopped/unstartable registration whose image is gone.
+    """Remove only a stopped registration whose image is gone.
 
     Old portable WinDivert applications can leave a demand-start service that
     points at a deleted temporary directory. In that state the official DLL
-    sees the service, attempts to start it, and returns ERROR_FILE_NOT_FOUND
-    instead of registering the valid bundled driver.
+    sees the service and returns ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND
+    instead of registering the valid bundled driver. Never stop a running
+    service or remove a registration that still has a driver file.
     """
     if os.name != "nt" or winreg is None:
         return False
@@ -206,6 +222,11 @@ def _remove_stale_windivert_service() -> bool:
         ctypes.c_uint32,
     ]
     advapi32.OpenServiceW.restype = ctypes.c_void_p
+    advapi32.QueryServiceStatus.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_ServiceStatus),
+    ]
+    advapi32.QueryServiceStatus.restype = ctypes.c_int
     advapi32.DeleteService.argtypes = [ctypes.c_void_p]
     advapi32.DeleteService.restype = ctypes.c_int
     advapi32.CloseServiceHandle.argtypes = [ctypes.c_void_p]
@@ -215,8 +236,15 @@ def _remove_stale_windivert_service() -> bool:
         return False
     service = None
     try:
-        service = advapi32.OpenServiceW(manager, "WinDivert", DELETE_SERVICE)
+        service = advapi32.OpenServiceW(
+            manager, "WinDivert", DELETE_SERVICE | SERVICE_QUERY_STATUS
+        )
         if not service:
+            return False
+        status = _ServiceStatus()
+        if not advapi32.QueryServiceStatus(service, ctypes.byref(status)):
+            return False
+        if status.current_state != SERVICE_STOPPED:
             return False
         return bool(advapi32.DeleteService(service))
     finally:
@@ -371,7 +399,7 @@ class WinDivertReceiver:
         error = ctypes.get_last_error()
         if (
             (not handle or int(handle) == INVALID_HANDLE_VALUE)
-            and error == ERROR_FILE_NOT_FOUND
+            and error in (ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND)
             and _remove_stale_windivert_service()
         ):
             handle = self.dll.WinDivertOpen(
@@ -569,7 +597,7 @@ def probe_windivert(
     error = ctypes.get_last_error()
     if (
         (not handle or int(handle) == INVALID_HANDLE_VALUE)
-        and error == ERROR_FILE_NOT_FOUND
+        and error in (ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND)
         and _remove_stale_windivert_service()
     ):
         handle = library.WinDivertOpen(

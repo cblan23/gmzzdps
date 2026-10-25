@@ -6503,7 +6503,7 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
     def test_release_version_matches_client_build_and_notes(self):
-        self.assertEqual(APP_VERSION, "0.4.1")
+        self.assertEqual(APP_VERSION, "0.4.1b")
         numeric_version = (
             APP_VERSION[:-1] if APP_VERSION[-1:].isalpha() else APP_VERSION
         )

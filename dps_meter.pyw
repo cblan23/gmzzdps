@@ -318,10 +318,10 @@ UPLOAD_STATE_PATH = DATA_DIR / "combat_upload_state.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手"
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.1b"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.4.1+20261019.1"
+CLIENT_BUILD = "0.4.1+20261025.2"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -35292,39 +35292,76 @@ class DpsWindow:
         if self.closing:
             return
 
-        control_queue = getattr(self, "control_messages", None)
-        control_drained = control_queue is None
-        if control_queue is not None:
-            try:
-                for _index in range(CONTROL_MESSAGE_DRAIN_BATCH_SIZE):
-                    kind, payload = control_queue.get_nowait()
-                    self._dispatch_message(kind, payload)
-                    if self.closing:
-                        return
-            except queue.Empty:
-                control_drained = True
-
         queue_drained = False
-        deadline = time.perf_counter() + MESSAGE_DRAIN_TIME_BUDGET_SECONDS
+        control_drained = False
+        failed = False
         try:
-            for _index in range(MESSAGE_DRAIN_BATCH_SIZE):
-                kind, payload = self.messages.get_nowait()
-                self._dispatch_message(kind, payload)
-                if self.closing or time.perf_counter() >= deadline:
-                    break
-        except queue.Empty:
-            queue_drained = True
-        if not self.closing:
-            self._release_stalled_startup_gate()
-            self._check_license_network_recovery()
-            # Continuous combat can keep the capture queue non-empty forever.
-            # Control results are handled first, then combat is bounded so Tk
-            # still receives paint and input events between batches.
-            delay = 50 if queue_drained and control_drained else 1
+            control_queue = getattr(self, "control_messages", None)
+            control_drained = control_queue is None
+            if control_queue is not None:
+                try:
+                    for _index in range(CONTROL_MESSAGE_DRAIN_BATCH_SIZE):
+                        kind, payload = control_queue.get_nowait()
+                        self._dispatch_queued_message(kind, payload, queue_name="control")
+                        if self.closing:
+                            return
+                except queue.Empty:
+                    control_drained = True
+
+            deadline = time.perf_counter() + MESSAGE_DRAIN_TIME_BUDGET_SECONDS
             try:
-                self.drain_after_id = self.root.after(delay, self._drain_messages)
-            except (AttributeError, tk.TclError):
-                self.drain_after_id = None
+                for _index in range(MESSAGE_DRAIN_BATCH_SIZE):
+                    kind, payload = self.messages.get_nowait()
+                    self._dispatch_queued_message(kind, payload, queue_name="capture")
+                    if self.closing or time.perf_counter() >= deadline:
+                        break
+            except queue.Empty:
+                queue_drained = True
+            if not self.closing:
+                self._release_stalled_startup_gate()
+                self._check_license_network_recovery()
+            self._message_drain_last_error = ""
+        except Exception as error:
+            failed = True
+            signature = (type(error).__name__, str(error))
+            if signature != getattr(self, "_message_drain_last_error", None):
+                self._message_drain_last_error = signature
+                write_capture_lifecycle_event(
+                    "message_drain_failed",
+                    component="main_window",
+                    error_type=type(error).__name__,
+                )
+        finally:
+            # Layout failures must not strand capture authorization renewals.
+            # Yield to Tk between combat batches even under continuous load.
+            if not self.closing:
+                delay = 50 if failed or (queue_drained and control_drained) else 1
+                try:
+                    self.drain_after_id = self.root.after(delay, self._drain_messages)
+                except (AttributeError, tk.TclError):
+                    self.drain_after_id = None
+
+    def _dispatch_queued_message(
+        self,
+        kind: object,
+        payload: object,
+        *,
+        queue_name: str,
+    ) -> bool:
+        """Keep one malformed result from permanently stopping the UI pump."""
+
+        try:
+            self._dispatch_message(str(kind), payload)
+        except Exception as error:
+            write_capture_lifecycle_event(
+                "message_dispatch_failed",
+                component="main_window",
+                queue=str(queue_name or "unknown")[:32],
+                message_kind=str(kind or "unknown")[:96],
+                error_type=type(error).__name__,
+            )
+            return False
+        return True
 
     def _pause_for_license_network(self) -> None:
         if self.closing or self.authorization_resetting or getattr(self, 'license_network_paused', False):
@@ -35877,7 +35914,16 @@ class DpsWindow:
                 return True
             handler = handlers.get(kind)
             if handler is not None:
-                handler(payload)
+                try:
+                    handler(payload)
+                except Exception as error:
+                    write_capture_lifecycle_event(
+                        "message_dispatch_failed",
+                        component="main_window",
+                        queue="close",
+                        message_kind=str(kind or "unknown")[:96],
+                        error_type=type(error).__name__,
+                    )
             if time.perf_counter() >= deadline:
                 return False
         return self.messages.empty()

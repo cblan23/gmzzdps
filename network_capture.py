@@ -487,6 +487,7 @@ class NetworkMessageHook:
         profile: Mapping[str, object],
         pid: int | None = None,
         takeover_existing: bool = False,
+        synchronize_arguments: bool = True,
     ):
         self.profile = normalize_runtime_profile(profile)
         hook = runtime_profile_hook(self.profile, "network_message")
@@ -505,6 +506,7 @@ class NetworkMessageHook:
         )
         self.requested_pid = pid
         self.takeover_existing = bool(takeover_existing)
+        self.synchronize_arguments = bool(synchronize_arguments)
         self.pid = 0
         self.base = 0
         self.process = 0
@@ -556,6 +558,12 @@ class NetworkMessageHook:
         self.next_sequence = write_index
         self.installed = True
         self.adopted = True
+        if not self.synchronize_arguments:
+            write_memory(
+                self.process,
+                self.ring + MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET,
+                struct.pack("<Q", 0),
+            )
         return True
 
     def install(self) -> "NetworkMessageHook":
@@ -622,7 +630,7 @@ class NetworkMessageHook:
                 MESSAGE_RECORD_COUNT,
                 MESSAGE_RECORD_SIZE,
                 self.target,
-                1,
+                int(self.synchronize_arguments),
             )
             write_memory(self.process, self.ring, header)
             stub = build_message_stub(
@@ -656,6 +664,8 @@ class NetworkMessageHook:
         decode_method_filter: Callable[[str], bool] | None = None,
         include_snapshots: bool = False,
     ) -> list[dict]:
+        if (decode_arguments or include_snapshots) and not self.synchronize_arguments:
+            raise ValueError("argument decoding requires synchronized capture")
         if not self.installed or not self.alive:
             return []
         header = read_region(self.process, self.ring, 0x30)
@@ -665,11 +675,11 @@ class NetworkMessageHook:
         sync_enabled = struct.unpack_from(
             "<Q", header, MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET
         )[0]
-        if not sync_enabled:
+        if bool(sync_enabled) != self.synchronize_arguments:
             write_memory(
                 self.process,
                 self.ring + MESSAGE_ARGUMENT_SYNC_ENABLED_OFFSET,
-                struct.pack("<Q", 1),
+                struct.pack("<Q", int(self.synchronize_arguments)),
             )
         if write_index - self.next_sequence > MESSAGE_RECORD_COUNT:
             self.next_sequence = write_index - MESSAGE_RECORD_COUNT

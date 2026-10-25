@@ -1,10 +1,10 @@
 """Optional Npcap + minimal team-stat Hook coordination.
 
 The request driver schedules the game's existing zero-argument
-``ReqCommonCombatStatisticsByTeam`` call.  The receive driver observes only the
-two decoded team-stat callbacks.  Npcap remains responsible for every other
-network message; no battle IDs, statistics, or protocol payloads are created
-here.
+``ReqCommonCombatStatisticsByTeam`` call. The receive driver observes the local
+script entity without synchronizing or reading RPC argument memory. Statistics
+are decoded from the captured network stream, so UI work cannot make the game
+thread wait for Python to acknowledge a response.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def hybrid_team_stats_settings(config: object) -> tuple[bool, float]:
 
 
 class HybridTeamStatsReceiveDriver:
-    """Capture decoded team-stat callbacks without duplicating Npcap events."""
+    """Observe the local RPC recipient without blocking the game thread."""
 
     def __init__(
         self,
@@ -129,18 +129,14 @@ class HybridTeamStatsReceiveDriver:
             profile=self.profile,
             pid=int(game_pid),
             takeover_existing=True,
+            synchronize_arguments=False,
         )
-
-    @staticmethod
-    def _decode_team_method(method: str) -> bool:
-        return method in TEAM_STATISTICS_METHODS
 
     def _run_poller(self, hook, local_stop: threading.Event) -> None:
         try:
             while not local_stop.is_set() and bool(getattr(hook, "alive", True)):
                 captured = hook.poll(
-                    decode_arguments=True,
-                    decode_method_filter=self._decode_team_method,
+                    decode_arguments=False,
                 )
                 retained = []
                 for record in captured:
@@ -273,7 +269,7 @@ class HybridTeamStatsReceiveDriver:
                 self.response_count += 1
                 if decoded:
                     self.decoded_response_count += 1
-                else:
+                elif record.get("decode_error"):
                     self.decode_error_count += 1
                 self.last_response_filetime = filetime_100ns
                 self.last_method = method
@@ -285,7 +281,9 @@ class HybridTeamStatsReceiveDriver:
                 decoded=decoded,
                 decode_error=str(record.get("decode_error", ""))[:240],
             )
-        return result
+        # These records contain transient argument pointers, not snapshots.
+        # The network stream supplies the team statistics to the combat parser.
+        return []
 
     def status_snapshot(self) -> dict[str, object]:
         poller = self.poller

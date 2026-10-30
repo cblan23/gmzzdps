@@ -55,6 +55,18 @@ TRAINING_DUMMY_TEMPLATE_IDS = frozenset(
         7_114_233,
     }
 )
+FIRST_BELIEVER_ENCOUNTER_TEMPLATE_IDS = frozenset(
+    {
+        7_100_201,
+        7_100_202,
+        7_100_203,
+        7_100_208,
+        7_100_209,
+        7_100_210,
+    }
+)
+FIRST_BELIEVER_CANONICAL_TEMPLATE_ID = 7_102_980
+FIRST_BELIEVER_CANONICAL_NAME = "一号信徒"
 UPLOAD_VICTORY_ARCHIVE_REASONS = frozenset(
     {"target_defeated", "boss_defeated", "stage_completed", "completed"}
 )
@@ -203,13 +215,14 @@ PUBLIC_DUNGEON_CATEGORIES: tuple[dict[str, object], ...] = (
                 "name": "五月庄园·花园",
                 "dungeon_ids": (5_100_045, 5_100_054),
                 "stage_ids": (5_150_050, 5_150_051, 5_150_052, 5_150_058, 5_150_059, 5_150_060),
+                "difficulties": ("normal", "hard"),
             },
             {
                 "key": "may-manor-castle",
                 "name": "五月庄园·城堡",
                 "dungeon_ids": (5_100_047, 5_100_055),
                 "stage_ids": (5_150_053, 5_150_054, 5_150_055, 5_150_061, 5_150_062, 5_150_063),
-                "boss_order": ("子嗣守护", "安西娅", "子爵夫人"),
+                "boss_order": ("子嗣守护", "一号信徒", "子爵夫人"),
             },
             {
                 "key": "emperor-returns",
@@ -295,7 +308,7 @@ for _category in PUBLIC_DUNGEON_CATEGORIES:
 
 PUBLIC_BOSS_NAME_GROUPS: dict[str, tuple[str, ...]] = {
     "先祖铠甲": ("先祖铠甲", "伯德温·威瑟尔", "伯德温"),
-    "安西娅": ("安西娅", "巴尼先生"),
+    "一号信徒": ("一号信徒", "安西娅", "巴尼先生"),
     "子爵夫人": ("子爵夫人", "子爵夫人-神话姿态"),
     "瑞尔比伯": ("瑞尔比伯", "瑞尔·比伯", "周本-瑞尔比伯", "英雄周本-瑞尔比伯"),
     "强尼": ("强尼", '"剥面人" 强尼', "“剥面人” 强尼", "剥面人·强尼"),
@@ -308,7 +321,7 @@ PUBLIC_BOSS_CANONICAL_NAMES = {
 }
 PUBLIC_BOSS_DUNGEON_OVERRIDES = {
     "子嗣守护": "may-manor-castle",
-    "安西娅": "may-manor-castle",
+    "一号信徒": "may-manor-castle",
     "子爵夫人": "may-manor-castle",
     "先祖铠甲": "may-manor-garden",
     "异化猎犬": "may-manor-garden",
@@ -355,11 +368,15 @@ PUBLIC_PERFORMANCE_METRICS = frozenset({"dps", "boss_damage"})
 PUBLIC_PERFORMANCE_SORTS = frozenset(
     {"p10", "p25", "p50", "p75", "p90", "best", "sample_count"}
 )
-PUBLIC_COMPETITIVE_ENCOUNTER_SQL = """NOT EXISTS (
+PUBLIC_AI_ENCOUNTER_SQL = """EXISTS (
     SELECT 1 FROM encounter_participants participant
     WHERE participant.encounter_id=e.encounter_id
       AND (participant.is_ai=1 OR participant.public_character_name LIKE '%·投影')
 )"""
+PUBLIC_COMPETITIVE_ENCOUNTER_SQL = f"NOT ({PUBLIC_AI_ENCOUNTER_SQL})"
+PUBLIC_CLEAR_ENCOUNTER_SQL = """json_valid(e.payload_json)
+    AND json_extract(e.payload_json, '$.result')='defeated'
+    AND json_extract(e.payload_json, '$.completion_confirmed')=1"""
 PUBLIC_RANKING_ENTRY_COUNT_SQL = f"""CASE WHEN {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}
     THEN (SELECT COUNT(*) FROM uploads ranked_upload
         JOIN encounter_participants ranked_participant
@@ -2171,7 +2188,11 @@ class ProfileUploadStore:
             }
         ) if isinstance(raw_template_ids, list) else []
         template_ids = [value for value in template_ids if value > 0][:16]
-        boss_name = _safe_text(encounter.get("boss_name"), 96)
+        boss_name = _public_canonical_boss_name(encounter.get("boss_name"))
+        boss_key_template_ids = template_ids
+        if set(template_ids).intersection(FIRST_BELIEVER_ENCOUNTER_TEMPLATE_IDS):
+            boss_name = FIRST_BELIEVER_CANONICAL_NAME
+            boss_key_template_ids = [FIRST_BELIEVER_CANONICAL_TEMPLATE_ID]
         dungeon_id = _as_int(encounter.get("dungeon_id"), maximum=2_000_000_000)
         stage_id = _as_int(encounter.get("stage_id"), maximum=2_000_000_000)
         difficulty = _safe_text(encounter.get("difficulty"), 32).casefold()
@@ -2182,7 +2203,7 @@ class ProfileUploadStore:
             brass_tome_source,
         ) = _encounter_brass_tome(encounter)
         boss_key_source = {
-            "templates": template_ids,
+            "templates": boss_key_template_ids,
             "boss": "" if template_ids else boss_name.casefold(),
             "dungeon": dungeon_id,
             "stage": stage_id,
@@ -3528,6 +3549,8 @@ class ProfileUploadStore:
     def public_catalog(self, connection: sqlite3.Connection) -> dict[str, object]:
         rows = connection.execute(f"""SELECT boss_name, COUNT(*) AS records,
             SUM(statistics_status='included' AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}) AS included,
+            SUM({PUBLIC_CLEAR_ENCOUNTER_SQL}) AS clears,
+            SUM(({PUBLIC_CLEAR_ENCOUNTER_SQL}) AND {PUBLIC_AI_ENCOUNTER_SQL}) AS ai_clears,
             SUM({PUBLIC_RANKING_ENTRY_COUNT_SQL}) AS ranking_entries,
             MAX(ended_at) AS last_at
             FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
@@ -3545,12 +3568,18 @@ class ProfileUploadStore:
                     "name": name,
                     "records": 0,
                     "included": 0,
+                    "clears": 0,
+                    "ai_clears": 0,
                     "ranking_entries": 0,
                     "last_at": 0.0,
                 },
             )
             boss["records"] = int(boss["records"]) + int(row["records"])
             boss["included"] = int(boss["included"]) + int(row["included"])
+            boss["clears"] = int(boss["clears"]) + int(row["clears"] or 0)
+            boss["ai_clears"] = (
+                int(boss["ai_clears"]) + int(row["ai_clears"] or 0)
+            )
             boss["ranking_entries"] = int(boss["ranking_entries"]) + int(
                 row["ranking_entries"] or 0
             )
@@ -3566,6 +3595,9 @@ class ProfileUploadStore:
                 e.statistics_status, e.ended_at,
                 CASE WHEN e.statistics_status='included'
                     AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL} THEN 1 ELSE 0 END AS included,
+                CASE WHEN {PUBLIC_CLEAR_ENCOUNTER_SQL} THEN 1 ELSE 0 END AS clears,
+                CASE WHEN ({PUBLIC_CLEAR_ENCOUNTER_SQL})
+                    AND {PUBLIC_AI_ENCOUNTER_SQL} THEN 1 ELSE 0 END AS ai_clears,
                 {PUBLIC_RANKING_ENTRY_COUNT_SQL} AS ranking_entries
             FROM encounters e
             WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
@@ -3583,9 +3615,21 @@ class ProfileUploadStore:
                     "dungeon_ids": [int(value) for value in dungeon["dungeon_ids"]],
                     "records": 0,
                     "included": 0,
+                    "clears": 0,
+                    "ai_clears": 0,
                     "ranking_entries": 0,
                     "last_at": 0.0,
                     "difficulties": set(dungeon.get("difficulties", ())),
+                    "difficulty_counts": {
+                        str(difficulty): {
+                            "records": 0,
+                            "included": 0,
+                            "clears": 0,
+                            "ai_clears": 0,
+                            "ranking_entries": 0,
+                        }
+                        for difficulty in dungeon.get("difficulties", ())
+                    },
                     "brass_tome_statuses": set(),
                     "bosses": (
                         {
@@ -3598,6 +3642,8 @@ class ProfileUploadStore:
                                 ),
                                 "records": 0,
                                 "included": 0,
+                                "clears": 0,
+                                "ai_clears": 0,
                                 "ranking_entries": 0,
                                 "last_at": 0.0,
                             }
@@ -3621,15 +3667,38 @@ class ProfileUploadStore:
             if dungeon is None:
                 continue
             included = int(row["included"] or 0)
+            clears = int(row["clears"] or 0)
+            ai_clears = int(row["ai_clears"] or 0)
             ranking_entries = int(row["ranking_entries"] or 0)
             dungeon["records"] = int(dungeon["records"]) + 1
             dungeon["included"] = int(dungeon["included"]) + included
+            dungeon["clears"] = int(dungeon["clears"]) + clears
+            dungeon["ai_clears"] = int(dungeon["ai_clears"]) + ai_clears
             dungeon["ranking_entries"] = (
                 int(dungeon["ranking_entries"]) + ranking_entries
             )
             dungeon["last_at"] = max(float(dungeon["last_at"]), float(row["ended_at"] or 0))
             difficulty = _safe_text(row["difficulty"], 24).casefold() or "unknown"
             dungeon["difficulties"].add(difficulty)
+            difficulty_count = dungeon["difficulty_counts"].setdefault(
+                difficulty,
+                {
+                    "records": 0,
+                    "included": 0,
+                    "clears": 0,
+                    "ai_clears": 0,
+                    "ranking_entries": 0,
+                },
+            )
+            difficulty_count["records"] = int(difficulty_count["records"]) + 1
+            difficulty_count["included"] = int(difficulty_count["included"]) + included
+            difficulty_count["clears"] = int(difficulty_count["clears"]) + clears
+            difficulty_count["ai_clears"] = (
+                int(difficulty_count["ai_clears"]) + ai_clears
+            )
+            difficulty_count["ranking_entries"] = (
+                int(difficulty_count["ranking_entries"]) + ranking_entries
+            )
             brass_status = _public_brass_tome_status(row["brass_tome_status"])
             dungeon["brass_tome_statuses"].add(brass_status)
             boss_key = _public_boss_name_for_context(row["boss_name"], context)
@@ -3641,12 +3710,16 @@ class ProfileUploadStore:
                     "stage_id": int(row["stage_id"]),
                     "records": 0,
                     "included": 0,
+                    "clears": 0,
+                    "ai_clears": 0,
                     "ranking_entries": 0,
                     "last_at": 0.0,
                 },
             )
             boss["records"] = int(boss["records"]) + 1
             boss["included"] = int(boss["included"]) + included
+            boss["clears"] = int(boss["clears"]) + clears
+            boss["ai_clears"] = int(boss["ai_clears"]) + ai_clears
             boss["ranking_entries"] = int(boss["ranking_entries"]) + ranking_entries
             boss["last_at"] = max(float(boss["last_at"]), float(row["ended_at"] or 0))
 
@@ -4067,9 +4140,11 @@ class ProfileUploadStore:
         }
 
     def public_leaderboards(
-        self, connection: sqlite3.Connection, *, limit: int = 100
+        self, connection: sqlite3.Connection, *, limit: int = 100,
+        include_ai: bool = False,
     ) -> list[dict[str, object]]:
-        rows = connection.execute(
+        row_limit = min(500, max(1, int(limit)))
+        rows = list(connection.execute(
             f"""
             SELECT u.encounter_id, u.public_mode, u.public_character_name,
                 u.profile_id, pr.nickname, e.boss_name, e.dungeon_id,
@@ -4080,6 +4155,7 @@ class ProfileUploadStore:
                     THEN json_extract(e.payload_json, '$.brass_tome_status') END AS brass_tome_status,
                 e.ended_at,
                 ep.profession_id, ep.damage, ep.dps,
+                1 AS competitive,
                 ROW_NUMBER() OVER (
                     PARTITION BY e.boss_key, e.stage_id, ep.profession_id
                     ORDER BY ep.dps DESC, e.ended_at ASC
@@ -4095,8 +4171,39 @@ class ProfileUploadStore:
             ORDER BY ep.dps DESC, e.ended_at DESC
             LIMIT ?
             """,
-            (min(500, max(1, int(limit))),),
-        ).fetchall()
+            (row_limit,),
+        ).fetchall())
+        if include_ai:
+            rows.extend(connection.execute(
+                f"""
+                SELECT u.encounter_id, u.public_mode, u.public_character_name,
+                    u.profile_id, pr.nickname, e.boss_name, e.dungeon_id,
+                    e.stage_id, e.difficulty,
+                    CASE WHEN json_valid(e.payload_json)
+                        THEN json_extract(e.payload_json, '$.dungeon_name') END AS dungeon_name,
+                    CASE WHEN json_valid(e.payload_json)
+                        THEN json_extract(e.payload_json, '$.brass_tome_status') END AS brass_tome_status,
+                    e.ended_at,
+                    ep.profession_id, ep.damage, ep.dps,
+                    0 AS competitive, 0 AS rank_number
+                FROM uploads u
+                JOIN encounters e ON e.encounter_id=u.encounter_id
+                JOIN encounter_participants ep
+                    ON ep.encounter_id=u.encounter_id
+                    AND ep.character_hash=u.uploader_character_hash
+                JOIN (
+                    SELECT DISTINCT encounter_id
+                    FROM encounter_participants
+                    WHERE is_ai=1 OR public_character_name LIKE '%·投影'
+                ) ai_encounter ON ai_encounter.encounter_id=e.encounter_id
+                LEFT JOIN profiles pr ON pr.profile_id=u.profile_id
+                WHERE ({PUBLIC_CLEAR_ENCOUNTER_SQL})
+                    AND ep.is_ai=0
+                ORDER BY e.ended_at DESC
+                LIMIT ?
+                """,
+                (row_limit,),
+            ).fetchall())
         result = []
         for row in rows:
             display_name, public_mode, profile_id = self._public_participant_name(row, 0)
@@ -4129,7 +4236,9 @@ class ProfileUploadStore:
                 "profession_id": int(row["profession_id"]),
                 "damage": int(row["damage"]),
                 "dps": float(row["dps"]),
-                "rank": int(row["rank_number"]),
+                "rank": int(row["rank_number"]) if row["competitive"] else None,
+                "competitive": bool(row["competitive"]),
+                "has_ai": not bool(row["competitive"]),
                 "ended_at": float(row["ended_at"]),
             })
         return result
@@ -4746,6 +4855,9 @@ def build_upload_encounter(
     primary_template = _as_int(monster.get("template_id"), maximum=2_000_000_000)
     if primary_template > 0:
         template_ids.add(primary_template)
+    boss_name = _public_canonical_boss_name(monster.get("name"))
+    if template_ids.intersection(FIRST_BELIEVER_ENCOUNTER_TEMPLATE_IDS):
+        boss_name = FIRST_BELIEVER_CANONICAL_NAME
     result, completion_confirmed, archive_reason = _normalized_encounter_outcome(
         record
     )
@@ -4890,7 +5002,7 @@ def build_upload_encounter(
         "brass_tome_enabled": brass_tome_enabled,
         "brass_tome_challenge_ids": brass_tome_challenge_ids,
         "brass_tome_source": brass_tome_source,
-        "boss_name": _safe_text(monster.get("name"), 96),
+        "boss_name": boss_name,
         "boss_template_ids": sorted(template_ids),
         "target_filter": record.get("target_filter", ""),
         "archive_reason": archive_reason,

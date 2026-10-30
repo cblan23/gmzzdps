@@ -59,6 +59,10 @@ class NpcapParserAdapter(NetworkPacketParser):
         # never enough to promote an entity or start an encounter.
         self.unconfirmed_hp_activity = {}
         self.boss_hp_activity_observation_keys = set()
+        # Read-only roster records share a queue with network packets.  Keep a
+        # timestamp watermark so an older Lua snapshot cannot undo a newer
+        # join/leave packet when the two sources arrive in different batches.
+        self._party_roster_observed_100ns = 0
 
     def apply_authoritative_local_profile(self, record):
         """Bind a log-proven current local role to this parser epoch.
@@ -124,7 +128,10 @@ class NpcapParserAdapter(NetworkPacketParser):
         try:
             dungeon_id = int(record.get("dungeon_id", 0) or 0)
             group_id = int(record.get("group_id", 0) or 0)
+            observed_at = int(record.get("filetime_100ns", 0) or 0)
         except (TypeError, ValueError, OverflowError):
+            return []
+        if observed_at and observed_at < self._party_roster_observed_100ns:
             return []
         members = record.get("members")
         if (
@@ -160,7 +167,34 @@ class NpcapParserAdapter(NetworkPacketParser):
         if local_token not in seen:
             return []
         source = dict(record, method="OnJoinGroupSuccess", npcap_synthetic=True)
-        return self._team_join_success_updates(source, [profiles])
+        updates = self._team_join_success_updates(source, [profiles])
+        for member in members:
+            if member.get("is_ai"):
+                continue
+            try:
+                rating = int(member.get("extraordinary_rating", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                rating = 0
+            if rating <= 0:
+                continue
+            updates.extend(
+                self.apply_read_only_team_profile(
+                    {
+                        **record,
+                        **member,
+                        "method": "NpcapLiveTeamProfile",
+                        "capture_source": "npcap_read_only_team_profile",
+                        "profile_source": "live_lua_bound_rating",
+                        "client_rating_key": "ceScore",
+                        "client_rating_binding": "team_member_ceScore",
+                    }
+                )
+            )
+        if observed_at:
+            self._party_roster_observed_100ns = max(
+                self._party_roster_observed_100ns, observed_at
+            )
+        return updates
 
     def _reset_local_role_session(
         self,
@@ -791,6 +825,7 @@ class NpcapParserAdapter(NetworkPacketParser):
 
     def process(self, record, *, include_damage=True):
         record = normalize_npcap_record(record)
+        roster_before = self.current_team_profile_tokens()
         if record.get('method') in SCENE_TRANSITION_METHODS:
             # Wire creation IDs are scoped to the space being left.  A missing
             # BeforeEnterNewSpace packet must not let the next instance inherit
@@ -896,4 +931,16 @@ class NpcapParserAdapter(NetworkPacketParser):
             self._freeze_new_boss_confirmations(record, previously_confirmed)
         )
         updates.extend(self._drain_scoped())
+        if (
+            str(record.get("capture_source", "")).casefold() == "npcap"
+            and roster_before != self.current_team_profile_tokens()
+        ):
+            try:
+                observed_at = int(record.get("filetime_100ns", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                observed_at = 0
+            if observed_at:
+                self._party_roster_observed_100ns = max(
+                    self._party_roster_observed_100ns, observed_at
+                )
         return updates

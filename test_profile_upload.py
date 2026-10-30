@@ -193,6 +193,44 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(history['records'][0]['encounter_id'], receipt['encounter_id'])
         self.assertEqual(history['records'][0]['result'], 'failed')
 
+    def test_client_upload_collapses_first_believer_templates_to_one_boss_name(self):
+        local = {
+            'encounter_id': 'local-first-believer-1',
+            'started_at_epoch': 100.0,
+            'ended_at_epoch': 580.0,
+            'duration_seconds': 480.0,
+            'archive_reason': 'target_defeated',
+            'result': 'defeated',
+            'completion_confirmed': True,
+            'total_damage': 150_798_060,
+            'team_size': 1,
+            'monster': {
+                'name': '安西娅',
+                'template_id': 7_100_203,
+                'boss_rank': 3,
+            },
+            'targets': [
+                {'name': '安西娅', 'template_id': 7_100_201, 'boss_rank': 3},
+                {'name': '巴尼先生', 'template_id': 7_100_202, 'boss_rank': 3},
+                {'name': '安西娅', 'template_id': 7_100_203, 'boss_rank': 3},
+            ],
+            'participants': [{
+                'actor_id': 11,
+                'name': '本人',
+                'is_self': True,
+                'user_token': self.first,
+                'damage': 150_798_060,
+            }],
+        }
+
+        payload = build_upload_encounter(local, self.first)
+
+        self.assertEqual(payload['boss_name'], '一号信徒')
+        self.assertEqual(
+            payload['boss_template_ids'],
+            [7_100_201, 7_100_202, 7_100_203],
+        )
+
     def test_upload_excludes_supplemental_rows_outside_encounter_roster(self):
         local = {
             'encounter_id': 'local-kicked-members',
@@ -412,7 +450,7 @@ class ProfileUploadTests(unittest.TestCase):
             "stage_id": 9001,
             "difficulty": "normal",
             "boss_name": "测试首领",
-            "boss_template_ids": [7100208],
+            "boss_template_ids": [7_200_001],
             "archive_reason": "target_defeated",
             "result": result,
             "completion_confirmed": completion_confirmed,
@@ -814,6 +852,56 @@ class ProfileUploadTests(unittest.TestCase):
         )
         self.assertEqual(second_receipt["upload_source_count"], 2)
 
+    def test_first_believer_template_observations_merge_under_one_public_boss(self) -> None:
+        self.create_profile(self.first, "信徒上传甲")
+        self.create_profile(self.second, "信徒上传乙")
+        first_payload = self.encounter(self.first)
+        first_payload.update(
+            boss_name="安西娅",
+            boss_template_ids=[7_100_201, 7_100_202],
+            dungeon_id=5_100_047,
+            stage_id=5_150_062,
+            stage_name="安西娅",
+        )
+        first_receipt = self.store.upload_encounter(
+            self.connection,
+            self.first,
+            first_payload,
+            public_mode="nickname",
+            app_version="0.4.1b",
+        )
+
+        second_payload = self.encounter(self.second)
+        second_payload.update(
+            boss_name="安西娅",
+            boss_template_ids=[7_100_203],
+            dungeon_id=5_100_047,
+            stage_id=5_150_062,
+            stage_name="安西娅",
+        )
+        second_receipt = self.store.upload_encounter(
+            self.connection,
+            self.second,
+            second_payload,
+            public_mode="nickname",
+            app_version="0.4.1b",
+        )
+
+        self.assertEqual(second_receipt["encounter_id"], first_receipt["encounter_id"])
+        self.assertEqual(
+            self.connection.execute("SELECT COUNT(*) FROM encounters").fetchone()[0],
+            1,
+        )
+        public = self.store.public_encounter(
+            self.connection, first_receipt["encounter_id"]
+        )
+        self.assertEqual(public["boss_name"], "一号信徒")
+        self.assertEqual(public["data"]["stage_name"], "一号信徒")
+        self.assertEqual(
+            self.store.public_history(self.connection, boss="巴尼先生")["total"],
+            1,
+        )
+
     def test_partial_identity_uploads_merge_by_strong_team_signature(self) -> None:
         self.create_profile(self.first, "不完整甲")
         self.create_profile(self.second, "不完整乙")
@@ -1090,6 +1178,8 @@ class ProfileUploadTests(unittest.TestCase):
         catalog = self.store.public_catalog(self.connection)
         self.assertEqual(catalog['bosses'][0]['records'], 2)
         self.assertEqual(catalog['bosses'][0]['included'], 1)
+        self.assertEqual(catalog['bosses'][0]['clears'], 2)
+        self.assertEqual(catalog['bosses'][0]['ai_clears'], 0)
 
     def test_public_history_deduplicates_shared_uploads_and_applies_filters(self) -> None:
         self.create_profile(self.first, '上传甲')
@@ -1189,10 +1279,25 @@ class ProfileUploadTests(unittest.TestCase):
         catalog = self.store.public_catalog(self.connection)
         self.assertEqual(catalog['bosses'][0]['records'], 2)
         self.assertEqual(catalog['bosses'][0]['included'], 1)
+        self.assertEqual(catalog['bosses'][0]['clears'], 2)
+        self.assertEqual(catalog['bosses'][0]['ai_clears'], 1)
         self.assertEqual(
             {row['encounter_id'] for row in self.store.public_leaderboards(self.connection)},
             {visible['encounter_id']},
         )
+        with_ai = self.store.public_leaderboards(
+            self.connection, include_ai=True
+        )
+        self.assertEqual(
+            {row['encounter_id'] for row in with_ai},
+            {visible['encounter_id'], ai['encounter_id']},
+        )
+        ai_row = next(
+            row for row in with_ai if row['encounter_id'] == ai['encounter_id']
+        )
+        self.assertFalse(ai_row['competitive'])
+        self.assertTrue(ai_row['has_ai'])
+        self.assertIsNone(ai_row['rank'])
         self.assertEqual(
             self.store.public_performance(self.connection, boss='name:测试首领')['total_encounters'],
             1,
@@ -1359,6 +1464,19 @@ class ProfileUploadTests(unittest.TestCase):
             return next(row for row in party["dungeons"] if row["key"] == "antigonus-notes")
 
         self.assertEqual(set(notes()["difficulties"]), {"normal", "hard"})
+        self.assertEqual(
+            notes()["difficulty_counts"],
+            {
+                "normal": {
+                    "records": 0, "included": 0, "clears": 0,
+                    "ai_clears": 0, "ranking_entries": 0,
+                },
+                "hard": {
+                    "records": 0, "included": 0, "clears": 0,
+                    "ai_clears": 0, "ranking_entries": 0,
+                },
+            },
+        )
         receipts = {}
         for index, (difficulty, dungeon_id, stage_id) in enumerate((
             ("normal", 5_100_040, 5_150_040),
@@ -1383,6 +1501,19 @@ class ProfileUploadTests(unittest.TestCase):
 
         self.assertEqual(set(notes()["difficulties"]), {"normal", "hard"})
         self.assertEqual(notes()["ranking_entries"], 2)
+        self.assertEqual(
+            notes()["difficulty_counts"],
+            {
+                "normal": {
+                    "records": 1, "included": 1, "clears": 1,
+                    "ai_clears": 0, "ranking_entries": 1,
+                },
+                "hard": {
+                    "records": 1, "included": 1, "clears": 1,
+                    "ai_clears": 0, "ranking_entries": 1,
+                },
+            },
+        )
         rankings = self.store.public_leaderboards(self.connection)
         self.assertEqual(
             {(row["difficulty"], row["encounter_id"]) for row in rankings
@@ -1397,6 +1528,23 @@ class ProfileUploadTests(unittest.TestCase):
             self.assertEqual(performance["selection"]["difficulty"], difficulty)
             self.assertEqual(performance["total_encounters"], 1)
             self.assertEqual(performance["total_samples"], 2)
+
+    def test_may_manor_garden_lists_hard_difficulty_before_first_clear(self) -> None:
+        catalog = self.store.public_catalog(self.connection)
+        raid = next(row for row in catalog["dungeon_categories"] if row["key"] == "raid")
+        garden = next(row for row in raid["dungeons"] if row["key"] == "may-manor-garden")
+
+        self.assertEqual(set(garden["difficulties"]), {"normal", "hard"})
+        self.assertEqual(
+            garden["difficulty_counts"]["hard"],
+            {
+                "records": 0,
+                "included": 0,
+                "clears": 0,
+                "ai_clears": 0,
+                "ranking_entries": 0,
+            },
+        )
 
     def test_public_rankings_catalog_and_performance_share_dungeon_context(self) -> None:
         record = self.encounter(self.first)
@@ -1526,7 +1674,7 @@ class ProfileUploadTests(unittest.TestCase):
 
         self.assertEqual(
             [row["name"] for row in dungeon("raid", "may-manor-castle")["bosses"]],
-            ["子嗣守护", "安西娅", "子爵夫人"],
+            ["子嗣守护", "一号信徒", "子爵夫人"],
         )
         self.assertEqual(
             {row["name"] for row in dungeon("raid", "may-manor-garden")["bosses"]},
@@ -1559,7 +1707,7 @@ class ProfileUploadTests(unittest.TestCase):
             for row in self.store.public_leaderboards(self.connection)
         }
         self.assertIn(("子嗣守护", "may-manor-castle"), leaderboard_groups)
-        self.assertIn(("安西娅", "may-manor-castle"), leaderboard_groups)
+        self.assertIn(("一号信徒", "may-manor-castle"), leaderboard_groups)
         self.assertIn(("子爵夫人", "may-manor-castle"), leaderboard_groups)
         self.assertIn(("先祖铠甲", "may-manor-garden"), leaderboard_groups)
         self.assertIn(("瑞尔比伯", "antigonus-notes"), leaderboard_groups)

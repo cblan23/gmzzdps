@@ -423,7 +423,7 @@ class LiveTeamProfileReader(RuntimeMetadataReader):
     A late-start passive capture sees HP heartbeats, but unchanged field 11
     (the extraordinary rating) is not repeated. Locate the live actor/party
     model in the existing GC chain and validate its complete Lua table, token
-    and layout. The two-second refresh reads only the cached bounded tables.
+    and layout. Periodic refreshes read only the cached bounded tables.
     """
 
     PROFILE_NODE_RADIUS = 32

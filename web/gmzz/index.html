@@ -6,10 +6,11 @@
   <meta name="description" content="叨叨诡秘战斗历史：查询公开角色、Boss 战报、团队 DPS、治疗、承伤和职业表现。">
   <title>叨叨诡秘 · DPS Logs</title>
   <link rel="icon" href="assets/app_icon.ico">
-  <link rel="stylesheet" href="home.css?v=20261006-detail-timeline-2">
+  <link rel="stylesheet" href="home.css?v=20261030-may-manor-castle-1">
   <link rel="stylesheet" href="site.css?v=20261007-profession-analysis-1">
-  <link rel="stylesheet" href="history.css?v=20261015-skill-cast-export-1">
-  <script src="site.js?v=20261015-skill-cast-export-1" defer></script>
+  <link rel="stylesheet" href="history.css?v=20261016-result-column-1">
+  <link rel="stylesheet" href="boss-data.css?v=20261016-boss-data-1">
+  <script src="site.js?v=20261030-castle-bosses-1" defer></script>
 </head>
 <body>
 <div class="scene" id="scene">
@@ -22,6 +23,7 @@
       <nav class="nav" aria-label="主导航">
         <a href="#records">数据排行</a>
         <a href="#insights">职业统计</a>
+        <a href="#boss-data">BOSS 数据</a>
         <a class="nav-lab" href="#lab">叨叨实验室<small>预告</small></a>
       </nav>
       <div class="upload-area">
@@ -36,7 +38,7 @@
             <div class="upload-guide-title">怎么上传？</div>
             <div class="upload-step"><span class="step-no">1</span><div><b>先加 QQ 群下载叨叨 DPS-Log</b><small>QQ群：1094925831 / 165966739</small></div></div>
             <div class="upload-step"><span class="step-no">2</span><div><b>打开叨叨 DPS-Log</b><small>登录后保持客户端正常运行</small></div></div>
-            <div class="upload-step"><span class="step-no">3</span><div><b>完成一场 BOSS 战斗</b><small>战斗胜利后自动上传</small></div></div>
+            <div class="upload-step"><span class="step-no">3</span><div><b>完成一场 BOSS 战斗</b><small>战斗结束后自动上传（胜利、失败或中断）</small></div></div>
           </div>
         </div>
       </div>
@@ -57,6 +59,46 @@
     <div class="search-note">查询角色的 <b>Boss 战斗记录与 DPS 表现</b></div>
     <div class="home-data" aria-live="polite"><span id="historySummary">正在读取历史战斗场次</span></div>
     <div class="home-help">加QQ群下载叨叨dps-log：1094925831 / 165966739</div>
+    <a class="home-dungeon-shortcut" href="#records?category=raid&amp;dungeon=may-manor-castle&amp;boss=%E5%AD%90%E5%97%A3%E5%AE%88%E6%8A%A4&amp;difficulty=hard" aria-label="查看五月庄园·城堡困难模式数据排行">
+      <span class="home-dungeon-copy">
+        <span class="home-dungeon-badge">当前新副本 · 困难模式</span>
+        <strong>五月庄园·城堡</strong>
+        <span class="home-dungeon-description" id="latestDungeonClearCount" aria-live="polite">正在读取通关数据</span>
+      </span>
+      <span class="home-dungeon-action">进入排行 <span aria-hidden="true">→</span></span>
+    </a>
+    <section class="home-capabilities" aria-label="叨叨 DPS-Log 功能">
+      <article class="capability-card capability-plugin">
+        <div class="capability-heading">
+          <span class="capability-kicker">CLIENT PLUGIN</span>
+          <h2>插件功能</h2>
+          <p>战斗中即时呈现关键数据，并自动留存完整记录。</p>
+        </div>
+        <ul class="capability-list">
+          <li><b>进队超凡评分</b><span>入队即看队员评分</span></li>
+          <li><b>队伍装备查询</b><span>查看装备与核心属性</span></li>
+          <li><b>实时战斗面板</b><span>DPS、HPS、承伤与占比</span></li>
+          <li><b>输出细节统计</b><span>暴击、穿透与死亡记录</span></li>
+          <li><b>Boss 战斗预警</b><span>血量阶段与狂暴倒计时</span></li>
+          <li><b>自动上传战报</b><span>记录胜利、失败、中断及人机</span></li>
+        </ul>
+      </article>
+      <article class="capability-card capability-web">
+        <div class="capability-heading">
+          <span class="capability-kicker">WEB ANALYTICS</span>
+          <h2>网站功能</h2>
+          <p>从单场复盘到职业表现，集中查询与分享战斗数据。</p>
+        </div>
+        <ul class="capability-list">
+          <li><b>战斗详情复盘</b><span>团队与个人数据完整拆解</span></li>
+          <li><b>战时装备快照</b><span>还原参战时的装备状态</span></li>
+          <li><b>技能构成分析</b><span>技能占比与命中时间线</span></li>
+          <li><b>Boss 历史查询</b><span>按角色、难度和日期筛选</span></li>
+          <li><b>职业表现分析</b><span>排行、分位与样本趋势</span></li>
+          <li><b>战报分享导出</b><span>分享详情并导出释放记录</span></li>
+        </ul>
+      </article>
+    </section>
   </main>
   <div class="fog" aria-hidden="true"></div><div class="skyline" aria-hidden="true"><div class="layer"></div></div>
   <noscript><p class="noscript-note">请启用 JavaScript 查看历史列表和战斗详情。</p></noscript>

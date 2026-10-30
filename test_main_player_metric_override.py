@@ -141,7 +141,7 @@ class CurrentMainPlayerMetricTests(unittest.TestCase):
                 self.assertEqual([row['actor_id'] for row in rows], [3, 4, 2, 1])
         self.assertEqual(record.to_dict(), original)
 
-    def test_main_rows_keep_live_and_previous_settlement_metrics_separate(self):
+    def test_main_rows_keep_previous_settlement_metrics_in_history_only(self):
         window, record, roster = self.make_settled_window()
         window.model.current_stats()[0].damage = 30_000
         window.model.healing_summary = lambda _duration: {
@@ -155,18 +155,36 @@ class CurrentMainPlayerMetricTests(unittest.TestCase):
         self.assertFalse(rating_preview)
         self.assertTrue(rows[0]['is_live_self'])
         self.assertEqual((rows[0]['metric'], rows[0]['stat_value']), ('hps', 2000))
-        recent_self = next(row for row in rows if row.get('is_recent_battle') and row.get('is_self'))
-        self.assertEqual((recent_self['metric'], recent_self['stat_value']), ('hps', 20_000))
-        self.assertEqual(recent_self['dps_value'], record.participants[0]['dps'])
+        self.assertFalse(any(row.get('is_recent_battle') for row in rows))
+        archived_self = next(
+            row for row in window._settlement_record_main_rows(record)
+            if row.get('is_self')
+        )
+        self.assertEqual(
+            (archived_self['metric'], archived_self['stat_value']),
+            ('hps', 20_000),
+        )
+        self.assertEqual(
+            archived_self['dps_value'], record.participants[0]['dps']
+        )
 
-    def test_final_boss_uses_official_self_metric(self):
+    def test_final_boss_official_self_metric_stays_in_history(self):
         window, record, _ = self.make_settled_window()
         record.result = 'VICTORY'
         rows, rating_preview = window._main_display_rows()
         self.assertFalse(rating_preview)
-        self.assertTrue(rows[0]['is_official_self'])
-        self.assertEqual((rows[0]['metric'], rows[0]['stat_value']), ('hps', 20_000))
-        self.assertEqual(rows[0]['dps_value'], 4000)
+        self.assertNotIn('is_official_self', rows[0])
+        self.assertIsNone(rows[0]['stat_value'])
+        self.assertIsNone(rows[0]['total_value'])
+        archived_self = next(
+            row for row in window._settlement_record_main_rows(record)
+            if row.get('is_self')
+        )
+        self.assertEqual(
+            (archived_self['metric'], archived_self['stat_value']),
+            ('hps', 20_000),
+        )
+        self.assertEqual(archived_self['dps_value'], 4000)
 
     def test_unavailable_metrics_or_clock_are_not_fabricated(self):
         window, record, _ = self.make_settled_window()

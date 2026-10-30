@@ -264,6 +264,113 @@ class TeamProfilePollerTests(unittest.TestCase):
 
         self.assertEqual(poller._active_tokens(), {current_token})
 
+    def test_direct_roster_scores_refresh_without_per_member_profile_scans(self):
+        self_token = "AQAAAOwNKLYHAAAA"
+        peer_token = "AQAAAOwNuopBAAAA"
+        self_actor_id = 57_463_447_253_497
+
+        class FakeReader:
+            members = [
+                {
+                    "user_token": self_token,
+                    "name": "Self",
+                    "extraordinary_rating": 80_975,
+                    "is_ai": False,
+                },
+                {
+                    "user_token": peer_token,
+                    "name": "Peer",
+                    "extraordinary_rating": 91_444,
+                    "is_ai": False,
+                },
+            ]
+            snapshot_calls = []
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def current_local_role(self):
+                return self_token, self_actor_id
+
+            def current_dungeon_roster(self):
+                return {
+                    "local_user_token": self_token,
+                    "dungeon_id": 5_100_055,
+                    "group_id": 57_422_102_180_769,
+                    "members": [dict(member) for member in self.__class__.members],
+                }
+
+            def current_encounter_context(self):
+                return None
+
+            def snapshot(self, tokens):
+                self.__class__.snapshot_calls.append(frozenset(tokens))
+                return []
+
+            def close(self):
+                pass
+
+        callbacks = []
+        with patch("npcap_entity_metadata.LiveTeamProfileReader", FakeReader):
+            poller = PassiveTeamProfilePoller(
+                1234,
+                interval_seconds=1.0,
+                startup_profile_callback=callbacks.append,
+            )
+            poller.interval_seconds = 0.02
+            poller.replace((self_token, peer_token))
+            poller.start()
+            records = []
+            deadline = time.monotonic() + 1.0
+            try:
+                while time.monotonic() < deadline:
+                    records.extend(poller.poll())
+                    rosters = [
+                        record
+                        for record in records
+                        if record.get("method") == "ReadOnlyCurrentDungeonRoster"
+                    ]
+                    if rosters:
+                        break
+                    time.sleep(0.01)
+
+                FakeReader.members = [dict(FakeReader.members[0])]
+                while time.monotonic() < deadline:
+                    records.extend(poller.poll())
+                    rosters = [
+                        record
+                        for record in records
+                        if record.get("method") == "ReadOnlyCurrentDungeonRoster"
+                    ]
+                    if len(rosters) >= 2:
+                        break
+                    time.sleep(0.01)
+            finally:
+                poller.close()
+                records.extend(poller.poll())
+
+        rosters = [
+            record
+            for record in records
+            if record.get("method") == "ReadOnlyCurrentDungeonRoster"
+        ]
+        self.assertGreaterEqual(len(rosters), 2)
+        self.assertEqual(
+            [len(record["members"]) for record in rosters[:2]], [2, 1]
+        )
+        self.assertEqual(
+            [
+                member.get("extraordinary_rating")
+                for member in rosters[0]["members"]
+            ],
+            [80_975, 91_444],
+        )
+        self.assertEqual(FakeReader.snapshot_calls, [])
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(callbacks[0]["user_token"], self_token)
+        self.assertEqual(callbacks[0]["entity_id"], self_actor_id)
+        self.assertEqual(callbacks[0]["client_rating_binding"], "team_member_ceScore")
+
     def test_new_token_forces_one_immediate_full_roster_poll(self):
         first_token = "AQAAAOwNuopBAAAA"
         second_token = "AQAAAOwN0ga-AAAA"
@@ -348,7 +455,7 @@ class TeamProfilePollerTests(unittest.TestCase):
                 1234,
                 interval_seconds=1.0,
             )
-            # Keep production's two-second default intact while making this
+            # Keep production's one-second default intact while making this
             # background scheduling test finish promptly.
             poller.interval_seconds = 0.02
             poller.request([token])

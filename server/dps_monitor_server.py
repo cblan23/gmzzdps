@@ -1668,9 +1668,12 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 limit = int(query.get("limit", ["100"])[0] or 100)
             except (TypeError, ValueError, OverflowError):
                 limit = 100
+            include_ai = str(query.get("include_ai", [""])[0]).casefold() in {
+                "1", "true", "yes", "on",
+            }
             with database() as connection:
                 leaderboards = profile_upload_store().public_leaderboards(
-                    connection, limit=limit
+                    connection, limit=limit, include_ai=include_ai
                 )
             self._json(HTTPStatus.OK, {"ok": True, "leaderboards": leaderboards})
             return

@@ -45,19 +45,19 @@
     {
       "id": "mutated_hound",
       "display_name": "异化猎犬",
-      "template_ids": [7109821],
+      "template_ids": [7109801, 7109821],
       "enrage_seconds": 480
     },
     {
       "id": "ancestral_armor",
       "display_name": "先祖铠甲",
-      "template_ids": [7103402, 7103401],
+      "template_ids": [7103210, 7103206, 7103402, 7103401],
       "enrage_seconds": 480
     },
     {
       "id": "astrologer",
       "display_name": "星象仪者",
-      "template_ids": [7102403],
+      "template_ids": [7102400, 7102403],
       "enrage_seconds": 300,
       "countdown_start_signal": "Set_MUS_B_WYZY_Boss_GuanJia_Stage2",
       "first_sample_is_baseline": true
@@ -65,7 +65,7 @@
     {
       "id": "descendant_guardian",
       "display_name": "子嗣守护",
-      "template_ids": [7100215],
+      "template_ids": [7100215, 7102938],
       "enrage_seconds": 480
     },
     {
@@ -88,9 +88,28 @@
       ]
     },
     {
+      "id": "first_believer_level_94",
+      "display_name": "一号信徒",
+      "template_ids": [7100201, 7100202, 7100203],
+      "enrage_seconds": 480,
+      "hp_slots": [
+        {
+          "id": "anxia",
+          "template_ids": [7100203],
+          "max_hp": 85820034
+        },
+        {
+          "id": "barney",
+          "template_ids": [7100202],
+          "max_hp": 64978026,
+          "complete_when_templates": [7100203]
+        }
+      ]
+    },
+    {
       "id": "viscountess",
       "display_name": "子爵夫人",
-      "template_ids": [7102990, 7102991],
+      "template_ids": [7102932, 7102936, 7102990, 7102991],
       "enrage_seconds": 480
     },
     {
@@ -132,5 +151,5 @@
       "forecast_stop_hp_percent": 2
     }
   ],
-  "configuration_note": "仅使用已实测确认的普通难度模板；未配置 Boss 不展示预测。预测只比较当前战斗时间与 Boss 血量进度，不读取或计算团队 DPS。"
+  "configuration_note": "仅使用已实测确认的模板，包含五月庄园·花园与五月庄园·城堡普通、困难难度；未配置 Boss 不展示预测。预测只比较当前战斗时间与 Boss 血量进度，不读取或计算团队 DPS。"
 }

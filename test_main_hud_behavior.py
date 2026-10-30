@@ -228,7 +228,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         self.assertIsNone(window._main_displayable_team_dps_record())
 
-    def test_live_boss_team_dps_is_separate_from_recent_battle_total(self):
+    def test_live_boss_footer_stays_separate_from_live_team_dps(self):
         window, members = make_window()
         members.clear()
         members.add(1)
@@ -331,7 +331,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             if row.get("row_kind") == "section"
         )
 
-        self.assertEqual(live_snapshot["team_dps"], "309,500/s")
+        self.assertEqual(live_snapshot["team_dps"], "--")
         self.assertEqual(live_section["live_team_dps"], "221/s")
 
         window._main_display_rows = lambda: ([dict(rows[0])], False)
@@ -360,7 +360,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             if row.get("row_kind") == "section"
         )
 
-        self.assertEqual(ended_snapshot["team_dps"], "309,500/s")
+        self.assertEqual(ended_snapshot["team_dps"], "--")
         self.assertEqual(ended_section["live_team_dps"], "--")
 
 
@@ -2124,7 +2124,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(len(ingested), 1)
         self.assertEqual(scheduled, [True])
 
-    def test_live_settlement_pins_self_then_shows_previous_battle(self):
+    def test_live_settlement_pins_self_without_showing_previous_battle(self):
         window, members = make_window()
         window.pve_hud_view = "recent_battle"
         window.main_recent_battle_expanded = True
@@ -2208,37 +2208,22 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[0]["inline_rating_text"], "80001")
         self.assertEqual(rows[1]["row_kind"], "section")
         self.assertTrue(rows[1]["expanded"])
-        self.assertEqual(rows[2]["row_kind"], "recent_boss")
-        self.assertEqual(rows[2]["boss_name"], "异化猎犬")
-        self.assertEqual(rows[2]["boss_template_id"], 7109821)
-        self.assertEqual(rows[2]["boss_percent"], "25.0%")
-        self.assertEqual(
-            [row["actor_id"] for row in rows[3:]],
-            [2, 1],
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertNotIn(
+            "recent_boss", {row.get("row_kind") for row in rows}
         )
-        self.assertEqual(
-            [row["total_value"] for row in rows[3:]],
-            [300_000, 100_000],
-        )
-        self.assertTrue(
-            all(not row["hide_total"] for row in rows[3:])
-        )
-        self.assertTrue(all(not row["interactive"] for row in rows[3:]))
-        self.assertEqual(
-            [row["inline_rating_text"] for row in rows[3:]],
-            ["88893", "80001"],
-        )
-        self.assertNotIn("message", {row.get("row_kind") for row in rows})
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
+        self.assertIs(window._main_recent_settlement_record(), previous)
 
         snapshot = window._layered_main_snapshot()
-        self.assertEqual(snapshot["visible_rows"], 4)
+        self.assertEqual(snapshot["visible_rows"], 3)
         self.assertEqual(snapshot["dps_summary_caption"], "团队总秒伤")
-        self.assertEqual(snapshot["team_dps"], "40,000/s")
+        self.assertEqual(snapshot["team_dps"], "--")
         window.main_recent_battle_expanded = False
         still_open = window._settlement_main_rows(now=205)
         self.assertEqual(len(still_open), len(rows))
         self.assertTrue(still_open[1]["expanded"])
-        self.assertEqual(window._layered_main_snapshot()["visible_rows"], 4)
+        self.assertEqual(window._layered_main_snapshot()["visible_rows"], 3)
 
     def test_new_party_does_not_mutate_previous_settlement_rows(self):
         window, members = make_window()
@@ -2294,8 +2279,9 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.settlement_ui = SimpleNamespace(tracker=tracker)
 
         rows = window._settlement_main_rows(now=205)
-        self.assertEqual(rows[2]["row_kind"], "recent_boss")
-        recent = rows[3:]
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
+        recent = window._settlement_record_main_rows(previous)
 
         self.assertEqual([row["actor_id"] for row in recent], [2, 1])
         self.assertNotIn(7, {row["actor_id"] for row in recent})
@@ -2310,7 +2296,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             ["", "82929"],
         )
 
-    def test_next_boss_retains_previous_team_result_after_teammates_leave(self):
+    def test_next_boss_keeps_previous_team_result_only_in_history(self):
         window, members = make_window()
         window.model.party_active = True
         window.model.party_member_count = 6
@@ -2357,7 +2343,8 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.model.actor_character_ids = {1: "self-token"}
 
         rows = window._settlement_main_rows(now=205)
-        previous_rows = [row for row in rows if row.get("is_recent_battle")]
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
+        previous_rows = window._settlement_record_main_rows(previous)
         self.assertEqual(len(previous_rows), 6)
         self.assertEqual(
             {row["total_value"] for row in previous_rows},
@@ -2425,8 +2412,9 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(window.main_recent_battle_scope_started_ns, 0)
         self.assertIs(window._main_recent_settlement_record(), previous)
         rows = window._settlement_main_rows(now=205)
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
         self.assertEqual(
-            {row.get("total_value") for row in rows if row.get("is_recent_battle")},
+            {row.get("total_value") for row in window._settlement_record_main_rows(previous)},
             {100_000, 300_000},
         )
 
@@ -2434,10 +2422,11 @@ class MainHudBehaviorTests(unittest.TestCase):
         # started. The same dungeon and character still own that result.
         window.main_recent_battle_scope_started_ns = 201_000_000_000
         self.assertIs(window._main_recent_settlement_record(), previous)
-        self.assertEqual(
-            {row.get("total_value") for row in window._settlement_main_rows(now=205)
-             if row.get("is_recent_battle")},
-            {100_000, 300_000},
+        self.assertFalse(
+            any(
+                row.get("is_recent_battle")
+                for row in window._settlement_main_rows(now=205)
+            )
         )
         window.model.self_character_id = "another-character"
         self.assertIsNone(window._main_recent_settlement_record())
@@ -2445,7 +2434,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         tracker.encounters[tracker.current_id].instance_id = "another-dungeon"
         self.assertIsNone(window._main_recent_settlement_record())
 
-    def test_final_boss_settlement_is_immediately_displayable_without_successor(self):
+    def test_final_boss_settlement_stays_available_without_realtime_projection(self):
         window, members = make_window()
         members.clear()
         members.update({1, 2})
@@ -2485,11 +2474,14 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertIsNone(tracker.current_id)
         self.assertIs(window._main_recent_settlement_record(), final)
         self.assertIs(window._main_displayable_team_dps_record(), final)
+        realtime_rows = window._settlement_main_rows(now=111)
+        self.assertFalse(
+            any(row.get("is_recent_battle") for row in realtime_rows)
+        )
         self.assertEqual(
             {
                 row.get("total_value")
-                for row in window._settlement_main_rows(now=111)
-                if row.get("is_recent_battle")
+                for row in window._settlement_record_main_rows(final)
             },
             {100_000, 300_000},
         )
@@ -2527,11 +2519,17 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         window.settlement_ui = SimpleNamespace(tracker=tracker)
 
-        rows = window._settlement_main_rows(now=205)
+        rows = window._settlement_record_main_rows(previous)
 
         self.assertEqual(
-            [row['total_value'] for row in rows if row.get('is_recent_battle')],
+            [row['total_value'] for row in rows],
             [100_000, 20_000],
+        )
+        self.assertFalse(
+            any(
+                row.get('is_recent_battle')
+                for row in window._settlement_main_rows(now=205)
+            )
         )
         self.assertEqual(len(previous.participants_snapshot), 6)
 
@@ -2605,8 +2603,13 @@ class MainHudBehaviorTests(unittest.TestCase):
         settled_lower = [
             row for row in settled_rows[2:] if row.get("actor_id") is not None
         ]
+        self.assertEqual(settled_lower, [])
+        self.assertIs(window._main_recent_settlement_record(), current)
         self.assertEqual(
-            [row["total_value"] for row in settled_lower],
+            [
+                row["total_value"]
+                for row in window._settlement_record_main_rows(current)
+            ],
             [444_000, 222_000],
         )
 
@@ -2615,7 +2618,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(len(window._settlement_main_rows()), 3)
         self.assertEqual(window._settlement_main_rows()[2]["row_kind"], "message")
 
-    def test_solo_next_pull_shows_previous_settlement(self):
+    def test_solo_next_pull_does_not_show_previous_settlement(self):
         window, members = make_window()
         members.clear()
         members.add(1)
@@ -2664,11 +2667,12 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         rows = window._settlement_main_rows(now=205)
 
-        self.assertEqual(rows[2]["row_kind"], "recent_boss")
-        self.assertEqual(rows[2]["boss_name"], "Solo Boss")
-        self.assertEqual(rows[3]["actor_id"], 1)
-        self.assertEqual(rows[3]["total_value"], 11_228)
-        self.assertAlmostEqual(rows[3]["stat_value"], 863.6923076923077)
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
+        archived = window._settlement_record_main_rows(previous)
+        self.assertEqual(archived[0]["actor_id"], 1)
+        self.assertEqual(archived[0]["total_value"], 11_228)
+        self.assertAlmostEqual(archived[0]["stat_value"], 863.6923076923077)
 
         window.live_hud_combat_state = {
             "active": True,
@@ -2691,8 +2695,10 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         self.assertIsNone(waiting_rows[0]["total_value"])
         self.assertIsNone(waiting_rows[0]["stat_value"])
-        self.assertEqual(waiting_rows[2]["row_kind"], "recent_boss")
-        self.assertEqual(waiting_rows[3]["total_value"], 11_228)
+        self.assertEqual(waiting_rows[2]["row_kind"], "message")
+        self.assertFalse(
+            any(row.get("is_recent_battle") for row in waiting_rows)
+        )
         self.assertFalse(waiting_snapshot.get("live_no_boss", False))
 
         window.model.last_damage_time = 204.0
@@ -2713,8 +2719,10 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.live_hud_dps_segment["active"] = False
         window.live_hud_dps_segment["ended_at_epoch"] = 205.0
         restored_rows, _ = window._main_display_rows(now=205)
-        self.assertEqual(restored_rows[2]["row_kind"], "recent_boss")
-        self.assertEqual(restored_rows[3]["total_value"], 11_228)
+        self.assertEqual(restored_rows[2]["row_kind"], "message")
+        self.assertFalse(
+            any(row.get("is_recent_battle") for row in restored_rows)
+        )
 
     def test_hundred_wipes_keep_latest_result_visible_on_next_pull(self):
         window, members = make_window()
@@ -2784,12 +2792,14 @@ class MainHudBehaviorTests(unittest.TestCase):
         recent_rows = [row for row in rows if row.get("is_recent_battle")]
 
         self.assertIs(latest, completed[-1])
+        self.assertEqual(recent_rows, [])
+        archived_rows = window._settlement_record_main_rows(latest)
         self.assertEqual(
-            [row["total_value"] for row in recent_rows],
+            [row["total_value"] for row in archived_rows],
             [20_099, 10_099],
         )
         self.assertEqual(
-            [row["stat_value"] for row in recent_rows],
+            [row["stat_value"] for row in archived_rows],
             [2_009.9, 1_009.9],
         )
 
@@ -3009,10 +3019,8 @@ class MainHudBehaviorTests(unittest.TestCase):
             window._main_recent_settlement_record(keep_last_settled=False),
             pending,
         )
-        self.assertEqual(rows[2]["row_kind"], "recent_boss")
-        self.assertEqual(rows[2]["boss_name"], "异化猎犬")
-        self.assertIsNone(rows[3]["total_value"])
-        self.assertIsNone(rows[3]["stat_value"])
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
 
     def test_newer_different_boss_pending_uses_its_bound_frozen_rows(self):
         window, members = make_window()
@@ -3095,13 +3103,14 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertFalse(window._main_has_displayable_team_dps())
         rows = window._settlement_main_rows(now=215)
         self.assertEqual(rows[1]["row_kind"], "section")
-        self.assertEqual(rows[2]["row_kind"], "recent_boss")
-        self.assertEqual(rows[2]["boss_name"], "Second Boss")
-        self.assertEqual(rows[3]["total_value"], 222_222)
-        self.assertEqual(rows[3]["stat_value"], 22_222.2)
-        self.assertIn("等待服务器结算", rows[3]["settlement_status_text"])
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
+        pending_rows = window._main_pending_local_rows(pending)
+        self.assertEqual(pending_rows[0]["total_value"], 222_222)
+        self.assertEqual(pending_rows[0]["stat_value"], 22_222.2)
+        self.assertIn("等待服务器结算", pending_rows[0]["settlement_status_text"])
 
-    def test_new_boss_live_keeps_previous_result_below_current_self(self):
+    def test_new_boss_live_does_not_show_previous_result(self):
         window, _ = make_window()
         window.model.actor_character_ids = {1: "self-token"}
         window.model.self_character_id = "self-token"
@@ -3135,20 +3144,19 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertFalse(window._main_has_displayable_team_dps())
         self.assertTrue(rows[0]["is_live_self"])
         self.assertNotEqual(rows[0]["total_value"], 123_456)
-        self.assertEqual(rows[2]["row_kind"], "recent_boss")
-        self.assertEqual(rows[2]["boss_name"], "Boss 3")
-        self.assertEqual(rows[3]["total_value"], 123_456)
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
 
         window.model.party_session_id = 2
         self.assertIs(
             window._main_recent_settlement_record(settled_only=True), previous
         )
-        self.assertIn(
+        self.assertNotIn(
             "recent_boss",
             {row.get("row_kind") for row in window._settlement_main_rows(now=205)},
         )
 
-    def test_finished_boss_without_server_table_shows_bound_local_team_rows(self):
+    def test_finished_boss_keeps_bound_local_rows_out_of_realtime_view(self):
         window, _ = make_window()
         window.model.encounter_id = "local-first-boss"
         window.model.actor_character_ids = {
@@ -3193,13 +3201,14 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         self.assertFalse(rating_preview)
         self.assertTrue(rows[0]["is_live_self"])
-        self.assertEqual(rows[2]["row_kind"], "recent_boss")
-        self.assertEqual(rows[2]["boss_name"], "厄水巨龟")
-        self.assertEqual([row["actor_id"] for row in history], list(range(1, 7)))
-        self.assertEqual(history[0]["total_value"], 630_000)
-        self.assertEqual(history[0]["stat_value"], 21_000)
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertEqual(history, [])
+        frozen = window._main_finished_current_local_rows(current, now=205)
+        self.assertEqual([row["actor_id"] for row in frozen], list(range(1, 7)))
+        self.assertEqual(frozen[0]["total_value"], 630_000)
+        self.assertEqual(frozen[0]["stat_value"], 21_000)
         self.assertTrue(
-            all("等待服务器结算" in row["settlement_status_text"] for row in history)
+            all("等待服务器结算" in row["settlement_status_text"] for row in frozen)
         )
         self.assertEqual(window._main_recent_battle_team_dps_text(), "91,000/s")
 
@@ -3211,7 +3220,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             "recent_boss", {row.get("row_kind") for row in stale_rows}
         )
 
-    def test_bootstrap_boss_rebind_keeps_previous_settlement_visible(self):
+    def test_bootstrap_boss_rebind_keeps_previous_settlement_in_history(self):
         window, _ = make_window()
         window.model.actor_character_ids = {1: "self-token"}
         window.model.self_character_id = "self-token"
@@ -3258,11 +3267,12 @@ class MainHudBehaviorTests(unittest.TestCase):
             window._main_recent_settlement_record(settled_only=True), previous
         )
         rows = window._settlement_main_rows(now=205)
-        self.assertIn(
+        self.assertNotIn(
             "recent_boss", {row.get("row_kind") for row in rows}
         )
+        archived = window._settlement_record_main_rows(previous)
         self.assertTrue(
-            any(row.get("total_value") == 7_578_453 for row in rows)
+            any(row.get("total_value") == 7_578_453 for row in archived)
         )
 
     def test_real_instance_change_does_not_reuse_previous_settlement(self):
@@ -3295,7 +3305,7 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         self.assertIsNone(window._main_recent_settlement_record())
 
-    def test_recent_rows_take_dps_and_total_from_the_same_latest_settlement(self):
+    def test_archived_rows_take_dps_and_total_from_the_same_latest_settlement(self):
         window, members = make_window()
         window.model.started = False
         window.model.party_active = True
@@ -3364,10 +3374,14 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         rows = window._settlement_main_rows(now=225)
 
-        self.assertEqual(rows[2]["boss_name"], "第二场")
-        self.assertEqual(rows[0]["total_value"], 222_000)
-        self.assertEqual(rows[0]["stat_value"], 11_100)
-        peer = next(row for row in rows[3:] if row["actor_id"] == 2)
+        self.assertEqual(rows[2]["row_kind"], "message")
+        self.assertFalse(any(row.get("is_recent_battle") for row in rows))
+        self.assertIs(window._main_recent_settlement_record(), latest)
+        archived = window._settlement_record_main_rows(latest)
+        own = next(row for row in archived if row["actor_id"] == 1)
+        self.assertEqual(own["total_value"], 222_000)
+        self.assertEqual(own["stat_value"], 11_100)
+        peer = next(row for row in archived if row["actor_id"] == 2)
         self.assertEqual(peer["total_value"], 444_000)
         self.assertEqual(peer["stat_value"], 22_200)
 
@@ -3410,17 +3424,23 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         window.settlement_ui = SimpleNamespace(tracker=tracker)
 
-        before = window._settlement_main_rows(now=205)
+        before = window._settlement_record_main_rows(completed)
         before_history = {row["actor_id"]: row["total_value"]
-                          for row in before if row.get("is_recent_battle")}
+                          for row in before}
         self.assertEqual(before_history, {1: 100_000, 2: 200_000, 3: 300_000})
+        self.assertFalse(
+            any(
+                row.get("is_recent_battle")
+                for row in window._settlement_main_rows(now=205)
+            )
+        )
 
         live_profiles.pop()
         members.intersection_update({1, 2})
         window.model.party_member_count = 2
-        after = window._settlement_main_rows(now=215)
+        after = window._settlement_record_main_rows(completed)
         after_history = {row["actor_id"]: row["total_value"]
-                         for row in after if row.get("is_recent_battle")}
+                         for row in after}
         self.assertEqual(after_history, before_history)
         self.assertEqual(len(window._main_team_rating_section_rows()), 2)
 
@@ -3738,7 +3758,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(row['boss_percent'], '')
         self.assertIsNone(row['boss_ratio'])
 
-    def test_confirmed_victory_overrides_stale_live_boss_health(self):
+    def test_confirmed_victory_removes_stale_live_boss_health(self):
         window, _ = make_window()
         window.model.started = False
         window.model.combat_end_reason = 'target_defeated'
@@ -3777,8 +3797,10 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         snapshot = window._layered_main_snapshot()
 
-        self.assertEqual(snapshot['boss_percent'], '0%')
-        self.assertTrue(snapshot['boss_hp'].startswith('0 /'))
+        self.assertEqual(snapshot['boss_name'], '暂无目标')
+        self.assertFalse(snapshot['boss_available'])
+        self.assertEqual(snapshot['boss_percent'], '')
+        self.assertEqual(snapshot['boss_hp'], '')
 
     def test_packet_terminal_zero_overrides_stale_model_health_before_settlement(self):
         window, _ = make_window()
@@ -3930,7 +3952,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         monster.entity_id = 91
         self.assertFalse(window._main_recent_victory_matches_live_boss(encounter, monster))
 
-    def test_confirmed_wire_victory_zeroes_hud_with_stale_live_fight_state(self):
+    def test_confirmed_wire_victory_removes_stale_boss_from_realtime_hud(self):
         window, _ = make_window()
         wire_token = 'arySSqyWHxYtctkg'
         tracker = EncounterTracker()
@@ -3990,8 +4012,12 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         snapshot = window._layered_main_snapshot()
 
-        self.assertEqual(snapshot['boss_percent'], '0%')
-        self.assertTrue(snapshot['boss_hp'].startswith('0 /'))
+        self.assertEqual(snapshot['boss_name'], '暂无目标')
+        self.assertFalse(snapshot['boss_available'])
+        self.assertEqual(snapshot['boss_percent'], '')
+        self.assertEqual(snapshot['boss_hp'], '')
+        self.assertEqual(snapshot['bosses'][0]['boss_name'], '暂无目标')
+        self.assertFalse(snapshot['bosses'][0]['boss_available'])
 
     def test_delayed_victory_freezes_the_bound_model_encounter(self):
         window, _ = make_window()
@@ -4485,13 +4511,13 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(snapshot["boss_percent"], "")
         self.assertIsNone(snapshot["boss_ratio"])
         self.assertEqual(snapshot["time"], "00:10")
-        self.assertEqual(snapshot["team_dps"], "105,000")
+        self.assertEqual(snapshot["team_dps"], "--")
         section = next(
             row for row in snapshot["rows"] if row.get("row_kind") == "section"
         )
         self.assertEqual(section["live_team_dps"], "60,000/s")
 
-    def test_finished_small_monster_projection_keeps_recent_battle_visible(self):
+    def test_finished_small_monster_projection_returns_to_idle(self):
         window, _ = make_window()
         actors = []
         for actor_id, damage in ((1, 320_000), (2, 180_000)):
@@ -4519,16 +4545,12 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         snapshot = window._layered_main_snapshot()
 
-        self.assertEqual(snapshot["boss_name"], "Boss")
+        self.assertEqual(snapshot["boss_name"], "暂无目标")
         self.assertFalse(snapshot.get("live_no_boss", False))
-        self.assertEqual(snapshot["time"], "00:30")
-        self.assertEqual(snapshot["team_dps"], "105,000")
-        self.assertEqual(
-            [
-                row["actor_id"] for row in snapshot["rows"]
-                if row.get("actor_id") is not None
-            ],
-            list(range(1, 7)),
+        self.assertEqual(snapshot["time"], "00:00")
+        self.assertEqual(snapshot["team_dps"], "--")
+        self.assertFalse(
+            any(row.get("is_recent_battle") for row in snapshot["rows"])
         )
         section = next(
             row for row in snapshot["rows"] if row.get("row_kind") == "section"
@@ -4616,7 +4638,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         self.assertFalse(snapshot.get("live_no_boss", False))
         self.assertEqual(snapshot["time"], "00:42")
-        self.assertEqual(snapshot["team_dps"], "105,000")
+        self.assertEqual(snapshot["team_dps"], "--")
         self.assertEqual(
             [
                 row["actor_id"] for row in snapshot["rows"]
@@ -4677,7 +4699,7 @@ class MainHudBehaviorTests(unittest.TestCase):
             snapshot["boss_ratio"], 14_092_149.0 / 14_095_294.0
         )
         self.assertEqual(snapshot["time"], "00:37")
-        self.assertEqual(snapshot["team_dps"], "105,000")
+        self.assertEqual(snapshot["team_dps"], "--")
         section = next(
             row for row in snapshot["rows"] if row.get("row_kind") == "section"
         )
@@ -4903,6 +4925,122 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(window.live_hud_dps_segment["kind"], "boss")
         self.assertEqual(window.live_hud_dps_segment["started_at_epoch"], 1_200.0)
         self.assertEqual(window.live_hud_dps_segment["rows"], [])
+
+    def test_dual_live_hud_boss_updates_keep_one_current_dps_segment(self):
+        window, _ = make_window()
+        window.live_hud_boss_state = None
+        window.live_hud_dps_segment = None
+        window._schedule_layered_main_render = lambda: None
+        first = {
+            "active": True,
+            "entity_id": 501,
+            "template_id": 7_100_201,
+            "boss_type": 3,
+            "started_at_epoch": 1_000.0,
+            "boss_segment_id": 7,
+            "boss_segment_started_at_epoch": 1_000.0,
+        }
+        second = {
+            "active": True,
+            "entity_id": 502,
+            "template_id": 7_100_202,
+            "boss_type": 3,
+            "started_at_epoch": 1_000.1,
+            "boss_segment_id": 7,
+            "boss_segment_started_at_epoch": 1_000.0,
+        }
+
+        window._dispatch_message("live_hud_boss", first)
+        segment = window.live_hud_dps_segment
+        current_rows = [
+            {
+                "actor_id": actor_id,
+                "total_value": actor_id * 10_000,
+                "targetless_team_live": True,
+            }
+            for actor_id in range(1, 7)
+        ]
+        segment["rows"] = current_rows
+        segment["last_complete_rows"] = current_rows
+        segment["team_snapshot_projection_started"] = True
+
+        window._dispatch_message("live_hud_boss", second)
+        self.assertIs(window.live_hud_dps_segment, segment)
+        self.assertEqual(window.live_hud_dps_segment["rows"], current_rows)
+
+        window._dispatch_message("live_hud_boss", dict(first, current_hp=1.0))
+        self.assertIs(window.live_hud_dps_segment, segment)
+        self.assertEqual(window.live_hud_dps_segment["rows"], current_rows)
+
+        window._dispatch_message(
+            "live_hud_boss",
+            dict(
+                first,
+                started_at_epoch=1_200.0,
+                boss_segment_id=8,
+                boss_segment_started_at_epoch=1_200.0,
+            ),
+        )
+        self.assertIsNot(window.live_hud_dps_segment, segment)
+        self.assertEqual(window.live_hud_dps_segment["rows"], [])
+
+    def test_current_boss_keeps_last_complete_rows_during_partial_snapshots(self):
+        window, _ = make_window()
+        window.live_hud_boss_state = {
+            "active": True,
+            "entity_id": 501,
+            "template_id": 7_100_201,
+            "boss_type": 3,
+            "started_at_epoch": 1_000.0,
+        }
+        window.live_hud_dps_segment = {
+            "key": ("boss", "7", 1_000.0),
+            "kind": "boss",
+            "active": True,
+            "started_at_epoch": 1_000.0,
+            "ended_at_epoch": 0.0,
+            "rows": [],
+        }
+        complete = [
+            {
+                "actor_id": actor_id,
+                "total_value": actor_id * 10_000,
+                "targetless_team_live": True,
+            }
+            for actor_id in range(1, 7)
+        ]
+        partial = complete[:2]
+        window._main_targetless_team_rows = mock.Mock(
+            side_effect=[complete, partial, []]
+        )
+
+        first = window._main_authoritative_live_team_rows(1_010.0)
+        second = window._main_authoritative_live_team_rows(1_011.0)
+        empty = window._main_authoritative_live_team_rows(1_012.0)
+
+        self.assertEqual(first, complete)
+        self.assertEqual(second, complete)
+        self.assertEqual(empty, complete)
+        self.assertFalse(
+            any(row.get("row_kind") == "recent_boss" for row in empty)
+        )
+
+        window._end_live_hud_dps_segment(1_020.0)
+        self.assertEqual(window.live_hud_dps_segment["last_complete_rows"], [])
+
+        window._begin_live_hud_dps_segment(
+            kind="boss",
+            segment_key=8,
+            started_at_epoch=1_200.0,
+        )
+        window.live_hud_boss_state = dict(
+            window.live_hud_boss_state,
+            entity_id=503,
+            started_at_epoch=1_200.0,
+        )
+        window._main_targetless_team_rows = lambda _now=None: []
+        self.assertEqual(window._main_authoritative_live_team_rows(1_201.0), [])
+        self.assertEqual(window.live_hud_dps_segment["last_complete_rows"], [])
 
     def test_live_hud_boss_starts_a_fresh_snapshot_cached_dps_segment(self):
         window, _ = make_window()
@@ -5514,7 +5652,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.model.entity_extraordinary_ratings.clear()
         self.assertIsNone(window._main_extraordinary_rating(2))
 
-    def test_same_map_model_reset_retains_finished_battle_until_new_pull(self):
+    def test_same_map_model_reset_keeps_result_out_of_realtime_hud(self):
         window, _ = make_window()
         window.pve_hud_view = "recent_battle"
         record = completed_record()
@@ -5524,11 +5662,14 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertFalse(window._team_rating_preview_active())
         self.assertTrue(window._main_retained_battle_active())
         snapshot = window._layered_main_snapshot()
-        self.assertEqual(len([row for row in snapshot['rows'] if not row.get('row_kind')]), 6)
-        self.assertEqual(snapshot['boss_name'], 'Boss')
-        self.assertEqual(snapshot['boss_percent'], '0%')
-        self.assertEqual(snapshot['time'], '00:30')
-        self.assertEqual(snapshot['team_dps'], '105,000')
+        self.assertFalse(
+            any(row.get('is_recent_battle') for row in snapshot['rows'])
+        )
+        self.assertEqual(snapshot['boss_name'], '暂无目标')
+        self.assertEqual(snapshot['boss_percent'], '')
+        self.assertEqual(snapshot['time'], '00:00')
+        self.assertEqual(snapshot['team_dps'], '--')
+        self.assertIsNotNone(window.main_last_battle_result)
         self.assertEqual(record, original)
         window.model.started = True
         self.assertFalse(window._main_retained_battle_active())
@@ -5552,7 +5693,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertNotIn("bosses", window.main_last_battle_result)
         self.assertEqual(window.main_last_battle_result["monster"]["current_hp"], 0)
 
-    def test_final_clear_hud_uses_stage_rows_team_dps_and_stage_clock(self):
+    def test_final_clear_keeps_stage_result_out_of_realtime_hud(self):
         window, _ = make_window()
         window.model.started = False
         window.model.self_character_id = 'self-token'
@@ -5619,11 +5760,17 @@ class MainHudBehaviorTests(unittest.TestCase):
             if row.get('is_recent_battle') and not row.get('is_official_self')
         ]
 
+        self.assertEqual(recent_rows, [])
+        self.assertIs(window._main_recent_settlement_record(), record)
         self.assertEqual(
-            [row['total_value'] for row in recent_rows], [300, 100]
+            [
+                row['total_value']
+                for row in window._settlement_record_main_rows(record)
+            ],
+            [300, 100],
         )
-        self.assertEqual(snapshot['team_dps'], '40/s')
-        self.assertEqual(snapshot['time'], '00:10')
+        self.assertEqual(snapshot['team_dps'], '--')
+        self.assertEqual(snapshot['time'], '00:00')
 
     def test_hud_all_fallback_requires_a_verified_one_boss_dungeon(self):
         window, _ = make_window()
@@ -5656,7 +5803,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         record.stage_id = 999001
         self.assertEqual(window._main_hud_statistics_scope(record), 'STAGE')
 
-    def test_idle_recent_settlement_drives_the_same_header_boss_and_time(self):
+    def test_idle_recent_settlement_stays_out_of_the_realtime_hud(self):
         window, _ = make_window()
         window.model.started = False
         roster = [{
@@ -5702,6 +5849,11 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         window.main_last_battle_result = None
         window.main_manual_clear_state = None
+        window.pve_hud_view = 'recent_battle'
+        finished_self = ActorStats(actor_id=1)
+        finished_self.damage = 300_000
+        window.model.current_stats = lambda: [finished_self]
+        window.model.duration = lambda _now=None: 30
         window.main_time_text = '00:00'
         window.team_dps_text = '0'
         window.main_scroll_offset = 0
@@ -5720,15 +5872,28 @@ class MainHudBehaviorTests(unittest.TestCase):
 
         snapshot = window._layered_main_snapshot()
 
-        self.assertEqual(snapshot['boss_name'], '异化猎犬')
-        self.assertEqual(snapshot['boss_template_id'], 7109821)
-        self.assertEqual(snapshot['boss_level'], 73)
-        self.assertTrue(snapshot['boss_hp'])
-        self.assertEqual(snapshot['boss_percent'], '0%')
-        self.assertEqual(snapshot['boss_ratio'], 0.0)
-        self.assertEqual(snapshot['time'], '00:37')
-        self.assertTrue(loaded_encounters)
-        self.assertEqual(set(loaded_encounters), {record.local_encounter_id})
+        self.assertIs(window._main_recent_settlement_record(), record)
+        self.assertIs(tracker.encounters[record.local_encounter_id], record)
+        self.assertEqual(snapshot['boss_name'], '暂无目标')
+        self.assertFalse(snapshot['boss_available'])
+        self.assertEqual(snapshot['boss_template_id'], 0)
+        self.assertEqual(snapshot['boss_hp'], '')
+        self.assertEqual(snapshot['boss_percent'], '')
+        self.assertIsNone(snapshot['boss_ratio'])
+        self.assertEqual(snapshot['time'], '00:00')
+        self.assertEqual(snapshot['team_dps'], '--')
+        self.assertNotIn(
+            'recent_boss', {row.get('row_kind') for row in snapshot['rows']}
+        )
+        self.assertFalse(
+            any(row.get('is_recent_battle') for row in snapshot['rows'])
+        )
+        self_row = next(
+            row for row in snapshot['rows'] if row.get('is_live_self')
+        )
+        self.assertIsNone(self_row['total_value'])
+        self.assertIsNone(self_row['stat_value'])
+        self.assertEqual(loaded_encounters, [])
 
         live_boss = SimpleNamespace(
             entity_id=301,
@@ -5849,8 +6014,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         window.profession_display_metrics['1200006'] = 'dt'
         window._remember_main_battle_result(record)
         window.model.started = False
-        rows, rating = window._main_display_rows()
-        self.assertFalse(rating)
+        rows = window._main_retained_battle_rows()
         self.assertEqual(rows[0]['metric'], 'hps')
         self.assertEqual(rows[0]['stat_value'], 31_500)
         self.assertEqual(rows[0]['total_value'], 945_000)
@@ -5934,7 +6098,7 @@ class MainHudBehaviorTests(unittest.TestCase):
                                   hps=1000, effective_healing=30000)]
         window._remember_main_battle_result(record)
         window.model.started = False
-        rows, _ = window._main_display_rows()
+        rows = window._main_retained_battle_rows()
         healer = next(row for row in rows if row['actor_id'] == 12)
         self.assertEqual(healer['metric'], 'hps')
         self.assertEqual(healer['stat_value'], 1000)

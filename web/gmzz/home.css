@@ -391,6 +391,100 @@ button,input{font:inherit}
   color:#9da9b2;font-weight:500;
 }
 
+.scene:not(.portal-open){overflow-x:hidden;overflow-y:auto}
+.scene:not(.portal-open) .hero{
+  height:auto;
+  min-height:calc(100dvh - 68px);
+  justify-content:flex-start;
+  padding:clamp(46px,7vh,76px) 0 42px;
+  transform:none;
+}
+.home-dungeon-shortcut{
+  width:min(650px,100%);
+  margin-top:22px;
+  padding:18px 22px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:20px;
+  border:1px solid rgba(169,231,108,.32);
+  border-radius:12px;
+  background:linear-gradient(90deg,rgba(12,23,21,.98),rgba(11,20,19,.9) 56%,rgba(11,18,20,.65)),url("assets/ranking/dungeon-may-manor-garden-v1.webp") center/cover;
+  box-shadow:0 12px 30px rgba(0,0,0,.18);
+  text-align:left;
+  transition:border-color .18s,box-shadow .18s;
+}
+.home-dungeon-shortcut:hover,
+.home-dungeon-shortcut:focus-visible{
+  border-color:var(--accent);
+  box-shadow:0 0 18px rgba(169,231,108,.12);
+}
+.home-dungeon-shortcut:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.home-dungeon-copy{min-width:0;display:grid;gap:7px}
+.home-dungeon-badge{color:#d8b879;font-size:11px;font-weight:700;letter-spacing:.06em}
+.home-dungeon-copy strong{color:#eff5eb;font-size:18px;line-height:1.4}
+.home-dungeon-description{color:#8fa49c;font-size:11px;line-height:1.5}
+.home-dungeon-action{display:flex;align-items:center;gap:9px;flex-shrink:0;color:var(--accent);font-size:12px;font-weight:700;white-space:nowrap}
+.home-dungeon-action>span{font-size:20px}
+.home-capabilities{
+  width:min(860px,100%);
+  margin-top:28px;
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px;
+  text-align:left;
+}
+.capability-card{
+  position:relative;
+  overflow:hidden;
+  border:1px solid rgba(123,148,164,.25);
+  border-radius:12px;
+  padding:18px;
+  background:linear-gradient(145deg,rgba(19,27,34,.88),rgba(11,16,21,.76));
+  box-shadow:0 18px 45px rgba(0,0,0,.2),inset 0 1px rgba(255,255,255,.025);
+  backdrop-filter:blur(12px);
+}
+.capability-card::before{
+  position:absolute;
+  inset:0 0 auto;
+  height:2px;
+  background:linear-gradient(90deg,transparent,var(--capability-accent),transparent);
+  opacity:.7;
+  content:"";
+}
+.capability-plugin{--capability-accent:#a9e76c}
+.capability-web{--capability-accent:#61b6ff}
+.capability-heading{padding-bottom:13px;border-bottom:1px solid rgba(132,151,164,.16)}
+.capability-kicker{
+  color:var(--capability-accent);
+  font:700 8px/1.2 "Segoe UI",sans-serif;
+  letter-spacing:.2em;
+}
+.capability-heading h2{margin:5px 0 0;color:#f1f5f7;font-size:16px;line-height:1.3;letter-spacing:.06em}
+.capability-heading p{margin:6px 0 0;color:#7f8e99;font-size:10px;line-height:1.6}
+.capability-list{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px 16px;
+  margin:15px 0 0;
+  padding:0;
+  list-style:none;
+}
+.capability-list li{position:relative;min-width:0;padding-left:12px}
+.capability-list li::before{
+  position:absolute;
+  top:5px;
+  left:0;
+  width:4px;
+  height:4px;
+  border-radius:50%;
+  background:var(--capability-accent);
+  box-shadow:0 0 8px color-mix(in srgb,var(--capability-accent) 55%,transparent);
+  content:"";
+}
+.capability-list b{display:block;color:#dbe4e9;font-size:11px;line-height:1.4}
+.capability-list span{display:block;margin-top:3px;color:#73818b;font-size:9px;line-height:1.45}
+
 /* 很淡的雾 */
 .fog{
   position:absolute;z-index:3;
@@ -417,4 +511,13 @@ button,input{font:inherit}
   .recent-searches{align-items:flex-start}
   .recent-searches-list{justify-content:flex-start}
   .recent-search-item{max-width:120px}
+  .scene:not(.portal-open) .hero{min-height:calc(100dvh - 112px);padding:32px 0 36px}
+  .home-capabilities{grid-template-columns:1fr;margin-top:24px}
+}
+@media(max-width:480px){
+  .home-dungeon-shortcut{padding:16px;gap:12px}
+  .home-dungeon-copy strong{font-size:16px}
+  .home-dungeon-action{font-size:11px;gap:6px}
+  .capability-card{padding:16px}
+  .capability-list{grid-template-columns:1fr;gap:10px}
 }

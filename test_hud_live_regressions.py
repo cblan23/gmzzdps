@@ -245,17 +245,17 @@ class HudLiveRegressions(unittest.TestCase):
 
         self.assertEqual(value, '50,000/s')
 
-    def test_ended_clock_uses_official_duration_even_with_remaining_boss_hp(self):
+    def test_ended_clock_returns_to_idle_even_with_remaining_boss_hp(self):
         window = self.window()
         self.ended(window)
         boss = SimpleNamespace(entity_id=90, name='Previous Boss', current_hp=50, max_hp=100)
         window.model.current_monster = lambda: boss
-        self.assertEqual(window._layered_main_snapshot()['time'], '00:37')
+        self.assertEqual(window._layered_main_snapshot()['time'], '00:00')
 
-    def test_ended_clock_falls_back_to_same_encounter_boundaries(self):
+    def test_ended_clock_does_not_fall_back_to_encounter_boundaries(self):
         window = self.window()
         self.ended(window, duration=None)
-        self.assertEqual(window._layered_main_snapshot()['time'], '00:42')
+        self.assertEqual(window._layered_main_snapshot()['time'], '00:00')
 
     def test_pending_new_boss_beats_retained_boss_without_first_hp(self):
         window = self.window()
@@ -292,7 +292,7 @@ class HudLiveRegressions(unittest.TestCase):
         self.assertEqual(snapshot['boss_hp'], '380.54万 / 511.42万')
         self.assertAlmostEqual(snapshot['boss_ratio'], 3_805_441 / 5_114_224)
 
-    def test_health_older_than_result_keeps_retained_boss(self):
+    def test_health_older_than_result_does_not_restore_previous_boss(self):
         window = self.window()
         window.model.started = False
         window.main_last_battle_result = completed_record()
@@ -310,8 +310,9 @@ class HudLiveRegressions(unittest.TestCase):
 
         snapshot = window._layered_main_snapshot()
 
-        self.assertEqual(snapshot['boss_name'], 'Boss')
-        self.assertEqual(snapshot['boss_percent'], '0%')
+        self.assertEqual(snapshot['boss_name'], '暂无目标')
+        self.assertFalse(snapshot['boss_available'])
+        self.assertEqual(snapshot['boss_percent'], '')
 
     def test_new_live_pull_does_not_use_previous_settlement_clock(self):
         window = self.window()

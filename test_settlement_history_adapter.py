@@ -226,6 +226,50 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
         self.assertEqual(completed["result"], "interrupted")
         self.assertNotIn("failure_reason", completed)
 
+    def test_scene_exit_preserves_participant_without_user_token(self):
+        tracker = EncounterTracker()
+        encounter = tracker.begin(
+            instance_id="instance",
+            started_at_ns=START_EPOCH * NS,
+            participants_snapshot=[ROSTER[0]],
+            dungeon_id=5_100_044,
+            map_id=5_200_095,
+            boss_template_id=7_102_400,
+            boss_token="boss",
+            self_token="self",
+        )
+        tracker.end("RESET", (START_EPOCH + 300) * NS)
+        unresolved_actor = -5_273_117_938_068_274_874
+
+        record = encounter_history_record(
+            encounter,
+            {
+                "archive_reason": "scene_change",
+                "duration_seconds": 300.0,
+                "monster": {
+                    "template_id": 7_102_400,
+                    "name": "Astrologer",
+                },
+                "participants": [
+                    {
+                        "actor_id": unresolved_actor,
+                        "name": "Unresolved AI",
+                        "is_ai": True,
+                        "damage": 1_000,
+                        "dps": 10 / 3,
+                    }
+                ],
+            },
+        )
+
+        unresolved = next(
+            row
+            for row in record["participants"]
+            if row["actor_id"] == unresolved_actor
+        )
+        self.assertEqual(unresolved["damage"], 1_000)
+        self.assertNotIn("user_token", unresolved)
+
     def test_server_settlement_replaces_unsettled_local_team_metrics(self):
         tracker = EncounterTracker()
         encounter = self.wipe(tracker)

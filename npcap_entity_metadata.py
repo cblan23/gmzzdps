@@ -260,7 +260,7 @@ class PassiveEntityMetadataReader:
 
 
 class PassiveTeamProfilePoller:
-    """Poll token-bound live ``power`` values off the packet receive loop."""
+    """Publish the complete live roster, with profile scans as a fallback."""
 
     def __init__(
         self,
@@ -294,6 +294,8 @@ class PassiveTeamProfilePoller:
         self._startup_profile_published = False
         self._local_role_generation = 0
         self._roster_signature = None
+        self._direct_roster_tokens = set()
+        self._direct_roster_active = False
         self._encounter_context_signature = None
         self._thread = threading.Thread(
             target=self._run,
@@ -332,6 +334,12 @@ class PassiveTeamProfilePoller:
         self._startup_actor_id = actor_id
         self._startup_profile_published = False
         self._local_role_generation += 1
+        # The same process can switch characters while retaining the previous
+        # Lua tables for a short time.  Require one fresh complete roster before
+        # it can suppress the fallback profile reader for the new role.
+        self._roster_signature = None
+        self._direct_roster_tokens.clear()
+        self._direct_roster_active = False
         with self._lock:
             self._counters["local_role_changes"] += int(
                 bool(previous_role[0] or previous_role[1])
@@ -506,6 +514,10 @@ class PassiveTeamProfilePoller:
                     roster_reader = getattr(reader, "current_dungeon_roster", None)
                     roster = roster_reader() if callable(roster_reader) else None
                     if roster is not None and roster == roster_reader():
+                        self._direct_roster_tokens = {
+                            member["user_token"] for member in roster["members"]
+                        }
+                        self._direct_roster_active = True
                         signature = (
                             roster["dungeon_id"], roster["group_id"],
                             roster["local_user_token"],
@@ -518,24 +530,40 @@ class PassiveTeamProfilePoller:
                         )
                         if signature != self._roster_signature:
                             self._roster_signature = signature
-                            self.request(
-                                member["user_token"]
-                                for member in roster["members"]
-                                if not member["is_ai"]
-                            )
                             unix_ns = time.time_ns()
+                            filetime_100ns = (
+                                unix_ns // 100 + 116444736000000000
+                            )
                             with self._lock:
                                 self._ready.append({
                                     "method": "ReadOnlyCurrentDungeonRoster",
                                     "function": "LuaGroupSystemCurrentRoster",
-                                    "filetime_100ns": (
-                                        unix_ns // 100 + 116444736000000000
-                                    ),
+                                    "filetime_100ns": filetime_100ns,
                                     "capture_timestamp_ns": unix_ns,
                                     **roster,
                                 })
                                 self._counters["live_dungeon_roster_updates"] += 1
-                    next_roster_poll = time.monotonic() + max(2.0, self.interval_seconds)
+                            if not self._startup_profile_published:
+                                startup_member = next(
+                                    (
+                                        member
+                                        for member in roster["members"]
+                                        if member["user_token"] == self._startup_token
+                                    ),
+                                    None,
+                                )
+                                if startup_member is not None:
+                                    startup_profile = {
+                                        **startup_member,
+                                        "client_rating_observed_filetime": filetime_100ns,
+                                    }
+                                    if startup_member.get("extraordinary_rating"):
+                                        startup_profile.update(
+                                            client_rating_key="ceScore",
+                                            client_rating_binding="team_member_ceScore",
+                                        )
+                                    self._publish((startup_profile,))
+                    next_roster_poll = time.monotonic() + self.interval_seconds
                 if now >= next_encounter_context_poll:
                     context_reader = getattr(reader, "current_encounter_context", None)
                     context = context_reader() if callable(context_reader) else None
@@ -572,18 +600,30 @@ class PassiveTeamProfilePoller:
                     )
                 refresh_requested = self._take_refresh_request()
                 tokens = self._active_tokens()
-                if tokens and (refresh_requested or now >= next_poll):
+                profile_tokens = (
+                    set() if self._direct_roster_active
+                    else tokens - self._direct_roster_tokens
+                )
+                if profile_tokens and (refresh_requested or now >= next_poll):
                     with self._lock:
                         self._counters["live_team_profile_polls"] += 1
                         if refresh_requested:
                             self._counters["live_team_profile_immediate_polls"] += 1
-                    profiles = reader.snapshot(tokens)
+                    profiles = reader.snapshot(profile_tokens)
                     self._publish(profiles)
                     next_poll = time.monotonic() + self.interval_seconds
                     continue
-                wait_for = 1.0
-                if tokens:
-                    wait_for = max(0.05, min(1.0, next_poll - now))
+                deadlines = [
+                    next_local_role_check,
+                    next_roster_poll,
+                    next_encounter_context_poll,
+                ]
+                if profile_tokens:
+                    deadlines.append(next_poll)
+                wait_for = max(
+                    0.05,
+                    min(1.0, min(deadlines) - time.monotonic()),
+                )
                 self._wake.wait(wait_for)
                 self._wake.clear()
         except Exception as exc:

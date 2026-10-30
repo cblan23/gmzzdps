@@ -14,6 +14,94 @@ def packet(method, entity, arguments, sequence=1):
 
 
 class LocalRecipientTests(unittest.TestCase):
+    def test_stale_read_only_roster_cannot_restore_a_departed_member(self):
+        self_token = "AQAAAOwNKLYHAAAA"
+        peer_token = "AQAAAOwNuopBAAAA"
+        parser = NpcapParserAdapter()
+        parser.self_id = SELF
+        parser.native_self_id = SELF
+        parser.self_token = self_token
+        parser.self_confirmed = True
+        parser._bind_team_token(self_token, SELF)
+        roster = {
+            "method": "ReadOnlyCurrentDungeonRoster",
+            "local_user_token": self_token,
+            "dungeon_id": 5_100_055,
+            "group_id": 57_422_102_180_769,
+            "filetime_100ns": TIME + 10_000,
+            "members": [
+                {"user_token": self_token, "name": "本人角色", "is_ai": False},
+                {"user_token": peer_token, "name": "队友角色", "is_ai": False},
+            ],
+        }
+        self.assertTrue(parser.apply_read_only_group_roster(roster))
+
+        parser.process(
+            packet("OnMsgOtherQuitTeam", SELF, [0, 123, peer_token], sequence=3)
+        )
+        self.assertNotIn(peer_token, parser.party_tokens)
+
+        self.assertEqual(parser.apply_read_only_group_roster(roster), [])
+        self.assertNotIn(peer_token, parser.party_tokens)
+
+    def test_read_only_group_roster_refreshes_all_bound_scores_directly(self):
+        self_token = "AQAAAOwNKLYHAAAA"
+        peer_token = "AQAAAOwNuopBAAAA"
+        parser = NpcapParserAdapter()
+        parser.self_id = SELF
+        parser.native_self_id = SELF
+        parser.self_token = self_token
+        parser.self_confirmed = True
+        parser._bind_team_token(self_token, SELF)
+        roster = {
+            "method": "ReadOnlyCurrentDungeonRoster",
+            "local_user_token": self_token,
+            "dungeon_id": 5_100_055,
+            "group_id": 57_422_102_180_769,
+            "filetime_100ns": TIME,
+            "members": [
+                {
+                    "user_token": self_token,
+                    "name": "本人角色",
+                    "extraordinary_rating": 80_975,
+                    "is_ai": False,
+                },
+                {
+                    "user_token": peer_token,
+                    "name": "队友角色",
+                    "extraordinary_rating": 91_444,
+                    "is_ai": False,
+                },
+            ],
+        }
+        parser.apply_read_only_group_roster(roster)
+        peer_id = parser.token_actors[peer_token]
+        self.assertEqual(
+            parser.entity_profiles[peer_id]["extraordinary_rating"], 91_444
+        )
+
+        changed = {
+            **roster,
+            "filetime_100ns": TIME + 10_000,
+            "members": [
+                dict(roster["members"][0]),
+                {**roster["members"][1], "extraordinary_rating": 92_001},
+            ],
+        }
+        updates = parser.apply_read_only_group_roster(changed)
+
+        self.assertEqual(
+            parser.entity_profiles[peer_id]["extraordinary_rating"], 92_001
+        )
+        self.assertTrue(
+            any(
+                kind == "profile"
+                and update.get("entity_id") == peer_id
+                and update.get("extraordinary_rating") == 92_001
+                for kind, update in updates
+            )
+        )
+
     def test_read_only_group_roster_keeps_cross_scene_party_and_clears_to_solo(self):
         self_token = "AQAAAOwNKLYHAAAA"
         peer_token = "AQAAAOwNuopBAAAA"

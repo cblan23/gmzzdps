@@ -89,7 +89,9 @@
     catalog: null,
     skillNames: null,
     iconCatalog: null,
+    bossData: null,
     basePromise: null,
+    leaderboardsPromise: null,
     historyPromise: null,
     catalogPromise: null,
     skillNamesPromise: null,
@@ -262,12 +264,11 @@
   }
 
   async function loadCatalogData(force = false) {
+    if (state.catalogPromise) return state.catalogPromise;
     if (force) {
       state.catalog = null;
-      state.catalogPromise = null;
     }
     if (state.catalog) return;
-    if (state.catalogPromise) return state.catalogPromise;
     state.catalogPromise = fetchJson(`${API_ROOT}/catalog`)
       .then((catalog) => {
         state.catalog = catalog.catalog || {};
@@ -276,6 +277,20 @@
         state.catalogPromise = null;
       });
     return state.catalogPromise;
+  }
+
+  async function loadLeaderboardData(force = false) {
+    if (state.leaderboardsPromise) return state.leaderboardsPromise;
+    if (!force && state.leaderboards) return;
+    if (force) state.leaderboards = null;
+    state.leaderboardsPromise = fetchJson(`${API_ROOT}/leaderboards?limit=500&include_ai=1`)
+      .then((payload) => {
+        state.leaderboards = Array.isArray(payload.leaderboards) ? payload.leaderboards : [];
+      })
+      .finally(() => {
+        state.leaderboardsPromise = null;
+      });
+    return state.leaderboardsPromise;
   }
 
   async function loadBaseData(force = false) {
@@ -290,7 +305,7 @@
     if (state.basePromise) return state.basePromise;
     state.basePromise = Promise.all([
       fetchJson(`${API_ROOT}/statistics`),
-      fetchJson(`${API_ROOT}/leaderboards?limit=500`),
+      fetchJson(`${API_ROOT}/leaderboards?limit=500&include_ai=1`),
       loadHistoryData(force),
       loadCatalogData(force),
       fetchJson("assets/icon_catalog.json"),
@@ -603,15 +618,21 @@
   function recordList(rows, options = {}) {
     const list = element("div", "records-list");
     const head = element("div", "record-head");
-    ["名次", "玩家", "首领", "伤害 DPS", "总伤害", "发生时间", ""].forEach((label) => {
+    [options.rankLabel || "名次", "玩家", "首领", "伤害 DPS", "总伤害", "发生时间", ""].forEach((label) => {
       head.appendChild(element("div", "", label));
     });
     list.appendChild(head);
 
     rows.forEach((row, index) => {
       const record = element("article", "record-row");
-      const shownRank = options.sequentialRank ? index + 1 : Number(row.rank) || index + 1;
-      record.appendChild(element("div", `rank-cell${shownRank <= 3 ? " is-top" : ""}`, shownRank));
+      const shownRank = options.rankValue
+        ? options.rankValue(row, index)
+        : options.sequentialRank ? index + 1 : Number(row.rank) || index + 1;
+      record.appendChild(element(
+        "div",
+        `rank-cell${!options.rankValue && shownRank <= 3 ? " is-top" : ""}`,
+        shownRank,
+      ));
       record.appendChild(identityCell(row));
       const boss = bossCell(row);
       const bossMeta = boss.querySelector(".boss-stage");
@@ -1556,7 +1577,7 @@
         item.appendChild(itemCopy);
         item.addEventListener("click", () => update(
           {boss: boss.name},
-          ["difficulty", "brass"],
+          ["brass"],
         ));
         bossChoices.appendChild(item);
       });
@@ -1566,7 +1587,7 @@
       bossField.appendChild(bossChoices);
       controls.appendChild(bossField);
     }
-    if (selected.boss) {
+    if (selected.dungeon) {
       const segments = element("div", "ranking-segment-grid");
       segments.appendChild(performanceFilterField("难度", performanceSegments([
         {value: "all", label: "全部"},
@@ -1607,7 +1628,7 @@
     footer.appendChild(element(
       "p",
       "",
-      "排行只包含身份完整、通过校验且不含人机或投影的胜利记录。资料未确认的旧记录可单独筛选。",
+      "通关数据包含已确认胜利的人机/投影场次；正式排行只包含身份完整、通过校验且不含人机或投影的记录。",
     ));
     const reset = element("a", "history-reset", "重置筛选");
     reset.href = "#records";
@@ -1616,26 +1637,23 @@
     return panel;
   }
 
-  async function renderRecords(token) {
-    setPage("DATA RANKINGS", "数据排行", "选择类型和副本后查看对应职业排行；难度与黄铜书模式分别筛选。");
-    showStatus("正在读取巅峰记录");
-    await loadBaseData();
-    if (token !== state.renderToken) return;
-
-    const params = parseRoute().params;
+  function renderRankingContent(params, {loading = false, error = null} = {}) {
     const selected = resolveRankingFilters(params);
     const ready = Boolean(selected.dungeon && selected.boss);
-    const rows = ready ? [...(state.leaderboards || [])].filter((row) =>
+    const matchingRows = ready ? [...(state.leaderboards || [])].filter((row) =>
       row.category === selected.category?.key
       && row.dungeon_key === selected.dungeon?.key
       && row.boss_name === selected.boss?.name
       && (selected.difficulty === "all" || (row.difficulty || "unknown") === selected.difficulty)
       && (selected.brass === "all" || (row.brass_tome_status || "unknown") === selected.brass)
       && (!selected.profession || String(row.profession_id) === selected.profession)
-    ).sort((a, b) => {
+    ) : [];
+    const rows = matchingRows.filter((row) => row.competitive !== false).sort((a, b) => {
       const dps = Number(b.dps || 0) - Number(a.dps || 0);
       return dps || Number(b.ended_at || 0) - Number(a.ended_at || 0);
-    }) : [];
+    });
+    const aiRows = matchingRows.filter((row) => row.has_ai || row.competitive === false)
+      .sort((a, b) => Number(b.ended_at || 0) - Number(a.ended_at || 0));
     const fragment = document.createDocumentFragment();
     fragment.appendChild(rankingFilters(params, selected));
     const title = selected.profession
@@ -1645,13 +1663,27 @@
       selected.category?.name,
       selected.dungeon?.name,
       selected.category?.key === "family" ? "" : selected.boss?.name,
-      ...(selected.boss ? [
+      ...(selected.dungeon ? [
         performanceDifficultyLabel(selected.difficulty),
         brassTomeFilterLabel(selected.brass),
       ] : []),
     ].filter(Boolean).join(" · ");
     fragment.appendChild(sectionHeading(title, rows.length ? `${context} · ${rows.length} 条` : context));
-    if (rows.length) {
+    if (ready && (loading || error)) {
+      const status = element("div", "portal-status ranking-status");
+      const copy = element("div");
+      copy.append(
+        element("strong", "", error ? "排行数据暂时无法加载" : "正在读取排行记录"),
+        element("span", "", error ? "请求未能完成，请重新加载。" : "可以继续切换副本、难度和职业。"),
+      );
+      if (error) {
+        const retry = button("portal-refresh error-action", "重新加载");
+        retry.addEventListener("click", () => renderRoute(true));
+        copy.appendChild(retry);
+      }
+      status.appendChild(copy);
+      fragment.appendChild(status);
+    } else if (rows.length) {
       fragment.appendChild(recordList(rows));
     } else {
       const empty = element("div", "portal-status ranking-empty");
@@ -1673,7 +1705,50 @@
       }
       fragment.appendChild(empty);
     }
+    if (ready && !loading && !error && aiRows.length) {
+      fragment.appendChild(sectionHeading(
+        "人机 / 投影通关记录",
+        `${context} · ${aiRows.length} 条 · 单独展示，不参与名次`,
+      ));
+      fragment.appendChild(recordList(aiRows, {
+        rankLabel: "类型",
+        rankValue: () => "人机",
+      }));
+    }
     contentNode.replaceChildren(fragment);
+  }
+
+  async function renderRecords(token, force = false) {
+    setPage("DATA RANKINGS", "数据排行", "选择类型和副本后查看对应职业排行；难度与黄铜书模式分别筛选。");
+    showStatus("正在读取副本列表");
+    if (force) state.leaderboards = null;
+    const params = parseRoute().params;
+    let loading = true;
+    let rankingError = null;
+    const rankingRequest = params.get("dungeon")
+      ? loadLeaderboardData(force).then(() => null, (error) => error)
+      : null;
+    const update = () => {
+      if (token === state.renderToken && state.catalog) {
+        renderRankingContent(params, {loading, error: rankingError});
+      }
+    };
+    loadHistoryData(force).then(update).catch(() => {});
+    await loadCatalogData(force);
+    if (token !== state.renderToken) return;
+    const selected = resolveRankingFilters(params);
+    const ready = Boolean(selected.dungeon && selected.boss);
+    loading = ready && (force || !state.leaderboards);
+    update();
+    if (!ready) return;
+    try {
+      if (rankingRequest) rankingError = await rankingRequest;
+      else await loadLeaderboardData(force);
+    } catch (error) {
+      rankingError = error;
+    }
+    loading = false;
+    update();
   }
 
   async function renderSearch(token, query) {
@@ -1780,7 +1855,7 @@
     fragment.appendChild(sectionHeading("战斗记录", `共 ${formatInteger(history.total)} 场 · 时间按北京时间显示`));
     const list = element("div", "history-list");
     const head = element("div", "history-row history-head");
-    ["Boss / 结果", "角色", "团队 DPS / 总伤害", "时长 / 死亡", "时间 / 数据状态", ""].forEach((label) => head.appendChild(element("div", "", label)));
+    ["Boss", "结果", "角色", "团队 DPS / 总伤害", "时长 / 死亡", "时间 / 数据状态", ""].forEach((label) => head.appendChild(element("div", "", label)));
     list.appendChild(head);
     for (const row of history.records || []) {
       const record = element("article", "history-row");
@@ -1791,9 +1866,11 @@
       bossTags.classList.add("boss-tags");
       bossTags.appendChild(element("span", "boss-tag difficulty-tag", performanceDifficultyLabel(row.difficulty || "unknown")));
       if (tomeLabel) bossTags.appendChild(element("span", `boss-tag tome-tag brass-${row.brass_tome_status || "unknown"}`, `黄铜书${tomeLabel}`));
-      bossTags.appendChild(element("span", `boss-tag result-tag${className}`, result));
-      boss.classList.add(className.trim() || "is-complete");
-      record.append(boss, identityCell(row));
+      const resultClassName = className.trim() || "is-complete";
+      boss.classList.add(resultClassName);
+      const resultCell = element("div", "history-result");
+      resultCell.appendChild(element("span", `history-result-badge ${resultClassName}`, result));
+      record.append(boss, resultCell, identityCell(row));
       const totals = element("div", "history-number");
       totals.append(element("b", "", formatInteger(row.team_dps)), element("small", "", `${formatCompact(row.team_total_damage)} 总伤害`));
       const time = element("div", "history-number");
@@ -1852,7 +1929,7 @@
     setPage("UPLOAD GUIDE", "如何上传战斗记录", "加QQ群下载叨叨dps-log：1094925831 / 165966739。通过客户端上传战斗记录。");
     const flow = element("div", "share-flow");
     [
-      ["完成一场 Boss 战斗", "登录客户端并保持采集运行。Boss 战胜利后会自动上传；伤害木桩不进入上传。"],
+      ["完成一场 Boss 战斗", "登录客户端并保持采集运行。Boss 战结束后会自动上传（胜利、失败或中断）；伤害木桩不进入上传。"],
       ["查询与分享", "自动上传完成后，在首页搜索角色名称。打开搜索结果中的详情，可查看已捕获模块并复制战报链接；缺少的模块会明确标注覆盖状态。"],
     ].forEach(([title, copy], index) => {
       const step = element("article", "share-step");
@@ -1908,7 +1985,8 @@
     }
     if (mode === "dt") return participant.stats?.taken !== undefined || Number(participant.taken) > 0
       ? Number(participant.taken || participant.stats?.taken || 0) : Number.NaN;
-    return Number(participant.dps || participant.stats?.dps || 0);
+    const dps = participant.dps ?? participant.stats?.dps;
+    return dps === undefined || dps === null ? Number.NaN : Number(dps);
   }
 
   function encounterShare(mode, participant, participants, durationSeconds) {
@@ -3602,6 +3680,18 @@
   }
 
   function renderEncounterBody(encounter) {
+    if (encounter.data?.team_total_damage_known === false) {
+      const hasHealing = (encounter.participants || []).some((participant) => participant.stats?.effective_healing != null);
+      const hasTaken = (encounter.participants || []).some((participant) => participant.stats?.taken != null);
+      encounter = {...encounter, data: {...encounter.data,
+        team_effective_healing: hasHealing ? encounter.data.team_effective_healing : null,
+        team_hps: hasHealing ? encounter.data.team_hps : null,
+        team_taken: hasTaken ? encounter.data.team_taken : null,
+      }, participants: (encounter.participants || []).map((participant) => ({
+        ...participant,
+        ...Object.fromEntries(["damage", "dps", "hps", "taken"].map((metric) => [metric, participant.stats?.[metric] ?? null])),
+      }))};
+    }
     const fragment = document.createDocumentFragment();
     const hero = element("section", "encounter-hero");
     const backdrop = bossBannerName(encounter.stage_id, encounter.boss_name);
@@ -3685,6 +3775,9 @@
           ? "本场已纳入有效统计，但不进入数据排行。"
           : `本场作为历史记录收录，未纳入正式统计：${qualificationText(encounter.qualification_reasons) || "数据未满足统计条件"}。`;
     fragment.appendChild(element("p", `qualification-note${included ? " is-included" : ""}`, qualificationCopy));
+    if (encounter.data?.outcome_source === "user_reported") {
+      fragment.appendChild(element("p", "qualification-note", "本场胜利由玩家确认；服务器结算未留存，仅展示已采集的数据，缺失数据以 -- 显示。"));
+    }
 
     const metrics = element("div", "metric-grid");
     const healing = encounterHealingTotals(encounter);
@@ -3839,6 +3932,133 @@
     });
   }
 
+  function bossDataTable(data, attributeTable = false) {
+    const section = element("section", `boss-data-section${attributeTable ? " boss-data-attributes" : ""}`);
+    section.appendChild(element("h3", "", data.title));
+    section.appendChild(element("p", "", data.description));
+    const viewport = element("div", "boss-data-table-scroll");
+    viewport.tabIndex = 0;
+    viewport.setAttribute("role", "region");
+    viewport.setAttribute("aria-label", `${data.title}，可横向滚动`);
+    viewport.innerHTML = `<table class="boss-data-table" aria-label="${escapeHtml(data.title)}">
+      <thead><tr>${data.columns.map((name) => `<th scope="col">${escapeHtml(name)}</th>`).join("")}</tr></thead>
+      <tbody>${data.rows.map((row) => `<tr>${row.map((value, index) => index === 0
+        ? `<th scope="row">${escapeHtml(value)}</th>`
+        : `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("")}</tbody>
+    </table>`;
+    section.appendChild(viewport);
+    return section;
+  }
+
+  async function renderBossData(token, dungeonId) {
+    setPage("BOSS REFERENCE", "BOSS 数据", "按副本查看已验证的血量、狂暴时间、DPS 口径与属性证据。");
+    showStatus("正在读取 BOSS 数据");
+    const data = state.bossData || await fetchJson("assets/boss-data/catalog.json?v=20261030-castle-1");
+    if (token !== state.renderToken) return;
+    state.bossData = data;
+    const dungeon = data.dungeons.find((item) => item.id === dungeonId) || data.dungeons[0];
+    document.title = `${dungeon.name} · BOSS 数据 · 叨叨诡秘`;
+    const page = element("div", "boss-data-page");
+    page.dataset.dungeon = dungeon.id;
+    const navigation = element("nav", "boss-data-nav");
+    navigation.setAttribute("aria-label", "选择副本");
+    data.dungeons.forEach((item) => {
+      const link = element("a");
+      link.href = `#boss-data?dungeon=${encodeURIComponent(item.id)}`;
+      if (item.id === dungeon.id) link.setAttribute("aria-current", "page");
+      link.appendChild(element("strong", "", item.name));
+      link.appendChild(element("span", "", item.subtitle));
+      navigation.appendChild(link);
+    });
+    page.appendChild(navigation);
+    const intro = element("section", "boss-data-intro");
+    const tags = element("div", "boss-data-tags");
+    dungeon.tags.forEach((tag) => tags.appendChild(element("span", "", tag)));
+    intro.appendChild(tags);
+    intro.appendChild(element("h2", "", `${dungeon.name} · ${dungeon.subtitle}`));
+    intro.appendChild(element("p", "", dungeon.intro));
+    page.appendChild(intro);
+    const cards = element("div", "boss-data-cards");
+    dungeon.bosses.forEach((boss) => {
+      const card = element("article", "boss-data-card");
+      const image = element("img");
+      image.src = `${boss.image}?v=${BOSS_ASSET_VERSION}`;
+      image.alt = "";
+      image.decoding = "async";
+      const body = element("div", "boss-data-card-body");
+      body.innerHTML = `<h3><small>${escapeHtml(boss.label)}</small>${escapeHtml(boss.name)}</h3>
+        <dl>${boss.metrics.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+      if (boss.threshold) {
+        const threshold = element("div", "boss-data-threshold");
+        threshold.appendChild(element("span", "", "原图结算 DPS 要求"));
+        threshold.appendChild(element("strong", "", `≥ ${boss.threshold}`));
+        body.appendChild(threshold);
+      }
+      if (boss.footnote) body.appendChild(element("p", "boss-data-footnote", boss.footnote));
+      card.append(image, body);
+      cards.appendChild(card);
+    });
+    page.appendChild(cards);
+    if (dungeon.summary) {
+      const summary = element("section", "boss-data-summary");
+      summary.setAttribute("aria-label", "团队与个人 DPS 门槛");
+      dungeon.summary.forEach(([label, value]) => {
+        const item = element("div");
+        item.appendChild(element("span", "", label));
+        item.appendChild(element("strong", "", value));
+        summary.appendChild(item);
+      });
+      page.appendChild(summary);
+    }
+    page.appendChild(bossDataTable(dungeon.conversion_table));
+    const calculation = element("section", "boss-data-calculation");
+    calculation.appendChild(element("h3", "", "计算口径"));
+    const formulas = element("ol");
+    dungeon.formulas.forEach((formula) => formulas.appendChild(element("li", "", formula)));
+    calculation.appendChild(formulas);
+    page.appendChild(calculation);
+    if (dungeon.attribute_table) page.appendChild(bossDataTable(dungeon.attribute_table, true));
+    const notes = element("ul", "boss-data-notes");
+    dungeon.notes.forEach((note) => notes.appendChild(element("li", "", note)));
+    page.appendChild(notes);
+    if (dungeon.source_image) {
+      const source = element("section", "boss-data-section boss-data-source");
+      const heading = element("div", "boss-data-source-heading");
+      heading.appendChild(element("h3", "", "参考原图"));
+      const openImage = element("a", "", "打开原图 ↗");
+      openImage.href = dungeon.source_image;
+      openImage.target = "_blank";
+      openImage.rel = "noopener";
+      heading.appendChild(openImage);
+      source.appendChild(heading);
+      source.appendChild(element("p", "", "上方数据从下图整理，可打开原图放大核对。"));
+      const figure = element("figure");
+      const imageLink = element("a");
+      imageLink.href = dungeon.source_image;
+      imageLink.target = "_blank";
+      imageLink.rel = "noopener";
+      imageLink.setAttribute("aria-label", `打开${dungeon.name}参考原图`);
+      const sourceImage = element("img");
+      sourceImage.src = dungeon.source_image;
+      sourceImage.alt = dungeon.source_alt;
+      sourceImage.width = dungeon.source_width;
+      sourceImage.height = dungeon.source_height;
+      sourceImage.loading = "lazy";
+      sourceImage.decoding = "async";
+      imageLink.appendChild(sourceImage);
+      figure.appendChild(imageLink);
+      figure.appendChild(element("figcaption", "", `${dungeon.name} · 用户提供的参考图 · 整理于 ${data.updated_at}`));
+      source.appendChild(figure);
+      page.appendChild(source);
+    } else if (dungeon.source_note) {
+      const source = element("section", "boss-data-section boss-data-source");
+      source.appendChild(element("h3", "", "数据来源"));
+      source.appendChild(element("p", "", dungeon.source_note));
+      page.appendChild(source);
+    }
+    contentNode.replaceChildren(page);
+  }
+
   function parseRoute() {
     const raw = window.location.hash.slice(1);
     if (!raw) return { name: "home", params: new URLSearchParams() };
@@ -3903,9 +4123,9 @@
     }
 
     document.title = "叨叨诡秘助手 · 战斗记录";
-    refreshButton.hidden = route.name === "share" || route.name === "lab";
+    refreshButton.hidden = route.name === "share" || route.name === "lab" || route.name === "boss-data";
     try {
-      if (force) {
+      if (force && route.name !== "boss-data" && route.name !== "records") {
         if (route.name === "search" || route.name === "history" || route.name === "battle") {
           await loadHistoryData(true);
         } else {
@@ -3913,7 +4133,7 @@
         }
       }
       if (route.name === "insights") await renderInsights(token);
-      else if (route.name === "records") await renderRecords(token);
+      else if (route.name === "records") await renderRecords(token, force);
       else if (route.name === "history") {
         const query = String(route.params.get("q") || "").trim();
         window.location.replace(query ? `#search?${route.params}` : "#home");
@@ -3921,6 +4141,7 @@
       else if (route.name === "search") await renderSearch(token, route.params.get("q"));
       else if (route.name === "share") renderShare();
       else if (route.name === "lab") renderLab();
+      else if (route.name === "boss-data") await renderBossData(token, route.params.get("dungeon"));
       else if (route.name === "battle") await renderEncounter(token, route.params.get("id"));
       else window.location.hash = "";
     } catch (error) {
@@ -3967,6 +4188,18 @@
     document.getElementById("historySummary").textContent = "暂时无法读取历史战斗场次";
     document.getElementById("uploadCount").textContent = "暂时无法读取";
     document.getElementById("lastUpload").textContent = "暂时无法读取";
+  });
+  loadCatalogData().then(() => {
+    const raid = (state.catalog?.dungeon_categories || []).find((category) => category.key === "raid");
+    const castle = (raid?.dungeons || []).find((dungeon) => dungeon.key === "may-manor-castle");
+    const count = Number(castle?.difficulty_counts?.hard?.clears);
+    const aiCount = Number(castle?.difficulty_counts?.hard?.ai_clears);
+    const countNode = document.getElementById("latestDungeonClearCount");
+    countNode.textContent = Number.isFinite(count)
+      ? `当前 ${formatInteger(count)} 条通关数据${Number.isFinite(aiCount) && aiCount > 0 ? ` · 含 ${formatInteger(aiCount)} 条人机` : ""}`
+      : "通关数据暂时无法读取";
+  }).catch(() => {
+    document.getElementById("latestDungeonClearCount").textContent = "通关数据暂时无法读取";
   });
   renderRecentSearches();
   renderRoute(false);

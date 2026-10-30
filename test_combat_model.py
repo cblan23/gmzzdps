@@ -4887,6 +4887,88 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.pending_active_boss_id, None)
         self.assertEqual(model.stats[SELF_ID].damage, 1_000_000)
 
+    def test_level_94_dual_boss_target_switch_and_successor_keep_one_pull(self):
+        model = CombatModel(run_id="level-94-dual-boss-target-switch-test")
+        model.ingest_identity({"entity_id": SELF_ID})
+        model.ingest_active_boss(
+            {
+                "entity_id": MONSTER_ID,
+                "template_id": 7_100_201,
+                "name": "安西娅",
+                "max_hp": 64_978_026,
+                "filetime_100ns": BASE_FILETIME,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": MONSTER_ID,
+                "current_hp": 64_978_026,
+                "max_hp": 64_978_026,
+                "filetime_100ns": BASE_FILETIME + 10_000,
+            }
+        )
+        model.ingest(damage(1, SELF_ID, MONSTER_ID, 500_000))
+        encounter_id = model.encounter_id
+        first_damage_time = model.first_damage_time
+        session_number = model.session_number
+
+        model.ingest_active_boss(
+            {
+                "entity_id": SECOND_MONSTER_ID,
+                "template_id": 7_100_202,
+                "name": "巴尼先生",
+                "max_hp": 64_978_026,
+                "filetime_100ns": BASE_FILETIME + 2 * 10_000_000,
+            }
+        )
+        model.ingest_monster(
+            {
+                "entity_id": SECOND_MONSTER_ID,
+                "current_hp": 64_978_026,
+                "max_hp": 64_978_026,
+                "filetime_100ns": BASE_FILETIME + 2 * 10_000_000 + 10_000,
+            }
+        )
+        model.ingest_active_boss(
+            {
+                "entity_id": MONSTER_ID,
+                "template_id": 7_100_201,
+                "filetime_100ns": BASE_FILETIME + 3 * 10_000_000,
+            }
+        )
+
+        self.assertEqual(model.session_number, session_number)
+        self.assertEqual(model.encounter_id, encounter_id)
+        self.assertEqual(model.first_damage_time, first_damage_time)
+        self.assertFalse(model.combat_end_time)
+        self.assertEqual(model.pop_completed_combats(), [])
+        self.assertEqual(model.stats[SELF_ID].damage, 500_000)
+        self.assertEqual(
+            model._current_boss_target_ids(),
+            {MONSTER_ID, SECOND_MONSTER_ID},
+        )
+
+        model.ingest_active_boss(
+            {
+                "entity_id": THIRD_MONSTER_ID,
+                "template_id": 7_100_203,
+                "name": "安西娅",
+                "max_hp": 85_820_034,
+                "filetime_100ns": BASE_FILETIME + 4 * 10_000_000,
+            }
+        )
+
+        self.assertEqual(model.session_number, session_number)
+        self.assertEqual(model.encounter_id, encounter_id)
+        self.assertEqual(model.first_damage_time, first_damage_time)
+        self.assertEqual(model.combat_target_id, THIRD_MONSTER_ID)
+        self.assertEqual(
+            [boss.entity_id for boss in model.current_bosses()],
+            [THIRD_MONSTER_ID],
+        )
+        self.assertEqual(model.stats[SELF_ID].damage, 500_000)
+        self.assertEqual(model.pop_completed_combats(), [])
+
     def test_verified_overlapping_hp_streams_link_active_second_boss(self):
         model = CombatModel(run_id="simultaneous-boss-hp-test")
         model.ingest_identity({"entity_id": SELF_ID})
@@ -6503,12 +6585,12 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
     def test_release_version_matches_client_build_and_notes(self):
-        self.assertEqual(APP_VERSION, "0.4.1b")
+        self.assertEqual(APP_VERSION, "0.4.2")
         numeric_version = (
             APP_VERSION[:-1] if APP_VERSION[-1:].isalpha() else APP_VERSION
         )
         self.assertEqual(CLIENT_BUILD.split("+", 1)[0], numeric_version)
-        self.assertRegex(CLIENT_BUILD, r"^0\.4\.1\+\d{8}\.\d+$")
+        self.assertRegex(CLIENT_BUILD, r"^0\.4\.2\+\d{8}\.\d+$")
         notes = Path(__file__).with_name(f"release-notes-v{APP_VERSION}.txt")
         self.assertTrue(notes.is_file())
         self.assertIn(APP_VERSION, notes.read_text(encoding="utf-8-sig"))
@@ -10291,6 +10373,48 @@ class CombatModelTests(unittest.TestCase):
         self.assertTrue(window.messages.empty())
         self.assertEqual(scheduled[1][0], 50)
 
+    def test_message_drain_continues_after_one_handler_failure(self):
+        scheduled = []
+        handled = []
+        lifecycle = []
+
+        class ScheduledRoot:
+            def after(self, delay, callback):
+                scheduled.append((delay, callback))
+
+        window = object.__new__(DpsWindow)
+        window.closing = False
+        window.root = ScheduledRoot()
+        window.messages = MODULE["queue"].Queue()
+        window.control_messages = MODULE["queue"].Queue()
+
+        def dispatch(kind, payload):
+            if kind == "scene":
+                raise RuntimeError("scene transition failed")
+            handled.append((kind, payload))
+
+        window._dispatch_message = dispatch
+        window.messages.put(("scene", {"transition": True}))
+        window.messages.put(("event", {"index": 1}))
+
+        with mock.patch.dict(
+            DpsWindow._dispatch_queued_message.__globals__,
+            {
+                "write_capture_lifecycle_event": (
+                    lambda message, **fields: lifecycle.append((message, fields))
+                )
+            },
+        ):
+            window._drain_messages()
+
+        self.assertEqual(handled, [("event", {"index": 1})])
+        self.assertTrue(window.messages.empty())
+        self.assertEqual(scheduled[0][0], 50)
+        self.assertEqual(lifecycle[0][0], "message_dispatch_failed")
+        self.assertEqual(lifecycle[0][1]["queue"], "capture")
+        self.assertEqual(lifecycle[0][1]["message_kind"], "scene")
+        self.assertEqual(lifecycle[0][1]["error_type"], "RuntimeError")
+
     def test_message_drain_stress_keeps_every_message_and_honors_time_budget(self):
         scheduled = []
         ingested = []
@@ -10424,6 +10548,71 @@ class CombatModelTests(unittest.TestCase):
             ingested,
             list(range(MODULE["MESSAGE_DRAIN_BATCH_SIZE"] + 5)),
         )
+
+    def test_close_skips_failed_message_and_finishes(self):
+        destroyed = []
+        ingested = []
+        lifecycle = []
+
+        class Root:
+            @staticmethod
+            def after(_delay, callback):
+                callback()
+
+            @staticmethod
+            def destroy():
+                destroyed.append(True)
+
+        class StoppedWorker:
+            @staticmethod
+            def is_alive():
+                return False
+
+        class Model:
+            @staticmethod
+            def archive_current(_reason):
+                return True
+
+            def __getattr__(self, _name):
+                return lambda _payload: None
+
+        window = object.__new__(DpsWindow)
+        window.root = Root()
+        window.worker = StoppedWorker()
+        window.heartbeat_worker = None
+        window.close_started_at = time.monotonic()
+        window.close_finalized = False
+        window.messages = MODULE["queue"].Queue()
+        window.model = Model()
+
+        def ingest(payload):
+            if payload.get("bad"):
+                raise RuntimeError("bad queued event")
+            ingested.append(payload["index"])
+
+        window._ingest_combat_event = ingest
+        window._ingest_stage_summary = lambda _payload: None
+        window._flush_combat_history = lambda **_kwargs: None
+        window._save_preferences = lambda: None
+        window.messages.put(("event", {"bad": True}))
+        window.messages.put(("event", {"index": 1}))
+
+        with mock.patch.dict(
+            DpsWindow._ingest_pending_capture_messages.__globals__,
+            {
+                "write_capture_lifecycle_event": (
+                    lambda message, **fields: lifecycle.append((message, fields))
+                )
+            },
+        ):
+            window._finish_close()
+
+        self.assertEqual(ingested, [1])
+        self.assertEqual(destroyed, [True])
+        self.assertEqual(lifecycle[0][0], "message_dispatch_failed")
+        self.assertEqual(lifecycle[0][1]["queue"], "close")
+        self.assertEqual(lifecycle[0][1]["message_kind"], "event")
+        self.assertEqual(lifecycle[0][1]["error_type"], "RuntimeError")
 
     def test_update_close_consumes_stopped_state_and_does_not_require_npcap(self):
         class StoppedWorker:
@@ -10655,6 +10844,89 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(target["name"], "伯德温·威瑟尔")
         self.assertTrue(target["catalog_match"])
         self.assertGreaterEqual(snapshot["boss_catalog_size"], 1)
+
+    def test_live_hud_boss_tracker_groups_simultaneous_bosses_until_last_exit(self):
+        tracker = LiveHudBossTracker()
+        first_id = 101
+        second_id = 102
+
+        def create(entity_id, template_id, second):
+            return tracker.ingest(
+                {
+                    "method": "NpcapEntityCreated",
+                    "capture_source": "npcap",
+                    "capture_timestamp_ns": second * 1_000_000_000,
+                    "decoded_arguments": [
+                        {
+                            "entity_id": entity_id,
+                            "entity_class": "NpcActor",
+                            "properties": {
+                                "TemplateID": template_id,
+                                "BossType": 3,
+                                "Level": 94,
+                            },
+                        }
+                    ],
+                }
+            )
+
+        def fight(entity_id, mode, second):
+            return tracker.ingest(
+                {
+                    "method": "OnMsgSyncFightMode",
+                    "capture_source": "npcap",
+                    "network_entity_id": entity_id,
+                    "script_entity": entity_id,
+                    "capture_timestamp_ns": second * 1_000_000_000,
+                    "decoded_arguments": [mode],
+                }
+            )
+
+        create(first_id, 7_100_201, 1)
+        create(second_id, 7_100_202, 1)
+        first = fight(first_id, 2, 2)
+        second = fight(second_id, 2, 3)
+
+        self.assertEqual(second["boss_segment_id"], first["boss_segment_id"])
+        self.assertEqual(
+            second["boss_segment_started_at_epoch"],
+            first["boss_segment_started_at_epoch"],
+        )
+
+        health = tracker.ingest(
+            {
+                "method": "OnMsgSyncCurrentHp",
+                "capture_source": "npcap",
+                "network_entity_id": first_id,
+                "script_entity": first_id,
+                "capture_timestamp_ns": 4_000_000_000,
+                "decoded_arguments": [64_000_000.0],
+            }
+        )
+        self.assertEqual(health["boss_segment_id"], first["boss_segment_id"])
+
+        remaining = fight(first_id, 0, 5)
+        self.assertTrue(remaining["active"])
+        self.assertEqual(remaining["entity_id"], second_id)
+        self.assertEqual(remaining["boss_segment_id"], first["boss_segment_id"])
+
+        terminal_first = tracker.ingest(
+            {
+                "method": "OnMsgSyncCurrentHp",
+                "capture_source": "npcap",
+                "network_entity_id": first_id,
+                "script_entity": first_id,
+                "capture_timestamp_ns": 5_500_000_000,
+                "decoded_arguments": [0.0],
+            }
+        )
+        self.assertIsNone(terminal_first)
+
+        ended = fight(second_id, 0, 6)
+        self.assertFalse(ended["active"])
+
+        restarted = fight(first_id, 2, 7)
+        self.assertGreater(restarted["boss_segment_id"], first["boss_segment_id"])
 
     def test_live_hud_boss_tracker_projects_packet_confirmed_karl_only(self):
         tracker = LiveHudBossTracker()

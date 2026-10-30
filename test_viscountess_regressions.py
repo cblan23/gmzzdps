@@ -92,13 +92,15 @@ class BossHpRegressionTests(unittest.TestCase):
 
 
 class ViscountessPhaseRegressionTests(unittest.TestCase):
-    def make_battle(self, unknown=False):
+    def make_battle(self, unknown=False, hard=False):
         model = CombatModel(run_id='viscountess-regression')
         model.ingest_identity({'entity_id': SELF_ID})
+        ordinary_template = 7102932 if hard else 7102990
+        mythic_template = 7102936 if hard else 7102991
         for actor, template, name in (
-            (MONSTER_ID, 0 if unknown else 7102990, 'Boss' if unknown else '子爵夫人'),
-            (SECOND_MONSTER_ID, 7102991, '子爵夫人-神话姿态'),
-            (THIRD_MONSTER_ID, 7102990, '子爵夫人'),
+            (MONSTER_ID, 0 if unknown else ordinary_template, 'Boss' if unknown else '子爵夫人'),
+            (SECOND_MONSTER_ID, mythic_template, '子爵夫人-神话姿态'),
+            (THIRD_MONSTER_ID, ordinary_template, '子爵夫人'),
         ):
             model.ingest_profile(dict(entity_id=actor, template_id=template, name=name,
                                       entity_type='Boss', boss_rank=3, boss_type=3))
@@ -115,34 +117,35 @@ class ViscountessPhaseRegressionTests(unittest.TestCase):
         return model
 
     def test_phase_keeps_identity_clock_dps_hps_dt_and_one_history_record(self):
-        for unknown in (False, True):
-            with self.subTest(unknown=unknown):
-                model = self.make_battle(unknown)
-                encounter, started = model.encounter_id, model.first_damage_time
-                model.combat_end_time = model.last_damage_time
-                model.combat_end_reason = 'boss_replaced'
-                model.healing_end_time = model.last_damage_time
-                model.archive_current('boss_replaced')
-                model.ingest_active_boss(dict(entity_id=SECOND_MONSTER_ID,
-                    filetime_100ns=BASE_FILETIME + 30 * 10000000))
-                self.assertEqual(model.combat_end_time, 0)
-                self.assertEqual(model.healing_end_time, 0)
-                reset = team_stat(31000, SELF_ID, 0, server_time=200)
-                reset.update(absolute_taken=0, absolute_effective_healing=0, full_snapshot=True)
-                model.ingest_team_stat(reset)
-                second = team_stat(35000, SELF_ID, 3000000, server_time=201)
-                second.update(absolute_taken=500, absolute_effective_healing=1000)
-                model.ingest_team_stat(second)
-                self.assertEqual(model.encounter_id, encounter)
-                self.assertEqual(model.first_damage_time, started)
-                self.assertEqual(model.stats[SELF_ID].damage, 23000000)
-                self.assertEqual(model.team_taken_states[SELF_ID].accepted_taken, 1500)
-                self.assertEqual(model.team_healing_states[SELF_ID].accepted_effective_healing, 5000)
-                self.assertEqual(model.pop_completed_combats(), [])
-                model.archive_current('party_exit')
-                records = model.pop_completed_combats()
-                self.assertEqual(len(records), 1)
-                self.assertEqual(build_history_summary(records[0])['boss_name'], '子爵夫人')
+        for hard in (False, True):
+            for unknown in (False, True):
+                with self.subTest(hard=hard, unknown=unknown):
+                    model = self.make_battle(unknown, hard=hard)
+                    encounter, started = model.encounter_id, model.first_damage_time
+                    model.combat_end_time = model.last_damage_time
+                    model.combat_end_reason = 'boss_replaced'
+                    model.healing_end_time = model.last_damage_time
+                    model.archive_current('boss_replaced')
+                    model.ingest_active_boss(dict(entity_id=SECOND_MONSTER_ID,
+                        filetime_100ns=BASE_FILETIME + 30 * 10000000))
+                    self.assertEqual(model.combat_end_time, 0)
+                    self.assertEqual(model.healing_end_time, 0)
+                    reset = team_stat(31000, SELF_ID, 0, server_time=200)
+                    reset.update(absolute_taken=0, absolute_effective_healing=0, full_snapshot=True)
+                    model.ingest_team_stat(reset)
+                    second = team_stat(35000, SELF_ID, 3000000, server_time=201)
+                    second.update(absolute_taken=500, absolute_effective_healing=1000)
+                    model.ingest_team_stat(second)
+                    self.assertEqual(model.encounter_id, encounter)
+                    self.assertEqual(model.first_damage_time, started)
+                    self.assertEqual(model.stats[SELF_ID].damage, 23000000)
+                    self.assertEqual(model.team_taken_states[SELF_ID].accepted_taken, 1500)
+                    self.assertEqual(model.team_healing_states[SELF_ID].accepted_effective_healing, 5000)
+                    self.assertEqual(model.pop_completed_combats(), [])
+                    model.archive_current('party_exit')
+                    records = model.pop_completed_combats()
+                    self.assertEqual(len(records), 1)
+                    self.assertEqual(build_history_summary(records[0])['boss_name'], '子爵夫人')
 
     def test_explicit_failed_pull_does_not_resume_into_mythic(self):
         for reason in ('party_wipe', 'target_reset'):

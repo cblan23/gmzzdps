@@ -200,10 +200,11 @@ HARD_EXCLUDED_BOSS_TEMPLATE_IDS = frozenset({7_110_551, 7_110_642})
 # Retained as an explicit allowlist for any future verified transitions. The
 # former 洛克·金 pair is intentionally absent: 7110642 is not a Boss encounter.
 SEPARATE_BOSS_ENCOUNTER_TRANSITIONS: frozenset[tuple[int, int]] = frozenset()
-# Only this captured encounter is currently verified to expose two independent
+# Only these captured encounter variants are verified to expose two independent
 # Boss HP streams at the same time. Keep dual-target behavior template-scoped so
 # Boss-ranked adds in unrelated encounters cannot acquire a second HP bar.
 VERIFIED_SIMULTANEOUS_BOSS_TEMPLATE_GROUPS = (
+    frozenset({7_100_201, 7_100_202}),  # 安西娅 + 巴尼先生（94 级）
     frozenset({7_100_208, 7_100_209}),  # 安西娅 + 巴尼先生
 )
 # Some clients miss one CommonComponent template callback for this encounter.
@@ -211,14 +212,26 @@ VERIFIED_SIMULTANEOUS_BOSS_TEMPLATE_GROUPS = (
 # has taken player damage beside the other verified Boss; HP alone is never a
 # general target-identity signal.
 VERIFIED_SIMULTANEOUS_BOSS_MAX_HP_BY_TEMPLATE = {
+    7_100_201: frozenset({64_978_026}),
+    7_100_202: frozenset({64_978_026}),
     7_100_208: frozenset({37_590_045}),
     7_100_209: frozenset({17_291_421}),
 }
 VERIFIED_SIMULTANEOUS_BOSS_SUCCESSORS = {
+    frozenset({7_100_201, 7_100_202}): frozenset({7_100_203}),
     frozenset({7_100_208, 7_100_209}): frozenset({7_100_210}),
 }
 AUTHORITATIVE_BOSS_NAME_TEMPLATE_IDS = frozenset(
-    {7_100_208, 7_100_209, 7_100_210, 7_110_200, 7_110_208}
+    {
+        7_100_201,
+        7_100_202,
+        7_100_203,
+        7_100_208,
+        7_100_209,
+        7_100_210,
+        7_110_200,
+        7_110_208,
+    }
 )
 # 罗塞尔的污染意志 finishes at a small non-zero HP sentinel and then emits
 # an explicit FightMode [0].  Keep this exception template-scoped: the first
@@ -494,6 +507,7 @@ LONG_GAP_BOSS_PHASE_TRANSITIONS = frozenset(
 BOSS_PHASE_TEMPLATE_TRANSITIONS = frozenset(
     {
         (7_103_402, 7_103_401),  # 先祖铠甲 -> 伯德温·威瑟尔
+        (7_102_932, 7_102_936),  # 困难子爵夫人 -> 神话姿态, same encounter.
         (7_102_990, 7_102_991),  # 子爵夫人 -> 神话姿态, same encounter.
     }
 ) | LONG_GAP_BOSS_PHASE_TRANSITIONS

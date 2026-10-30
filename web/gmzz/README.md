@@ -9,8 +9,17 @@ recorded timestamps use sample order instead of invented elapsed seconds.
 Battle details can export each member's recorded skill cast times as a real
 `.xlsx` workbook. Skills without a captured cast time are marked as unrecorded;
 damage-hit timestamps are not presented as cast times.
+The top navigation's `BOSS 数据` page (`#boss-data`) contains reference data for
+五月庄园·城堡（困难）, 困难小丑, 丰饶之树（黄铜书模式）, and 大帝重临. The
+latest castle page separates live HP/timing evidence from static client-config
+attributes; the other pages retain their supplied source images. Edit
+`assets/boss-data/catalog.json` to update these references while keeping each
+value's evidence boundary explicit.
 Battles containing a projection member (`is_ai` or a captured name ending in
-`·投影`) are excluded from all public history, detail, rankings, and statistics.
+`·投影`) remain visible in public character history and battle detail. Confirmed
+victories count as clears and appear in a separate unranked section on the data
+page, while these battles stay outside competitive rankings and profession
+statistics.
 
 Run locally:
 

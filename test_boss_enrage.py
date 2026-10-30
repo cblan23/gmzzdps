@@ -222,7 +222,7 @@ class BossEnrageTests(unittest.TestCase):
                     1,
                     23_000_000,
                     33_270_350,
-                    template_id=7_102_403,
+                    template_id=7_102_400,
                     name="星象仪者",
                 )
             ],
@@ -239,7 +239,7 @@ class BossEnrageTests(unittest.TestCase):
                     1,
                     23_000_000,
                     33_270_350,
-                    template_id=7_102_403,
+                    template_id=7_102_400,
                     name="星象仪者",
                 )
             ],
@@ -254,7 +254,7 @@ class BossEnrageTests(unittest.TestCase):
                     1,
                     21_000_000,
                     33_270_350,
-                    template_id=7_102_403,
+                    template_id=7_102_400,
                     name="星象仪者",
                 )
             ],
@@ -436,6 +436,82 @@ class BossEnrageTests(unittest.TestCase):
         self.assertEqual(result.lifetime_hp_per_second, 0)
         self.assertGreater(result.safety_margin_seconds, 0)
 
+    def test_level_94_first_believer_keeps_shared_clock_and_effective_work(self):
+        catalog = load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        )
+        forecast = BossEnragePredictor(catalog)
+        opening = forecast.update(
+            encounter_key="first-believer-level-94",
+            elapsed_seconds=400,
+            bosses=[
+                boss(
+                    1,
+                    50_000_000,
+                    64_978_026,
+                    template_id=7_100_201,
+                    name="安西娅",
+                ),
+                boss(
+                    2,
+                    60_000_000,
+                    64_978_026,
+                    template_id=7_100_202,
+                    name="巴尼先生",
+                ),
+            ],
+            monotonic_seconds=400,
+        )
+        successor = forecast.update(
+            encounter_key="first-believer-level-94",
+            elapsed_seconds=405,
+            bosses=[
+                boss(
+                    3,
+                    85_820_034,
+                    85_820_034,
+                    template_id=7_100_203,
+                    name="安西娅",
+                )
+            ],
+            monotonic_seconds=405,
+        )
+
+        self.assertIsNotNone(opening)
+        self.assertEqual(opening.boss_current_hp, 145_820_034)
+        self.assertEqual(opening.boss_max_hp, 150_798_060)
+        self.assertIsNotNone(successor)
+        self.assertEqual(successor.rule_id, "first_believer_level_94")
+        self.assertEqual(successor.elapsed_seconds, 405)
+        self.assertEqual(successor.time_to_enrage_seconds, 75)
+        self.assertEqual(successor.boss_current_hp, 85_820_034)
+        self.assertEqual(successor.boss_max_hp, 150_798_060)
+
+    def test_hard_viscountess_keeps_one_480_second_clock_across_forms(self):
+        catalog = load_boss_enrage_catalog(
+            Path(__file__).with_name("boss_enrage_config.json")
+        )
+        forecast = BossEnragePredictor(catalog)
+        ordinary = forecast.update(
+            encounter_key="hard-viscountess",
+            elapsed_seconds=300,
+            bosses=[boss(1, 800, 1_000, template_id=7_102_932)],
+            monotonic_seconds=300,
+        )
+        mythic = forecast.update(
+            encounter_key="hard-viscountess",
+            elapsed_seconds=305,
+            bosses=[boss(2, 500, 1_000, template_id=7_102_936)],
+            monotonic_seconds=305,
+        )
+
+        self.assertIsNotNone(ordinary)
+        self.assertIsNotNone(mythic)
+        self.assertEqual(ordinary.rule_id, "viscountess")
+        self.assertEqual(mythic.rule_id, "viscountess")
+        self.assertEqual(mythic.elapsed_seconds, 305)
+        self.assertEqual(mythic.time_to_enrage_seconds, 175)
+
     def test_prediction_does_not_compute_team_damage_rates(self):
         forecast = predictor(enrage_seconds=100.0)
         result = forecast.update(
@@ -510,7 +586,7 @@ class BossEnrageTests(unittest.TestCase):
             self.assertEqual(state, expected_state)
             self.assertEqual(message, expected_message)
 
-    def test_production_catalog_contains_only_verified_normal_bosses(self):
+    def test_production_catalog_contains_verified_bosses(self):
         catalog = load_boss_enrage_catalog(
             Path(__file__).with_name("boss_enrage_config.json")
         )
@@ -523,14 +599,24 @@ class BossEnrageTests(unittest.TestCase):
             7_107_450: ("abaddon", 300),
             7_102_834: ("ray_biber", 360),
             7_102_873: ("joker", 360),
+            7_109_801: ("mutated_hound", 480),
             7_109_821: ("mutated_hound", 480),
+            7_103_210: ("ancestral_armor", 480),
+            7_103_206: ("ancestral_armor", 480),
             7_103_402: ("ancestral_armor", 480),
             7_103_401: ("ancestral_armor", 480),
+            7_102_400: ("astrologer", 300),
             7_102_403: ("astrologer", 300),
             7_100_215: ("descendant_guardian", 480),
+            7_102_938: ("descendant_guardian", 480),
+            7_100_201: ("first_believer_level_94", 480),
+            7_100_202: ("first_believer_level_94", 480),
+            7_100_203: ("first_believer_level_94", 480),
             7_100_208: ("first_believer", 480),
             7_100_209: ("first_believer", 480),
             7_100_210: ("first_believer", 480),
+            7_102_932: ("viscountess", 480),
+            7_102_936: ("viscountess", 480),
             7_102_990: ("viscountess", 480),
             7_102_991: ("viscountess", 480),
             7_100_401: ("dire_water_turtle", 360),
@@ -540,7 +626,7 @@ class BossEnrageTests(unittest.TestCase):
             7_110_208: ("roselle_polluted", 600),
         }
 
-        self.assertEqual(len(catalog.rules), 17)
+        self.assertEqual(len(catalog.rules), 18)
         for template_id, (rule_id, seconds) in expected.items():
             matched = catalog.match(
                 [boss(1, 900, template_id=template_id, name="任意名称")]
@@ -775,14 +861,6 @@ class BossEnrageTests(unittest.TestCase):
             7_100_301,
             7_100_341,
             7_100_361,
-            7_100_201,
-            7_100_202,
-            7_100_203,
-            7_102_400,
-            7_102_932,
-            7_102_936,
-            7_102_938,
-            7_109_801,
             7_110_581,
             7_110_642,
             7_114_223,

@@ -787,7 +787,11 @@ def encounter_history_record(
     if encounter.boss_health_source:
         monster["health_source"] = encounter.boss_health_source
     output = base
-    visible_tokens = {row["user_token"] for row in participants}
+    visible_tokens = {
+        str(row.get("user_token"))
+        for row in participants
+        if isinstance(row, dict) and row.get("user_token")
+    }
     visible_identities = [
         deepcopy(row) for row in encounter.participants_snapshot
         if isinstance(row, dict) and row.get("id") in visible_tokens

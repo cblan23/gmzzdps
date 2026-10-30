@@ -318,10 +318,10 @@ UPLOAD_STATE_PATH = DATA_DIR / "combat_upload_state.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手"
-APP_VERSION = "0.4.1b"
+APP_VERSION = "0.4.2"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.4.1+20261025.2"
+CLIENT_BUILD = "0.4.2+20261030.3"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -6334,13 +6334,32 @@ class CombatModel:
 
         if self.combat_end_reason in {"party_wipe", "target_reset"}:
             return False
+        current_template_id = int(
+            getattr(
+                self.monsters.get(int(self.combat_target_id or 0)),
+                "template_id",
+                0,
+            )
+            or 0
+        )
         return bool(
             self._verified_simultaneous_boss_encounter_group() is not None
             or self._preserve_long_gap_phase_counters()
-            or (
-                int(getattr(self.monsters.get(int(self.combat_target_id or 0)), 'template_id', 0) or 0) == 7_102_991
-                and any(int(getattr(self.monsters.get(entity_id), 'template_id', 0) or 0) == 7_102_990
-                        for entity_id in self.linked_boss_target_ids)
+            or any(
+                (
+                    int(
+                        getattr(
+                            self.monsters.get(entity_id), "template_id", 0
+                        )
+                        or 0
+                    ),
+                    current_template_id,
+                )
+                in {
+                    (7_102_932, 7_102_936),
+                    (7_102_990, 7_102_991),
+                }
+                for entity_id in self.linked_boss_target_ids
             )
         )
 
@@ -16617,6 +16636,8 @@ class LiveHudBossTracker:
     def __init__(self) -> None:
         self.entities: dict[int, dict[str, object]] = {}
         self.active_entity_id = 0
+        self.boss_segment_id = 0
+        self.boss_segment_started_at_epoch = 0.0
 
     @staticmethod
     def _event_epoch(record: dict) -> float:
@@ -16672,6 +16693,12 @@ class LiveHudBossTracker:
             "updated_at_epoch": float(
                 state.get("updated_at_epoch", 0.0) or 0.0
             ),
+            "boss_segment_id": int(
+                state.get("boss_segment_id", 0) or 0
+            ),
+            "boss_segment_started_at_epoch": float(
+                state.get("boss_segment_started_at_epoch", 0.0) or 0.0
+            ),
             "source": "npcap_live_hud",
         }
 
@@ -16679,6 +16706,7 @@ class LiveHudBossTracker:
         had_active = bool(self.active_entity_id)
         self.entities.clear()
         self.active_entity_id = 0
+        self.boss_segment_started_at_epoch = 0.0
         if had_active:
             return {"active": False, "source": "npcap_live_hud"}
         return None
@@ -16744,24 +16772,59 @@ class LiveHudBossTracker:
             except (TypeError, ValueError, OverflowError):
                 return None
             if fight_mode == 2:
+                had_active_boss = any(
+                    bool(candidate.get("active"))
+                    for candidate in self.entities.values()
+                )
                 if not state.get("active"):
                     state["started_at_epoch"] = event_epoch
                     state["observed_damage_taken"] = 0.0
+                if not had_active_boss:
+                    self.boss_segment_id += 1
+                    self.boss_segment_started_at_epoch = event_epoch
                 state["ended_at_epoch"] = 0.0
                 state["active"] = True
                 state["updated_at_epoch"] = event_epoch
-                self.active_entity_id = entity_id
-                return self._snapshot(state)
+                state["boss_segment_id"] = self.boss_segment_id
+                state["boss_segment_started_at_epoch"] = (
+                    self.boss_segment_started_at_epoch
+                )
+                if not self.active_entity_id:
+                    self.active_entity_id = entity_id
+                selected = self.entities.get(self.active_entity_id, state)
+                return self._snapshot(selected)
             if fight_mode == 0 and state.get("active"):
                 state["active"] = False
                 state["updated_at_epoch"] = event_epoch
                 state["ended_at_epoch"] = event_epoch
                 if self.active_entity_id == entity_id:
+                    remaining = sorted(
+                        (
+                            candidate
+                            for candidate in self.entities.values()
+                            if candidate.get("active")
+                        ),
+                        key=lambda candidate: (
+                            float(
+                                candidate.get("started_at_epoch", 0.0) or 0.0
+                            ),
+                            int(candidate.get("entity_id", 0) or 0),
+                        ),
+                    )
+                    if remaining:
+                        self.active_entity_id = int(
+                            remaining[0].get("entity_id", 0) or 0
+                        )
+                        return self._snapshot(remaining[0])
                     self.active_entity_id = 0
+                    self.boss_segment_started_at_epoch = 0.0
                     return {
                         "active": False,
                         "entity_id": entity_id,
                         "ended_at_epoch": event_epoch,
+                        "boss_segment_id": int(
+                            state.get("boss_segment_id", 0) or 0
+                        ),
                         "source": "npcap_live_hud",
                     }
             return None
@@ -16804,7 +16867,9 @@ class LiveHudBossTracker:
 
         state["updated_at_epoch"] = event_epoch
         if state.get("active"):
-            return self._snapshot(state)
+            if self.active_entity_id == entity_id:
+                return self._snapshot(state)
+            return None
         try:
             ended_at = float(state.get("ended_at_epoch", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
@@ -16815,6 +16880,11 @@ class LiveHudBossTracker:
             and ended_at > 0
             and 0 <= event_epoch - ended_at <= 5.0
         ):
+            if any(
+                bool(candidate.get("active"))
+                for candidate in self.entities.values()
+            ):
+                return None
             # Keep parser settlement safety unchanged, but publish the exact
             # post-fight zero to the HUD immediately.  A later repull replaces
             # this presentation state on its next FightMode=2 edge.
@@ -23770,8 +23840,8 @@ class DpsWindow:
             else None
         )
         rows, rating_preview = self._main_display_rows()
-        # FightMode can arrive before the next team snapshot.  Only rows from
-        # that snapshot may replace the delayed result from the previous pull.
+        # FightMode can arrive before the next team snapshot. Keep that gap in
+        # a current-battle waiting state; never fill it with the previous pull.
         targetless_team_active = bool(
             live_hud_projection_active
             and any(
@@ -23960,7 +24030,13 @@ class DpsWindow:
             current_bosses = getattr(self.model, "current_bosses", None)
             bosses = list(current_bosses()) if callable(current_bosses) else []
             monster = bosses[0] if bosses else None
-        retained_record = self.main_last_battle_result if self._main_retained_battle_active() else None
+        last_battle_result = getattr(self, "main_last_battle_result", None)
+        retained_record = (
+            last_battle_result
+            if getattr(self.model, "long_gap_phase_suspended", False)
+            and self._main_retained_battle_active()
+            else None
+        )
         recent_settlement = self._main_recent_settlement_record()
         if targetless_team_active:
             retained_record = None
@@ -24026,20 +24102,10 @@ class DpsWindow:
         )
         # A confirmed replacement Boss can legitimately arrive before its
         # first CurrentHP packet (the delayed TeamStats path is independent
-        # from target promotion).  ``current_monster()`` already exposes the
-        # pending target in that window; keep the recent-settlement fallback
-        # from putting the previous Boss back over the new target.
+        # from target promotion). ``current_monster()`` already exposes the
+        # pending target in that window, so it remains the live header owner.
         pending_boss_id = int(
             getattr(self.model, "pending_active_boss_id", 0) or 0
-        )
-        model_has_current_boss = bool(
-            monster is not None
-            and (
-                current_boss_hp > 0
-                or model_combat_active
-                or current_boss_in_fight_mode
-                or (pending_boss_id and current_boss_id == pending_boss_id)
-            )
         )
         model_terminal_victory = bool(
             str(getattr(self.model, "combat_end_reason", "") or "").casefold()
@@ -24058,7 +24124,6 @@ class DpsWindow:
         )
         if terminal_zero_matches_live:
             model_terminal_victory = True
-            model_has_current_boss = False
         recent_victory_matches_live = bool(
             recent_settlement is not None
             and not current_settlement_id
@@ -24075,24 +24140,33 @@ class DpsWindow:
             # exact Boss match as terminal; a newer Boss sample is excluded by
             # the identity/timestamp check above.
             model_terminal_victory = True
-            model_has_current_boss = False
+            monster = None
         current_boss_health_is_newer = False
-        if retained_record is not None and current_boss_hp > 0:
+        if monster is not None and current_boss_hp > 0:
             try:
                 hp_updated_100ns = int(
                     getattr(monster, "last_hp_update_100ns", 0) or 0
                 )
-                retained_ended_at = float(
-                    retained_record.get("ended_at_epoch", 0.0) or 0.0
+                last_result_ended_at = float(
+                    last_battle_result.get("ended_at_epoch", 0.0) or 0.0
+                ) if isinstance(last_battle_result, dict) else 0.0
+                settlement_ended_at = (
+                    int(recent_settlement.ended_at_ns or 0) / 1_000_000_000
+                    if recent_settlement is not None
+                    else 0.0
                 )
             except (TypeError, ValueError, OverflowError):
                 hp_updated_100ns = 0
-                retained_ended_at = 0.0
-            if hp_updated_100ns > 116_444_736_000_000_000 and retained_ended_at > 0:
+                last_result_ended_at = 0.0
+                settlement_ended_at = 0.0
+            previous_ended_at = max(
+                last_result_ended_at, settlement_ended_at
+            )
+            if hp_updated_100ns > 116_444_736_000_000_000 and previous_ended_at > 0:
                 hp_updated_at = (
                     hp_updated_100ns - 116_444_736_000_000_000
                 ) / 10_000_000
-                current_boss_health_is_newer = hp_updated_at > retained_ended_at
+                current_boss_health_is_newer = hp_updated_at > previous_ended_at
         if (
             pending_boss_id
             or model_combat_active
@@ -24101,17 +24175,20 @@ class DpsWindow:
         ):
             # A retained display copy cannot replace a newly promoted target.
             retained_record = None
-        show_recent_settlement_header = bool(
-            recent_settlement is not None
-            and recent_settlement.settlement_status == "SETTLED"
-            and not current_settlement_id
-            and not is_dummy
-            and not model_has_current_boss
-            and not self._main_display_is_cleared()
+        suppress_historical_model_boss = bool(
+            monster is not None
+            and (recent_settlement is not None or last_battle_result)
+            and not retained_record
+            and not live_hud_boss_state
+            and not terminal_zero_matches_live
+            and not pending_boss_id
+            and not model_combat_active
+            and not current_boss_in_fight_mode
+            and not current_boss_health_is_newer
         )
-        if show_recent_settlement_header:
-            monster = self._main_recent_settlement_monster(recent_settlement)
-        elif retained_record is not None:
+        if suppress_historical_model_boss:
+            monster = None
+        if retained_record is not None:
             from types import SimpleNamespace
             monster = SimpleNamespace(**retained_record['monster'])
         boss_values = self._main_boss_display_values(
@@ -24135,8 +24212,6 @@ class DpsWindow:
         boss_reader = getattr(self.model, 'current_bosses', None)
         if live_no_boss:
             display_bosses = [boss_values]
-        elif show_recent_settlement_header:
-            display_bosses = [boss_values]
         elif retained_record:
             retained_bosses = retained_record.get('bosses') or [boss_values]
             if model_terminal_victory:
@@ -24158,6 +24233,8 @@ class DpsWindow:
                     display_bosses = [boss_values]
             else:
                 display_bosses = retained_bosses
+        elif recent_victory_matches_live or suppress_historical_model_boss:
+            display_bosses = [boss_values]
         else:
             monsters = (list(boss_reader()) if callable(boss_reader) else [])[:MAX_SIMULTANEOUS_BOSSES]
             if len(monsters) > 1 and any(
@@ -24256,9 +24333,7 @@ class DpsWindow:
                 else "0"
             )
         else:
-            team_dps_summary_text = (
-                self._main_recent_battle_team_dps_text() or "--"
-            )
+            team_dps_summary_text = "--"
         display_rows = [
             row if row.get("row_kind") or row.get("is_ai") else {
                 **row, **self._equipment_refresh_fields(
@@ -24268,13 +24343,10 @@ class DpsWindow:
             for row in display_rows
         ]
         return {
-            "time": self._main_display_time_text(
-                recent_settlement if show_recent_settlement_header else None,
-                retained_record,
-            ),
+            "time": self._main_display_time_text(None, retained_record),
             **boss_values,
             'bosses': display_bosses,
-            "prediction": None if retained_record or show_recent_settlement_header or self._main_display_is_cleared() else prediction_value,
+            "prediction": None if retained_record or self._main_display_is_cleared() else prediction_value,
             "rows": display_rows,
             "application_rows": application_rows,
             "rating_preview": rating_preview,
@@ -24336,7 +24408,11 @@ class DpsWindow:
                     return format_duration(max(0.0, time.time() - started_at))
                 return format_duration(targetless_team_data[1])
         if self._main_display_is_cleared() or self._main_context_display_is_stale():
-            if header_record is None and retained_record is None:
+            if (
+                live_hud_active
+                and header_record is None
+                and retained_record is None
+            ):
                 live_hud_duration = self._main_live_hud_dps_duration()
                 if live_hud_duration is not None:
                     return format_duration(live_hud_duration)
@@ -24354,7 +24430,7 @@ class DpsWindow:
         if (getattr(tracker, "current_id", None)
                 or (callable(active_reader) and active_reader())):
             return live_text
-        record = header_record or self._main_recent_settlement_record(keep_last_settled=False)
+        record = header_record
         if record is not None:
             # The header is the displayed Boss pull clock. A final victory can
             # also carry an ALL table whose member lengths cover the entire
@@ -24367,14 +24443,14 @@ class DpsWindow:
             return format_duration(seconds)
         if retained_record:
             return format_duration(retained_record.get("duration_seconds") or 0)
-        live_hud_duration = self._main_live_hud_dps_duration()
-        if live_hud_duration is not None:
-            return format_duration(live_hud_duration)
-        targetless_team_data = self._main_targetless_team_data()
-        if targetless_team_data is not None:
-            return format_duration(targetless_team_data[1])
-        reader = getattr(model, "display_duration", None)
-        return format_duration(reader()) if callable(reader) else live_text
+        if live_hud_active:
+            live_hud_duration = self._main_live_hud_dps_duration()
+            if live_hud_duration is not None:
+                return format_duration(live_hud_duration)
+            targetless_team_data = self._main_targetless_team_data()
+            if targetless_team_data is not None:
+                return format_duration(targetless_team_data[1])
+        return "00:00"
 
     def _render_layered_main_hud(self) -> None:
         if (
@@ -27949,14 +28025,45 @@ class DpsWindow:
             {},
         )
         live_segment = self._main_live_hud_dps_segment_state(now)
+        combat_reader = getattr(self.model, "combat_in_progress", None)
+        try:
+            if callable(combat_reader):
+                try:
+                    model_combat_active = bool(
+                        combat_reader(now) if now is not None else combat_reader()
+                    )
+                except TypeError:
+                    model_combat_active = bool(combat_reader())
+            else:
+                model_combat_active = False
+        except (AttributeError, ValueError):
+            model_combat_active = False
+        current_battle_active = bool(
+            (model_combat_active and (controller is None or current is not None))
+            or self._main_live_hud_projection_active(now)
+            or getattr(self.model, "long_gap_phase_suspended", False)
+        )
         if isinstance(live_segment, dict) and live_segment.get("active"):
             live_row = self._main_current_live_self_dps_row(
+                now, profession_id=identity.get("profession_id")
+            )
+        elif current_battle_active:
+            live_row = self._main_live_self_dps_row(
                 now, profession_id=identity.get("profession_id")
             )
         else:
             live_row = self._main_live_self_dps_row(
                 now, profession_id=identity.get("profession_id")
             )
+            if live_row is not None:
+                live_row = dict(
+                    live_row,
+                    stat_value=None,
+                    total_value=None,
+                    dps_value=None,
+                    damage_sort=0,
+                    deaths=0,
+                )
         if live_row is None:
             actor_id = int(identity.get("iid") or 0)
             shown_name = (
@@ -28017,91 +28124,19 @@ class DpsWindow:
                 deaths=0,
             )
 
-        # Recent history is limited to this launch/character epoch. Durable
-        # records remain available in Settings, but a restart or account
-        # switch starts the compact main window without the previous record.
-        previous = self._main_recent_settlement_record()
-        local_finished_rows = self._main_finished_current_local_rows(current, now)
-        if current is not None and current.result == "IN_PROGRESS":
-            # Once the next pull starts, its immediate predecessor owns the
-            # lower table even while the server result is still pending.
-            previous = self._main_recent_settlement_record(
-                keep_last_settled=False
-            )
-        team_dps_record = self._main_displayable_team_dps_record()
-        recent_record = team_dps_record
-        if local_finished_rows is not None:
-            recent_record = current
-        elif recent_record is None and not self._main_display_is_cleared():
-            dummy_reader = getattr(self.model, "_is_dummy_encounter", None)
-            if not callable(dummy_reader) or not dummy_reader():
-                recent_record = previous
-        show_recent_result = recent_record is not None
-        official_rows = None
-        if (
-            current is None
-            and team_dps_record is not None
-        ):
-            official_rows = self._settlement_record_main_rows(team_dps_record)
-            official_self = next(
-                (row for row in official_rows if row.get("is_self")), None
-            )
-            if official_self is not None:
-                live_row = dict(
-                    official_self,
-                    highlight_self_row=True,
-                    is_live_self=False,
-                    is_official_self=True,
-                )
         default_section = {
                 "row_kind": "section",
                 "section_text": "实时战斗/战斗记录",
                 "expanded": True,
             }
-        rows = [live_row, default_section]
-        if show_recent_result:
-            recent_boss = self._main_recent_boss_row(recent_record)
-            if recent_boss is not None:
-                rows.append(recent_boss)
-            party_rows = (
-                local_finished_rows
-                if local_finished_rows is not None and recent_record is current
-                else self._current_party_recent_rows(recent_record)
-            )
-            if party_rows is not None:
-                if party_rows:
-                    # The top row is the local player's live DPS, while this
-                    # section is the complete current-party roster projected
-                    # onto the latest settlement.  Keep the local player here
-                    # as well so the team rating list is complete and the
-                    # player's live score does not disappear from the lower
-                    # section merely because they are also pinned above it.
-                    rows.extend(party_rows)
-                else:
-                    rows.append(
-                        {
-                            "row_kind": "message",
-                            "message_text": "等待当前队伍资料",
-                        }
-                    )
-            elif previous is not None:
-                rows.extend(
-                    row
-                    for row in (
-                        official_rows
-                        if official_rows is not None
-                        else self._settlement_record_main_rows(recent_record)
-                    )
-                    if not row.get("is_self")
-                )
-        else:
-            rows.append(
-                {
-                    "row_kind": "message",
-                    "message_text": "该数据将在战斗胜利或下一次挑战 Boss 时体现",
-                }
-            )
-        return rows
+        return [
+            live_row,
+            default_section,
+            {
+                "row_kind": "message",
+                "message_text": "等待当前战斗数据",
+            },
+        ]
 
     def _ingest_team_application(
         self, payload: object, *, now: float | None = None
@@ -32157,6 +32192,7 @@ class DpsWindow:
             "counter_states": {},
             "team_snapshot_projection_started": False,
             "rows": [],
+            "last_complete_rows": [],
             "snapshot_duration": 0.0,
         }
         self.main_scroll_offset = 0
@@ -32396,6 +32432,14 @@ class DpsWindow:
         segment["team_snapshot_projection_started"] = True
         segment["official_team_clock"] = official_clock
         segment["rows"] = rows
+        if (
+            segment.get("kind") == "boss"
+            and self._main_team_rows_cover_known_party(
+                rows,
+                allow_missing_ai=True,
+            )
+        ):
+            segment["last_complete_rows"] = [dict(row) for row in rows]
         return True
 
     def _end_live_hud_dps_segment(self, ended_at_epoch: object) -> None:
@@ -32422,6 +32466,7 @@ class DpsWindow:
             state["active_started_at_epoch"] = 0.0
         state["active"] = False
         state["ended_at_epoch"] = max(started_at, ended_at or time.time())
+        state["last_complete_rows"] = []
 
     def _clear_live_hud_dps_segment(self) -> None:
         self.live_hud_combat_state = None
@@ -32684,6 +32729,14 @@ class DpsWindow:
             segment["last_snapshot_time_100ns"] = snapshot_time
             segment["snapshot_duration"] = duration
             segment["rows"] = rows
+            if (
+                segment.get("kind") == "boss"
+                and self._main_team_rows_cover_known_party(
+                    rows,
+                    allow_missing_ai=True,
+                )
+            ):
+                segment["last_complete_rows"] = [dict(row) for row in rows]
             return [dict(row) for row in rows]
         if data is None:
             return None
@@ -32841,8 +32894,8 @@ class DpsWindow:
             or model_monster is None
         ):
             targetless_rows = self._main_targetless_team_rows(now)
-            # An empty list means that the new live segment is waiting for its
-            # first snapshot; let the settlement projection handle that gap.
+            # A new segment can wait for its first snapshot, while a running
+            # Boss segment can briefly receive a partial roster snapshot.
             if targetless_rows and (
                 not boss_projection
                 or self._main_team_rows_cover_known_party(
@@ -32850,12 +32903,30 @@ class DpsWindow:
                     allow_missing_ai=True,
                 )
             ):
+                if (
+                    live_boss is not None
+                    and isinstance(live_segment, dict)
+                    and live_segment.get("kind") == "boss"
+                ):
+                    live_segment["last_complete_rows"] = [
+                        dict(row) for row in targetless_rows
+                    ]
                 return targetless_rows
             if (
                 live_boss is not None
                 and isinstance(live_segment, dict)
                 and live_segment.get("kind") == "boss"
             ):
+                last_complete_rows = [
+                    dict(row)
+                    for row in live_segment.get("last_complete_rows", [])
+                    if isinstance(row, dict)
+                ]
+                if last_complete_rows and self._main_team_rows_cover_known_party(
+                    last_complete_rows,
+                    allow_missing_ai=True,
+                ):
+                    return last_complete_rows
                 # The Boss edge resets the visible list immediately.  Do not
                 # leak the model's stage-wide counters while the first clean
                 # Boss-only team snapshot is still being assembled.
@@ -33041,12 +33112,11 @@ class DpsWindow:
             return with_current_live_self(settlement_rows), False
         rating_preview = self._team_rating_preview_active()
         if not rating_preview:
-            if self._main_retained_battle_active():
-                retained_rows = self._main_retained_battle_rows()
-                if getattr(self, 'settlement_ui', None) is not None:
-                    retained_rows = [row for row in retained_rows if row.get('is_self')]
-                return with_current_live_self(retained_rows), False
-            cached_targetless_rows = self._main_targetless_team_rows(now)
+            cached_targetless_rows = (
+                self._main_targetless_team_rows(now)
+                if self._main_live_hud_projection_active(now)
+                else None
+            )
             if cached_targetless_rows:
                 return with_current_live_self(cached_targetless_rows), False
             rows = self._main_combat_display_rows(now)
@@ -34739,12 +34809,36 @@ class DpsWindow:
             self.live_hud_boss_state = next_state or terminal_state
             if next_state is not None:
                 previous_key = (
-                    int(previous_state.get("entity_id", 0) or 0),
-                    float(previous_state.get("started_at_epoch", 0.0) or 0.0),
+                    int(
+                        previous_state.get(
+                            "boss_segment_id",
+                            previous_state.get("entity_id", 0),
+                        )
+                        or 0
+                    ),
+                    float(
+                        previous_state.get(
+                            "boss_segment_started_at_epoch",
+                            previous_state.get("started_at_epoch", 0.0),
+                        )
+                        or 0.0
+                    ),
                 ) if isinstance(previous_state, dict) else (0, 0.0)
                 next_key = (
-                    int(next_state.get("entity_id", 0) or 0),
-                    float(next_state.get("started_at_epoch", 0.0) or 0.0),
+                    int(
+                        next_state.get(
+                            "boss_segment_id",
+                            next_state.get("entity_id", 0),
+                        )
+                        or 0
+                    ),
+                    float(
+                        next_state.get(
+                            "boss_segment_started_at_epoch",
+                            next_state.get("started_at_epoch", 0.0),
+                        )
+                        or 0.0
+                    ),
                 )
                 if next_key != previous_key:
                     self._begin_live_hud_dps_segment(
@@ -35593,7 +35687,7 @@ class DpsWindow:
                 )
             else:
                 self.main_dps_caption_text = "团队总秒伤"
-                footer_text = self._main_recent_battle_team_dps_text() or "--"
+                footer_text = "--"
             self._set_team_dps_value(footer_text)
 
         team_health = self.worker.team_stats_health_state()

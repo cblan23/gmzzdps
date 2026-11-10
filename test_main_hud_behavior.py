@@ -638,7 +638,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertIn("请重启助手", notices[0][0][1])
         self.assertEqual(automatic_feedback_attempts, [5])
 
-    def test_team_application_notices_overlay_above_heading_for_ten_seconds(self):
+    def test_team_application_records_remain_available_after_reminder(self):
         window, _ = make_window()
         window.model.entity_names[1] = "本人"
         window.settlement_ui = SimpleNamespace(tracker=EncounterTracker())
@@ -668,12 +668,9 @@ class MainHudBehaviorTests(unittest.TestCase):
             [row.get("section_text") for row in rows],
         )
 
-        window.team_application_notices[0]["expires_at"] = (
-            time.monotonic() - 0.01
-        )
         expired = window._settlement_main_rows()
         self.assertEqual(expired[1]["section_text"], "实时战斗/战斗记录")
-        self.assertEqual(window._team_application_section_rows(), [])
+        self.assertEqual(len(window._team_application_section_rows(now=time.monotonic() + 600)), 1)
 
     def test_current_application_packet_displays_name_and_server_rating(self):
         import struct
@@ -736,13 +733,11 @@ class MainHudBehaviorTests(unittest.TestCase):
             [
                 "入队申请  甲  非凡评分 60000",
                 "入队申请  乙  非凡评分 60001",
-                "入队申请  丁  非凡评分 60003",
                 "入队申请  丙  非凡评分 70002",
+                "入队申请  丁  非凡评分 60003",
             ],
         )
-        self.assertEqual(
-            window._team_application_section_rows(now=114.1), []
-        )
+        self.assertEqual(len(window._team_application_section_rows(now=114.1)), 4)
 
     def test_team_application_notice_respects_hidden_names(self):
         window, _ = make_window()
@@ -764,7 +759,7 @@ class MainHudBehaviorTests(unittest.TestCase):
         )
         self.assertNotIn("真实名字", rows[0]["application_text"])
 
-    def test_team_application_rows_expire_independently_and_compact_upward(self):
+    def test_team_application_rows_do_not_expire_while_reading(self):
         window, _ = make_window()
         for offset, name in enumerate(("甲", "乙", "丙")):
             window._ingest_team_application(
@@ -781,13 +776,14 @@ class MainHudBehaviorTests(unittest.TestCase):
         self.assertEqual(
             [row["application_text"] for row in shifted],
             [
+                "入队申请  甲  非凡评分 70000",
                 "入队申请  乙  非凡评分 70001",
                 "入队申请  丙  非凡评分 70002",
             ],
         )
         self.assertEqual(
             [item["user_token"] for item in window.team_application_notices],
-            ["applicant-乙", "applicant-丙"],
+            ["applicant-甲", "applicant-乙", "applicant-丙"],
         )
 
     def test_startup_identity_does_not_require_a_cached_rating(self):

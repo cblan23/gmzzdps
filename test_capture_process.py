@@ -1325,6 +1325,7 @@ class HookWorkerBatchTests(unittest.TestCase):
             self.assertEqual(invalidations, [])
             self.assertEqual(boss_cache_updates, [])
             self.assertEqual(writes, [])
+            self.assertFalse(worker.hybrid_role_session_reset_pending)
             self.assertEqual(messages.get_nowait(), ("identity_session_reset", unproven))
 
             proven = {
@@ -1344,6 +1345,7 @@ class HookWorkerBatchTests(unittest.TestCase):
             self.assertEqual(invalidations, ["identity_session_reset"])
             self.assertEqual(boss_cache_updates, [{}])
             self.assertEqual(len(writes), 1)
+            self.assertTrue(worker.hybrid_role_session_reset_pending)
             self.assertEqual(messages.get_nowait(), ("identity_session_reset", proven))
         finally:
             update_globals["write_json_object"] = original_write

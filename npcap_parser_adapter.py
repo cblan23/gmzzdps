@@ -63,6 +63,7 @@ class NpcapParserAdapter(NetworkPacketParser):
         # timestamp watermark so an older Lua snapshot cannot undo a newer
         # join/leave packet when the two sources arrive in different batches.
         self._party_roster_observed_100ns = 0
+        self._read_only_party_identity = None
 
     def apply_authoritative_local_profile(self, record):
         """Bind a log-proven current local role to this parser epoch.
@@ -135,13 +136,14 @@ class NpcapParserAdapter(NetworkPacketParser):
             return []
         members = record.get("members")
         if (
-            dungeon_id < 0 or group_id <= 0
+            dungeon_id < 0 or group_id < 0
             or not isinstance(members, list)
             or not 1 <= len(members) <= MAX_PARTY_MEMBERS
         ):
             return []
         profiles = []
         seen = set()
+        team_ids = set()
         for member in members:
             if not isinstance(member, dict):
                 return []
@@ -149,6 +151,14 @@ class NpcapParserAdapter(NetworkPacketParser):
             name = plausible_name(member.get("name"))
             if not token or not name or token in seen:
                 return []
+            if group_id == 0:
+                try:
+                    team_id = int(member.get("team_id", 0) or 0)
+                except (TypeError, ValueError, OverflowError):
+                    return []
+                if team_id <= 0:
+                    return []
+                team_ids.add(team_id)
             seen.add(token)
             fields = [[2, token], [5, name]]
             for source, field in (
@@ -164,10 +174,22 @@ class NpcapParserAdapter(NetworkPacketParser):
                 if value > 0:
                     fields.append([field, value])
             profiles.append({"$map": fields})
-        if local_token not in seen:
+        if local_token not in seen or (group_id == 0 and len(team_ids) != 1):
             return []
-        source = dict(record, method="OnJoinGroupSuccess", npcap_synthetic=True)
+        # Ordinary six-person parties have group_id=0 and a real team_id.
+        # A membership refresh inside that team must not start a new session.
+        party_identity = (group_id, next(iter(team_ids)) if team_ids else 0)
+        if (self._read_only_party_identity is not None
+                and party_identity != self._read_only_party_identity):
+            self._clear_party_roster(lock_reactivation=False)
+        method = (
+            "OnSyncTeamGroupInfo"
+            if self.party_session_id and party_identity == self._read_only_party_identity
+            else "OnJoinGroupSuccess"
+        )
+        source = dict(record, method=method, npcap_synthetic=True)
         updates = self._team_join_success_updates(source, [profiles])
+        self._read_only_party_identity = party_identity
         for member in members:
             if member.get("is_ai"):
                 continue

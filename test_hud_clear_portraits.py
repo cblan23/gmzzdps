@@ -102,9 +102,9 @@ class PortraitTests(unittest.TestCase):
                 self.renderer._boss_portrait(template_id), self.renderer._boss
             )
 
-    def test_footer_omits_clear_and_keeps_remaining_actions_contiguous(self):
+    def test_footer_exposes_clear_and_keeps_existing_actions_contiguous(self):
         regions = self.renderer.render(snapshot()).hit_regions
-        self.assertNotIn('action:clear', regions)
+        self.assertIn('action:clear', regions)
         actions = ('settings', 'lock', 'pin')
         for left, right in zip(actions, actions[1:]):
             self.assertEqual(

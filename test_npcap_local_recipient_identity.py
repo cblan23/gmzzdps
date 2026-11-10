@@ -14,6 +14,68 @@ def packet(method, entity, arguments, sequence=1):
 
 
 class LocalRecipientTests(unittest.TestCase):
+    def test_small_party_roster_uses_team_identity_when_group_id_is_zero(self):
+        self_token = "AQAAAOwNKLYHAAAA"
+        peer_token = "AQAAAOwNuopBAAAA"
+        new_token = "AQAAABEREREHAAAA"
+        parser = NpcapParserAdapter()
+        parser.self_id = SELF
+        parser.self_token = self_token
+        parser.self_confirmed = True
+        parser._bind_team_token(self_token, SELF)
+        roster = dict(
+            method="ReadOnlyCurrentDungeonRoster", local_user_token=self_token,
+            dungeon_id=0, group_id=0, filetime_100ns=TIME,
+            members=[
+                dict(user_token=self_token, name="本人", team_id=123),
+                dict(user_token=peer_token, name="队友", team_id=123),
+            ],
+        )
+        updates = parser.apply_read_only_group_roster(roster)
+        party = next(value for kind, value in updates if kind == "party")
+        self.assertEqual(set(party["user_tokens"]), {self_token, peer_token})
+        self.assertTrue(parser.explicit_party_roster_seen)
+        session = parser.party_session_id
+
+        joined = dict(roster, filetime_100ns=TIME + 10_000,
+                      members=roster["members"] + [dict(
+                          user_token=new_token, name="新队友", team_id=123)])
+        parser.apply_read_only_group_roster(joined)
+        self.assertEqual(parser.party_session_id, session)
+        self.assertIn(new_token, parser.party_tokens)
+
+        removed = dict(joined, filetime_100ns=TIME + 20_000,
+                       members=[joined["members"][0], joined["members"][2]])
+        parser.apply_read_only_group_roster(removed)
+        self.assertEqual(parser.party_session_id, session)
+        self.assertNotIn(peer_token, parser.party_tokens)
+
+        switched = dict(removed, filetime_100ns=TIME + 30_000,
+                        members=[dict(member, team_id=456)
+                                 for member in removed["members"]])
+        parser.apply_read_only_group_roster(switched)
+        self.assertGreater(parser.party_session_id, session)
+
+    def test_zero_group_roster_requires_one_proven_local_team(self):
+        self_token = "AQAAAOwNKLYHAAAA"
+        peer_token = "AQAAAOwNuopBAAAA"
+        for team_ids in ((0, 0), (123, 456), (123, -1)):
+            with self.subTest(team_ids=team_ids):
+                parser = NpcapParserAdapter()
+                parser.self_id = SELF
+                parser.self_token = self_token
+                parser.self_confirmed = True
+                roster = dict(
+                    method="ReadOnlyCurrentDungeonRoster",
+                    local_user_token=self_token, dungeon_id=0, group_id=0,
+                    members=[
+                        dict(user_token=self_token, name="本人", team_id=team_ids[0]),
+                        dict(user_token=peer_token, name="队友", team_id=team_ids[1]),
+                    ],
+                )
+                self.assertEqual(parser.apply_read_only_group_roster(roster), [])
+                self.assertFalse(parser.party_tokens)
+
     def test_stale_read_only_roster_cannot_restore_a_departed_member(self):
         self_token = "AQAAAOwNKLYHAAAA"
         peer_token = "AQAAAOwNuopBAAAA"

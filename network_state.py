@@ -2484,6 +2484,7 @@ class NetworkPacketParser:
                 **self._base_update(record),
                 "user_token": token,
                 "name": name,
+                "party_session_id": self.party_session_id,
             }
             for field, key, maximum in (
                 (5, "profession_id", 10_000_000),
@@ -5105,6 +5106,18 @@ class NetworkPacketParser:
             or (self.party_reactivation_locked and not self.party_session_id)
         ):
             return []
+        previous_tokens = (
+            set(self.party_tokens) | set(self.authoritative_party_tokens)
+            | set(self.other_party_tokens)
+        )
+        if self.self_token:
+            previous_tokens.add(self.self_token)
+        if (explicit_boundary and self.party_session_id and seen
+                and previous_tokens and seen != previous_tokens):
+            # A different successful local join is a new team even when its
+            # preceding self-leave packet was missed. Repeated tables stay in
+            # the same session, as do ordinary roster-sync updates.
+            self._clear_party_roster(lock_reactivation=False)
         starting_new_session = not self.party_session_id
         if starting_new_session and (
             self.party_tokens
@@ -5124,7 +5137,7 @@ class NetworkPacketParser:
             # Join-success carries the complete current member table, unlike
             # combat-statistics responses.  Replace any mid-session fallback
             # snapshot with this exact membership evidence.
-            self.departed_party_tokens.clear()
+            self.departed_party_tokens.difference_update(seen)
             # This full table supersedes any partial scene-entry sweep.
             self.live_party_roster_tokens.clear()
             self.live_party_roster_heartbeat_seen = False
@@ -5132,7 +5145,9 @@ class NetworkPacketParser:
             self.live_party_roster_expected_member_count = 0
             stale_tokens = (
                 set(self.party_tokens) | set(self.authoritative_party_tokens)
+                | set(self.other_party_tokens)
             ) - seen
+            self.departed_party_tokens.update(stale_tokens)
             if stale_tokens:
                 changed = True
             for stale_token in stale_tokens:
@@ -5320,6 +5335,9 @@ class NetworkPacketParser:
         current = self._capture_stream_id(record)
         if not previous or not current or current == previous:
             return False
+        # A new capture stream supplies fresh live evidence. Retired tokens
+        # still block queued heartbeats from the stream that saw the leave.
+        self.departed_party_tokens.clear()
         self.party_reactivation_locked = False
         self.party_reactivation_lock_stream_id = ""
         return True
@@ -5385,6 +5403,10 @@ class NetworkPacketParser:
         )
 
     def _clear_party_roster(self, *, lock_reactivation: bool = True) -> None:
+        self.departed_party_tokens.update(
+            (set(self.party_tokens) | set(self.authoritative_party_tokens)
+             | set(self.other_party_tokens)) - {self.self_token}
+        )
         self._discard_dungeon_bot_roster()
         self.dungeon_bot_display_last_100ns = 0
         self_max_hp = self.token_max_hp.get(self.self_token or "")
@@ -5399,7 +5421,6 @@ class NetworkPacketParser:
         self.party_tokens.clear()
         self.authoritative_party_tokens.clear()
         self.other_party_tokens.clear()
-        self.departed_party_tokens.clear()
         self.explicit_party_roster_seen = False
         self.token_max_hp.clear()
         if self.self_token and self.self_id is not None:
@@ -6396,15 +6417,25 @@ class NetworkPacketParser:
             if party_changed:
                 updates.append(self._party_update(record, authoritative=True))
         else:
-            self.authoritative_party_tokens = set(desired)
-            self.party_tokens = set(desired)
-            self.party_ids = set(desired.values())
+            # Stage counters may omit quiet members even before a full join
+            # table was captured. Keep proven members and update only the
+            # token/actor bindings actually present in this statistics table.
+            self.authoritative_party_tokens.update(desired)
+            self.party_tokens.update(desired)
+            self.party_ids.difference_update(
+                actor_id for actor_id in old_actors.values()
+                if actor_id is not None
+            )
+            self.party_ids.update(desired.values())
             if self.self_token:
                 self.party_tokens.discard(self.self_token)
             if self.self_id is not None:
                 self.party_ids.discard(self.self_id)
             self.other_party_tokens = set(self.party_tokens)
-            self.party_member_count = min(MAX_PARTY_MEMBERS, len(desired))
+            self.party_member_count = min(MAX_PARTY_MEMBERS, max(
+                self.party_member_count, len(self.authoritative_party_tokens),
+                len(self.party_ids) + int(self.self_id is not None),
+            ))
             self._record_party_activity(record)
             updates.append(self._party_update(record, authoritative=True))
 
@@ -8126,6 +8157,7 @@ class NetworkPacketParser:
                 **self._base_update(record),
                 "actor_id": actor_id,
                 "user_token": token,
+                "party_session_id": self.party_session_id,
                 "server_time": server_time,
                 "full_snapshot": full_snapshot,
             }

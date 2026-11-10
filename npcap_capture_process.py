@@ -2707,6 +2707,9 @@ def capture_process_main(
     capture_source: str = CAPTURE_SOURCE_WINDOWS_RAW,
     allow_npcap_fallback: bool = False,
 ) -> None:
+    from runtime_diagnostics import enable_runtime_diagnostics, write_runtime_diagnostic
+
+    enable_runtime_diagnostics("capture")
     del target_boss_lookup_event  # Passive capture observes all server records.
     watchdog = ParentProcessWatchdog(parent_pid)
     parent_alive = watchdog.is_alive()
@@ -2752,6 +2755,7 @@ def capture_process_main(
     except RuntimeCapabilityError as exc:
         _put(output_queue, "fatal", f"runtime capability rejected: {exc}")
     except BaseException:
+        write_runtime_diagnostic("capture_process_exception", exception=sys.exc_info())
         _put(output_queue, "fatal", traceback.format_exc())
     finally:
         parent_alive = watchdog.is_alive()

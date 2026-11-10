@@ -334,6 +334,17 @@ class HybridTeamStatsReceiveDriver:
     def close(self) -> None:
         self._close_hook(reason="driver_close")
 
+    def reset_role_session(self) -> None:
+        """Discard an in-process hook after the selected role changes."""
+        self._close_hook(reason="role_session_changed")
+        self.next_install_at = 0.0
+        self.expected_sequence = None
+        self.records = queue.SimpleQueue()
+        self.errors = queue.SimpleQueue()
+        with self.lock:
+            self.local_role_script_entity = 0
+            self.local_role_evidence_method = ""
+
 
 class HybridTeamStatsHookDriver:
     """Manage one stable request Hook while Npcap consumes the responses."""
@@ -748,3 +759,12 @@ class HybridTeamStatsHookDriver:
         self.active_attempt = None
         self.attempt_deadline = 0.0
         self._close_hook(reason="driver_close")
+
+    def reset_role_session(self) -> None:
+        """Remove request state that belongs to the previous local role."""
+        self.active_attempt = None
+        self.attempt_deadline = 0.0
+        self.attempted_encounters.clear()
+        self.script_entity_override = 0
+        self._close_hook(reason="role_session_changed")
+        self.next_install_at = 0.0

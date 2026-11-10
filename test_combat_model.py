@@ -6585,12 +6585,12 @@ class CombatModelTests(unittest.TestCase):
         self.assertEqual(model.stats[SELF_ID].damage, 88_000)
 
     def test_release_version_matches_client_build_and_notes(self):
-        self.assertEqual(APP_VERSION, "0.4.2")
+        self.assertEqual(APP_VERSION, "0.4.5")
         numeric_version = (
             APP_VERSION[:-1] if APP_VERSION[-1:].isalpha() else APP_VERSION
         )
         self.assertEqual(CLIENT_BUILD.split("+", 1)[0], numeric_version)
-        self.assertRegex(CLIENT_BUILD, r"^0\.4\.2\+\d{8}\.\d+$")
+        self.assertRegex(CLIENT_BUILD, r"^0\.4\.5\+\d{8}\.\d+$")
         notes = Path(__file__).with_name(f"release-notes-v{APP_VERSION}.txt")
         self.assertTrue(notes.is_file())
         self.assertIn(APP_VERSION, notes.read_text(encoding="utf-8-sig"))

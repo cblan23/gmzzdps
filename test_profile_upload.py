@@ -422,6 +422,24 @@ class ProfileUploadTests(unittest.TestCase):
         self.first = character_token(1001)
         self.second = character_token(1002)
 
+    def test_public_catalog_has_a_covering_encounter_index(self) -> None:
+        columns = [
+            str(row[2])
+            for row in self.connection.execute(
+                "PRAGMA index_info(idx_encounters_public_catalog)"
+            )
+        ]
+
+        self.assertEqual(columns, [
+            "boss_name",
+            "statistics_status",
+            "ended_at",
+            "encounter_id",
+            "dungeon_id",
+            "stage_id",
+            "difficulty",
+        ])
+
     def tearDown(self) -> None:
         self.connection.close()
 
@@ -1180,6 +1198,49 @@ class ProfileUploadTests(unittest.TestCase):
         self.assertEqual(catalog['bosses'][0]['included'], 1)
         self.assertEqual(catalog['bosses'][0]['clears'], 2)
         self.assertEqual(catalog['bosses'][0]['ai_clears'], 0)
+
+    def test_public_aggregations_use_backfilled_lightweight_metadata(self) -> None:
+        record = self.encounter(self.first)
+        record["dungeon_name"] = "测试副本"
+        record["brass_tome_status"] = "enabled"
+        for participant in record["participants"]:
+            participant["extraordinary_rating"] = 30_000
+        receipt = self.store.upload_encounter(
+            self.connection,
+            self.first,
+            record,
+            public_mode="character",
+            app_version="0.3.5",
+        )
+        encounter_id = receipt["encounter_id"]
+        metadata = self.connection.execute(
+            "SELECT * FROM encounter_public_metadata WHERE encounter_id=?",
+            (encounter_id,),
+        ).fetchone()
+        self.assertEqual(metadata["result"], "defeated")
+        self.assertEqual(metadata["completion_confirmed"], 1)
+        self.assertEqual(metadata["dungeon_name"], "测试副本")
+        self.assertEqual(metadata["brass_tome_status"], "enabled")
+
+        self.connection.execute(
+            "DELETE FROM encounter_public_metadata WHERE encounter_id=?",
+            (encounter_id,),
+        )
+        initialize_profile_schema(self.connection)
+        self.connection.execute(
+            "UPDATE encounters SET payload_json='{}' WHERE encounter_id=?",
+            (encounter_id,),
+        )
+
+        catalog = self.store.public_catalog(self.connection)
+        self.assertEqual(catalog["bosses"][0]["clears"], 1)
+        leaderboard = self.store.public_leaderboards(self.connection)
+        self.assertEqual(leaderboard[0]["encounter_id"], encounter_id)
+        performance = self.store.public_performance(
+            self.connection, boss="name:测试首领"
+        )
+        self.assertEqual(performance["total_encounters"], 1)
+        self.assertEqual(performance["total_samples"], 2)
 
     def test_public_history_deduplicates_shared_uploads_and_applies_filters(self) -> None:
         self.create_profile(self.first, '上传甲')

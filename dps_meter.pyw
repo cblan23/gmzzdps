@@ -181,6 +181,7 @@ from network_state import (
     unique_inferred_auxiliary_for_parent,
 )
 from remembered_card import remember_card, remembered_card
+from runtime_diagnostics import enable_runtime_diagnostics, write_runtime_diagnostic
 from profile_upload import (
     ProfileUploadError,
     build_upload_encounter,
@@ -318,10 +319,10 @@ UPLOAD_STATE_PATH = DATA_DIR / "combat_upload_state.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手"
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.5"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.4.2+20261030.3"
+CLIENT_BUILD = "0.4.5+20261110.1"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -671,7 +672,7 @@ CAPTURE_PROCESS_SLOW_SHUTDOWN_SECONDS = 10.0
 CAPTURE_BATCH_HEARTBEAT_TIMEOUT_SECONDS = 8.0
 CAPTURE_STALL_STOP_GRACE_SECONDS = 1.0
 LIVE_TEAM_RATING_REPUBLISH_SECONDS = 1.0
-TEAM_APPLICATION_NOTICE_SECONDS = 10.0
+SUPPORT_AUTHOR_URL = "https://wzyp.cn/shop/QDAWZ5KZ"
 UPDATE_CLOSE_GAME_NOTICE_SECONDS = 30.0
 MULTIPHASE_BOSS_TEMPLATE_IDS = frozenset(
     int(parent_template_id)
@@ -3215,9 +3216,10 @@ class CombatModel:
         self.entity_ai_states: dict[int, bool] = {}
         self.entity_fight_attributes: dict[int, dict[str, float]] = {}
         self.entity_fight_attribute_times: dict[int, int] = {}
-        # Private upload identities are a side channel only. They never take
-        # part in combat classification, totals, clocks, or display names.
+        # Stable character identities guard ownership across roster changes.
+        # Raw tokens remain private and are never used as display names.
         self.actor_character_ids: dict[int, str] = {}
+        self.encounter_departed_profiles: dict[int, dict[str, object]] = {}
         self.self_character_id = ""
         self.target_catalog: dict[str, dict] = {
             str(template_id): dict(metadata)
@@ -3797,6 +3799,7 @@ class CombatModel:
         self.team_zero_baseline_signal_100ns = 0
         self.team_counter_regressions.clear()
         self.events.clear()
+        self.encounter_departed_profiles.clear()
         self.skill_cast_events.clear()
         self.skill_cast_event_keys.clear()
         if carried_skill_cast_events:
@@ -8420,7 +8423,7 @@ class CombatModel:
                 or f"玩家{index + 1}",
                 "profession_id": self.actor_profession_id(int(row["actor_id"])),
                 "extraordinary_rating": self.entity_extraordinary_ratings.get(
-                    int(row["actor_id"])
+                    int(row["actor_id"]), self.encounter_departed_profiles.get(int(row["actor_id"]), {}).get("extraordinary_rating")
                 ),
                 "is_ai": self.actor_is_ai(int(row["actor_id"])),
             }
@@ -8509,7 +8512,7 @@ class CombatModel:
                     "is_self": actor_id == self.self_id,
                     "profession_id": self.actor_profession_id(actor_id),
                     "extraordinary_rating": self.entity_extraordinary_ratings.get(
-                        actor_id
+                        actor_id, self.encounter_departed_profiles.get(actor_id, {}).get("extraordinary_rating")
                     ),
                     "is_ai": self.actor_is_ai(actor_id),
                     "damage": actor_damage,
@@ -8815,13 +8818,19 @@ class CombatModel:
         )
         if self.self_id is not None:
             identity_actor_ids.add(int(self.self_id))
+        record_character_ids = {
+            actor_id: str(profile.get("user_token", ""))
+            for actor_id, profile in self.encounter_departed_profiles.items()
+            if profile.get("user_token")
+        }
+        record_character_ids.update(self.actor_character_ids)
         participant_identities = [
             {
                 "actor_id": actor_id,
-                "character_id": self.actor_character_ids[actor_id],
+                "character_id": record_character_ids[actor_id],
             }
             for actor_id in sorted(identity_actor_ids)
-            if actor_id in self.actor_character_ids
+            if actor_id in record_character_ids
         ]
         archived_self_character_id = (
             self.actor_character_ids.get(int(self.self_id or 0), "")
@@ -11437,6 +11446,11 @@ class CombatModel:
             if party_session_id != previous_party_session_id
             else int(self.party_session_started_100ns or 0)
         )
+        if (previous_party_session_id > 0 and party_session_id > 0
+                and party_session_id != previous_party_session_id
+                and self._encounter_started()):
+            self.reset(keep_identity=True, keep_monsters=True,
+                       preserve_active_target=True, archive_reason="party_session_change")
         previous_provisional_ids = set(self.provisional_party_ids)
         official_positive_ids = {entity_id for entity_id in parsed if entity_id > 0}
         self.provisional_party_ids.difference_update(official_positive_ids)
@@ -11489,6 +11503,10 @@ class CombatModel:
             self.team_damage_states.clear()
             self.team_taken_states.clear()
             self.team_healing_states.clear()
+            # The first inferred roster can follow its own Common snapshot;
+            # those initial targetless rows already belong to the new team.
+            if previous_party_session_id > 0:
+                self._clear_targetless_team_statistics()
             self.team_server_time = 0
             self.team_server_update_100ns = 0
         self.party_known = True
@@ -11531,6 +11549,16 @@ class CombatModel:
                     and str(token or "") not in allowed_tokens
                 )
             for actor_id in stale_ids:
+                if actor_id in self.encounter_member_ids:
+                    # Live roster caches may expire; a participant's identity
+                    # must remain available for the battle already in progress.
+                    self.encounter_departed_profiles[actor_id] = {
+                        "name": self.entity_names.get(actor_id, ""),
+                        "profession_id": self.entity_professions.get(actor_id, 0),
+                        "extraordinary_rating": self.entity_extraordinary_ratings.get(actor_id),
+                        "is_ai": self.entity_ai_states.get(actor_id, False),
+                        "user_token": self.actor_character_ids.get(actor_id, ""),
+                    }
                 self.entity_names.pop(actor_id, None)
                 self.entity_professions.pop(actor_id, None)
                 self.entity_extraordinary_ratings.pop(actor_id, None)
@@ -11895,6 +11923,16 @@ class CombatModel:
                 )
             except ProfileUploadError:
                 identity = None
+        source_identity = self.actor_character_ids.get(old_actor, "") or str(self.encounter_departed_profiles.get(old_actor, {}).get("user_token", ""))
+        target_identity = self.actor_character_ids.get(new_actor, "") or str(self.encounter_departed_profiles.get(new_actor, {}).get("user_token", ""))
+        if (source_identity and raw_character_id
+                and (identity is None or source_identity != identity.canonical)):
+            return False
+        if source_identity and target_identity and source_identity != target_identity:
+            return False
+        departed_profile = self.encounter_departed_profiles.pop(old_actor, None)
+        if departed_profile is not None:
+            self.encounter_departed_profiles[new_actor] = departed_profile
         old_character_id = self.actor_character_ids.pop(old_actor, "")
         if old_character_id:
             changed = True
@@ -13852,8 +13890,42 @@ class CombatModel:
             state.baseline_absolute = 0
             state.baseline_snapshot_time_100ns = signal
 
+    def _team_stat_matches_context(self, update: object) -> bool:
+        """Validate shared identity/session boundaries before either consumer."""
+        if not isinstance(update, dict) or self.awaiting_post_exit_context:
+            return False
+        try:
+            session_id = int(update.get("party_session_id", 0) or 0)
+            actor_id = int(update.get("actor_id", 0) or 0)
+            timestamp = int(update.get("filetime_100ns", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (session_id and (self.party_known or self.party_session_id)
+                and session_id != self.party_session_id):
+            return False
+        if (timestamp and self.party_session_started_100ns
+                and timestamp < self.party_session_started_100ns):
+            return False
+        if (actor_id in self.encounter_departed_profiles
+                and actor_id not in self._current_member_ids()):
+            return False
+        token = str(update.get("user_token", "") or "").strip()
+        known_token = self.actor_character_ids.get(actor_id, "") or str(
+            self.encounter_departed_profiles.get(actor_id, {}).get("user_token", "")
+        )
+        if token and known_token:
+            try:
+                incoming_token = canonical_character_identity(token, allow_ai=True).canonical
+            except ProfileUploadError:
+                return False
+            if incoming_token != known_token:
+                # Never apply a new member's cumulative values to the departed
+                # member's actor. The parser must first provide an exact binding.
+                return False
+        return True
+
     def ingest_team_stat(self, update: dict) -> bool:
-        if self.awaiting_post_exit_context:
+        if not self._team_stat_matches_context(update):
             return False
         invalid = [key for key in ('absolute_damage', 'absolute_taken', 'absolute_effective_healing')
                    if key in update and parse_combat_amount(update[key]) is None]
@@ -14852,6 +14924,8 @@ class CombatModel:
 
     def display_name(self, actor_id: int) -> str:
         automatic_name = self.entity_names.get(actor_id, "").strip()
+        if not automatic_name:
+            automatic_name = str(self.encounter_departed_profiles.get(actor_id, {}).get("name", "") or "")
         if automatic_name:
             return automatic_name
         if actor_id == self.self_id:
@@ -14861,7 +14935,7 @@ class CombatModel:
     def actor_is_ai(self, actor_id: int) -> bool:
         if actor_id in self.entity_ai_states:
             return bool(self.entity_ai_states[actor_id])
-        return False
+        return bool(self.encounter_departed_profiles.get(actor_id, {}).get("is_ai", False))
 
     def display_target_name(self, entity_id: int) -> str:
         if not entity_id:
@@ -14980,7 +15054,7 @@ class CombatModel:
         return "未知技能"
 
     def actor_profession_id(self, actor_id: int) -> int | None:
-        explicit = self.entity_professions.get(actor_id)
+        explicit = self.entity_professions.get(actor_id) or self.encounter_departed_profiles.get(actor_id, {}).get("profession_id")
         if explicit:
             return explicit
         actor = self.stats.get(actor_id)
@@ -17064,6 +17138,7 @@ class HookWorker(threading.Thread):
         self.team_stats_mode = TEAM_STATS_MODE_NAMES[TEAM_STATS_MODE_UNKNOWN]
         self.team_stats_mode_reason = "startup"
         self.team_stats_mode_changes = 0
+        self.hybrid_role_session_reset_pending = False
         self.diagnostic_lock = threading.Lock()
         self.diagnostics: dict[str, object] = {
             "stage": "created",
@@ -17627,6 +17702,7 @@ class HookWorker(threading.Thread):
             self.last_emitted_self_identity = {}
             self.last_emitted_dungeon_context = {}
             self.team_stats_last_snapshot_total = None
+            self.hybrid_role_session_reset_pending = True
             self.equipment_profiles.invalidate("identity_session_reset")
             if self.self_identity_cache:
                 self.self_identity_cache = {}
@@ -18699,6 +18775,18 @@ class HookWorker(threading.Thread):
                         parser,
                         now=now,
                         capture_client=capture,
+                    )
+                if self.hybrid_role_session_reset_pending:
+                    self.hybrid_role_session_reset_pending = False
+                    for driver in (hybrid_team_driver, hybrid_receive_driver):
+                        reset_role_session = getattr(
+                            driver, "reset_role_session", None
+                        )
+                        if callable(reset_role_session):
+                            reset_role_session()
+                    self._log_experiment_lifecycle(
+                        "hybrid_role_session_reset",
+                        game_pid=game_pid,
                     )
                 self._service_equipment_hook_commands(
                     hybrid_team_driver,
@@ -19832,9 +19920,9 @@ class DpsWindow:
         self.main_cleared_encounter_ids = deque(maxlen=64)
         self.main_hidden_combat_encounter_id = ""
         self.main_recent_battle_scope_started_ns = 0
-        # Transient network notifications only.  They are never written to
-        # preferences/history and never become CombatModel party members.
+        # Application records live for this team session, independently of DPS.
         self.team_application_notices: deque[dict[str, object]] = deque()
+        self.team_applications_expanded = False
         # Current-session equipment summaries only. The permanent query
         # archive is evidence, never a source for this mapping.
         self.team_equipment_profiles: dict[str, dict[str, object]] = {}
@@ -21711,6 +21799,10 @@ class DpsWindow:
         fatal_payload = getattr(self, "capture_fatal_payload", None)
         requested = bool(details.get("requested", False))
         terminal = bool(details.get("terminal", False))
+        write_runtime_diagnostic(
+            f"capture_worker_stopped requested={requested} terminal={terminal} "
+            f"reason={str(details.get('reason', 'unknown'))[:96]}"
+        )
         intentional = bool(
             requested
             or self.closing
@@ -22410,6 +22502,10 @@ class DpsWindow:
     def _report_tk_callback_exception(
         self, exception_type, exception_value, exception_traceback
     ) -> None:
+        write_runtime_diagnostic(
+            "tk_callback_exception",
+            exception=(exception_type, exception_value, exception_traceback),
+        )
         details = "".join(
             traceback.format_exception(
                 exception_type, exception_value, exception_traceback
@@ -24022,6 +24118,15 @@ class DpsWindow:
                     },
                     *team_rows,
                 ]
+            for row in display_rows:
+                if row.get("row_kind") == "section":
+                    row["application_count"] = len(application_rows)
+                    row["applications_expanded"] = bool(getattr(self, "team_applications_expanded", False))
+            if getattr(self, "team_applications_expanded", False):
+                display_rows.extend([
+                    {"row_kind": "application_section", "application_count": len(application_rows)},
+                    *(application_rows or [{"row_kind": "message", "message_text": "等待入队申请"}]),
+                ])
             rating_preview = True
 
         current_monster = getattr(self.model, "current_monster", None)
@@ -24348,7 +24453,8 @@ class DpsWindow:
             'bosses': display_bosses,
             "prediction": None if retained_record or self._main_display_is_cleared() else prediction_value,
             "rows": display_rows,
-            "application_rows": application_rows,
+            "application_count": len(application_rows),
+            "observed_at": int(time.monotonic()) if pve_team_view and getattr(self, "team_applications_expanded", False) else 0,
             "rating_preview": rating_preview,
             "pve_hud_view": (
                 "team" if pve_team_view else "recent_battle"
@@ -24634,12 +24740,25 @@ class DpsWindow:
                 self._show_enrage_tooltip(event)
         else:
             self._hide_enrage_tooltip()
+        if region.startswith("application_name:"):
+            token = region.removeprefix("application_name:")
+            text = next((row["name"] for row in self._team_application_section_rows()
+                         if row["application_token"] == token), "")
+            self._show_hud_text_tooltip(text, event)
+        elif region in {"action:clear", "help:clear_disabled"}:
+            self._show_hud_text_tooltip("战斗结束后可清空" if self._main_clear_blocked()
+                                        else "清空当前统计", event)
+        elif region == "action:support":
+            self._show_hud_text_tooltip("支持作者，赠长期卡密", event)
+        else:
+            self._hide_main_tooltip()
 
     def _layered_main_leave(self, _event=None) -> None:
         if getattr(self, "layered_main_hover_action", ""):
             self.layered_main_hover_action = ""
             self._schedule_layered_main_render()
         self._hide_enrage_tooltip()
+        self._hide_main_tooltip()
 
     def _layered_main_press(self, event) -> None:
         if (
@@ -24663,10 +24782,17 @@ class DpsWindow:
             and region not in {"scrollbar:rows", "resize:height"}
             and not region.startswith("action:refresh_equipment:")
             and not region.startswith("equipment_refresh_pending:")
+            and not region.startswith("application_name:")
+            and region != "help:clear_disabled"
             and region not in {
                 "action:pve_recent_battle",
                 "action:pve_team",
                 "action:web_database",
+                "action:support",
+                "action:applications",
+                "action:collapse_applications",
+                "action:clear_applications",
+                "action:clear",
             }
         )
         self.layered_main_scroll_drag_origin = None
@@ -24833,6 +24959,12 @@ class DpsWindow:
             self._set_pve_hud_view("team")
         elif pressed == "web_database":
             webbrowser.open(WEB_DATABASE_URL, new=2)
+        elif pressed == "support":
+            webbrowser.open(SUPPORT_AUTHOR_URL, new=2)
+        elif pressed in {"applications", "collapse_applications"}:
+            self._toggle_team_applications()
+        elif pressed == "clear_applications":
+            self._clear_team_applications()
         elif pressed == "update":
             self._start_update_check(manual=True)
         elif pressed == "download_update":
@@ -27955,6 +28087,8 @@ class DpsWindow:
             self_id = 0
         if self_id:
             live_members.add(self_id)
+        if getattr(self.model, "party_known", False):
+            rows = [row for row in rows if int(row.get("actor_id", 0) or 0) in live_members]
         existing_ids = {
             int(row.get("actor_id", 0) or 0)
             for row in rows
@@ -28141,7 +28275,7 @@ class DpsWindow:
     def _ingest_team_application(
         self, payload: object, *, now: float | None = None
     ) -> bool:
-        """Remember one application for ten seconds without a row cap."""
+        """Retain one application per character until the team session ends."""
 
         if not isinstance(payload, dict):
             return False
@@ -28149,16 +28283,24 @@ class DpsWindow:
         name = str(payload.get("name", "") or "").strip()
         if not token or not name:
             return False
+        try:
+            session_id = int(payload.get("party_session_id", 0) or 0)
+            current_session = int(getattr(self.model, "party_session_id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if session_id and session_id != current_session:
+            return False
+        if token in getattr(self.model, "party_user_tokens", set()):
+            return False
         observed_at = time.monotonic() if now is None else float(now)
         rating = normalize_extraordinary_rating(
             payload.get("extraordinary_rating")
         )
         notice: dict[str, object] = {
             "user_token": token,
-            "name": name[:20],
+            "name": name,
             "extraordinary_rating": rating,
             "received_at": observed_at,
-            "expires_at": observed_at + TEAM_APPLICATION_NOTICE_SECONDS,
         }
         for key in ("profession_id", "level", "server_id"):
             try:
@@ -28169,28 +28311,56 @@ class DpsWindow:
                 notice[key] = value
 
         current = getattr(self, "team_application_notices", ())
-        active = [
-            dict(item)
-            for item in current
-            if isinstance(item, dict)
-            and float(item.get("expires_at", 0.0) or 0.0) > observed_at
-            and str(item.get("user_token", "") or "") != token
-        ]
-        active.append(notice)
+        active = [dict(item) for item in current if isinstance(item, dict)]
+        for index, item in enumerate(active):
+            if str(item.get("user_token", "") or "") == token:
+                active[index] = notice
+                break
+        else:
+            active.append(notice)
         self.team_application_notices = deque(active)
         return True
+
+    def _promote_joined_team_applications(self) -> bool:
+        """Move confirmed members out of applications, retaining known details."""
+        model = self.model
+        tokens = getattr(model, "party_user_tokens", set())
+        actors = {
+            token: actor_id
+            for actor_id, token in getattr(model, "actor_character_ids", {}).items()
+            if actor_id in model._current_member_ids()
+        }
+        pending = []
+        changed = False
+        for notice in getattr(self, "team_application_notices", ()):
+            token = str(notice.get("user_token", "") or "")
+            if token not in tokens:
+                pending.append(notice)
+                continue
+            changed = True
+            actor_id = actors.get(token)
+            if actor_id is None:
+                continue
+            profile = dict(entity_id=actor_id, user_token=token, entity_type="Player")
+            for key, values in (
+                ("name", model.entity_names),
+                ("profession_id", model.entity_professions),
+                ("extraordinary_rating", model.entity_extraordinary_ratings),
+            ):
+                if not values.get(actor_id) and notice.get(key):
+                    profile[key] = notice[key]
+            model.ingest_profile(profile)
+        self.team_application_notices = deque(pending)
+        return changed
 
     def _team_application_section_rows(
         self, *, now: float | None = None
     ) -> list[dict[str, object]]:
-        """Return active application lines and expire them without timers."""
-
-        observed_at = time.monotonic() if now is None else float(now)
+        """Return session records; closing a reminder never deletes its rows."""
         active = [
             dict(item)
             for item in getattr(self, "team_application_notices", ())
             if isinstance(item, dict)
-            and float(item.get("expires_at", 0.0) or 0.0) > observed_at
         ]
         self.team_application_notices = deque(active)
         rows: list[dict[str, object]] = []
@@ -28206,6 +28376,11 @@ class DpsWindow:
             rows.append(
                 {
                     "row_kind": "team_application",
+                    "name": name,
+                    "profession_id": int(item.get("profession_id", 0) or 0),
+                    "rating_text": f"{rating:,}" if rating is not None else "--",
+                    "received_at": float(item.get("received_at", 0.0) or 0.0),
+                    "joined": str(item.get("user_token", "") or "") in getattr(self.model, "party_user_tokens", set()),
                     "application_text": (
                         f"入队申请  {name}  非凡评分 "
                         f"{rating if rating is not None else '--'}"
@@ -28217,6 +28392,48 @@ class DpsWindow:
                 }
             )
         return rows
+
+    def _toggle_team_applications(self) -> None:
+        self.team_applications_expanded = not bool(getattr(self, "team_applications_expanded", False))
+        self.main_scroll_offset = 0
+        if self.team_applications_expanded:
+            snapshot = self._layered_main_snapshot()
+            rows = snapshot.get("rows", [])
+            section_index = next((index for index, row in enumerate(rows)
+                                  if row.get("row_kind") == "application_section"), 0)
+            visible = int(snapshot.get("visible_rows", HUD_DEFAULT_VISIBLE_ROWS))
+            self.main_scroll_offset = min(section_index, max(0, len(rows) - visible)) * self._main_row_height()
+        self._schedule_layered_main_render()
+
+    def _clear_team_applications(self) -> None:
+        self.team_application_notices = deque()
+        self._hide_main_tooltip()
+        self._schedule_layered_main_render()
+
+    def _show_hud_text_tooltip(self, text: str, event) -> None:
+        if not text or not isinstance(getattr(self, "root", None), tk.Misc):
+            return
+        popup = getattr(self, "main_tooltip", None)
+        if popup is not None and popup.winfo_exists() and getattr(self, "main_tooltip_text", "") == text:
+            return
+        self._hide_main_tooltip()
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True)
+        popup.transient(self.root)
+        popup.attributes("-topmost", bool(self.root.attributes("-topmost")))
+        tk.Label(popup, text=text, bg="#122738", fg="#e5f1fa", padx=8, pady=5,
+                 font=("Microsoft YaHei UI", 10)).pack()
+        popup.update_idletasks()
+        left, top, right, bottom = self._work_area(self.root)
+        x = min(right - popup.winfo_reqwidth() - 8, max(left + 8, int(event.x_root) + 12))
+        y = min(bottom - popup.winfo_reqheight() - 8, max(top + 8, int(event.y_root) + 18))
+        popup.geometry(f"+{x}+{y}")
+        self.main_tooltip = popup
+        self.main_tooltip_text = text
+
+    def _reset_team_applications(self) -> None:
+        self.team_application_notices = deque()
+        self.team_applications_expanded = False
 
 
 
@@ -32209,6 +32426,9 @@ class DpsWindow:
             or not payload.get("full_snapshot")
         ):
             return False
+        context_validator = getattr(self.model, "_team_stat_matches_context", None)
+        if callable(context_validator) and not context_validator(payload):
+            return False
         try:
             timestamp = int(payload.get("filetime_100ns", 0) or 0)
             actor_id = int(payload.get("actor_id", 0) or 0)
@@ -33628,7 +33848,6 @@ class DpsWindow:
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
         rows, rating_preview = self._main_display_rows()
-        application_rows = self._team_application_section_rows()
         if update_scroll_state:
             self._sync_main_content_height(len(rows))
             try:
@@ -34125,43 +34344,6 @@ class DpsWindow:
                     tags=(f"actor:{actor_id}",),
                 )
 
-        # Applications float over the list instead of becoming list rows.
-        # Their lifetime therefore cannot clear, shift, or scroll the rating /
-        # DPS content underneath.  Keep every notice in the queue; the current
-        # viewport naturally clips a burst larger than the visible area.
-        if draw_content and application_rows:
-            for index, row in enumerate(application_rows):
-                # Keep the local-player row visible; notices begin over the
-                # DPS/rating rows beneath it.
-                top = scroll_offset + (index + 1) * row_height
-                bottom = top + row_height
-                if top >= scroll_offset + height:
-                    break
-                margin = self._main_px(5)
-                canvas_rounded_rectangle(
-                    canvas,
-                    margin,
-                    top + self._main_px(7),
-                    width - margin,
-                    bottom - self._main_px(7),
-                    self._main_px(8),
-                    fill="#129750",
-                    outline="#66ffa6",
-                    width=max(1, self._main_px(1)),
-                    tags=("main-team-application-overlay",),
-                )
-                canvas_outlined_text(
-                    canvas,
-                    width // 2,
-                    top + row_height // 2,
-                    text=str(row.get("application_text") or "入队申请"),
-                    fill="#f7fffa",
-                    outline="#07552d",
-                    outline_width=max(1, self._main_px(1)),
-                    font=self._ui_font("main_text"),
-                    tags=("main-team-application-overlay",),
-                )
-
         if update_scroll_state:
             self._draw_main_scroll_indicator(width, height, content_height)
 
@@ -34653,6 +34835,7 @@ class DpsWindow:
 
     def _reset_for_capture_session_change(self, timestamp_ns=None) -> None:
         """Drop every role-scoped value before accepting a new stream."""
+        write_runtime_diagnostic("role_session_reset_started")
         controller = getattr(self, "settlement_ui", None)
         if controller is not None:
             controller.reset_capture_session(timestamp_ns)
@@ -34728,7 +34911,7 @@ class DpsWindow:
         self.main_hidden_combat_encounter_id = ""
         self.main_recent_battle_scope_started_ns = 0
         self.main_recent_battle_expanded = True
-        self.team_application_notices = deque()
+        self._reset_team_applications()
         self._clear_team_equipment_profiles()
         self.main_scroll_offset = 0
         self.main_time_text = "00:00"
@@ -34742,6 +34925,8 @@ class DpsWindow:
         self.enrage_prediction_visible = False
         self._flush_combat_history(force=True)
         self._schedule_layered_main_render()
+
+        write_runtime_diagnostic("role_session_reset_completed")
 
     def _identity_session_change_is_proven(self, payload: object) -> bool:
         """Require a different role token before dropping live PvE state."""
@@ -34938,6 +35123,7 @@ class DpsWindow:
                 self._invalidate_team_rating_preview_rows()
                 self._schedule_team_equipment_profiles()
         elif kind == "party":
+            previous_encounter_id = str(getattr(self.model, "encounter_id", ""))
             previous_party_session_id = int(
                 getattr(self.model, "party_session_id", 0) or 0
             )
@@ -34947,16 +35133,16 @@ class DpsWindow:
             had_battle_values = bool(
                 callable(encounter_started) and encounter_started()
             )
-            combat_in_progress = getattr(
-                self.model, "combat_in_progress", None
-            )
-            was_in_combat = bool(
-                callable(combat_in_progress) and combat_in_progress()
-            )
             party_changed = self.model.ingest_party(payload)
             next_party_session_id = int(
                 getattr(self.model, "party_session_id", 0) or 0
             )
+            if next_party_session_id != previous_party_session_id:
+                if previous_party_session_id > 0 or next_party_session_id == 0:
+                    self._reset_team_applications()
+                self._clear_live_hud_dps_segment()
+                self.live_hud_boss_state = None
+            applications_changed = self._promote_joined_team_applications()
             tracker = getattr(getattr(self, "settlement_ui", None), "tracker", None)
             settlement_controller = getattr(self, "settlement_ui", None)
             current = getattr(tracker, "encounters", {}).get(
@@ -34996,7 +35182,6 @@ class DpsWindow:
             )
             if (
                 next_party_session_id != previous_party_session_id
-                and not was_in_combat
                 and not preserve_recent
             ):
                 # Membership changes inside one team session update only the
@@ -35009,17 +35194,18 @@ class DpsWindow:
                         else self._main_boundary_timestamp_ns(payload)
                         or time.time_ns()
                     ),
-                    hide_current_encounter=had_battle_values
+                    hide_current_encounter=(
+                        had_battle_values
+                        and str(getattr(self.model, "encounter_id", ""))
+                        == previous_encounter_id
+                    )
                 )
-            if party_changed:
+            if party_changed or applications_changed:
                 self._invalidate_team_rating_preview_rows()
                 self._schedule_layered_main_render()
             self._schedule_team_equipment_profiles()
         elif kind == "team_application":
             if self._ingest_team_application(payload):
-                # Transient applications always occupy the top of the DPS
-                # viewport, even if the user had scrolled older rows down.
-                self.main_scroll_offset = 0
                 self._schedule_layered_main_render()
         elif kind == "profile":
             profile_changed = self.model.ingest_profile(payload)
@@ -35420,6 +35606,7 @@ class DpsWindow:
             signature = (type(error).__name__, str(error))
             if signature != getattr(self, "_message_drain_last_error", None):
                 self._message_drain_last_error = signature
+                write_runtime_diagnostic("message_drain_failed", exception=sys.exc_info())
                 write_capture_lifecycle_event(
                     "message_drain_failed",
                     component="main_window",
@@ -35447,6 +35634,9 @@ class DpsWindow:
         try:
             self._dispatch_message(str(kind), payload)
         except Exception as error:
+            write_runtime_diagnostic(
+                f"message_dispatch_failed kind={str(kind)[:96]}", exception=sys.exc_info()
+            )
             write_capture_lifecycle_event(
                 "message_dispatch_failed",
                 component="main_window",
@@ -35912,6 +36102,7 @@ class DpsWindow:
     def close(self) -> None:
         if self.closing:
             return
+        write_runtime_diagnostic("window_close_requested")
         self.closing = True
         try:
             self.root.withdraw()
@@ -36271,11 +36462,15 @@ def main() -> None:
             return
         # Select process DPI awareness before Tk creates its first HWND.
         enable_windows_dpi_awareness()
-        DpsWindow().run()
+        enable_runtime_diagnostics("ui", directory=LOG_DIR, client_build=CLIENT_BUILD)
+        window = DpsWindow()
+        window.run()
+        write_runtime_diagnostic(f"ui_loop_returned closing={window.closing}")
     except StartupBootstrapError as exc:
         show_startup_message(str(exc), title=exc.title)
     except Exception:
         details = traceback.format_exc()
+        write_runtime_diagnostic("main_exception", exception=sys.exc_info())
         try:
             (APP_DIR / "dps_error.log").write_text(details, encoding="utf-8")
         except Exception:

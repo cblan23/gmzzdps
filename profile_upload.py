@@ -368,15 +368,10 @@ PUBLIC_PERFORMANCE_METRICS = frozenset({"dps", "boss_damage"})
 PUBLIC_PERFORMANCE_SORTS = frozenset(
     {"p10", "p25", "p50", "p75", "p90", "best", "sample_count"}
 )
-PUBLIC_AI_ENCOUNTER_SQL = """EXISTS (
-    SELECT 1 FROM encounter_participants participant
-    WHERE participant.encounter_id=e.encounter_id
-      AND (participant.is_ai=1 OR participant.public_character_name LIKE '%·投影')
-)"""
+PUBLIC_AI_ENCOUNTER_SQL = "pm.has_ai=1"
 PUBLIC_COMPETITIVE_ENCOUNTER_SQL = f"NOT ({PUBLIC_AI_ENCOUNTER_SQL})"
-PUBLIC_CLEAR_ENCOUNTER_SQL = """json_valid(e.payload_json)
-    AND json_extract(e.payload_json, '$.result')='defeated'
-    AND json_extract(e.payload_json, '$.completion_confirmed')=1"""
+PUBLIC_CLEAR_ENCOUNTER_SQL = """pm.result='defeated'
+    AND pm.completion_confirmed=1"""
 PUBLIC_RANKING_ENTRY_COUNT_SQL = f"""CASE WHEN {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}
     THEN (SELECT COUNT(*) FROM uploads ranked_upload
         JOIN encounter_participants ranked_participant
@@ -754,6 +749,11 @@ def initialize_profile_schema(connection: sqlite3.Connection) -> None:
             ON encounters(boss_key, stage_id, ended_at DESC);
         CREATE INDEX IF NOT EXISTS idx_encounters_statistics
             ON encounters(statistics_status, ended_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_encounters_public_catalog
+            ON encounters(
+                boss_name, statistics_status, ended_at DESC, encounter_id,
+                dungeon_id, stage_id, difficulty
+            );
         CREATE TABLE IF NOT EXISTS encounter_participants (
             encounter_id TEXT NOT NULL REFERENCES encounters(encounter_id)
                 ON DELETE CASCADE,
@@ -791,6 +791,17 @@ def initialize_profile_schema(connection: sqlite3.Connection) -> None:
             ON encounter_participants(profession_id, encounter_id);
         CREATE INDEX IF NOT EXISTS idx_encounter_participants_visibility
             ON encounter_participants(encounter_id, is_ai, public_character_name);
+        CREATE TABLE IF NOT EXISTS encounter_public_metadata (
+            encounter_id TEXT PRIMARY KEY REFERENCES encounters(encounter_id)
+                ON DELETE CASCADE,
+            result TEXT NOT NULL DEFAULT '',
+            completion_confirmed INTEGER NOT NULL DEFAULT 0,
+            dungeon_name TEXT NOT NULL DEFAULT '',
+            brass_tome_status TEXT NOT NULL DEFAULT 'unknown',
+            has_ai INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_encounter_public_metadata_clear_ai
+            ON encounter_public_metadata(completion_confirmed, result, has_ai);
         CREATE TABLE IF NOT EXISTS uploads (
             upload_id TEXT PRIMARY KEY,
             encounter_id TEXT NOT NULL REFERENCES encounters(encounter_id)
@@ -880,6 +891,34 @@ def initialize_profile_schema(connection: sqlite3.Connection) -> None:
             if connection.in_transaction:
                 connection.rollback()
             raise
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO encounter_public_metadata(
+            encounter_id, result, completion_confirmed, dungeon_name,
+            brass_tome_status, has_ai
+        )
+        SELECT e.encounter_id,
+            CASE WHEN json_valid(e.payload_json)
+                THEN COALESCE(json_extract(e.payload_json, '$.result'), '')
+                ELSE '' END,
+            CASE WHEN json_valid(e.payload_json)
+                    AND json_extract(e.payload_json, '$.completion_confirmed')=1
+                THEN 1 ELSE 0 END,
+            CASE WHEN json_valid(e.payload_json)
+                THEN COALESCE(json_extract(e.payload_json, '$.dungeon_name'), '')
+                ELSE '' END,
+            CASE WHEN json_valid(e.payload_json)
+                THEN COALESCE(json_extract(e.payload_json, '$.brass_tome_status'), 'unknown')
+                ELSE 'unknown' END,
+            EXISTS (
+                SELECT 1 FROM encounter_participants participant
+                WHERE participant.encounter_id=e.encounter_id
+                  AND (participant.is_ai=1
+                    OR participant.public_character_name LIKE '%·投影')
+            )
+        FROM encounters e
+        """
+    )
 
 
 def _safe_text(value: object, maximum: int) -> str:
@@ -3066,6 +3105,41 @@ class ProfileUploadStore:
                 uploader_hash,
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO encounter_public_metadata(
+                encounter_id, result, completion_confirmed, dungeon_name,
+                brass_tome_status, has_ai
+            )
+            SELECT e.encounter_id,
+                CASE WHEN json_valid(e.payload_json)
+                    THEN COALESCE(json_extract(e.payload_json, '$.result'), '')
+                    ELSE '' END,
+                CASE WHEN json_valid(e.payload_json)
+                        AND json_extract(e.payload_json, '$.completion_confirmed')=1
+                    THEN 1 ELSE 0 END,
+                CASE WHEN json_valid(e.payload_json)
+                    THEN COALESCE(json_extract(e.payload_json, '$.dungeon_name'), '')
+                    ELSE '' END,
+                CASE WHEN json_valid(e.payload_json)
+                    THEN COALESCE(json_extract(e.payload_json, '$.brass_tome_status'), 'unknown')
+                    ELSE 'unknown' END,
+                EXISTS (
+                    SELECT 1 FROM encounter_participants participant
+                    WHERE participant.encounter_id=e.encounter_id
+                      AND (participant.is_ai=1
+                        OR participant.public_character_name LIKE '%·投影')
+                )
+            FROM encounters e WHERE e.encounter_id=?
+            ON CONFLICT(encounter_id) DO UPDATE SET
+                result=excluded.result,
+                completion_confirmed=excluded.completion_confirmed,
+                dungeon_name=excluded.dungeon_name,
+                brass_tome_status=excluded.brass_tome_status,
+                has_ai=excluded.has_ai
+            """,
+            (encounter_id,),
+        )
         compact_request = {
             "character": uploader_hash,
             "public_mode": mode,
@@ -3553,7 +3627,9 @@ class ProfileUploadStore:
             SUM(({PUBLIC_CLEAR_ENCOUNTER_SQL}) AND {PUBLIC_AI_ENCOUNTER_SQL}) AS ai_clears,
             SUM({PUBLIC_RANKING_ENTRY_COUNT_SQL}) AS ranking_entries,
             MAX(ended_at) AS last_at
-            FROM encounters e WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
+            FROM encounters e
+            JOIN encounter_public_metadata pm ON pm.encounter_id=e.encounter_id
+            WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
             GROUP BY boss_name ORDER BY included DESC, last_at DESC""").fetchall()
         catalog_bosses: dict[str, dict[str, object]] = {}
         for row in rows:
@@ -3588,10 +3664,7 @@ class ProfileUploadStore:
             )
         context_rows = connection.execute(
             f"""SELECT e.boss_name, e.dungeon_id, e.stage_id, e.difficulty,
-                CASE WHEN json_valid(e.payload_json)
-                    THEN json_extract(e.payload_json, '$.dungeon_name') END AS dungeon_name,
-                CASE WHEN json_valid(e.payload_json)
-                    THEN json_extract(e.payload_json, '$.brass_tome_status') END AS brass_tome_status,
+                pm.dungeon_name, pm.brass_tome_status,
                 e.statistics_status, e.ended_at,
                 CASE WHEN e.statistics_status='included'
                     AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL} THEN 1 ELSE 0 END AS included,
@@ -3600,6 +3673,7 @@ class ProfileUploadStore:
                     AND {PUBLIC_AI_ENCOUNTER_SQL} THEN 1 ELSE 0 END AS ai_clears,
                 {PUBLIC_RANKING_ENTRY_COUNT_SQL} AS ranking_entries
             FROM encounters e
+            JOIN encounter_public_metadata pm ON pm.encounter_id=e.encounter_id
             WHERE EXISTS (SELECT 1 FROM uploads u WHERE u.encounter_id=e.encounter_id)
             ORDER BY e.ended_at DESC"""
         ).fetchall()
@@ -3782,13 +3856,16 @@ class ProfileUploadStore:
             SELECT COUNT(*) AS encounters,
                 COALESCE(SUM(team_total_damage), 0) AS total_damage,
                 COALESCE(SUM(duration_seconds), 0) AS duration_seconds
-            FROM encounters e WHERE e.statistics_status='included'
+            FROM encounters e
+            JOIN encounter_public_metadata pm ON pm.encounter_id=e.encounter_id
+            WHERE e.statistics_status='included'
                 AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}
             """
         ).fetchone()
         uploads = connection.execute(
             f"""SELECT COUNT(*) FROM uploads u
                 JOIN encounters e ON e.encounter_id=u.encounter_id
+                JOIN encounter_public_metadata pm ON pm.encounter_id=e.encounter_id
                 WHERE u.statistics_status='included' AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}"""
         ).fetchone()[0]
         history = connection.execute(f"""SELECT COUNT(*) AS encounters, MAX(ended_at) AS last_at
@@ -3876,13 +3953,15 @@ class ProfileUploadStore:
         rows = connection.execute(
             f"""
             SELECT e.encounter_id, e.boss_name, e.dungeon_id, e.stage_id, e.difficulty,
-                e.ended_at, e.game_version, e.payload_json,
+                e.ended_at, e.game_version, pm.dungeon_name, pm.brass_tome_status,
                 ep.profession_id, ep.damage, ep.dps, ep.profile_id,
                 ep.stats_json
             FROM encounters e
+            JOIN encounter_public_metadata pm ON pm.encounter_id=e.encounter_id
             JOIN encounter_participants ep ON ep.encounter_id=e.encounter_id
             WHERE e.statistics_status='included'
                 AND {PUBLIC_COMPETITIVE_ENCOUNTER_SQL}
+                AND {PUBLIC_CLEAR_ENCOUNTER_SQL}
                 AND NOT EXISTS (
                     SELECT 1 FROM encounter_participants unresolved_member
                     WHERE unresolved_member.encounter_id=e.encounter_id
@@ -3907,20 +3986,10 @@ class ProfileUploadStore:
         extraordinary_available = False
         equipment_available = False
         for row in rows:
-            try:
-                payload = json.loads(str(row["payload_json"] or "{}"))
-            except (TypeError, ValueError):
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-            if str(payload.get("result", "")).casefold() != "defeated":
-                continue
-            if not bool(payload.get("completion_confirmed")):
-                continue
             context = _public_dungeon_context(
                 row["dungeon_id"],
                 row["stage_id"],
-                payload.get("dungeon_name"),
+                row["dungeon_name"],
                 row["boss_name"],
             )
             record_category = str(context["category"])
@@ -3937,7 +4006,7 @@ class ProfileUploadStore:
             record_difficulty = _public_performance_difficulty(raw_difficulty)
             if record_difficulty == "all":
                 record_difficulty = raw_difficulty or "unknown"
-            brass_status = _public_brass_tome_status(payload.get("brass_tome_status"))
+            brass_status = _public_brass_tome_status(row["brass_tome_status"])
             raw_version = _safe_text(row["game_version"], 48)
             record_version = raw_version or "unknown"
             available_difficulties.add(record_difficulty)
@@ -4149,10 +4218,7 @@ class ProfileUploadStore:
             SELECT u.encounter_id, u.public_mode, u.public_character_name,
                 u.profile_id, pr.nickname, e.boss_name, e.dungeon_id,
                 e.stage_id, e.difficulty,
-                CASE WHEN json_valid(e.payload_json)
-                    THEN json_extract(e.payload_json, '$.dungeon_name') END AS dungeon_name,
-                CASE WHEN json_valid(e.payload_json)
-                    THEN json_extract(e.payload_json, '$.brass_tome_status') END AS brass_tome_status,
+                pm.dungeon_name, pm.brass_tome_status,
                 e.ended_at,
                 ep.profession_id, ep.damage, ep.dps,
                 1 AS competitive,
@@ -4162,6 +4228,7 @@ class ProfileUploadStore:
                 ) AS rank_number
             FROM uploads u
             JOIN encounters e ON e.encounter_id=u.encounter_id
+            JOIN encounter_public_metadata pm ON pm.encounter_id=e.encounter_id
             JOIN encounter_participants ep
                 ON ep.encounter_id=u.encounter_id
                 AND ep.character_hash=u.uploader_character_hash
@@ -4179,25 +4246,19 @@ class ProfileUploadStore:
                 SELECT u.encounter_id, u.public_mode, u.public_character_name,
                     u.profile_id, pr.nickname, e.boss_name, e.dungeon_id,
                     e.stage_id, e.difficulty,
-                    CASE WHEN json_valid(e.payload_json)
-                        THEN json_extract(e.payload_json, '$.dungeon_name') END AS dungeon_name,
-                    CASE WHEN json_valid(e.payload_json)
-                        THEN json_extract(e.payload_json, '$.brass_tome_status') END AS brass_tome_status,
+                    pm.dungeon_name, pm.brass_tome_status,
                     e.ended_at,
                     ep.profession_id, ep.damage, ep.dps,
                     0 AS competitive, 0 AS rank_number
                 FROM uploads u
                 JOIN encounters e ON e.encounter_id=u.encounter_id
+                JOIN encounter_public_metadata pm ON pm.encounter_id=e.encounter_id
                 JOIN encounter_participants ep
                     ON ep.encounter_id=u.encounter_id
                     AND ep.character_hash=u.uploader_character_hash
-                JOIN (
-                    SELECT DISTINCT encounter_id
-                    FROM encounter_participants
-                    WHERE is_ai=1 OR public_character_name LIKE '%·投影'
-                ) ai_encounter ON ai_encounter.encounter_id=e.encounter_id
                 LEFT JOIN profiles pr ON pr.profile_id=u.profile_id
                 WHERE ({PUBLIC_CLEAR_ENCOUNTER_SQL})
+                    AND {PUBLIC_AI_ENCOUNTER_SQL}
                     AND ep.is_ai=0
                 ORDER BY e.ended_at DESC
                 LIMIT ?

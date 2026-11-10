@@ -299,6 +299,7 @@ $RuntimeAssetFiles = @(
         "app_logo.png",
         "main_boss_icon.png",
         "main_hud_reference.png",
+        "main_hud_navigation_v2.png",
         "app_icon.ico"
     )) {
         Get-Item -LiteralPath (Join-Path $AssetRoot $Name)
@@ -527,10 +528,12 @@ try {
         "--include-module=profile_upload",
         "--include-module=resumable_update",
         "--include-module=update_cdn",
+        "--include-module=runtime_diagnostics",
         "--include-data-files=$CapstoneDll=capstone/lib/capstone.dll",
         "--include-data-files=assets/app_logo.png=assets/app_logo.png",
         "--include-data-files=assets/main_boss_icon.png=assets/main_boss_icon.png",
         "--include-data-files=assets/main_hud_reference.png=assets/main_hud_reference.png",
+        "--include-data-files=assets/main_hud_navigation_v2.png=assets/main_hud_navigation_v2.png",
         "--include-data-files=assets/professions/*.png=assets/professions/",
         "--include-data-files=assets/bosses/*.png=assets/bosses/",
         "--include-data-files=assets/bosses/hud/*.png=assets/bosses/hud/",

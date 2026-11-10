@@ -76,7 +76,7 @@ class MainHudRendererTests(unittest.TestCase):
         actions = {key for key in result.hit_regions if key.startswith("action:")}
         self.assertEqual(
             actions,
-            {"action:update", "action:settings", "action:lock", "action:pin"},
+            {"action:update", "action:settings", "action:lock", "action:pin", "action:clear"},
         )
         self.assertEqual(
             result.hit_regions["action:update"][2],
@@ -168,16 +168,47 @@ class MainHudRendererTests(unittest.TestCase):
 
 
 
-    def test_pve_title_rail_has_web_database_action_right_of_dps_tab(self):
+    def test_pve_title_rail_has_short_labels_and_card_link_after_database(self):
         for deaths in (False, True):
             state = snapshot(deaths=deaths)
             state["pve_hud_view"] = "recent_battle"
-            result = self.renderer.render(state)
+            with mock.patch.object(self.renderer, '_label', wraps=self.renderer._label) as labels, mock.patch.object(
+                self.renderer, '_navigation_skin', wraps=self.renderer._navigation_skin
+            ) as skins:
+                result = self.renderer.render(state, font_size=20)
 
+            team = result.hit_regions["action:pve_team"]
             recent = result.hit_regions["action:pve_recent_battle"]
             database = result.hit_regions["action:web_database"]
+            support = result.hit_regions["action:support"]
+            self.assertGreater(recent[0], team[2])
             self.assertGreater(database[0], recent[2])
-            self.assertLessEqual(database[2], result.image.width)
+            self.assertGreater(support[0], database[2])
+            self.assertEqual(support[1], database[1])
+            self.assertEqual(support[3], database[3])
+            self.assertLess(support[3], result.actor_regions[0][0][1])
+            self.assertLessEqual(support[2], result.image.width)
+            texts = {call.args[0] for call in labels.call_args_list}
+            self.assertTrue({'团队', 'dps', '数据库', '长期卡密'} <= texts)
+            self.assertFalse({'团队构成', 'DPS数据', '网页数据库'} & texts)
+            self.assertEqual(
+                [call.args[0] for call in skins.call_args_list],
+                [92, 84, 120, 152],
+            )
+
+    def test_pve_navigation_stays_visible_with_boss_header_hidden(self):
+        for deaths in (False, True):
+            for font_size in (14, 20):
+                with self.subTest(deaths=deaths, font_size=font_size):
+                    state = snapshot(deaths=deaths)
+                    state.update(pve_hud_view="team", show_boss=False)
+                    result = self.renderer.render(state, font_size=font_size)
+                    for action in ("pve_team", "pve_recent_battle", "web_database", "support"):
+                        bounds = result.hit_regions["action:" + action]
+                        self.assertGreaterEqual(bounds[0], 0)
+                        self.assertGreaterEqual(bounds[1], 0)
+                        self.assertLessEqual(bounds[2], result.image.width)
+                        self.assertLessEqual(bounds[3], result.actor_regions[0][0][1])
 
 
 
@@ -231,7 +262,7 @@ class MainHudRendererTests(unittest.TestCase):
 
         result = self.renderer.render(state, pixel_scale=1.0)
 
-        # Clear is no longer a visible footer action, disabled or otherwise.
+        # Disabled footer actions do not accept clicks.
         self.assertNotIn("action:clear", result.hit_regions)
         self.assertNotIn("action:settings", result.hit_regions)
         self.assertIn("action:pin", result.hit_regions)
@@ -348,16 +379,14 @@ class MainHudRendererTests(unittest.TestCase):
         self.assertIn("18,135/s", texts)
         self.assertNotIn("实时团队秒伤", texts)
 
-    def test_team_application_uses_dedicated_green_overlay_row(self):
+    def test_application_entry_keeps_all_player_rows_uncovered(self):
         state = snapshot(row_count=2)
+        state['rows'].insert(1, dict(row_kind='section', section_text='团队构成', application_count=20))
         original_rows = copy.deepcopy(state["rows"])
-        state["application_rows"] = [
-            {
-                "row_kind": "team_application",
-                "application_text": "入队申请  测试玩家  非凡评分 88888",
-            }
-        ]
-        state["visible_rows"] = 2
+        state["visible_rows"] = 3
+        baseline_state = copy.deepcopy(state)
+        baseline_state['rows'][1]['application_count'] = 0
+        baseline = self.renderer.render(baseline_state)
 
         with mock.patch.object(
             self.renderer, "_label", wraps=self.renderer._label
@@ -365,11 +394,11 @@ class MainHudRendererTests(unittest.TestCase):
             result = self.renderer.render(state)
 
         texts = [str(call.args[0]) for call in labels.call_args_list]
-        self.assertIn("入队申请  测试玩家  非凡评分 88888", texts)
+        self.assertTrue(any(text.startswith("入队申请 20") for text in texts))
+        self.assertIn("action:applications", result.hit_regions)
         self.assertEqual(state["rows"], original_rows)
         self.assertEqual([actor for _bounds, actor in result.actor_regions], [1, 2])
-        # Row 0 is the local player. The notice begins over the DPS area at
-        # row 1 (y=395) without consuming or replacing either source row.
+        # Application records never paint over either player's row.
         scale = REFERENCE_SCALE
         self_pixel = result.image.getpixel(
             (round((220 - 146) * scale), round((319 - 126) * scale))
@@ -381,8 +410,25 @@ class MainHudRendererTests(unittest.TestCase):
             self_pixel[1] > self_pixel[0] * 2
             and self_pixel[1] > self_pixel[2]
         )
-        self.assertGreater(pixel[1], pixel[0] * 2)
-        self.assertGreater(pixel[1], pixel[2])
+        for bounds, actor_id in result.actor_regions:
+            self.assertEqual(result.image.crop(bounds).tobytes(), baseline.image.crop(bounds).tobytes())
+
+    def test_all_twenty_applicants_are_reachable_without_becoming_combat_actors(self):
+        state = snapshot(row_count=1)
+        state['visible_rows'] = 5
+        state['rows'] = [dict(row_kind='application_section', application_count=20)] + [
+            dict(row_kind='team_application', application_token=f'applicant-{i}',
+                 name=f'申请{i}', profession_id=1_200_003, rating_text=f'{100_000+i:,}',
+                 received_at=0) for i in range(20)]
+        shown_names = set()
+        for start in range(0, 17, 4):
+            state['start_index'] = start
+            with mock.patch.object(self.renderer, '_label', wraps=self.renderer._label) as labels:
+                result = self.renderer.render(state)
+            shown_names.update(str(call.args[0]) for call in labels.call_args_list)
+            self.assertFalse(result.actor_regions)
+            self.assertIn('scrollbar:rows', result.hit_regions)
+        self.assertTrue({f'申请{i}' for i in range(20)} <= shown_names)
 
     def test_scrollable_recent_rows_expose_wheel_and_drag_regions(self):
         state = snapshot(row_count=12)
@@ -890,7 +936,7 @@ class MainHudRendererTests(unittest.TestCase):
         self.assertNotIn('action:close', pinned.hit_regions)
         self.assertEqual(
             {key for key in pinned.hit_regions if key.startswith('action:')},
-            {'action:update', 'action:settings', 'action:lock', 'action:pin'},
+            {'action:update', 'action:settings', 'action:lock', 'action:pin', 'action:clear'},
         )
         box = pinned.hit_regions['action:pin']
         self.assertNotEqual(pinned.image.crop(box).tobytes(), unpinned.image.crop(box).tobytes())

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageStat
 
 
 REFERENCE_BOUNDS = (146, 126, 1130, 1130)
@@ -35,12 +35,10 @@ HUD_BASE_SOURCE_HEIGHT = 1004
 SUMMARY_FONT_HEIGHT = 40
 TEAM_SUMMARY_AVATAR_SIZE = (109, 107)
 INLINE_RATING_GAP = 12
-# Keep the view switch clear of the timer at every supported
-# font scale.  The previous 300px source-art anchor left only a few rendered
-# pixels between ``00:00`` and the first pill.
+# Keep the navigation clear of the timer at every supported font scale.
 TITLE_RAIL_TAB_LEFT = 326
-TITLE_RAIL_TAB_WIDTH = 170
-TITLE_RAIL_TAB_GAP = 12
+TITLE_RAIL_TAB_WIDTH = 92
+TITLE_RAIL_TAB_GAP = 8
 ADMIN_INDICATOR_ELEVATED = (58, 211, 116)
 ADMIN_INDICATOR_STANDARD = (239, 76, 91)
 ROW_CENTERS = (319, 395, 470, 546, 621, 697, 772, 848, 923, 997)
@@ -51,6 +49,7 @@ ACTION_BOXES = {
 }
 # Keep the update action immediately left of the settings artwork.
 FOOTER_ACTION_BOXES = {
+    "clear": (673, 1038, 756, 1126),
     "update": (756, 1038, 839, 1126),
     **ACTION_BOXES,
 }
@@ -146,6 +145,14 @@ class MainHudRenderer:
         # The PNG contains almost-invisible export noise outside its artwork.
         # Removing only alpha<8 avoids carrying those isolated dots into DWM.
         self.reference.putalpha(self.reference.getchannel("A").point(lambda n: 0 if n < 8 else n))
+        with Image.open(self.asset_dir / "main_hud_navigation_v2.png") as sprite:
+            self._navigation_sprite = sprite.convert("RGBA")
+        self._navigation_sprite.putalpha(
+            self._navigation_sprite.getchannel("A").point(lambda n: 0 if n < 8 else n)
+        )
+        self._navigation_sprite = self._navigation_sprite.crop(
+            self._navigation_sprite.getchannel("A").getbbox()
+        )
         fonts = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
         self.font_paths = {
             "name": fonts / "msyhbd.ttc",
@@ -208,6 +215,7 @@ class MainHudRenderer:
         self._warning = self._crop((798, 151, 835, 184))
         self._actions = {name: self._crop(box) for name, box in ACTION_BOXES.items()}
         self._actions["update"] = self._update_sprite()
+        self._actions["clear"] = self._clear_sprite()
         self._equipment_word_badge = self._equipment_badge("word")
         self._unlocked = self._unlock_sprite()
         self._pin_on = self._pin_sprite(True)
@@ -310,6 +318,22 @@ class MainHudRenderer:
         ink = (239, 245, 250, 255)
         draw.arc((22 * 3, 24 * 3, 62 * 3, 64 * 3), 45, 330, fill=ink, width=5 * 3)
         draw.polygon([(64 * 3, 40 * 3), (49 * 3, 40 * 3), (64 * 3, 25 * 3)], fill=ink)
+        return sprite.resize(size, Image.Resampling.LANCZOS)
+
+    def _clear_sprite(self):
+        sprite = self._actions['pin'].copy()
+        middle = sprite.crop((11, 15, 13, 73)).resize((59, 58))
+        sprite.paste(middle, (13, 15))
+        size = sprite.size
+        sprite = sprite.resize((size[0] * 3, size[1] * 3), Image.Resampling.LANCZOS)
+        draw = ImageDraw.Draw(sprite)
+        ink = (232, 241, 250, 255)
+        draw.line([(59 * 3, 21 * 3), (37 * 3, 48 * 3)], fill=ink, width=5 * 3)
+        draw.polygon([(35 * 3, 40 * 3), (47 * 3, 50 * 3), (41 * 3, 69 * 3),
+                      (17 * 3, 51 * 3)], outline=ink, fill=(87, 140, 175, 255))
+        for offset in (0, 6, 12):
+            draw.line([(24 * 3 + offset * 3, 49 * 3 + offset * 2),
+                       (20 * 3 + offset * 3, 54 * 3 + offset * 2)], fill=ink, width=2 * 3)
         return sprite.resize(size, Image.Resampling.LANCZOS)
 
     def _pin_sprite(self, active):
@@ -462,6 +486,25 @@ class MainHudRenderer:
         self._skins[key] = result
         return result
 
+    def _navigation_skin(self, width, height, *, selected=False, hovered=False):
+        key = ("navigation", width, height, selected, hovered)
+        if key in self._skins:
+            return self._skins[key]
+        source = self._navigation_sprite
+        cap = round(source.height * 0.4)
+        target_cap = min(round(height * 0.4), width // 2 - 1)
+        tile = Image.new("RGBA", (width, height))
+        for bounds, x, target_width in (
+            ((0, 0, cap, source.height), 0, target_cap),
+            ((cap, 0, source.width - cap, source.height), target_cap, width - target_cap * 2),
+            ((source.width - cap, 0, source.width, source.height), width - target_cap, target_cap),
+        ):
+            piece = source.crop(bounds).resize((target_width, height), Image.Resampling.LANCZOS)
+            tile.alpha_composite(piece, (x, 0))
+        tile = ImageEnhance.Brightness(tile).enhance(1.10 if selected else 0.98 if hovered else 0.86)
+        self._skins[key] = tile
+        return tile
+
     def _ink(self, text, height, numeric=False, regular=False):
         text = str(text or "--")
         if numeric and all(char in self._glyphs for char in text):
@@ -487,13 +530,13 @@ class MainHudRenderer:
         factor = height / max(1, ink_height)
         return ink.resize((max(1, round(ink.width * factor)), max(1, round(ink.height * factor))), Image.Resampling.LANCZOS)
 
-    def _label(self, text, height, *, color=(249, 250, 253), numeric=False, contour=False, flat=False, regular=False, padding=None, stroke_radius=3):
+    def _label(self, text, height, *, color=(249, 250, 253), numeric=False, contour=False, flat=False, regular=False, padding=None, stroke_radius=3, show_unknown=False):
         # Missing data is invisible in the HUD. Keep the domain model's None
         # / unknown distinction, and never fabricate zero to fill a column.
-        if text is None or str(text).strip() in {'', '--', '-- / --', '--/--'}:
+        if text is None or not str(text).strip() or (not show_unknown and str(text).strip() in {'--', '-- / --', '--/--'}):
             return Image.new('RGBA', (1, 1))
         pad = (13 if contour else 7) if padding is None else int(padding)
-        key = (str(text), round(height, 2), color, numeric, contour, flat, regular, pad, stroke_radius)
+        key = (str(text), round(height, 2), color, numeric, contour, flat, regular, pad, stroke_radius, show_unknown)
         if key in self._labels:
             self._labels.move_to_end(key)
             return self._labels[key]
@@ -653,11 +696,6 @@ class MainHudRenderer:
         pixel_scale = max(0.75, min(4.0, float(pixel_scale)))
         font_factor = max(0.8, min(1.4, float(font_size) / 14))
         rows = [dict(row) for row in snapshot.get("rows", ()) if isinstance(row, Mapping)]
-        application_rows = [
-            dict(row)
-            for row in snapshot.get("application_rows", ())
-            if isinstance(row, Mapping)
-        ]
         capacity = clamp_visible_rows(
             snapshot.get("visible_rows", HUD_DEFAULT_VISIBLE_ROWS)
         )
@@ -711,110 +749,38 @@ class MainHudRenderer:
             # Only outlined text: no pill, tile or background behind the clock.
             paste_text(timer, 177, timer_y + 29)
 
-        # Keep the compact title-rail navigation
-        # it immediately to the right of the clock so the content switch does
-        # not consume another row or alter the approved window dimensions.
+        # Four compact tabs stay readable after the complete HUD is scaled down.
         if "pve_hud_view" in snapshot:
+            title_rail_left = max(TITLE_RAIL_TAB_LEFT, timer_right + 16)
             pve_view = (
                 "team"
                 if str(snapshot.get("pve_hud_view") or "recent_battle") == "team"
                 else "recent_battle"
             )
             hover_action = str(snapshot.get("hover_action", "") or "")
-            for view, caption, action, left, accent in (
-                (
-                    "team",
-                    "团队构成",
-                    "pve_team",
-                    TITLE_RAIL_TAB_LEFT,
-                    (80, 189, 246),
-                ),
-                (
-                    "recent_battle",
-                    "DPS数据",
-                    "pve_recent_battle",
-                    TITLE_RAIL_TAB_LEFT
-                    + TITLE_RAIL_TAB_WIDTH
-                    + TITLE_RAIL_TAB_GAP,
-                    (111, 224, 173),
-                ),
-            ):
-                right = left + TITLE_RAIL_TAB_WIDTH
+            navigation = (
+                ("team", "团队", "pve_team", TITLE_RAIL_TAB_WIDTH),
+                ("recent_battle", "dps", "pve_recent_battle", 84),
+                (None, "数据库", "web_database", 120),
+                (None, "长期卡密", "support", 152),
+            )
+            rail_top, rail_bottom = 130 + top_removed, 186 + top_removed
+            left = title_rail_left
+            for view, caption, action, width in navigation:
+                right = left + width
                 selected = pve_view == view
-                hovered = hover_action == action
-                tile = self._pill(
-                    right - left,
-                    46,
-                    accent=accent,
-                    red=False,
-                    blue=view == "team" and selected,
-                )
-                if selected:
-                    tile = tile.copy()
-                    ImageDraw.Draw(tile).rounded_rectangle(
-                        (1, 1, tile.width - 2, tile.height - 2),
-                        radius=22,
-                        fill=accent + (255,),
-                        outline=(235, 250, 255, 255),
-                        width=3,
-                    )
-                elif not hovered:
-                    tile = tile.copy()
-                    tile.putalpha(
-                        tile.getchannel("A").point(lambda value: value * 3 // 5)
-                    )
-                paste(tile, left, 135)
+                hovered = hover_action == action and not interaction_blocked
+                paste(self._navigation_skin(
+                    width, rail_bottom - rail_top,
+                    selected=selected, hovered=hovered,
+                ), left, rail_top)
                 label(
-                    caption,
-                    (left + right) / 2,
-                    158,
-                    28,
-                    anchor="center",
-                    max_width=right - left - 10,
-                    color=(250, 252, 255) if selected else (226, 236, 246),
-                    regular=False,
-                    flat=True,
-                    padding=3,
-                    stroke_radius=2 if selected else 1,
-                    truncate=False,
+                    caption, (left + right) / 2, 158 + top_removed, 30,
+                    anchor="center", max_width=width - 8,
+                    contour=True, padding=8, truncate=False,
                 )
-                regions[f"action:{action}"] = (left, 135, right, 181)
-
-            database_left, database_right = 690, 850
-            database_hovered = hover_action == "web_database"
-            database_tile = self._pill(
-                database_right - database_left,
-                46,
-                accent=(215, 179, 109),
-                red=False,
-                blue=False,
-            )
-            if not database_hovered:
-                database_tile = database_tile.copy()
-                database_tile.putalpha(
-                    database_tile.getchannel("A").point(lambda value: value * 4 // 5)
-                )
-            paste(database_tile, database_left, 135)
-            label(
-                "网页数据库",
-                (database_left + database_right) / 2,
-                158,
-                25,
-                anchor="center",
-                max_width=database_right - database_left - 10,
-                color=(255, 229, 169) if database_hovered else (239, 217, 174),
-                regular=False,
-                flat=True,
-                padding=3,
-                stroke_radius=1,
-                truncate=False,
-            )
-            regions["action:web_database"] = (
-                database_left,
-                135,
-                database_right,
-                181,
-            )
+                regions[f"action:{action}"] = (left, rail_top, right, rail_bottom)
+                left = right + TITLE_RAIL_TAB_GAP
 
         indicator_color = (
             ADMIN_INDICATOR_ELEVATED
@@ -1074,35 +1040,45 @@ class MainHudRenderer:
                     )
                 continue
             if row.get("row_kind") == "team_application":
-                draw = ImageDraw.Draw(frame)
-                left, right = 203, 1082 - width_removed
-                top, bottom = cy - 30, cy + 30
-                draw.rounded_rectangle(
-                    (
-                        round(left - 146),
-                        round(top - 126 - top_removed),
-                        round(right - 146),
-                        round(bottom - 126 - top_removed),
-                    ),
-                    radius=12,
-                    fill=(18, 151, 80, 242),
-                    outline=(102, 255, 166, 255),
-                    width=2,
-                )
-                label(
-                    str(row.get("application_text") or "入队申请"),
-                    (left + right) / 2,
-                    cy,
-                    27,
-                    anchor="center",
-                    max_width=right - left - 32,
-                    regular=True,
-                    color=(247, 255, 250),
-                    contour=True,
-                    truncate=False,
-                )
+                right = 1082 - width_removed
+                paste(self._profession(row.get("profession_id", 0)), 191, cy - 47)
+                label(row.get("name", "申请玩家"), 280, cy, 36,
+                      max_width=310 - width_removed * 0.35, contour=True)
+                label(str(row.get("rating_text") or "--"), right - 180, cy, 34,
+                      anchor="right", max_width=190, numeric=True, truncate=False,
+                      color=(247, 207, 109), contour=True, show_unknown=True)
+                age = max(0, int(float(snapshot.get("observed_at", 0)) - float(row.get("received_at", 0))))
+                received = "已入队" if row.get("joined") else "刚刚" if age < 5 else f"{age}秒前" if age < 60 else f"{age // 60}分钟前"
+                label(received, right, cy, 32, anchor="right", max_width=150,
+                      contour=True)
+                regions["application_name:" + str(row.get("application_token", ""))] = (270, cy - 30, right - 385, cy + 30)
+                continue
+            if row.get("row_kind") == "application_section":
+                right = 1082 - width_removed
+                label(f"入队申请 {int(row.get('application_count', 0))} 人", 218, cy, 32,
+                      max_width=430 - width_removed, truncate=False,
+                      color=(191, 215, 233), flat=True, padding=5, stroke_radius=1)
+                for action, caption, left, end in (
+                    ("clear_applications", "清空", right - 230, right - 130),
+                    ("collapse_applications", "收起", right - 110, right),
+                ):
+                    label(caption, (left + end) / 2, cy, 30, anchor="center",
+                          max_width=end - left, color=(120, 199, 242), flat=True, padding=5, stroke_radius=1)
+                    if not interaction_blocked:
+                        regions[f"action:{action}"] = (left, cy - 30, end, cy + 30)
                 continue
             if row.get("row_kind") == "section":
+                if "application_count" in row:
+                    right = 1082 - width_removed
+                    label(str(row.get("section_text") or "团队构成"), 430 - width_removed / 4,
+                          cy, 27, anchor="center", max_width=350, regular=False,
+                          color=(214, 226, 240), flat=True, padding=3, stroke_radius=1)
+                    label(f"入队申请 {int(row['application_count'])}",
+                          right, cy, 32, anchor="right", max_width=340,
+                          color=(120, 199, 242), flat=True, padding=5, stroke_radius=1)
+                    if not interaction_blocked:
+                        regions["action:applications"] = (right - 330, cy - 30, right, cy + 30)
+                    continue
                 live_team_dps = str(row.get("live_team_dps") or "").strip()
                 if not live_team_dps:
                     label(
@@ -1516,50 +1492,8 @@ class MainHudRenderer:
                 list_top + count * 75.4,
             )
 
-        # Team applications are transient notices, not list data.  Paint them
-        # last over the DPS/rating viewport so the underlying rows, scroll
-        # position and configured viewport height never change.  The notice
-        # queue itself is unbounded; only the physical viewport clips it.
-        if not interaction_blocked:
-            # Row 0 is the local player and must remain readable. Application
-            # notices begin in the DPS/rating area below it; the queue remains
-            # unbounded and only the available viewport rows are clipped.
-            for index, row in enumerate(application_rows[: max(0, count - 1)]):
-                row_index = index + 1
-                cy = (
-                    ROW_CENTERS[row_index]
-                    if row_index < len(ROW_CENTERS)
-                    else ROW_CENTERS[-1] + (row_index - 9) * 75.4
-                ) + boss_extra
-                draw = ImageDraw.Draw(frame)
-                left, right = 203, 1082 - width_removed
-                top, bottom = cy - 30, cy + 30
-                draw.rounded_rectangle(
-                    (
-                        round(left - 146),
-                        round(top - 126 - top_removed),
-                        round(right - 146),
-                        round(bottom - 126 - top_removed),
-                    ),
-                    radius=12,
-                    fill=(18, 151, 80, 255),
-                    outline=(102, 255, 166, 255),
-                    width=2,
-                )
-                label(
-                    str(row.get("application_text") or "入队申请"),
-                    (left + right) / 2,
-                    cy,
-                    27,
-                    anchor="center",
-                    max_width=right - left - 32,
-                    regular=True,
-                    color=(247, 255, 250),
-                    contour=True,
-                    truncate=False,
-                )
-
-        fy = 1039 - footer_offset + boss_extra + update_status_height
+        footer_shift = update_status_height
+        fy = 1039 - footer_offset + boss_extra + footer_shift
         if update_status_text:
             left, right = 169, 1097 - width_removed
             top = fy - update_status_height + 4
@@ -1612,6 +1546,7 @@ class MainHudRenderer:
                 tile = self._unlocked
             disabled = bool(
                 (interaction_blocked and name != "settings")
+                or (name == 'clear' and snapshot.get('clear_disabled', False))
                 or (
                     name == 'settings'
                     and snapshot.get('settings_disabled', False)
@@ -1626,12 +1561,14 @@ class MainHudRenderer:
                 glow.putalpha(tile.getchannel("A").point(lambda n: n // 12))
                 tile.alpha_composite(glow)
             tile = tile.resize((box[2] - box[0], box[3] - box[1]), Image.Resampling.LANCZOS)
-            paste(tile, box[0] - width_removed, box[1] - footer_offset + boss_extra + update_status_height)
+            paste(tile, box[0] - width_removed, box[1] - footer_offset + boss_extra + footer_shift)
             if not disabled:
-                regions["action:" + name] = (box[0] - width_removed, box[1] - footer_offset + boss_extra + update_status_height, box[2] - width_removed, box[3] - footer_offset + boss_extra + update_status_height)
+                regions["action:" + name] = (box[0] - width_removed, box[1] - footer_offset + boss_extra + footer_shift, box[2] - width_removed, box[3] - footer_offset + boss_extra + footer_shift)
+            elif name == "clear":
+                regions["help:clear_disabled"] = (box[0] - width_removed, box[1] - footer_offset + boss_extra + footer_shift, box[2] - width_removed, box[3] - footer_offset + boss_extra + footer_shift)
 
         if not bool(snapshot.get("locked", False)):
-            right, bottom = 1128 - width_removed, 1128 - footer_offset + boss_extra + update_status_height
+            right, bottom = 1128 - width_removed, 1128 - footer_offset + boss_extra + footer_shift
             regions['resize:height'] = (right - 30, bottom - 30, right, bottom)
             draw = ImageDraw.Draw(frame)
             for span in (10, 20):

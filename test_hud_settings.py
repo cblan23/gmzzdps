@@ -29,6 +29,7 @@ class HudSettingsTests(unittest.TestCase):
         self.assertIn("action:settings_toggle:upload", regions)
         self.assertIn("action:settings_page:2", regions)
         self.assertEqual(first.size, (306, 294))
+        self.assertNotIn("action:settings_support", regions)
         panel_alpha = first.getpixel((153, 85))[3]
         self.assertGreater(panel_alpha, 150)
         self.assertLess(panel_alpha, 235)

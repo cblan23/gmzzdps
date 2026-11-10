@@ -186,6 +186,30 @@ class HybridTeamStatsTests(unittest.TestCase):
         self.assertEqual(len(FakeHook.instances), 2)
         self.assertEqual(driver.game_pid, 77)
 
+    def test_role_change_rebuilds_request_hook_for_same_game_process(self):
+        driver = self.driver()
+        driver.sync(
+            game_pid=66,
+            mode="team",
+            script_entity_override=6066,
+        )
+        first = FakeHook.instances[-1]
+        driver.attempted_encounters.add("old-role-battle")
+
+        driver.reset_role_session()
+
+        self.assertTrue(first.closed)
+        self.assertIsNone(driver.hook)
+        self.assertFalse(driver.attempted_encounters)
+        self.assertEqual(driver.script_entity_override, 0)
+        driver.sync(
+            game_pid=66,
+            mode="team",
+            script_entity_override=6067,
+        )
+        self.assertEqual(len(FakeHook.instances), 2)
+        self.assertEqual(FakeHook.instances[-1].script_entity_override, 6067)
+
     def test_equipment_request_temporarily_releases_team_hook(self):
         driver = self.driver()
         driver.sync(
@@ -278,6 +302,27 @@ class HybridTeamStatsTests(unittest.TestCase):
         first = FakeReceiveHook.instances[-1]
         driver.sync(game_pid=92)
         self.assertTrue(first.closed)
+        self.assertEqual(len(FakeReceiveHook.instances), 2)
+        driver.close()
+
+    def test_role_change_rebuilds_receive_hook_for_same_game_process(self):
+        driver = HybridTeamStatsReceiveDriver(
+            {"profile": "test"},
+            self.events.append,
+            hook_factory=FakeReceiveHook,
+        )
+        driver.sync(game_pid=91)
+        first = FakeReceiveHook.instances[-1]
+        with driver.lock:
+            driver.local_role_script_entity = 910091
+            driver.local_role_evidence_method = "RetNTP"
+
+        driver.reset_role_session()
+
+        self.assertTrue(first.closed)
+        self.assertIsNone(driver.hook)
+        self.assertEqual(driver.status_snapshot()["local_role_script_entity"], 0)
+        driver.sync(game_pid=91)
         self.assertEqual(len(FakeReceiveHook.instances), 2)
         driver.close()
 

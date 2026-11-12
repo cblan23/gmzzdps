@@ -12,6 +12,10 @@ def read_json(path):
     return json.loads(path.read_text(encoding='utf-8-sig'))
 
 
+def normalize_newlines(value):
+    return value.replace('\r\n', '\n').replace('\r', '\n')
+
+
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('--directory', type=Path, required=True)
@@ -61,9 +65,18 @@ def main():
         for target, source in expected.items():
             assert resources[target] == hashlib.sha256(source.read_bytes()).hexdigest()
         assert not any(name.startswith('_npcap/') for name in resources)
-    notes = (args.source / f'release-notes-v{args.version}.txt').read_text(encoding='utf-8-sig').strip()
-    assert notes == update['notes']
-    assert notes == (directory / f'更新日志-v{args.version}.txt').read_text(encoding='utf-8-sig').strip()
+    notes = normalize_newlines(
+        (args.source / f'release-notes-v{args.version}.txt')
+        .read_text(encoding='utf-8-sig')
+        .strip()
+    )
+    assert notes == normalize_newlines(update['notes'])
+    published_notes = normalize_newlines(
+        (directory / f'更新日志-v{args.version}.txt')
+        .read_text(encoding='utf-8-sig')
+        .strip()
+    )
+    assert notes == published_notes
     print(json.dumps(dict(version=args.version, build_id=args.build_id, size=manifest['size'],
                           sha256=digest, protected=True, capture_backend=args.backend,
                           notes_lines=len(notes.splitlines()), status='verified'), ensure_ascii=False))

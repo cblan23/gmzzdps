@@ -21,9 +21,10 @@ from npcap_rc4_decode import Rc4State
 
 
 GAME_MODULE = "C7-Win64-Shipping.exe"
-# Verified vtable for the connection cipher object in the supported 2026-09-09
-# client.  ASLR is handled by adding this RVA to the live module base.
-RC4_CRYPTOR_OWNER_VTABLE_RVA = 0x0DB589F8
+# Verified vtable for the connection cipher object in the 2026-11-12 client
+# (resource build 2307645). ASLR is handled by adding this RVA to the live
+# module base.
+RC4_CRYPTOR_OWNER_VTABLE_RVA = 0x0DB93488
 CRYPTOR_POINTERS = struct.Struct("<QQQ")
 RC4_STATE_STRUCT = struct.Struct("<II256I")
 EVP_ENCRYPT_OFFSET = 0x10

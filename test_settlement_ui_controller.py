@@ -1078,6 +1078,58 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(encounter.participants),6)
         self.assertFalse(self.controller.tracker.orphans)
 
+    def test_current_client_success_boundary_uses_shifted_boss_references(self):
+        self.context['stage_id'] = None
+        self.send('OnMsgSyncFightMode', 100, 300, [2])
+        encounter = self.controller.tracker.encounters[
+            self.controller.tracker.current_id
+        ]
+
+        self.send(
+            'OnMsgDungeonStageSettlement', 110, 100,
+            [5_150_053, True, 'self', 4_250_302, {
+                38: {'boss': 32_682},
+                39: {'other-target': 1, 'boss': 4},
+            }],
+        )
+
+        self.assertIsNone(self.controller.tracker.current_id)
+        self.assertEqual(encounter.result, 'VICTORY')
+        self.assertEqual(encounter.stage_id, 5_150_053)
+        self.assertTrue(encounter.completion_confirmed)
+
+    def test_local_token_success_fallback_requires_missing_live_context(self):
+        self.context['stage_id'] = None
+        self.send('OnMsgSyncFightMode', 100, 300, [2])
+        encounter = self.controller.tracker.encounters[
+            self.controller.tracker.current_id
+        ]
+
+        self.send(
+            'OnMsgDungeonStageSettlement', 110, 100,
+            [5_150_053, True, 'self', 4_250_302, {}],
+        )
+
+        self.assertIsNone(self.controller.tracker.current_id)
+        self.assertEqual(encounter.result, 'VICTORY')
+        self.assertEqual(encounter.stage_id, 5_150_053)
+        self.assertTrue(encounter.completion_confirmed)
+
+    def test_local_token_success_fallback_rejects_another_character(self):
+        self.context['stage_id'] = None
+        self.send('OnMsgSyncFightMode', 100, 300, [2])
+
+        self.send(
+            'OnMsgDungeonStageSettlement', 110, 100,
+            [5_150_053, True, 'another-character', 4_250_302, {}],
+        )
+
+        self.assertIsNotNone(self.controller.tracker.current_id)
+        encounter = self.controller.tracker.encounters[
+            self.controller.tracker.current_id
+        ]
+        self.assertFalse(encounter.completion_confirmed)
+
     def test_settled_boss_roster_cannot_shrink_after_a_member_is_kicked(self):
         self.send('OnMsgSyncFightMode', 100, 300, [2])
         encounter = self.controller.tracker.encounters[

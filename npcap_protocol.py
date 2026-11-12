@@ -25,7 +25,12 @@ import zstandard
 from npcap_wire_entities import decode_creation, validate_wrapper
 
 from npcap_zstd_state import NativeZstdDecoder, ZstdSnapshot
-from npcap_method_tables import LOCAL_ROLE_RPC_METHODS, NPC_RPC_METHODS
+from npcap_method_tables import (
+    CURRENT_ACTOR_RPC_METHODS,
+    CURRENT_LOCAL_ROLE_RPC_METHODS,
+    LOCAL_ROLE_RPC_METHODS,
+    NPC_RPC_METHODS,
+)
 
 
 WINDOWS_EPOCH_SECONDS = 11_644_473_600
@@ -93,30 +98,312 @@ METHOD_ID_NAMES: dict[int, str] = {
 }
 
 
-def current_team_rpc_method(method_id: int, arguments: list) -> str:
-    """Distinguish the current application from legacy self-property updates."""
-    # Verified in the running 2026-10-19 LocalRole registry: 213 moved to 220.
-    # Legacy 220 also carries one map, but lacks the applicant token/name pair.
-    if method_id != 220 or len(arguments) != 1 or not isinstance(arguments[0], dict):
-        return ''
-    fields = arguments[0]
-    token = fields.get(2, fields.get('2'))
-    name = fields.get(4, fields.get('4'))
-    if (
-        isinstance(token, str) and 12 <= len(token) <= 128
-        and isinstance(name, str) and 1 <= len(name.strip()) <= 20
+def _wire_int(value: object) -> bool:
+    return type(value) is int
+
+
+def _wire_number(value: object) -> bool:
+    return type(value) in (int, float)
+
+
+def _wire_structure(value: object) -> bool:
+    return isinstance(value, (dict, list))
+
+
+def _wire_map_items(value: object) -> list[tuple[object, object]]:
+    if isinstance(value, dict):
+        if len(value) == 1 and ('$map' in value or 'map_pairs' in value):
+            value = value.get('$map', value.get('map_pairs'))
+        else:
+            return list(value.items())
+    if isinstance(value, list) and all(
+        isinstance(item, (list, tuple)) and len(item) == 2 for item in value
     ):
+        return [(item[0], item[1]) for item in value]
+    return []
+
+
+def _wire_numeric_fields(value: object) -> dict[int, object]:
+    result: dict[int, object] = {}
+    for raw_key, item in _wire_map_items(value):
+        try:
+            key = int(raw_key)
+        except (TypeError, ValueError, OverflowError):
+            return {}
+        if isinstance(raw_key, bool) or key < 0 or key in result:
+            return {}
+        result[key] = item
+    return result
+
+
+def _valid_team_application(arguments: object) -> bool:
+    if not isinstance(arguments, list) or len(arguments) != 1:
+        return False
+    fields = _wire_numeric_fields(arguments[0])
+    token = fields.get(2)
+    name = fields.get(4)
+    return bool(
+        isinstance(token, str)
+        and 12 <= len(token) <= 128
+        and isinstance(name, str)
+        and 1 <= len(name.strip()) <= 64
+    )
+
+
+def _valid_team_statistics_map(value: object) -> bool:
+    entries = _wire_map_items(value)
+    if not 1 <= len(entries) <= 64:
+        return False
+    return all(
+        isinstance(token, str)
+        and 8 <= len(token) <= 128
+        and _wire_structure(fields)
+        for token, fields in entries
+    )
+
+
+def _valid_stage_statistics(value: object) -> bool:
+    fields = _wire_numeric_fields(value)
+    return bool(fields and 5 in fields and _wire_structure(fields[5]))
+
+
+def _valid_heal_sync_v2(entity_id: int, arguments: object) -> bool:
+    if not isinstance(arguments, list) or len(arguments) != 5:
+        return False
+    if any(not _wire_int(value) for value in arguments):
+        return False
+    healer_id, target_id, skill_id, attempted, effective = arguments
+    return bool(
+        entity_id in (healer_id, target_id)
+        and 0 < healer_id < 2**64
+        and 0 < target_id < 2**64
+        and 0 < skill_id < 2**64
+        and 0 <= attempted < 2**63
+        and 0 <= effective < 2**63
+    )
+
+
+def _valid_beaten_sync_v2(entity_id: int, arguments: object) -> bool:
+    return bool(
+        isinstance(arguments, list)
+        and len(arguments) == 3
+        and all(_wire_int(value) for value in arguments)
+        and entity_id in arguments[:2]
+        and 0 < arguments[0] < 2**64
+        and 0 < arguments[1] < 2**64
+        and 0 <= arguments[2] < 2**64
+    )
+
+
+def current_team_rpc_method(method_id: int, arguments: list) -> str:
+    """Recognize verified LocalRole callbacks without reusing colliding IDs."""
+    # The application callback was 220 in the preceding client and is 223 in
+    # build 2307645. Both carry the same token/name-bearing structure.
+    if method_id in (220, 223) and _valid_team_application(arguments):
         return 'OnMsgNewTeamGroupApply'
+
+    if (
+        method_id == 218
+        and len(arguments) == 3
+        and _wire_int(arguments[0])
+        and _wire_structure(arguments[1])
+        and isinstance(arguments[2], dict)
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id in (219, 220, 221)
+        and len(arguments) == 2
+        and _wire_int(arguments[0])
+        and _wire_structure(arguments[1])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if method_id == 225 and len(arguments) == 1 and _wire_int(arguments[0]):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id in (226, 282)
+        and len(arguments) == 3
+        and _wire_int(arguments[0])
+        and _wire_int(arguments[1])
+        and isinstance(arguments[2], str)
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 229
+        and len(arguments) == 2
+        and isinstance(arguments[0], str)
+        and _wire_structure(arguments[1])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if method_id == 230 and len(arguments) == 1 and _wire_structure(arguments[0]):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 231
+        and len(arguments) == 3
+        and _wire_int(arguments[0])
+        and _wire_int(arguments[1])
+        and _wire_structure(arguments[2])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if method_id == 233 and len(arguments) == 1 and _wire_structure(arguments[0]):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 243
+        and len(arguments) == 3
+        and _wire_int(arguments[0])
+        and _wire_int(arguments[1])
+        and _wire_structure(arguments[2])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if method_id == 266 and not arguments:
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 267
+        and len(arguments) == 2
+        and _wire_int(arguments[0])
+        and _wire_structure(arguments[1])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 288
+        and len(arguments) == 3
+        and isinstance(arguments[0], str)
+        and _wire_int(arguments[1])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 289
+        and len(arguments) == 7
+        and isinstance(arguments[0], str)
+        and all(_wire_int(value) for value in arguments[1:6])
+        and type(arguments[6]) is bool
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 407
+        and len(arguments) == 2
+        and all(_wire_int(value) for value in arguments)
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 2534
+        and len(arguments) == 2
+        and all(_wire_int(value) for value in arguments)
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
     return ''
 
 
-def current_combat_rpc_method(method_id: int, arguments: list) -> str:
+def current_combat_rpc_method(
+    method_id: int, arguments: list, entity_id: int = 0
+) -> str:
     """Apply the current client descriptors only to their verified payloads.
 
-    Inspected on 2026-10-06: AvatarActor/LocalRole casts moved to 1170/1172.
-    The old 1119/1121 IDs now describe buff removal/lifetime, and 94 is healing.
-    Legacy captures with the earlier shapes continue to use METHOD_ID_NAMES.
+    The 2026-11-12 build moved LocalRole statistics to 349-366 and actor skill
+    callbacks to 1206/1259/1261/1267. Legacy captures continue to use the
+    earlier tables when their shapes do not match these verified descriptors.
     """
+    if method_id in (349, 350) and len(arguments) == 3 and all(
+        _wire_int(value) for value in arguments[:2]
+    ) and _wire_structure(arguments[2]):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id in (351, 352)
+        and len(arguments) == 2
+        and _wire_structure(arguments[0])
+        and type(arguments[1]) is bool
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id in (356, 357, 358)
+        and len(arguments) == 2
+        and isinstance(arguments[0], str)
+        and _wire_structure(arguments[1])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 359
+        and len(arguments) == 1
+        and _valid_team_statistics_map(arguments[0])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if method_id == 360 and len(arguments) == 1 and _wire_structure(arguments[0]):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if method_id == 361 and len(arguments) == 1 and _wire_structure(arguments[0]):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 362
+        and len(arguments) == 1
+        and _valid_stage_statistics(arguments[0])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 363
+        and len(arguments) == 2
+        and _wire_structure(arguments[0])
+        and _valid_stage_statistics(arguments[1])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if method_id == 364 and len(arguments) == 1 and _wire_structure(arguments[0]):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 365
+        and len(arguments) == 1
+        and isinstance(arguments[0], list)
+        and all(isinstance(value, str) for value in arguments[0])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+    if (
+        method_id == 366
+        and len(arguments) == 2
+        and _wire_structure(arguments[0])
+        and _wire_int(arguments[1])
+    ):
+        return CURRENT_LOCAL_ROLE_RPC_METHODS[method_id]
+
+    if method_id in (34, 1206) and len(arguments) == 11:
+        if (
+            all(_wire_int(value) for value in arguments[:6])
+            and _wire_number(arguments[6])
+            and all(_wire_int(arguments[index]) for index in (7, 8, 10))
+            and (arguments[9] is None or _wire_int(arguments[9]))
+        ):
+            return CURRENT_ACTOR_RPC_METHODS[method_id]
+    if (
+        method_id in (120, 566)
+        and len(arguments) == 3
+        and all(_wire_int(value) for value in arguments)
+    ):
+        return CURRENT_ACTOR_RPC_METHODS[method_id]
+    if method_id == 1259 and len(arguments) == 9:
+        if (
+            all(_wire_int(value) for value in arguments[:2])
+            and all(_wire_number(value) for value in arguments[2:7])
+            and all(_wire_int(value) for value in arguments[7:])
+        ):
+            return CURRENT_ACTOR_RPC_METHODS[method_id]
+    if (
+        method_id == 1261
+        and len(arguments) == 3
+        and all(_wire_int(value) for value in arguments)
+    ):
+        return CURRENT_ACTOR_RPC_METHODS[method_id]
+    if (
+        method_id == 1267
+        and len(arguments) == 3
+        and _wire_int(arguments[0])
+        and _wire_number(arguments[1])
+        and _wire_int(arguments[2])
+    ):
+        return CURRENT_ACTOR_RPC_METHODS[method_id]
+    if method_id in (3, 73, 94, 97) and _valid_heal_sync_v2(
+        entity_id, arguments
+    ):
+        return 'OnMsgHealSyncV2'
+    if method_id in (6, 76, 97, 100) and _valid_beaten_sync_v2(
+        entity_id, arguments
+    ):
+        return 'OnMsgBeatenSyncV2'
+
     # Current statistics IDs overlap older callbacks. Their descriptor
     # signatures distinguish a current response from the saved legacy shape.
     if method_id in (346, 347) and len(arguments) == 3 and all(
@@ -138,10 +425,6 @@ def current_combat_rpc_method(method_id: int, arguments: list) -> str:
         return 'OnMsgRemoveBuffNew'
     if method_id == 1121 and len(arguments) == 5:
         return 'OnMsgBuffTotalLifeChangeNew'
-    if method_id == 94 and len(arguments) == 5:
-        return 'OnMsgHealSyncV2'
-    if method_id == 97 and len(arguments) == 3:
-        return 'OnMsgBeatenSyncV2'
     return ''
 
 
@@ -253,10 +536,10 @@ def _valid_named_method(value: object) -> bool:
 def _valid_current_damage_sync_v2(
     entity_id: int, arguments: object
 ) -> bool:
-    """Recognize current method 93/96 damage callbacks by exact shape.
+    """Recognize verified damage callback IDs by their exact wire shape.
 
-    Numeric RPC IDs are scoped to an entity class, so method 93 cannot be
-    added to the global table without also accepting unrelated callbacks.  A
+    Numeric RPC IDs are scoped to an entity class, so these IDs cannot be
+    added to the global table without also accepting unrelated callbacks. A
     real DamageSyncV2 carries exactly nine values.  Captures before the
     2026-09-20 update dispatched it on the attacking entity; current team-PVP
     traffic dispatches the same canonical ``attacker, target, ...`` payload on
@@ -1022,7 +1305,9 @@ class NpcapProtocolDecoder:
                 except (TypeError, ValueError, OverflowError):
                     continue
                 current_team_method = current_team_rpc_method(method_id, arguments)
-                current_method = current_combat_rpc_method(method_id, arguments)
+                current_method = current_combat_rpc_method(
+                    method_id, arguments, entity_id
+                )
                 if current_team_method:
                     method = current_team_method
                     method_scope = 'local_role'
@@ -1039,7 +1324,7 @@ class NpcapProtocolDecoder:
                 elif method_id in NPC_RPC_METHODS:
                     method = NPC_RPC_METHODS[method_id]
                     method_scope = 'npc'
-                elif method_id in (93, 96) and _valid_current_damage_sync_v2(
+                elif method_id in (2, 72, 93, 96) and _valid_current_damage_sync_v2(
                     entity_id, arguments
                 ):
                     method = "OnMsgDamageSyncV2"

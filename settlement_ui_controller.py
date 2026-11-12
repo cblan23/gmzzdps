@@ -1062,29 +1062,32 @@ class SettlementUIController:
 
     @staticmethod
     def _stage_settlement_identity(args):
-        """Return the authoritative stage and Boss references from a win RPC."""
+        """Return the authoritative stage, Boss references and local token."""
         if not isinstance(args,list) or len(args)<2 or args[1] is not True:
-            return None,set()
+            return None,set(),None
         try:
             stage_id=int(args[0] or 0)
         except (TypeError,ValueError,OverflowError):
-            return None,set()
+            return None,set(),None
         if stage_id<=0:
-            return None,set()
+            return None,set(),None
+        self_token=(str(args[2]).strip() if len(args)>=3 and args[2] else None)
         references=set()
         if len(args)>=5:
             try:
                 member=fields(args[4])
-                for key in (36,37):
+                # The 2026-11 client moved target/bear maps to 38/39. Keep
+                # 36/37 for captures produced by earlier supported clients.
+                for key in (36,37,38,39):
                     if member.get(key) is not None:
                         references.update(str(token) for token,_amount in pairs(member[key]))
             except (ValueError,KeyError,TypeError):
                 references.clear()
-        return stage_id,references
+        return stage_id,references,self_token
 
     def _apply_stage_victory_boundary(self, args, stamp, instance):
         """End a win immediately and repair the one-stage-late spawn context."""
-        stage_id,references=self._stage_settlement_identity(args)
+        stage_id,references,settlement_self_token=self._stage_settlement_identity(args)
         if stage_id is None:
             return None
         authoritative_token=(next(iter(references)) if len(references)==1 else None)
@@ -1139,8 +1142,26 @@ class SettlementUIController:
             ]
             if len(candidates)==1:
                 target=candidates[0]
+        if target is None and settlement_self_token:
+            # A late-start capture can have one live Boss without a stage or
+            # stable Boss token yet. The success RPC is still authoritative
+            # for this client when its local token identifies the sole active
+            # encounter in the same instance and after that encounter began.
+            candidates=[
+                encounter for encounter in self.tracker.encounters.values()
+                if encounter.result=='IN_PROGRESS'
+                and encounter.instance_id==instance
+                and encounter.self_token==settlement_self_token
+                and (encounter.stage_id is None or not encounter.boss_token)
+                and 0<=stamp-int(encounter.started_at_ns)<=86_400_000_000_000
+            ]
+            if len(candidates)==1 and candidates[0].local_encounter_id==self.tracker.current_id:
+                target=candidates[0]
         if target is None:
             return None
+        if not target.completion_confirmed:
+            target.completion_confirmed=True
+            target.revision+=1
         if (
             authoritative_token
             and str(target.boss_token or '').startswith('entity:')

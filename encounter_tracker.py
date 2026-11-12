@@ -62,6 +62,7 @@ class EncounterRecord:
     ended_at_ns: int | None = None
     result: str = 'IN_PROGRESS'
     settlement_status: str = 'LIVE'
+    completion_confirmed: bool = False
     stage_statistics: dict | None = None
     all_statistics: dict | None = None
     settlement_received_at_ns: int | None = None

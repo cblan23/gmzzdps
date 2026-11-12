@@ -13,6 +13,7 @@ from test_network_state import (
 
 
 NEW_TOKEN = "AQAAABEREREHAAAA"
+SECOND_NEW_TOKEN = "AQAAACIiIiIHAAAA"
 BASE_FILETIME = 134_321_845_085_764_054
 WINDOWS_EPOCH = 116_444_736_000_000_000
 
@@ -144,6 +145,42 @@ class TeamRosterLifecycleTests(unittest.TestCase):
             in_team=True, party_session_id=1, authoritative=True))
         applications = self.window._team_application_section_rows()
         self.assertEqual([row["application_token"] for row in applications], [NEW_TOKEN])
+
+    def test_group_transfer_preserves_two_applications_until_join_confirmation(self):
+        applications = (
+            (NEW_TOKEN, "申请队友甲", 196_882),
+            (SECOND_NEW_TOKEN, "申请队友乙", 201_817),
+        )
+        for sequence, (token, name, rating) in enumerate(applications, start=2):
+            self.feed("OnMsgNewTeamGroupApply", [{"$map": [
+                [2, token], [4, name], [5, 1_200_003], [8, rating],
+            ]}], sequence)
+        self.assertEqual(
+            [row["application_token"] for row in self.window._team_application_section_rows()],
+            [NEW_TOKEN, SECOND_NEW_TOKEN],
+        )
+
+        self.feed("OnMsgQuitTeamGroup", [57_353_919_529_918], 4)
+        self.assertEqual(self.model.party_session_id, 0)
+        self.assertEqual(len(self.window._team_application_section_rows()), 2)
+
+        roster = [
+            {"$map": [[2, SELF_TOKEN], [5, "self"], [8, 1_200_002]]}
+        ] + [
+            {"$map": [[2, token], [5, name], [8, 1_200_003]]}
+            for token, name, _rating in applications
+        ]
+        self.feed("OnJoinGroupSuccess", roster, 5)
+
+        self.assertEqual(self.window._team_application_section_rows(), [])
+        self.assertTrue({NEW_TOKEN, SECOND_NEW_TOKEN} <= self.model.party_user_tokens)
+        for token, _name, rating in applications:
+            actor_id = next(
+                actor for actor, character in self.model.actor_character_ids.items()
+                if character == token
+            )
+            self.assertIn(actor_id, self.model._current_member_ids())
+            self.assertEqual(self.model.entity_extraordinary_ratings[actor_id], rating)
 
     def test_dungeon_roster_kick_and_replacements_keep_each_players_own_damage(self):
         self.parser = NpcapParserAdapter()

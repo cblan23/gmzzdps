@@ -109,7 +109,11 @@ from npcap_protocol import (
     NpcapProtocolDecoder,
 )
 from npcap_rc4_decode import Rc4State
-from npcap_method_tables import LOCAL_ROLE_RPC_METHODS
+from npcap_method_tables import (
+    CURRENT_ACTOR_RPC_METHODS,
+    CURRENT_LOCAL_ROLE_RPC_METHODS,
+    LOCAL_ROLE_RPC_METHODS,
+)
 from npcap_zstd_state import _region_priority
 
 
@@ -1140,10 +1144,25 @@ class NpcapProtocolTests(unittest.TestCase):
         self.assertEqual(METHOD_ID_NAMES[352], "RetOtherRoleShapeData")
         self.assertEqual(METHOD_ID_NAMES[363], "RetOtherRoleShapeData")
         self.assertEqual(METHOD_ID_NAMES[1067], "OnMsgAddBuffNew")
+        self.assertEqual(
+            CURRENT_LOCAL_ROLE_RPC_METHODS[218], "OnSyncTeamGroupInfo"
+        )
+        self.assertEqual(
+            CURRENT_LOCAL_ROLE_RPC_METHODS[223], "OnMsgNewTeamGroupApply"
+        )
+        self.assertEqual(
+            CURRENT_LOCAL_ROLE_RPC_METHODS[359],
+            "RetCommonCombatStatisticsByTeam",
+        )
+        self.assertEqual(
+            CURRENT_LOCAL_ROLE_RPC_METHODS[366], "RetOtherRoleShapeData"
+        )
+        self.assertEqual(CURRENT_LOCAL_ROLE_RPC_METHODS[2534], "RetNTP")
+        self.assertEqual(CURRENT_ACTOR_RPC_METHODS[1259], "OnMsgCastSkillNew")
 
     def test_current_and_legacy_application_ids_preserve_rating_without_joining_party(self):
         applicant = "applicant-token-0001"
-        for method_id in (213, 220):
+        for method_id in (213, 220, 223):
             with self.subTest(method_id=method_id):
                 decoder = NpcapProtocolDecoder()
                 self._append_numeric_rpc(decoder, 57_223_461_897_621, method_id, [{
@@ -1160,6 +1179,133 @@ class NpcapProtocolTests(unittest.TestCase):
                 self.assertNotIn(applicant, parser.party_tokens)
                 self.assertNotIn(applicant, parser.token_actors)
                 self.assertFalse(any(kind in {"party", "profile"} for kind, _ in updates))
+
+    def test_20261112_team_ids_restore_roster_rating_and_member_properties(self):
+        local_token = "current-local-token"
+        teammate_token = "current-peer-token1"
+        local_entity = 57_223_461_897_621
+        roster = [
+            {2: local_token, 5: "Local", 6: 1001, 8: 1_200_002, 9: 69},
+            {
+                2: teammate_token,
+                5: "Peer",
+                6: 1002,
+                8: 1_200_003,
+                9: 69,
+                27: 54_817,
+            },
+        ]
+        decoder = NpcapProtocolDecoder(capture_unknown=True)
+        self._append_numeric_rpc(decoder, local_entity, 218, [101, roster, {}])
+        self._append_numeric_rpc(
+            decoder,
+            local_entity,
+            229,
+            [teammate_token, {4: False, 5: 17_307, 6: 17_307, 11: 68_245}],
+        )
+        records = decoder._rpc_records()
+
+        self.assertEqual(
+            [record["method"] for record in records],
+            ["OnSyncTeamGroupInfo", "OnUpdateTeamGroupMemberProps"],
+        )
+        self.assertTrue(
+            all(record["npcap_method_scope"] == "local_role" for record in records)
+        )
+        self.assertEqual(list(decoder.unknown_records), [])
+
+        parser = NetworkPacketParser()
+        parser.self_id = local_entity
+        parser.self_token = local_token
+        parser.self_confirmed = True
+        parser._bind_team_token(local_token, local_entity)
+        updates = parser.process(records[0])
+        self.assertTrue(any(kind == "party" for kind, _value in updates))
+        updates = parser.process(records[1])
+        peer_actor = parser.token_actors[teammate_token]
+        profile = next(
+            value
+            for kind, value in updates
+            if kind == "profile" and value.get("entity_id") == peer_actor
+        )
+        self.assertEqual(profile["extraordinary_rating"], 68_245)
+        self.assertTrue(any(kind == "life" for kind, _value in updates))
+
+    def test_20261112_combat_equipment_and_skill_ids_keep_legacy_collisions(self):
+        entity = 57_223_461_897_621
+        target = 57_463_441_195_725
+        token = "current-local-token"
+        stage = {0: 5_150_049, 1: 3, 2: "battle", 5: {token: {6: 500}}}
+        cases = (
+            (349, [1, 2, {}], "RetDungeonBattleStatistics"),
+            (350, [1, 2, {}], "RetMonsterBattleStatistics"),
+            (351, [{}, True], "OnMsgUpdateDungeonBattleStatistics"),
+            (352, [{}, True], "OnMsgUpdateDungeonTeamPlayerBattleStatistics"),
+            (356, ["boss", {}], "RetNpcCombatStatisticsByTeam"),
+            (357, ["boss", {}], "RetDirtyNpcCombatStatisticsByTeam"),
+            (358, ["boss", {}], "RetNpcCombatStatistics"),
+            (
+                359,
+                [{token: {3: 1_200_002, 4: "Local", 5: 123_456}}],
+                "RetCommonCombatStatisticsByTeam",
+            ),
+            (360, [{token: {5: 123_456}}], "RetDirtyCommonCombatStatisticsByTeam"),
+            (361, [{3: 1_200_002, 5: 123_456}], "RetCommonCombatStatistics"),
+            (362, [stage], "OnMsgUpdateStageCombatStatistics"),
+            (363, [{0: stage[5]}, stage], "OnMsgSettlementCombatStatistics"),
+            (364, [{}], "OnMsgReconnectOrEnter"),
+            (365, [[token]], "OnMsgRemoveAvatarsCombatStatistics"),
+            (366, [{token: {1: 2}}, 9988], "RetOtherRoleShapeData"),
+            (
+                1206,
+                [1, entity, entity, 2, 3, 4, 1.5, 5, 6, None, 7],
+                "OnMsgAddBuffNew",
+            ),
+            (1259, [1, target, 0.0, 0.0, 0.0, 0.0, 0.0, 2, 3], "OnMsgCastSkillNew"),
+            (1261, [1, 2, 3], "RetCastSkillSuccessNew"),
+            (1267, [1, 0.5, 3], "OnMsgSkillEnterTeamGCD"),
+            (97, [entity, target, 8_602_107_000_361, 1_000, 900], "OnMsgHealSyncV2"),
+            (100, [entity, target, 8_602_107_000_361], "OnMsgBeatenSyncV2"),
+        )
+        for method_id, arguments, expected in cases:
+            with self.subTest(method_id=method_id, expected=expected):
+                decoder = NpcapProtocolDecoder(capture_unknown=True)
+                self._append_numeric_rpc(decoder, entity, method_id, arguments)
+                record, = decoder._rpc_records()
+                self.assertEqual(record["method"], expected)
+                self.assertEqual(list(decoder.unknown_records), [])
+                if method_id == 366:
+                    self.assertIn("npcap_rpc_payload_base64", record)
+
+        for method_id in (2, 72, 96):
+            with self.subTest(damage_method_id=method_id):
+                decoder = NpcapProtocolDecoder(capture_unknown=True)
+                damage = [
+                    entity,
+                    target,
+                    8_602_107_000_361,
+                    1,
+                    2,
+                    1_041,
+                    0,
+                    1_041,
+                    False,
+                ]
+                self._append_numeric_rpc(decoder, entity, method_id, damage)
+                record, = decoder._rpc_records()
+                self.assertEqual(record["method"], "OnMsgDamageSyncV2")
+                self.assertEqual(
+                    record["npcap_method_scope"], "damage_shape_compat"
+                )
+
+        # The previous client used these same integers for different payloads.
+        legacy = NpcapProtocolDecoder()
+        self._append_numeric_rpc(legacy, entity, 359, [stage])
+        self._append_numeric_rpc(legacy, entity, 363, [{token: {}}, 9988])
+        self.assertEqual(
+            [record["method"] for record in legacy._rpc_records()],
+            ["OnMsgUpdateStageCombatStatistics", "RetOtherRoleShapeData"],
+        )
 
     def test_application_id_220_preserves_legacy_self_properties(self):
         decoder = NpcapProtocolDecoder()

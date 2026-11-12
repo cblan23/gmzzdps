@@ -319,10 +319,10 @@ UPLOAD_STATE_PATH = DATA_DIR / "combat_upload_state.json"
 UPDATE_DIR = APP_DIR
 
 APP_NAME = "叨叨诡秘助手"
-APP_VERSION = "0.4.5"
+APP_VERSION = "0.4.6"
 if CAPTURE_DISPLAY_VERSION:
     APP_VERSION = CAPTURE_DISPLAY_VERSION
-CLIENT_BUILD = "0.4.5+20261110.1"
+CLIENT_BUILD = "0.4.6+20261113.1"
 WEB_DATABASE_URL = "https://gmzz.daodaogame.vip/"
 RELEASE_IDENTITY = load_release_identity(BUNDLE_DIR)
 DEVELOPMENT_RUNTIME_PROFILE_PATH = Path(__file__).resolve().with_name(
@@ -19923,6 +19923,7 @@ class DpsWindow:
         # Application records live for this team session, independently of DPS.
         self.team_application_notices: deque[dict[str, object]] = deque()
         self.team_applications_expanded = False
+        self.team_application_transfer_pending = False
         # Current-session equipment summaries only. The permanent query
         # archive is evidence, never a source for this mapping.
         self.team_equipment_profiles: dict[str, dict[str, object]] = {}
@@ -25997,6 +25998,7 @@ class DpsWindow:
             or (
                 str(record.get("settlement_status", "")).upper() == "PENDING"
                 and normalize_battle_result(record) != RESULT_FAILED
+                and not bool(record.get("completion_confirmed"))
             )
             or bool(getattr(self, "closing", False))
         ):
@@ -28407,6 +28409,7 @@ class DpsWindow:
 
     def _clear_team_applications(self) -> None:
         self.team_application_notices = deque()
+        self.team_application_transfer_pending = False
         self._hide_main_tooltip()
         self._schedule_layered_main_render()
 
@@ -28434,6 +28437,7 @@ class DpsWindow:
     def _reset_team_applications(self) -> None:
         self.team_application_notices = deque()
         self.team_applications_expanded = False
+        self.team_application_transfer_pending = False
 
 
 
@@ -35137,12 +35141,30 @@ class DpsWindow:
             next_party_session_id = int(
                 getattr(self.model, "party_session_id", 0) or 0
             )
+            applications_changed = self._promote_joined_team_applications()
             if next_party_session_id != previous_party_session_id:
-                if previous_party_session_id > 0 or next_party_session_id == 0:
+                pending_applications = bool(
+                    getattr(self, "team_application_notices", ())
+                )
+                preserve_for_group_transfer = bool(
+                    previous_party_session_id > 0
+                    and next_party_session_id == 0
+                    and payload.get("left_team") is True
+                    and pending_applications
+                )
+                transfer_pending = bool(
+                    getattr(self, "team_application_transfer_pending", False)
+                )
+                if preserve_for_group_transfer:
+                    self.team_application_transfer_pending = True
+                elif transfer_pending and next_party_session_id > 0:
+                    applications_changed |= pending_applications
+                    self._reset_team_applications()
+                elif previous_party_session_id > 0 or next_party_session_id == 0:
+                    applications_changed |= pending_applications
                     self._reset_team_applications()
                 self._clear_live_hud_dps_segment()
                 self.live_hud_boss_state = None
-            applications_changed = self._promote_joined_team_applications()
             tracker = getattr(getattr(self, "settlement_ui", None), "tracker", None)
             settlement_controller = getattr(self, "settlement_ui", None)
             current = getattr(tracker, "encounters", {}).get(

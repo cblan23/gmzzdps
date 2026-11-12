@@ -310,6 +310,11 @@ def encounter_history_record(
     existing_participants = _base_actor_rows(base, "participants")
     existing_healers = _base_actor_rows(base, "healers")
     existing_taken = _base_actor_rows(base, "damage_taken")
+    existing_participants_by_token = {
+        str(row.get("user_token")): row
+        for row in existing_participants.values()
+        if row.get("user_token")
+    }
     existing_identities = _base_actor_identities(base)
     existing_equipment = {}
     for collection_name in ("participants", "healers", "damage_taken"):
@@ -344,6 +349,7 @@ def encounter_history_record(
     taken_rows = []
     healing_values = []
     taken_values = []
+    resolved_actor_by_token = {}
     for identity in encounter.participants_snapshot:
         if not isinstance(identity, dict) or not identity.get("id"):
             continue
@@ -352,6 +358,13 @@ def encounter_history_record(
         actor = _combat_actor_id(identity.get("iid") or values.get("iid"))
         is_self = token == encounter.self_token
         local = existing_participants.get(actor, {})
+        if not settled and not local:
+            local = existing_participants_by_token.get(token, {})
+            local_actor = _combat_actor_id(local.get("actor_id"))
+            if local_actor:
+                actor = local_actor
+        if actor:
+            resolved_actor_by_token[token] = actor
         if token not in visible_tokens:
             continue
         damage = _optional_nonnegative(values.get("damage")) if settled else None
@@ -792,10 +805,15 @@ def encounter_history_record(
         for row in participants
         if isinstance(row, dict) and row.get("user_token")
     }
-    visible_identities = [
-        deepcopy(row) for row in encounter.participants_snapshot
-        if isinstance(row, dict) and row.get("id") in visible_tokens
-    ]
+    visible_identities = []
+    for identity in encounter.participants_snapshot:
+        if not isinstance(identity, dict) or identity.get("id") not in visible_tokens:
+            continue
+        visible_identity = deepcopy(identity)
+        resolved_actor = resolved_actor_by_token.get(str(identity.get("id")))
+        if resolved_actor:
+            visible_identity["iid"] = resolved_actor
+        visible_identities.append(visible_identity)
     visible_identity_actors = {
         _combat_actor_id(row.get("actor_id") or row.get("iid"))
         for row in visible_identities
@@ -894,7 +912,8 @@ def encounter_history_record(
             "settlement_revision": encounter.revision,
             "capture_complete": encounter.capture_complete,
             "completion_confirmed": bool(
-                encounter.result == "VICTORY" and settled
+                encounter.result == "VICTORY"
+                and (settled or encounter.completion_confirmed)
             ),
             "damage_accounting": damage_accounting,
         }

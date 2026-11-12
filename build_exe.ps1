@@ -271,16 +271,16 @@ $CompiledCaptureSourceNames += @(
 $CompiledCaptureSources = $CompiledCaptureSourceNames |
     ForEach-Object { Join-Path $ProjectDir $_ }
 $ForbiddenCaptureLiterals = @(
-    "0x0997DBD0",
-    "0x09A5AD40",
+    "0x099A9840",
+    "0x09A86B30",
     "0x06733B00",
     "0x0672D7C0",
     "0x068D6550",
     "0x068D5A02",
     "0x068D78F0",
     "0x068D70A0",
-    "0x0EC0A080",
-    "0x0EC0A094",
+    "0x0EC49740",
+    "0x0EC49754",
     "ReqCommonCombatStatisticsByTeam"
 )
 foreach ($CaptureSource in $CompiledCaptureSources) {

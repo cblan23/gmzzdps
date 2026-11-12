@@ -27,9 +27,9 @@ import proc_inspect
 GAME_MODULE = "C7-Win64-Shipping.exe"
 NATIVE_LIBRARY_NAME = "npcap_zstd_restore.dll"
 
-# Verified against the supported client.  The codec is stored immediately
-# after its RC4 peer in the owning connection object.
-ZSTD_CODEC_VTABLE_RVA = 0x0DB75398
+# Verified against the 2026-11-12 client (resource build 2307645). The codec is
+# stored immediately after its RC4 peer in the owning connection object.
+ZSTD_CODEC_VTABLE_RVA = 0x0DBB00E8
 CODEC_DCTX_POINTER_OFFSET = 0x28
 CONNECTION_CODEC_POINTER_OFFSET = 0x08
 

@@ -135,6 +135,47 @@ class SettlementHistoryAdapterTests(unittest.TestCase):
                 self.assertEqual(taken[200]["taken"], 75)
                 self.assertEqual(taken[200]["share"], 0.75)
 
+    def test_explicit_victory_keeps_pending_team_metrics_but_confirms_completion(self):
+        tracker = EncounterTracker()
+        encounter = tracker.begin(
+            instance_id="instance",
+            started_at_ns=START_EPOCH * NS,
+            participants_snapshot=[ROSTER[0], {**ROSTER[1], "iid": 999}],
+            dungeon_id=10,
+            map_id=20,
+            boss_template_id=7_102_990,
+            boss_token="boss",
+            self_token="self",
+        )
+        tracker.end("VICTORY", (START_EPOCH + 10) * NS)
+        encounter.completion_confirmed = True
+        base = {
+            "duration_seconds": 10.0,
+            "participants": [
+                {
+                    "actor_id": 100,
+                    "user_token": "self",
+                    "damage": 60,
+                    "dps": 6.0,
+                },
+                {
+                    "actor_id": 200,
+                    "user_token": "peer",
+                    "damage": 40,
+                    "dps": 4.0,
+                },
+            ],
+        }
+
+        record = encounter_history_record(encounter, base)
+
+        self.assertEqual(record["settlement_status"], "PENDING")
+        self.assertTrue(record["completion_confirmed"])
+        self.assertEqual(record["result"], "success")
+        self.assertEqual([row["damage"] for row in record["participants"]], [60, 40])
+        self.assertEqual([row["actor_id"] for row in record["participants"]], [100, 200])
+        self.assertEqual([row["iid"] for row in record["participants_snapshot"]], [100, 200])
+
     def test_scene_exit_preserves_negative_ai_rows_and_marks_interrupted_pull(self):
         tracker = EncounterTracker()
         encounter = tracker.begin(

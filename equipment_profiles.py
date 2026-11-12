@@ -48,8 +48,11 @@ from runtime_capability import runtime_profile_hook
 
 REQUEST_METHOD = "ReqOtherRoleShapeData"
 RESPONSE_METHOD = "RetOtherRoleShapeData"
-REQUEST_METHOD_ID = 318
-RESPONSE_METHOD_ID = 363
+# Read from the build-2307645 LocalRole registry on 2026-11-12. Dispatch still
+# resolves the registered method by name and validates its argument schema;
+# these IDs are retained as response/archive provenance only.
+REQUEST_METHOD_ID = 323
+RESPONSE_METHOD_ID = 366
 EXPECTED_ARGUMENT_DESCRIPTORS = (("ListStr", 5), ("int", 1))
 ARGUMENT_DESCRIPTOR_SNAPSHOT_SIZE = 0x80
 ROLE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{10,32}$")
@@ -60,11 +63,11 @@ EQUIPMENT_QUERY_COALESCE_SECONDS = 0.12
 
 # Current C7 Lua API entry points.  The call_server entry itself continues to
 # come from the signed runtime profile and is signature checked before use.
-LUA_CREATETABLE_RVA = 0x09604650
-LUA_PUSHLSTRING_RVA = 0x09605540
-LUA_PUSHNUMBER_RVA = 0x096055E0
-LUA_RAWSETI_RVA = 0x09605920
-LUA_SETTOP_RVA = 0x09605F50
+LUA_CREATETABLE_RVA = 0x0962E3D0
+LUA_PUSHLSTRING_RVA = 0x0962F2C0
+LUA_PUSHNUMBER_RVA = 0x0962F360
+LUA_RAWSETI_RVA = 0x0962F6A0
+LUA_SETTOP_RVA = 0x0962FCD0
 
 PROCESS_VM_OPERATION = 0x0008
 PROCESS_VM_WRITE = 0x0020

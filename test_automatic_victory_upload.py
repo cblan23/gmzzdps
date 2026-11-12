@@ -148,6 +148,15 @@ class AutomaticVictoryUploadTests(unittest.TestCase):
             {**pending, "settlement_status": "SETTLED"}
         ))
 
+    def test_pending_explicit_victory_queues_without_full_stage_table(self):
+        pending = {
+            **self.record,
+            "settlement_status": "PENDING",
+            "completion_confirmed": True,
+        }
+
+        self.assertTrue(self.window._queue_automatic_victory_upload(pending))
+
     def test_pending_wipe_uploads_without_official_settlement(self):
         wipe = {
             **self.record,

@@ -1,4 +1,4 @@
-"""Scoped RPC names read from the current c7-2026-09-17 method descriptors.
+"""Scoped RPC names read from verified C7 method descriptors.
 
 IDs belong to entity classes. Do not apply the player table to an NPC just
 because an integer matches. Tables contain names, never captured game values.
@@ -76,6 +76,64 @@ LOCAL_ROLE_RPC_METHODS = {
     2451: 'OnMsgEntityDead',
     2452: 'OnMsgEntityRelive',
     2460: 'RetNTP',
+}
+
+
+# Read-only descriptor scan of the running build 2307645 on 2026-11-12.  These
+# IDs overlap both older LocalRole callbacks and other entity classes, so the
+# protocol decoder must validate the registered argument shape before using
+# this table.  Keep the earlier table above for old captures and clients.
+CURRENT_LOCAL_ROLE_RPC_METHODS = {
+    # Team lifecycle and member properties.
+    218: 'OnSyncTeamGroupInfo',
+    219: 'OnCreateTeamSuccess',
+    220: 'OnCreateGroupSuccess',
+    221: 'OnJoinGroupSuccess',
+    223: 'OnMsgNewTeamGroupApply',
+    225: 'OnMsgQuitTeamGroup',
+    226: 'OnMsgOtherQuitTeam',
+    229: 'OnUpdateTeamGroupMemberProps',
+    230: 'OnUpdateTeamGroupSelfProps',
+    231: 'OnMsgOtherJoinTeamGroup',
+    233: 'OnUpdateTeamGroupDetail',
+    243: 'OnMsgTeamJoinGroup',
+    266: 'OnMsgTeamGroupDisbanded',
+    267: 'OnSyncTeamQuitGroup',
+    282: 'OnMsgOtherTeamQuitGroup',
+    288: 'OnMsgSyncTeamGroupMemberFreqProp',
+    289: 'OnSyncTeamGroupPropsForceRefresh',
+    # Combat statistics and equipment responses.
+    349: 'RetDungeonBattleStatistics',
+    350: 'RetMonsterBattleStatistics',
+    351: 'OnMsgUpdateDungeonBattleStatistics',
+    352: 'OnMsgUpdateDungeonTeamPlayerBattleStatistics',
+    356: 'RetNpcCombatStatisticsByTeam',
+    357: 'RetDirtyNpcCombatStatisticsByTeam',
+    358: 'RetNpcCombatStatistics',
+    359: 'RetCommonCombatStatisticsByTeam',
+    360: 'RetDirtyCommonCombatStatisticsByTeam',
+    361: 'RetCommonCombatStatistics',
+    362: 'OnMsgUpdateStageCombatStatistics',
+    363: 'OnMsgSettlementCombatStatistics',
+    364: 'OnMsgReconnectOrEnter',
+    365: 'OnMsgRemoveAvatarsCombatStatistics',
+    366: 'RetOtherRoleShapeData',
+    # Scene and local-role identity evidence used to scope the callbacks above.
+    407: 'OnMsgBeforeEnterNewSpace',
+    2534: 'RetNTP',
+}
+
+
+# Actor callback IDs from the same build.  Several actor classes expose a
+# compact low-numbered variant, so these names are also shape-gated.
+CURRENT_ACTOR_RPC_METHODS = {
+    34: 'OnMsgAddBuffNew',
+    120: 'OnMsgActorBuffStateSync',
+    566: 'OnMsgActorBuffStateSync',
+    1206: 'OnMsgAddBuffNew',
+    1259: 'OnMsgCastSkillNew',
+    1261: 'RetCastSkillSuccessNew',
+    1267: 'OnMsgSkillEnterTeamGCD',
 }
 
 NPC_RPC_METHODS = {

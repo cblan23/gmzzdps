@@ -34,6 +34,12 @@ class ScopedLifecycleTests(unittest.TestCase):
     def test_verified_clock_reply_identifies_without_waiting_for_cast(self):
         self.identify()
 
+    def test_20261112_clock_reply_identifies_without_waiting_for_cast(self):
+        self.parser.process(
+            self.record(2534, [1789112000000, 1789112000005])
+        )
+        self.assertEqual(self.parser.native_self_id, SELF)
+
     def test_current_application_uses_local_role_scope_without_adding_member(self):
         self.identify()
         application = [{2: 'applicant-token-0001', 4: '申请玩家',

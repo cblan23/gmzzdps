@@ -3640,7 +3640,7 @@ class NetworkPacketParserTests(unittest.TestCase):
         self.assertEqual(parser.active_boss_entity_id, dummy_id)
 
     def test_reserved_damage_dummy_requires_current_client_validation(self):
-        template_id = 7_100_639
+        template_id = 7_100_641
         dummy_id = 57_228_828_730_502
         parser = NetworkPacketParser(boss_template_catalog={})
 
@@ -3663,16 +3663,38 @@ class NetworkPacketParserTests(unittest.TestCase):
                 "boss_type": 3,
                 "localization_id": 435_407_409_907_200,
                 "damage_target_validated": True,
-                "level": 97,
+                "level": 99,
                 "filetime_100ns": 134_353_748_206_558_295,
             }
         )
 
         profile = next(value for kind, value in updates if kind == "profile")
         self.assertEqual(profile["name"], "伤害木桩")
-        self.assertEqual(profile["level"], 97)
+        self.assertEqual(profile["level"], 99)
         self.assertIn(template_id, parser.damage_target_template_ids)
         self.assertIn(dummy_id, parser.training_dummy_entities)
+
+        damage_updates = parser.process(
+            packet(
+                "OnMsgDamageSyncV2",
+                [
+                    PLAYER_ID,
+                    dummy_id,
+                    86_021_010_059_47,
+                    2,
+                    2,
+                    19_224,
+                    0,
+                    19_224,
+                    False,
+                ],
+                sequence=2,
+            )
+        )
+        event = next(value for kind, value in damage_updates if kind == "event")
+        self.assertEqual(event["target_id"], dummy_id)
+        self.assertEqual(event["damage"], 19_224)
+        self.assertTrue(event["active_boss"])
 
     def test_reserved_non_dummy_template_is_never_registered(self):
         parser = NetworkPacketParser(boss_template_catalog={})

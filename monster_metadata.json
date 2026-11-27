@@ -1568,6 +1568,18 @@
       "localization_id": 435407409907200,
       "name": "伤害木桩"
     },
+    "7100639": {
+      "boss_type": 3,
+      "level": 96,
+      "localization_id": 826834354803456,
+      "name": "伤害木桩"
+    },
+    "7100640": {
+      "boss_type": 3,
+      "level": 98,
+      "localization_id": 826834354803456,
+      "name": "伤害木桩"
+    },
     "7100700": {
       "boss_type": 4,
       "localization_id": 915000906483456
@@ -10491,6 +10503,15 @@
       ],
       "level": 98,
       "localization_id": 1046736948713728,
+      "name": "罗塞尔的残留意志"
+    },
+    "7110300": {
+      "boss_type": 3,
+      "fc_paths": [
+        "AI.RossellBossRaid.RossellBoss_Hero.Boss_Rossell_Hero"
+      ],
+      "level": 98,
+      "localization_id": 826834354737408,
       "name": "罗塞尔的残留意志"
     },
     "7110510": {
